@@ -1,0 +1,8 @@
+CPUTests_autogen/timestamp: \
+	/Users/alexwaldmann/Desktop/AIO\ Server/tests/CMakeLists.txt \
+	/Users/alexwaldmann/Desktop/AIO\ Server/tests/CPUTests.cpp \
+	/opt/homebrew/Cellar/cmake/3.28.1/share/cmake/Modules/ExternalProject/shared_internal_commands.cmake \
+	/opt/homebrew/Cellar/cmake/3.28.1/share/cmake/Modules/FetchContent.cmake \
+	/opt/homebrew/Cellar/cmake/3.28.1/share/cmake/Modules/FetchContent/CMakeLists.cmake.in \
+	/opt/homebrew/Cellar/cmake/3.28.1/share/cmake/Modules/GoogleTest.cmake \
+	/opt/homebrew/Cellar/cmake/3.28.1/bin/cmake
