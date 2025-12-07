@@ -255,6 +255,72 @@ namespace AIO::Emulator::GBA {
         }
         */
         
+        // DEBUG: Trace near crash point 0x300330c
+        static bool crashTraceEnabled = false;
+        static int crashTraceCount = 0;
+        
+        // Trace caller at ROM before BX R0
+        if (pc >= 0x8032400 && pc <= 0x8032420 && !crashTraceEnabled) {
+            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            std::cout << "[CallerTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+                      << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+                      << " R11=0x" << registers[11] << " LR=0x" << registers[14]
+                      << " Mode=" << (thumbMode?"T":"A") << std::dec << std::endl;
+        }
+        
+        // Trace early ROM startup (first 100 instructions from 0x08000000)
+        static int earlyTraceCount = 0;
+        if (pc >= 0x08000000 && pc <= 0x08000200 && earlyTraceCount < 100) {
+            earlyTraceCount++;
+            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            std::cout << "[EarlyTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+                      << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+                      << " R13=0x" << registers[13] << " LR=0x" << registers[14]
+                      << std::dec << std::endl;
+        }
+        
+        // Trace 0x800023d to 0x8000996 (before DMA#1)
+        static int preDmaTraceCount = 0;
+        if (pc >= 0x0800023c && pc <= 0x080009a0 && preDmaTraceCount < 200) {
+            preDmaTraceCount++;
+            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            std::cout << "[PreDMA] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+                      << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+                      << " R2=0x" << registers[2] << " R3=0x" << registers[3]
+                      << " SP=0x" << registers[13]
+                      << (thumbMode?" T":" A") << std::dec << std::endl;
+        }
+        
+        // Trace the entry point 0x30032b0 to 0x3003400 (expanded to cover branch targets)
+        if (pc >= 0x30032b0 && pc <= 0x3003400 && !crashTraceEnabled) {
+            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            std::cout << "[EntryTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+                      << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+                      << " R11=0x" << registers[11] << " LR=0x" << registers[14]
+                      << " Mode=" << (thumbMode?"T":"A") << std::dec << std::endl;
+        }
+        if (pc == 0x3003308) {
+            // This is the LDR R0, [R12, R0, LSL #4] instruction
+            // R0 should be a small index (0-15 or so)
+            if (registers[0] > 20) {
+                std::cout << "[CRASH TRACE] LDR at 0x3003308 with BAD R0=0x" << std::hex << registers[0]
+                          << " R11=0x" << registers[11]
+                          << " R12=0x" << registers[12] << std::dec << std::endl;
+            }
+        }
+        if (pc >= 0x3003300 && pc <= 0x3003320) {
+            crashTraceEnabled = true;
+        }
+        if (crashTraceEnabled && crashTraceCount < 200) {
+            crashTraceCount++;
+            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            std::cout << "[CrashTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+                      << " R0=0x" << registers[0] << " R11=0x" << registers[11]
+                      << " R12=0x" << registers[12] 
+                      << " LR=0x" << registers[14]
+                      << " R1=0x" << registers[1] << " R2=0x" << registers[2]
+                      << " SP=0x" << registers[13] << std::dec << std::endl;
+        }
         
         // Validate PC is in executable region
         bool valid = (pc >= 0x08000000 && pc < 0x0E000000) ||
@@ -263,7 +329,25 @@ namespace AIO::Emulator::GBA {
                      (pc < 0x4000);
         
         if (!valid) {
-            std::cerr << "INVALID PC: 0x" << std::hex << pc << " (Last PC: 0x" << lastPC << ")" << std::dec << std::endl;
+            static int invalidCount = 0;
+            invalidCount++;
+            std::cerr << "INVALID PC: 0x" << std::hex << pc << " (Last PC: 0x" << lastPC << ")" << std::dec;
+            if (invalidCount <= 3) {
+                // Show more detail on first few invalid PCs
+                std::cerr << " LR=0x" << std::hex << registers[14] 
+                          << " R0=0x" << registers[0]
+                          << " R12=0x" << registers[12]
+                          << " ThumbMode=" << thumbMode;
+                if (lastPC >= 0x03000000 && lastPC < 0x04000000) {
+                    // Last PC in IWRAM - show instruction there
+                    uint32_t lastInstr = thumbMode ? memory.ReadInstruction16(lastPC) : memory.ReadInstruction32(lastPC);
+                    std::cerr << " lastInstr=0x" << lastInstr;
+                }
+                // Show values near the corrupted R0 in IWRAM
+                std::cerr << std::endl;
+                std::cerr << "  R0 came from unknown location, checking if it looks like IWRAM ptr + corruption";
+            }
+            std::cerr << std::dec << std::endl;
             
             if (pc == 0xe000000 && lastPC != 0x1bc) {
                 std::cerr << "!!! ORIGINAL CRASH DETECTED !!!" << std::endl;
@@ -280,11 +364,11 @@ namespace AIO::Emulator::GBA {
         if (thumbMode) {
             uint16_t instruction = memory.ReadInstruction16(pc);
             
-            // DEBUG: Trace instruction at PC near 0x80323c6
-            if (pc >= 0x80323c0 && pc <= 0x80323d0) {
-                std::cout << "[THUMB] PC=0x" << std::hex << pc 
-                          << " instr=0x" << instruction << std::dec << std::endl;
-            }
+            // DEBUG: Trace instruction at PC near 0x80323c6 (disabled)
+            // if (pc >= 0x80323c0 && pc <= 0x80323d0) {
+            //     std::cout << "[THUMB] PC=0x" << std::hex << pc 
+            //               << " instr=0x" << instruction << std::dec << std::endl;
+            // }
             
             registers[15] += 2;
             DecodeThumb(instruction);
@@ -419,6 +503,14 @@ namespace AIO::Emulator::GBA {
         }
 
         uint32_t target = currentPC + 4 + offset;
+        
+        // DEBUG: Trace branches in DKC audio code
+        if (currentPC >= 0x30032b0 && currentPC <= 0x3003400) {
+            std::cout << "[BRANCH DEBUG] PC=0x" << std::hex << (currentPC - 4) 
+                      << " instr=0x" << instruction << " offset=" << offset 
+                      << " target=0x" << target << std::dec << std::endl;
+        }
+        
         LogBranch(currentPC - 4, target); // Log from actual instruction address
         registers[15] = target;
     }
@@ -1379,8 +1471,6 @@ namespace AIO::Emulator::GBA {
                 uint32_t source = registers[0] & 0xFFFFFFFC;  // Align to 4 bytes
                 uint32_t dest = registers[1];
                 
-                std::printf("[SWI 0x13 HuffUnComp] src=0x%08X dst=0x%08X\n", source, dest);
-                
                 // Read header (4 bytes)
                 uint32_t header = memory.Read32(source);
                 int remaining = header >> 8;  // Decompressed size
@@ -2020,16 +2110,16 @@ namespace AIO::Emulator::GBA {
             
             uint32_t addr = registers[rn] + (imm * (B ? 1 : 4));
 
-            // DEBUG: Trace ALL STR to 0x03xxxxxx range 
-            if (!L && !B && (addr >> 24) == 0x03) {
-                static int strCount = 0;
-                if (strCount++ < 100 || ((addr & 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600)) {
-                    std::cout << "[F9 STR] PC=0x" << std::hex << (registers[15] - 2) 
-                              << " instr=0x" << instruction
-                              << " Addr=0x" << addr << " Val=0x" << registers[rd] 
-                              << " (R" << std::dec << rd << "=[R" << rn << "+#" << (imm*4) << "])" << std::endl;
-                }
-            }
+            // DEBUG: Trace ALL STR to 0x03xxxxxx range (disabled)
+            // if (!L && !B && (addr >> 24) == 0x03) {
+            //     static int strCount = 0;
+            //     if (strCount++ < 100 || ((addr & 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600)) {
+            //         std::cout << "[F9 STR] PC=0x" << std::hex << (registers[15] - 2) 
+            //                   << " instr=0x" << instruction
+            //                   << " Addr=0x" << addr << " Val=0x" << registers[rd] 
+            //                   << " (R" << std::dec << rd << "=[R" << rn << "+#" << (imm*4) << "])" << std::endl;
+            //     }
+            // }
 
             if (L) { // Load
                 if (B) {
@@ -2096,48 +2186,48 @@ namespace AIO::Emulator::GBA {
             uint32_t addr = registers[rb];
             uint32_t startAddr = addr;
             
-            // DEBUG: Trace STMIA to DMA2 control registers (0x40000C8-0x40000D3)
-            bool traceDMA2 = (!L && addr >= 0x40000C8 && addr <= 0x40000D3);
-            if (traceDMA2) {
-                std::cout << "[STMIA DMA2] PC=0x" << std::hex << (registers[15] - 2)
-                          << " R" << std::dec << rb << "=0x" << std::hex << addr
-                          << " rList=0x" << (int)rList;
-                for (int i=0; i<8; ++i) {
-                    if ((rList >> i) & 1) {
-                        std::cout << " R" << i << "=0x" << registers[i];
-                    }
-                }
-                std::cout << std::dec << std::endl;
-            }
+            // DEBUG: Trace STMIA to DMA2 control registers (0x40000C8-0x40000D3) - disabled
+            // bool traceDMA2 = (!L && addr >= 0x40000C8 && addr <= 0x40000D3);
+            // if (traceDMA2) {
+            //     std::cout << "[STMIA DMA2] PC=0x" << std::hex << (registers[15] - 2)
+            //               << " R" << std::dec << rb << "=0x" << std::hex << addr
+            //               << " rList=0x" << (int)rList;
+            //     for (int i=0; i<8; ++i) {
+            //         if ((rList >> i) & 1) {
+            //             std::cout << " R" << i << "=0x" << registers[i];
+            //         }
+            //     }
+            //     std::cout << std::dec << std::endl;
+            // }
             
-            // DEBUG: Trace STMIA to 0x3001500
-            bool traceMixbuf = (!L && (addr & 0xFF000000) == 0x03000000 && (addr & 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600);
-            if (traceMixbuf) {
-                std::cout << "[STMIA] PC=0x" << std::hex << (registers[15] - 2) 
-                          << " R" << std::dec << rb << "=0x" << std::hex << addr
-                          << " rList=0x" << (int)rList << std::dec << std::endl;
-            }
+            // DEBUG: Trace STMIA to 0x3001500 - disabled
+            // bool traceMixbuf = (!L && (addr & 0xFF000000) == 0x03000000 && (addr & 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600);
+            // if (traceMixbuf) {
+            //     std::cout << "[STMIA] PC=0x" << std::hex << (registers[15] - 2) 
+            //               << " R" << std::dec << rb << "=0x" << std::hex << addr
+            //               << " rList=0x" << (int)rList << std::dec << std::endl;
+            // }
             
             for (int i=0; i<8; ++i) {
                 if ((rList >> i) & 1) {
                     if (L) { // Load
                         registers[i] = memory.Read32(addr);
                     } else { // Store
-                        if (traceMixbuf) {
-                            std::cout << "  Store R" << i << "=0x" << std::hex << registers[i] 
-                                      << " to 0x" << addr << std::dec << std::endl;
-                        }
+                        // if (traceMixbuf) {
+                        //     std::cout << "  Store R" << i << "=0x" << std::hex << registers[i] 
+                        //               << " to 0x" << addr << std::dec << std::endl;
+                        // }
                         memory.Write32(addr, registers[i]);
                     }
                     addr += 4;
                 }
             }
             
-            // Write-back
-            if (traceMixbuf) {
-                std::cout << "  Writeback R" << std::dec << rb << ": 0x" << std::hex << startAddr 
-                          << " -> 0x" << addr << std::dec << std::endl;
-            }
+            // Write-back (debug disabled)
+            // if (traceMixbuf) {
+            //     std::cout << "  Writeback R" << std::dec << rb << ": 0x" << std::hex << startAddr 
+            //               << " -> 0x" << addr << std::dec << std::endl;
+            // }
             registers[rb] = addr;
         }
         // Format 13: Add Offset to Stack Pointer

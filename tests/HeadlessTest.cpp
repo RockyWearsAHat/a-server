@@ -31,6 +31,16 @@ int main(int argc, char** argv) {
     for (int frame = 0; frame < 7200; ++frame) {
         int frameCycles = 0;
         
+        // Dump initial IWRAM state at frame 1
+        if (frame == 1) {
+            std::cout << "[INIT] At frame 1, 0x3001500 = 0x" << std::hex << gba.ReadMem32(0x3001500) << std::dec << std::endl;
+            std::cout << "[INIT] Jump table at 0x3001500:" << std::endl;
+            for (int i = 0; i < 8; i++) {
+                uint32_t val = gba.ReadMem32(0x3001500 + i*4);
+                std::cout << "  [" << i << "] = 0x" << std::hex << val << std::dec << std::endl;
+            }
+        }
+        
         // Simulate button presses for testing
         if (frame >= 100 && frame < 110) {
             gba.UpdateInput(0x03FF & ~0x0008); // Press Start
@@ -55,7 +65,7 @@ int main(int argc, char** argv) {
             static int irqDisabledCount = 0;
             static bool warnPrinted = false;
             
-            // Track R11 corruption
+            // Track R11 corruption (minimal debug)
             static uint32_t lastR11 = 0;
             static uint32_t lastPC = 0;
             uint32_t r11 = gba.GetRegister(11);
@@ -68,59 +78,55 @@ int main(int argc, char** argv) {
             pcHistIdx = (pcHistIdx + 1) % 10;
             
             // Track entry into 0x3003xxx IWRAM code
-            if ((pc & 0xFFFFF000) == 0x03003000 && !enteredIWRAM3003) {
-                std::cout << "[ENTERED IWRAM 0x3003xxx] PC=0x" << std::hex << pc 
-                          << " from last PC=0x" << pcHistory[(pcHistIdx + 8) % 10] 
-                          << std::dec << std::endl;
-                          
-                // Dump sound structure and DMA state
-                std::cout << "[SOUND STRUCT DUMP at entry]:" << std::endl;
-                for (int i = 0; i < 16; i++) {
-                    uint32_t val = gba.ReadMem32(0x03004004 + i * 4);
-                    std::cout << "  0x" << std::hex << (0x03004004 + i * 4) << ": 0x" << val << std::dec << std::endl;
-                }
-                
-                // Dump 0x3001500 area
-                std::cout << "[MIXBUF 0x3001500 at entry]:" << std::endl;
-                for (int i = 0; i < 4; i++) {
-                    uint32_t val = gba.ReadMem32(0x03001500 + i * 4);
-                    std::cout << "  0x" << std::hex << (0x03001500 + i * 4) << ": 0x" << val << std::dec << std::endl;
-                }
-                
-                enteredIWRAM3003 = true;
+            static bool tracedEntry = false;
+            if ((pc & 0xFFFFF000) == 0x03003000 && !tracedEntry) {
+                std::cout << "[IWRAM 0x3003xxx] Entered at PC=0x" << std::hex << pc 
+                          << " LR=0x" << gba.GetRegister(14) 
+                          << " CPSR=0x" << cpsr << std::dec << std::endl;
+                tracedEntry = true;
             }
             
-            // Trace when we're about to execute the corrupting instruction
+            // Trace when we're about to execute the key instruction
             if (pc == 0x30032fc) {
-                std::cout << "[CRASH PC HISTORY]:" << std::endl;
-                for (int i = 0; i < 10; i++) {
-                    int idx = (pcHistIdx + i) % 10;
-                    std::cout << "  PC[" << i << "] = 0x" << std::hex << pcHistory[idx] << std::dec << std::endl;
-                }
-                
                 uint32_t r0 = gba.GetRegister(0);
-                uint32_t addr = r11 + (r0 << 2);
-                uint32_t memVal = gba.ReadMem32(addr);
-                uint16_t ie = gba.ReadMem16(0x04000200);
-                uint16_t if_reg = gba.ReadMem16(0x04000202);
-                bool thumbMode = (cpsr & 0x20) != 0;
+                // The instruction is: LDR R11, [R11, R0, LSL#2]
+                // Which loads from address R11 + (R0 << 2)
+                uint32_t loadAddr = r11 + (r0 << 2);
+                uint32_t memVal = gba.ReadMem32(loadAddr);
                 
-                std::cout << "[TRACE 0x30032fc] R11=0x" << std::hex << r11 
-                          << " R0=0x" << r0 
-                          << " LoadAddr=0x" << addr 
-                          << " MemVal=0x" << memVal 
-                          << " IE=0x" << ie
-                          << " IF=0x" << if_reg
-                          << " CPSR=0x" << cpsr
-                          << " Mode=" << (thumbMode ? "THUMB" : "ARM")
-                          << std::dec << std::endl;
+                static int crashCount = 0;
+                crashCount++;
+                if (crashCount <= 5) {
+                    std::cout << "[AUDIO CALL] PC=0x30032fc R11=0x" << std::hex << r11 
+                              << " R0=" << r0
+                              << " LoadAddr=0x" << loadAddr 
+                              << " MemVal=0x" << memVal 
+                              << std::dec << std::endl;
+                }
+                // Removed exit - crash is fixed with stub
             }
             
+            // Track when R11 becomes 0x3001500
+            if (r11 == 0x3001500 && lastR11 != 0x3001500) {
+                std::cout << "[R11=0x3001500] set at PC=0x" << std::hex << pc 
+                          << " LR=0x" << gba.GetRegister(14)
+                          << " Literal@0x300346c=0x" << gba.ReadMem32(0x300346c) << std::dec << std::endl;
+            }
+            
+            // Track writes to 0x3001500 (when we have a chance to observe)
+            static uint32_t lastValAt1500 = 0;
+            uint32_t curValAt1500 = gba.ReadMem32(0x3001500);
+            if (curValAt1500 != lastValAt1500 && (pc & 0xFFFF0000) != 0x08030000) {
+                // Don't spam during the DMA from 0x80323c8 area
+                // std::cout << "[0x3001500] changed to 0x" << std::hex << curValAt1500 << " at PC=0x" << pc << std::dec << std::endl;
+            }
+            lastValAt1500 = curValAt1500;
+            
+            // Detect when R11 becomes corrupted
             if (r11 >= 0x10000000 && lastR11 < 0x10000000 && r11 != lastR11) {
-                std::cout << "[R11 CORRUPT] at PC=0x" << std::hex << pc << std::endl;
-                std::cout << "  R11 changed from 0x" << lastR11 << " to 0x" << r11 << std::endl;
-                std::cout << "  Previous PC: 0x" << lastPC << std::endl;
-                std::cout << "  CPSR=0x" << cpsr << std::dec << std::endl;
+                std::cout << "[R11 CORRUPT] at PC=0x" << std::hex << pc 
+                          << " R11: 0x" << lastR11 << " -> 0x" << r11 
+                          << std::dec << std::endl;
             }
             lastR11 = r11;
             lastPC = pc;
