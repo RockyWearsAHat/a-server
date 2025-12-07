@@ -1113,17 +1113,13 @@ namespace AIO::Emulator::GBA {
         
         // Trace writes to 0x3001420 (polled address)
         // DKC audio engine writes 0xFFFFFFFF here then polls waiting for audio init to complete
-        // Only intercept writes from ROM code (0x08xxxxxx), not from audio engine in IWRAM (0x03xxxxxx)
+        // We intercept this and force it to 0 to signal "init complete" instantly.
         if ((address >> 24) == 0x03 && (address & 0x7FFF) == 0x1420 && gameCode == "A5NE") {
-            if (value == 0xFFFFFFFF && cpu) {
-                uint32_t pc = cpu->GetRegister(15);
-                // Only intercept if write is from ROM (game init), not from audio engine
-                if ((pc >> 24) == 0x08) {
-                    std::cout << "[WRITE 0x3001420] Intercepted init flag from ROM, setting to 0 (instant init)";
-                    std::cout << " PC=0x" << std::hex << pc;
-                    std::cout << std::dec << std::endl;
-                    value = 0;  // Pretend init completed instantly
-                }
+            if (value == 0xFFFFFFFF) {
+                std::cout << "[WRITE 0x3001420] Intercepted init flag, setting to 0 (instant init)";
+                if (cpu) std::cout << " PC=0x" << std::hex << cpu->GetRegister(15);
+                std::cout << std::dec << std::endl;
+                value = 0;  // Pretend init completed instantly
             }
         }
         
