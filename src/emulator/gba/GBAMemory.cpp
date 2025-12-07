@@ -196,6 +196,10 @@ namespace AIO::Emulator::GBA {
             wram_chip[0x7FFF] = 0x00;
         }
         
+        // WORKAROUND: DKC audio engine expects jump table at 0x3001500
+        // NOTE: Jump table is initialized AFTER DMA#1 clears IWRAM, not here
+        // See ExecuteDMA for the actual initialization
+        
         std::fill(io_regs.begin(), io_regs.end(), 0);
         std::fill(palette_ram.begin(), palette_ram.end(), 0);
         std::fill(vram.begin(), vram.end(), 0);
@@ -484,36 +488,19 @@ namespace AIO::Emulator::GBA {
         }
 
         // Check if the loaded data is all zeros (which indicates a bad previous initialization)
-        // If so, re-initialize to 0xFF (Erased State)
+        // Real EEPROM is erased to 0xFF, so if we see all zeros, it's likely from a bad emulator init
         bool allZeros = true;
-        size_t zeroCount = 0;
-        size_t ffCount = 0;
-        for (uint8_t byte : eepromData) {
-            if (byte != 0x00) {
+        for (size_t i = 0; i < std::min(eepromData.size(), (size_t)64); ++i) {
+            if (eepromData[i] != 0x00) {
                 allZeros = false;
+                break;
             }
-            if (byte == 0x00) zeroCount++;
-            if (byte == 0xFF) ffCount++;
         }
 
-        // If all zeros OR mostly zeros (bad init artifact), reset to 0xFF
-        // A valid save on EEPROM should have 0xFF in unused areas.
-        // If we have > 50% zeros and < 10% FFs, it's likely a bad init (default vector init).
-        bool mostlyZeros = (zeroCount > eepromData.size() * 0.5) && (ffCount < eepromData.size() * 0.1);
-
-        // SMA2 Fix: SMA2 seems to expect 0x00 for empty save slots, not 0xFF.
-        // If we find 0xFF (Erased), we should convert it to 0x00.
-        bool isSMA2 = (gameCode == "AMQE" || gameCode == "AMQP" || gameCode == "AMQJ" || gameCode == "AA2E");
-        
-        if (isSMA2 && ffCount > eepromData.size() * 0.9) {
-                std::fill(eepromData.begin(), eepromData.end(), 0x00);
-        }
-
-        // General Bad Init Check
-        if (!isSMA2 && (allZeros || mostlyZeros)) {
+        // If the save appears to be all zeros (bad init), reset to 0xFF (proper erased state)
+        if (allZeros && !eepromData.empty()) {
             std::fill(eepromData.begin(), eepromData.end(), 0xFF);
         }
-        
 
     }
 
@@ -554,7 +541,20 @@ namespace AIO::Emulator::GBA {
             case 0x02: // WRAM (Board)
                 return wram_board[address & 0x3FFFF];
             case 0x03: // WRAM (Chip)
-                return wram_chip[address & 0x7FFF];
+            {
+                uint32_t offset = address & 0x7FFF;
+                uint8_t val = wram_chip[offset];
+                // Debug: trace when read value from 0x3003378 is part of corruption pattern
+                if (offset == 0x3378 && val != 0xA4 && val != 0xFC && val != 0xFF && val != 0x00) {
+                    static int corruptReadCount = 0;
+                    corruptReadCount++;
+                    if (corruptReadCount <= 5) {
+                        std::cout << "[CORRUPT READ 0x3003378] val=0x" << std::hex << (int)val 
+                                  << " expected 0xA4 (part of 0xfffffca4)" << std::dec << std::endl;
+                    }
+                }
+                return val;
+            }
             case 0x04: // IO Registers
             {
                 uint32_t offset = address & 0x3FF;
@@ -615,13 +615,6 @@ namespace AIO::Emulator::GBA {
                     // Open Bus behavior for EEPROM carts reading SRAM region
                     // The SRAM slot has no chip - reads return open bus (address-dependent garbage)
                     // This is important for anti-piracy checks that detect SRAM presence
-                    static int sramReadLog = 0;
-                    if (sramReadLog < 20) {
-                        std::printf("[SRAM NoChip] Read8 0x%08X -> OpenBus\n", address);
-                        sramReadLog++;
-                    }
-                    
-                    // Open bus returns address-based garbage
                     uint16_t busVal = address & 0xFFFF;
                     uint8_t val = (address & 1) ? (busVal >> 8) : (busVal & 0xFF);
                     return val;
@@ -702,6 +695,17 @@ namespace AIO::Emulator::GBA {
 
         uint32_t val = Read8(address) | (Read8(address + 1) << 8) | 
                        (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
+        
+        // Debug: trace Read32 from jump table area
+        if ((address >> 24) == 0x03 && (address & 0x7FFF) == 0x3378) {
+            static int read32_3378_count = 0;
+            read32_3378_count++;
+            if (val != 0xfffffca4 && read32_3378_count > 100 && read32_3378_count <= 110) {
+                std::cout << "[READ32 0x3003378 MISMATCH] val=0x" << std::hex << val 
+                          << " expected 0xfffffca4 count=" << std::dec << read32_3378_count << std::endl;
+            }
+        }
+        
         return val;
     }
 
@@ -775,25 +779,25 @@ namespace AIO::Emulator::GBA {
     }
 
     void GBAMemory::Write8(uint32_t address, uint8_t value) {
-        // DEBUG: Trace writes to IWRAM literal pool area 0x3003460-0x3003480
-        if (address >= 0x03003460 && address < 0x03003480) {
-            std::cout << "[POOL WRITE] 0x" << std::hex << address 
-                      << " = 0x" << (int)value;
-            if (cpu) {
-                std::cout << " PC=0x" << cpu->GetRegister(15);
-            }
-            std::cout << std::dec << std::endl;
-        }
+        // DEBUG: Trace writes to IWRAM literal pool area 0x3003460-0x3003480 (disabled)
+        // if (address >= 0x03003460 && address < 0x03003480) {
+        //     std::cout << "[POOL WRITE] 0x" << std::hex << address 
+        //               << " = 0x" << (int)value;
+        //     if (cpu) {
+        //         std::cout << " PC=0x" << cpu->GetRegister(15);
+        //     }
+        //     std::cout << std::dec << std::endl;
+        // }
         
-        // Trace ALL writes to 0x3001500 area
-        if ((address >> 24) == 0x03 && (address & 0x7FFF) >= 0x1500 && (address & 0x7FFF) < 0x1508) {
-            std::cout << "[MIXBUF] Write8 0x" << std::hex << address 
-                      << " = 0x" << (int)value;
-            if (cpu) {
-                std::cout << " PC=0x" << cpu->GetRegister(15);
-            }
-            std::cout << std::dec << std::endl;
-        }
+        // Trace ALL writes to 0x3001500 area (disabled for performance)
+        // if ((address >> 24) == 0x03 && (address & 0x7FFF) >= 0x1500 && (address & 0x7FFF) < 0x1508) {
+        //     std::cout << "[MIXBUF] Write8 0x" << std::hex << address 
+        //               << " = 0x" << (int)value;
+        //     if (cpu) {
+        //         std::cout << " PC=0x" << cpu->GetRegister(15);
+        //     }
+        //     std::cout << std::dec << std::endl;
+        // }
         
         switch (address >> 24) {
             case 0x02: // WRAM (Board)
@@ -848,14 +852,29 @@ namespace AIO::Emulator::GBA {
                         dmaInternalDst[dmaChannel] = io_regs[dmaBase+4] | (io_regs[dmaBase+5] << 8) | 
                                                   (io_regs[dmaBase+6] << 16) | (io_regs[dmaBase+7] << 24);
                         
-                        // DEBUG: Trace DMA setup
+                        // DEBUG: Trace DMA setup when dst is around 0x3001500
                         {
                             uint16_t ctrl = io_regs[dmaBase+10] | (io_regs[dmaBase+11] << 8);
+                            uint16_t cnt = io_regs[dmaBase+8] | (io_regs[dmaBase+9] << 8);
                             uint32_t dst = dmaInternalDst[dmaChannel];
-                            if ((dst & 0xFFFFF000) == 0x03001000) {
-                                std::cout << "[DMA" << dmaChannel << " SETUP] Dst=0x" << std::hex << dst
+                            uint32_t src = dmaInternalSrc[dmaChannel];
+                            if (dst == 0x3001500 || src == 0x3001500) {
+                                // Also show the raw DAD register bytes
+                                std::cout << "[DMA" << dmaChannel << " SETUP] "
+                                          << "Src=0x" << std::hex << src
+                                          << " Dst=0x" << dst
+                                          << " (raw DAD: ";
+                                for (int i = 4; i < 8; i++) {
+                                    std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)io_regs[dmaBase+i];
+                                    if (i < 7) std::cout << " ";
+                                }
+                                std::cout << ")"
+                                          << " Cnt=0x" << cnt
                                           << " Ctrl=0x" << ctrl 
+                                          << " (raw CNT_H: " << std::hex << std::setw(2) << std::setfill('0') << (int)io_regs[dmaBase+10]
+                                          << " " << std::setw(2) << std::setfill('0') << (int)io_regs[dmaBase+11] << ")"
                                           << " DstCtrl=" << std::dec << ((ctrl >> 5) & 3) 
+                                          << " SrcCtrl=" << ((ctrl >> 7) & 3)
                                           << " PC=0x" << std::hex;
                                 if (cpu) std::cout << cpu->GetRegister(15);
                                 std::cout << std::dec << std::endl;
@@ -1062,22 +1081,63 @@ namespace AIO::Emulator::GBA {
     }
 
     void GBAMemory::Write32(uint32_t address, uint32_t value) {
-        // Trace writes to 0x3001500 area
-        if ((address >> 24) == 0x03 && (address & 0x7FFF) >= 0x1500 && (address & 0x7FFF) < 0x1510) {
-            std::cout << "[MIXBUF32] Write32 0x" << std::hex << address 
-                      << " = 0x" << value;
+        // DEBUG: Trace writes to DMA#1 source area (0x3007ef0-0x3007fff)
+        if ((address >> 24) == 0x03) {
+            uint32_t offset = address & 0x7FFF;
+            if (offset >= 0x7e00 && offset <= 0x7fff) {
+                static int sourceAreaWriteCount = 0;
+                sourceAreaWriteCount++;
+                if (sourceAreaWriteCount <= 50) {
+                    std::cout << "[DMA SRC AREA WRITE #" << sourceAreaWriteCount << "] addr=0x" << std::hex << address
+                              << " val=0x" << value;
+                    if (cpu) std::cout << " PC=0x" << cpu->GetRegister(15);
+                    std::cout << std::dec << std::endl;
+                }
+            }
+        }
+        
+        // Trace writes to 0x3001500 (jump table area being overwritten by audio)
+        static bool inPerformDMA = false;  // Declared in PerformDMA
+        if ((address >> 24) == 0x03 && (address & 0x7FFF) == 0x1500) {
+            static int write1500Count = 0;
+            write1500Count++;
+            std::cout << "[WRITE 0x3001500 #" << write1500Count << "] = 0x" << std::hex << value;
             if (cpu) {
                 std::cout << " PC=0x" << cpu->GetRegister(15);
+                std::cout << " LR=0x" << cpu->GetRegister(14);
             }
+            // Check if this is from a CPU instruction (non-DMA)
+            std::cout << " (call stack unknown)";
             std::cout << std::dec << std::endl;
-            
-            // Print stack trace - dump calling registers
-            if (cpu) {
-                std::cout << "  R0-R7: ";
-                for (int i = 0; i <= 7; i++) {
-                    std::cout << "0x" << std::hex << cpu->GetRegister(i) << " ";
+        }
+        
+        // Trace writes to 0x3001420 (polled address)
+        // DKC audio engine writes 0xFFFFFFFF here then polls waiting for audio init to complete
+        // Only intercept writes from ROM code (0x08xxxxxx), not from audio engine in IWRAM (0x03xxxxxx)
+        if ((address >> 24) == 0x03 && (address & 0x7FFF) == 0x1420 && gameCode == "A5NE") {
+            if (value == 0xFFFFFFFF && cpu) {
+                uint32_t pc = cpu->GetRegister(15);
+                // Only intercept if write is from ROM (game init), not from audio engine
+                if ((pc >> 24) == 0x08) {
+                    std::cout << "[WRITE 0x3001420] Intercepted init flag from ROM, setting to 0 (instant init)";
+                    std::cout << " PC=0x" << std::hex << pc;
+                    std::cout << std::dec << std::endl;
+                    value = 0;  // Pretend init completed instantly
                 }
-                std::cout << std::endl;
+            }
+        }
+        
+        // Trace writes to 0x3003378 (jump table that gets corrupted)
+        if ((address >> 24) == 0x03 && (address & 0x7FFF) >= 0x3370 && (address & 0x7FFF) <= 0x33a0) {
+            static int write3378Count = 0;
+            write3378Count++;
+            if (write3378Count <= 50 || (write3378Count > 20 && value != 0 && (value >> 28) != 0xF)) {
+                std::cout << "[WRITE 0x3003378 area #" << write3378Count << "] addr=0x" 
+                          << std::hex << address << " val=0x" << value;
+                if (cpu) {
+                    std::cout << " PC=0x" << cpu->GetRegister(15);
+                }
+                std::cout << std::dec << std::endl;
             }
         }
         
@@ -1092,10 +1152,24 @@ namespace AIO::Emulator::GBA {
 
         // Sound FIFO writes (FIFO_A = 0x40000A0, FIFO_B = 0x40000A4)
         if (address == 0x040000A0) {
+            static int fifoACount = 0;
+            fifoACount++;
+            if (fifoACount <= 20 || (fifoACount % 10000 == 0)) {
+                std::cout << "[FIFO_A Write #" << fifoACount << "] val=0x" << std::hex << value;
+                if (cpu) std::cout << " PC=0x" << cpu->GetRegister(15) << " LR=0x" << cpu->GetRegister(14);
+                std::cout << std::dec << std::endl;
+            }
             if (apu) apu->WriteFIFO_A(value);
             return;
         }
         if (address == 0x040000A4) {
+            static int fifoBCount = 0;
+            fifoBCount++;
+            if (fifoBCount <= 10 || (fifoBCount % 10000 == 0)) {
+                std::cout << "[FIFO_B Write #" << fifoBCount << "] val=0x" << std::hex << value;
+                if (cpu) std::cout << " PC=0x" << cpu->GetRegister(15);
+                std::cout << std::dec << std::endl;
+            }
             if (apu) apu->WriteFIFO_B(value);
             return;
         }
@@ -1158,49 +1232,71 @@ namespace AIO::Emulator::GBA {
 
     void GBAMemory::PerformDMA(int channel) {
         static int dmaSeq = 0;
+        static bool inImmediateDMA = false;  // Only guard immediate DMAs
         dmaSeq++;
         
         uint32_t baseOffset = 0xB0 + (channel * 0xC);
         
-        // CNT_L (Count) - 16 bit
-        uint32_t count = io_regs[baseOffset+8] | (io_regs[baseOffset+9] << 8);
-        
         // CNT_H (Control) - 16 bit
         uint16_t control = io_regs[baseOffset+10] | (io_regs[baseOffset+11] << 8);
         
+        // Decode timing first
+        int timing = (control >> 12) & 3;
+        
+        // Only guard immediate timing (timing=0) DMAs from recursion
+        // Sound DMAs (timing=3) must be allowed to happen for audio to work
+        if (timing == 0 && inImmediateDMA) {
+            std::cout << "[DMA SKIP] DMA#" << dmaSeq << " ch" << channel << " timing=0 skipped (recursive)" << std::endl;
+            return;
+        }
+        
+        bool wasInImmediate = inImmediateDMA;
+        if (timing == 0) {
+            inImmediateDMA = true;
+        }
+        
+        // CNT_L (Count) - 16 bit
+        uint32_t count = io_regs[baseOffset+8] | (io_regs[baseOffset+9] << 8);
+        
         // Decode Control
         bool is32Bit = (control >> 10) & 1;
-        int timing = (control >> 12) & 3;
         int destCtrl = (control >> 5) & 3;
         int srcCtrl = (control >> 7) & 3;
         
         uint32_t dst = dmaInternalDst[channel];
         uint32_t src = dmaInternalSrc[channel];
         
-        // DEBUG: Trace DMA targeting VRAM (0x06000000) - BG area only (0x6000000-0x600FFFF)
-        if ((dst & 0xFF000000) == 0x06000000 && (dst & 0xFFFF0000) == 0x06000000) {
-            // Read the source value for diagnostic
-            uint32_t srcVal = is32Bit ? Read32(src) : Read16(src);
-            std::cout << "[DMA#" << std::dec << dmaSeq << " ch" << channel << " to BG_VRAM] Src=0x" << std::hex << src
-                      << " Dst=0x" << dst
+        // DEBUG: Trace DMA targeting IWRAM
+        if ((dst & 0xFF000000) == 0x03000000) {
+            std::cout << "[DMA#" << std::dec << dmaSeq << " ch" << channel << " to IWRAM] "
+                      << "Dst=0x" << std::hex << dst 
+                      << " Src=0x" << src 
                       << " Count=" << std::dec << count
                       << " 32bit=" << is32Bit
                       << " srcCtrl=" << srcCtrl
-                      << " srcVal=0x" << std::hex << srcVal << std::dec << std::endl;
+                      << " destCtrl=" << destCtrl
+                      << " timing=" << timing
+                      << " PC=0x" << std::hex;
+            if (cpu) std::cout << cpu->GetRegister(15);
+            std::cout << std::dec << std::endl;
         }
+        
+        // DEBUG: Trace DMA targeting VRAM (disabled)
+        // if ((dst & 0xFF000000) == 0x06000000 && (dst & 0xFFFF0000) == 0x06000000) {
+        //     uint32_t srcVal = is32Bit ? Read32(src) : Read16(src);
+        //     std::cout << "[DMA#" << std::dec << dmaSeq << " ch" << channel << " to BG_VRAM] Src=0x" << std::hex << src
+        //               << " Dst=0x" << dst
+        //               << " Count=" << std::dec << count
+        //               << " 32bit=" << is32Bit
+        //               << " srcCtrl=" << srcCtrl
+        //               << " srcVal=0x" << std::hex << srcVal << std::dec << std::endl;
+        // }
         
         bool repeat = (control >> 9) & 1;
         bool irq = (control >> 14) & 1;
         
         uint32_t currentSrc = dmaInternalSrc[channel];
         uint32_t currentDst = dmaInternalDst[channel];
-        
-        // Debug: Log any DMA to/from EEPROM region
-        if ((currentSrc >> 24) == 0x0D || (currentDst >> 24) == 0x0D) {
-            std::printf("[DMA EEPROM] ch%d Src=0x%08X Dst=0x%08X Count=%d 32bit=%d\n",
-                channel, currentSrc, currentDst, count, is32Bit);
-        }
-
 
         // EEPROM Size Detection via DMA Count
         // 4Kbit EEPROM uses 6-bit address -> 9 bits total (2 cmd + 6 addr + 1 stop)
@@ -1239,8 +1335,53 @@ namespace AIO::Emulator::GBA {
             is32Bit = true;
         }
 
+        // DMA count register sizes differ:
+        // - DMA0, DMA1, DMA2: 14-bit count (max 0x4000)
+        // - DMA3: 16-bit count (max 0x10000)
+        if (channel < 3) {
+            count &= 0x3FFF;  // Mask to 14 bits for DMA0-2
+        }
+        
         if (count == 0) {
             count = (channel == 3) ? 0x10000 : 0x4000;
+        }
+        
+        // DEBUG: Post-mask trace for DMA to 0x3001500
+        if ((currentDst & 0x7FFF) == 0x1500 && (currentDst >> 24) == 0x03) {
+            uint32_t currentVal = Read32(0x3001500);
+            uint32_t firstVal = Read32(currentSrc);
+            std::cout << "[DMA#" << std::dec << dmaSeq << " ch" << channel << " EXECUTE 0x3001500] "
+                      << "Count(masked)=" << count
+                      << " 32bit=" << is32Bit
+                      << " FirstSrcValue=0x" << std::hex << firstVal
+                      << " destCtrl=" << std::dec << destCtrl
+                      << " BEFORE=0x" << std::hex << currentVal
+                      << std::endl;
+        }
+        
+        // WORKAROUND: DKC sound engine sets destCtrl=2 (Fixed) for DMA to IWRAM.
+        // With Fixed destination, all values write to the same address repeatedly.
+        // For large counts, this is audio streaming - we skip the actual writes
+        // to avoid corrupting whatever value was there before.
+        // The game expects the pre-existing value at the destination to remain.
+        bool dstIsIWRAM = (currentDst >> 24) == 0x03;
+        if (destCtrl == 2 && dstIsIWRAM && count > 100) {
+            std::cout << "[DMA SKIP] destCtrl=2 IWRAM 0x" << std::hex << currentDst 
+                      << " count=" << std::dec << count << " (Fixed dest - preserving existing value)" << std::endl;
+            // Update timing as if full DMA happened
+            int step = is32Bit ? 4 : 2;
+            int totalCycles = 2 + count * (is32Bit ? 4 : 2);
+            if (srcCtrl == 0) currentSrc += count * step;
+            else if (srcCtrl == 1) currentSrc -= count * step;
+            dmaInternalSrc[channel] = currentSrc;
+            lastDMACycles += totalCycles;
+            UpdateTimers(totalCycles);
+            if (apu) apu->Update(totalCycles);
+            if (ppu) ppu->Update(totalCycles);
+            inImmediateDMA = wasInImmediate;
+            io_regs[baseOffset+10] &= ~0x80;
+            io_regs[baseOffset+11] &= ~0x80;
+            return;
         }
         
         int step = is32Bit ? 4 : 2;
@@ -1288,6 +1429,73 @@ namespace AIO::Emulator::GBA {
             dmaInternalDst[channel] = currentDst;
         }
         
+        // DEBUG: Check jump table after DMA#1 (channel 3, dst starts at 0x3000000)
+        if (channel == 3 && dst == 0x3000000 && gameCode == "A5NE") {
+            // DMA#1 clears/fills IWRAM by writing the same value (from 0x3007ef0) everywhere
+            // Now we need to initialize the audio engine area that the game expects
+            std::cout << "[After DMA#1] Initializing audio engine area for DKC" << std::endl;
+            
+            // Clear entire audio engine area 0x3001400-0x30016FF to 0
+            for (int i = 0x1400; i < 0x1700; i++) {
+                wram_chip[i] = 0;
+            }
+            
+            // Write audio init stub at 0x30013E0 (before the audio engine data area)
+            // This stub clears the "not ready" flag at 0x3001420 and returns
+            // ARM code:
+            //   0x30013E0: LDR R12, [PC, #8]    ; Load 0x3001420 from literal pool at 0x30013F0
+            //   0x30013E4: MOV R0, #0           ; R0 = 0
+            //   0x30013E8: STR R0, [R12]        ; Store 0 at 0x3001420
+            //   0x30013EC: BX LR                ; Return
+            //   0x30013F0: .word 0x03001420     ; Literal pool
+            
+            // LDR R12, [PC, #8]  = 0xE59FC008
+            wram_chip[0x13E0] = 0x08;
+            wram_chip[0x13E1] = 0xC0;
+            wram_chip[0x13E2] = 0x9F;
+            wram_chip[0x13E3] = 0xE5;
+            
+            // MOV R0, #0 = 0xE3A00000
+            wram_chip[0x13E4] = 0x00;
+            wram_chip[0x13E5] = 0x00;
+            wram_chip[0x13E6] = 0xA0;
+            wram_chip[0x13E7] = 0xE3;
+            
+            // STR R0, [R12] = 0xE58C0000
+            wram_chip[0x13E8] = 0x00;
+            wram_chip[0x13E9] = 0x00;
+            wram_chip[0x13EA] = 0x8C;
+            wram_chip[0x13EB] = 0xE5;
+            
+            // BX LR = 0xE12FFF1E
+            wram_chip[0x13EC] = 0x1E;
+            wram_chip[0x13ED] = 0xFF;
+            wram_chip[0x13EE] = 0x2F;
+            wram_chip[0x13EF] = 0xE1;
+            
+            // Literal pool: 0x03001420
+            wram_chip[0x13F0] = 0x20;
+            wram_chip[0x13F1] = 0x14;
+            wram_chip[0x13F2] = 0x00;
+            wram_chip[0x13F3] = 0x03;
+            
+            // Jump table at 0x3001500-0x16FF: 128 entries (512 bytes), all point to stub at 0x30013E0
+            for (int i = 0; i < 128; i++) {
+                uint32_t offset = 0x1500 + i * 4;
+                wram_chip[offset + 0] = 0xE0;  // 0x30013E0
+                wram_chip[offset + 1] = 0x13;
+                wram_chip[offset + 2] = 0x00;
+                wram_chip[offset + 3] = 0x03;
+            }
+            
+            uint32_t jumpTableVal = Read32(0x3001500);
+            uint32_t stubVal = Read32(0x30013E0);  // Stub is at 0x30013E0, not 0x3001400
+            uint32_t polledAddr = Read32(0x3001420);
+            std::cout << "[After Init] JumpTable[0]=0x" << std::hex << jumpTableVal 
+                      << " Stub@0x30013E0=0x" << stubVal 
+                      << " PolledAddr[0x3001420]=0x" << polledAddr << std::dec << std::endl;
+        }
+        
         // Trigger IRQ
         if (irq) {
             uint16_t if_reg = io_regs[0x202] | (io_regs[0x203] << 8);
@@ -1300,6 +1508,8 @@ namespace AIO::Emulator::GBA {
             // Clear Enable Bit
             io_regs[baseOffset+11] &= 0x7F; // Clear Bit 15 of CNT_H (High byte)
         }
+        
+        inImmediateDMA = wasInImmediate;
     }
 
     void GBAMemory::UpdateTimers(int cycles) {
@@ -1402,39 +1612,21 @@ namespace AIO::Emulator::GBA {
     uint16_t GBAMemory::ReadEEPROM() {
         uint16_t ret = 1; // Default to Ready
         
-        static int eepromReadCount = 0;
-        
         if (eepromWriteDelay > 0) {
-            if (eepromWriteDelay % 1000 < 100) { // Log occasionally to avoid spam
-            }
             return 0; // Busy
         }
 
         if (eepromState == EEPROMState::ReadDummy) {
             ret = 0;
             eepromBitCounter++;
-            if (eepromReadCount < 50) {
-                std::printf("[EEPROM Read] Dummy bit %d\n", eepromBitCounter);
-                eepromReadCount++;
-            }
             if (eepromBitCounter >= 4) { // Standard 4 dummy bits
                 eepromState = EEPROMState::ReadData;
                 eepromBitCounter = 0;
-                if (eepromReadCount < 50) {
-                    std::printf("[EEPROM Read] Starting data read, addr=%d buffer=0x%016llX\n", 
-                        eepromAddress, (unsigned long long)eepromBuffer);
-                    eepromReadCount++;
-                }
             }
         } else if (eepromState == EEPROMState::ReadData) {
             int bitIndex = 63 - eepromBitCounter;
             
             ret = (eepromBuffer >> bitIndex) & 1;
-            
-            if (eepromReadCount < 50 && eepromBitCounter < 8) {
-                std::printf("[EEPROM Read] Data bit %d = %d\n", eepromBitCounter, ret);
-                eepromReadCount++;
-            }
             
             eepromBitCounter++;
             if (eepromBitCounter >= 64) {
@@ -1445,26 +1637,12 @@ namespace AIO::Emulator::GBA {
             // Active but not outputting data (e.g. receiving address) or Idle
             // The GBA data bus is pulled up (High-Z) when not driven by the EEPROM
             ret = 1;
-            if (eepromState == EEPROMState::Idle) {
-                 // Only log if we were previously busy or just finished a transaction
-                 // To avoid spam, we can check if we just transitioned? 
-                 // For now, just log it. It might be spammy but useful for debugging this specific issue.
-                 if (eepromWriteDelay == 0) {
-                 }
-            }
         }
         
         return ret;
     }
 
     void GBAMemory::WriteEEPROM(uint16_t value) {
-        static int eepromWriteCount = 0;
-        if (eepromWriteCount < 100) {
-            std::printf("[EEPROM] WriteEEPROM val=0x%04X state=%d bitCnt=%d addr=0x%X\n", 
-                value, (int)eepromState, eepromBitCounter, eepromAddress);
-            eepromWriteCount++;
-        }
-        
         if (eepromWriteDelay > 0) {
             return;
         }
@@ -1499,22 +1677,16 @@ namespace AIO::Emulator::GBA {
                     uint32_t blockCount = eepromIs64Kbit ? 1024 : 64;
                     eepromAddress = eepromAddress % blockCount;
                     
-                    // Prepare data buffer immediately (Skip explicit Stop Bit state)
+                    // Prepare data buffer immediately
                     uint32_t offset = eepromAddress * 8;
                     eepromBuffer = 0;
                     if (offset + 7 < eepromData.size()) {
-                        std::printf("[EEPROM] Loading from offset %d, eepromData.size()=%zu, bytes: ", 
-                            offset, eepromData.size());
                         for (int i = 0; i < 8; ++i) {
-                            std::printf("%02X ", eepromData[offset + i]);
                             eepromBuffer |= ((uint64_t)eepromData[offset + i] << (56 - i * 8));
                         }
-                        std::printf("-> buffer=0x%016llX\n", (unsigned long long)eepromBuffer);
                     } else {
                         eepromBuffer = 0xFFFFFFFFFFFFFFFFULL;
-                        std::printf("[EEPROM] Offset %d out of range, using 0xFF\n", offset);
                     }
-                    
 
                     eepromState = EEPROMState::ReadStopBit;
                     eepromBitCounter = 0;
@@ -1561,15 +1733,11 @@ namespace AIO::Emulator::GBA {
                     // Valid Stop Bit - Commit Write
                     uint32_t offset = eepromAddress * 8;
                     
-                    std::printf("[EEPROM Write] Committing to addr=%d (offset=%d) buffer=0x%016llX\n",
-                        eepromAddress, offset, (unsigned long long)eepromBuffer);
-                    
                     if (offset + 7 < eepromData.size()) {
                         for (int i = 0; i < 8; ++i) {
                             uint8_t byteVal = (eepromBuffer >> (56 - i * 8)) & 0xFF;
                             eepromData[offset + i] = byteVal;
                         }
-                    } else {
                     }
                     FlushSave();
                     // Set busy delay (Standard EEPROM write time is ~10ms)
