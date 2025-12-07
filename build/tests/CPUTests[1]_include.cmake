@@ -1,5 +1,0 @@
-if(EXISTS "/Users/alexwaldmann/Desktop/AIO Server/build/tests/CPUTests[1]_tests.cmake")
-  include("/Users/alexwaldmann/Desktop/AIO Server/build/tests/CPUTests[1]_tests.cmake")
-else()
-  add_test(CPUTests_NOT_BUILT CPUTests_NOT_BUILT)
-endif()

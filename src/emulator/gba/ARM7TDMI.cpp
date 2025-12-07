@@ -1,32 +1,33 @@
 #include "emulator/gba/ARM7TDMI.h"
 #include "emulator/gba/GBAMemory.h"
 #include <cstring>
+#include <cmath>
 #include <iostream>
 #include <iomanip>
 #include <deque>
 
 namespace AIO::Emulator::GBA {
 
+    // Branch logging - only used for debugging invalid jumps
+    #ifdef DEBUG_BRANCHES
     static std::deque<std::pair<uint32_t, uint32_t>> branchLog;
-    static void LogBranch(uint32_t from, uint32_t to) {
+    #endif
+    
+    static void LogBranch([[maybe_unused]] uint32_t from, [[maybe_unused]] uint32_t to) {
+        #ifdef DEBUG_BRANCHES
         branchLog.push_back({from, to});
         if (branchLog.size() > 50) branchLog.pop_front();
 
-        // Check for bad jump
-        bool valid = false;
-        if (to >= 0x08000000 && to < 0x0E000000) valid = true;
-        else if (to >= 0x03000000 && to < 0x04000000) valid = true; // IWRAM (Mirrored)
-        else if (to >= 0x02000000 && to < 0x03000000) valid = true; // WRAM (Mirrored)
-        else if (to < 0x4000) valid = true; // BIOS
-        else if ((to & 0xFFFFFF00) == 0xFFFFFF00) valid = true; // Magic Return
+        bool valid = (to >= 0x08000000 && to < 0x0E000000) ||
+                     (to >= 0x03000000 && to < 0x04000000) ||
+                     (to >= 0x02000000 && to < 0x03000000) ||
+                     (to < 0x4000) ||
+                     ((to & 0xFFFFFF00) == 0xFFFFFF00);
         
         if (!valid) {
-            std::cout << "BAD BRANCH DETECTED: 0x" << std::hex << from << " -> 0x" << to << std::endl;
-            std::cout << "Branch History:" << std::endl;
-            for (const auto& pair : branchLog) {
-                std::cout << "  0x" << pair.first << " -> 0x" << pair.second << std::endl;
-            }
+            std::cerr << "BAD BRANCH: 0x" << std::hex << from << " -> 0x" << to << std::dec << std::endl;
         }
+        #endif
     }
 
     ARM7TDMI::ARM7TDMI(GBAMemory& mem) : memory(mem) {
@@ -101,171 +102,119 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::CheckInterrupts() {
-        // Check IME (Interrupt Master Enable)
         uint16_t ime = memory.Read16(0x04000208);
-        
-        // Even if IME is 0, we might need to wake up from Halt if an interrupt is pending in IF & IE?
-        // GBA Docs: "If the CPU is in Halted state (SWI 2), it is woken up by ANY interrupt enabled in IE, regardless of IME."
-        // But to TAKE the interrupt (jump to vector), IME must be 1.
-        
         uint16_t ie = memory.Read16(0x04000200);
         uint16_t if_reg = memory.Read16(0x04000202);
 
-        if (halted) {
-            if (ie & if_reg) {
-                halted = false;
-                // std::cout << "CPU Woken from Halt by Interrupt! IE=" << std::hex << ie << " IF=" << if_reg << " CPSR=" << cpsr << std::endl;
-            }
+        // Wake from halt if any enabled interrupt is pending
+        if (halted && (ie & if_reg)) {
+            halted = false;
         }
 
         if (!(ime & 1)) return;
-
-        // Check CPSR I bit (IRQ Disable)
-        if (cpsr & 0x80) return;
+        if (cpsr & 0x80) return; // IRQ disabled in CPSR
 
         if (ie & if_reg) {
-            // HLE BIOS IRQ Handling (Since we don't have a real BIOS)
-            uint16_t active = ie & if_reg;
+            // Calculate triggered interrupts NOW before PPU/Timers run
+            // On real GBA, BIOS reads IE & IF atomically at IRQ entry
+            uint16_t triggered = ie & if_reg;
             
-            // std::cout << "IRQ Triggered! Active=0x" << std::hex << active << " PC=0x" << registers[15] << std::endl;
-
-            // 1. Acknowledge Interrupts in IF
-            memory.Write16(0x04000202, active);
+            // Update BIOS_IF immediately (before PPU can change IF)
+            uint32_t biosIF = memory.Read32(0x03007FF8);
+            memory.Write32(0x03007FF8, biosIF | triggered);
             
-            // 2. Update BIOS Interrupt Flags (0x03007FF8)
-            // The game's interrupt dispatcher (at 0x08000100) reads 0x03007FF8 as 32-bit
-            // and checks (val & (val >> 16)). So we must set the flag in both halves.
-            uint32_t flags = memory.Read32(0x03007FF8);
-            flags |= (active | (active << 16));
-            memory.Write32(0x03007FF8, flags);
+            // Also write to a scratch location the BIOS can read
+            // We'll use 0x03007FF4 as a temp storage for triggered bits
+            memory.Write16(0x03007FF4, triggered);
             
-            // 3. Call User Interrupt Handler (0x03007FFC)
-            uint32_t handler = memory.Read32(0x03007FFC);
-            std::cout << "Jumping to IRQ Handler: 0x" << std::hex << handler << " Active=0x" << active << std::endl;
-
-            if (handler != 0 && handler != 0xFFFFFFFF) {
-                // Save Context (Simulate BIOS IRQ Wrapper)
-                // We must use the REAL Stack (R13_irq) because some games (SMA2)
-                // pop registers directly from the stack in their handler.
-                
-                // 1. Save CPSR to SPSR_irq
-                uint32_t oldCpsr = cpsr;
-                if (thumbMode) oldCpsr |= 0x20; else oldCpsr &= ~0x20;
-                
-                // 2. Switch to IRQ Mode
-                SwitchMode(0x12);
-                spsr = oldCpsr; // SwitchMode loads SPSR from bank, so we overwrite it with current CPSR
-                
-                // 3. Disable Thumb (IRQ is always ARM)
-                thumbMode = false;
-                cpsr &= ~0x20;
-                cpsr |= 0x80; // Disable IRQ (I bit)
-                
-                // 4. Calculate Return Address (PC + 4)
-                // Note: registers[15] points to current instruction.
-                // Hardware sets LR to PC of next instruction + 4.
-                // Since we interrupt BEFORE execution, next instruction is current PC.
-                uint32_t returnAddr = registers[15] + 4;
-                
-                // 5. Push R0-R3, R12, LR to R13_irq (Stack)
-                // Stack grows down.
-                // Push order: LR, R12, R3, R2, R1, R0 (R0 at lowest address)
-                registers[13] -= 4 * 6;
-                uint32_t sp = registers[13];
-                
-                memory.Write32(sp + 0, registers[0]);
-                memory.Write32(sp + 4, registers[1]);
-                memory.Write32(sp + 8, registers[2]);
-                memory.Write32(sp + 12, registers[3]);
-                memory.Write32(sp + 16, registers[12]);
-                memory.Write32(sp + 20, returnAddr);
-
-                // Set LR to Magic Return
-                // Note: User Handler expects to return to BIOS, which restores registers.
-                // We use a magic address to trap the return.
-                registers[14] = MAGIC_IRQ_RETURN;
-                
-                // Jump to Handler
-                if (handler & 1) {
-                    thumbMode = true;
-                    registers[15] = handler & ~1;
-                    cpsr |= 0x20;
-                } else {
-                    thumbMode = false;
-                    registers[15] = handler & ~3;
-                    cpsr &= ~0x20;
-                }
-                // Note: We stay in the current mode (System/User), which is what User Handlers expect
-            }
+            // Save CPSR to SPSR_irq
+            uint32_t oldCpsr = cpsr;
+            if (thumbMode) oldCpsr |= 0x20; else oldCpsr &= ~0x20;
             
-            // If no handler is set, we just continue execution. 
-            // The flag update above is enough to unblock wait loops.
+            // Switch to IRQ Mode
+            SwitchMode(0x12);
+            spsr = oldCpsr;
+            spsr_irq = oldCpsr; // Also save to banked SPSR for System Mode return
+            
+            // Disable Thumb, enable IRQ mask
+            thumbMode = false;
+            cpsr &= ~0x20;
+            cpsr |= 0x80;
+            
+            // Calculate return address (LR = PC_next + 4)
+            // registers[15] points to the next instruction to be executed
+            registers[14] = registers[15] + 4;
+            
+            // Jump to BIOS IRQ Trampoline at 0x180
+            registers[15] = 0x180;
         }
     }
 
     void ARM7TDMI::Step() {
-        CheckInterrupts();
-
-        // Check for Magic Return from IRQ Handler
-        if (registers[15] == MAGIC_IRQ_RETURN || (registers[15] & 0xFFFFFFFE) == (MAGIC_IRQ_RETURN & 0xFFFFFFFE)) {
-             // Pop Context from Stack (R13_irq)
-             // We are in IRQ Mode (or should be, if we returned to BIOS)
-             // But if the game switched mode, we might be in System mode?
-             // If we are in System mode, R13 is User Stack.
-             // But BIOS runs in IRQ mode.
-             // So we should assume we are in IRQ mode.
-             // If not, we should switch to IRQ mode to access the stack?
-             // No, if the game returned to MAGIC_IRQ_RETURN, it did so via BX LR.
-             // LR was set in IRQ mode.
-             // So we should be in IRQ mode.
+        static uint32_t lastPC = 0;
+        
+        // Sanity Check SP
+        if (registers[13] == 0) {
+             std::cerr << "[FATAL] SP is 0! CPSR=0x" << std::hex << cpsr << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
+             std::cerr << "Last PC: 0x" << std::hex << lastPC << std::dec << std::endl;
+             std::cerr << "PC: 0x" << std::hex << registers[15] << std::dec << std::endl;
              
-             uint32_t sp = registers[13];
-             
-             registers[0] = memory.Read32(sp + 0);
-             registers[1] = memory.Read32(sp + 4);
-             registers[2] = memory.Read32(sp + 8);
-             registers[3] = memory.Read32(sp + 12);
-             registers[12] = memory.Read32(sp + 16);
-             uint32_t returnAddr = memory.Read32(sp + 20);
-             
-             registers[13] += 4 * 6; // Pop
-             
-             // Restore Mode
-             uint32_t oldSpsr = spsr;
-             SwitchMode(oldSpsr & 0x1F);
-             cpsr = oldSpsr;
-             thumbMode = cpsr & 0x20;
-             
-             // Restore PC
-             registers[15] = returnAddr - 4;
-             
-             std::cout << "Returned from IRQ Handler. Restored PC=0x" << std::hex << registers[15] << std::dec << std::endl;
+             // Dump Instructions around Last PC
+             std::cerr << "Code around Last PC (0x" << lastPC << "):" << std::endl;
+             for (int i = -16; i <= 16; i+=2) {
+                 uint32_t addr = lastPC + i;
+                 if (addr >= 0x08000000) {
+                     uint16_t val = memory.Read16(addr);
+                     std::cerr << "0x" << addr << ": " << val << (i==0 ? " <--" : "") << std::endl;
+                 }
+             }
+             exit(1);
         }
+
+        CheckInterrupts();
 
         if (halted) {
             return;
         }
-
-        static int stepCount = 0;
-        stepCount++;
-        if (stepCount % 100000 == 0) {
-            std::cout << "PC Sample: 0x" << std::hex << registers[15] << " Mode=" << (thumbMode?"T":"A") << std::dec << std::endl;
-        }
         
-        // Dump state every 60 frames (approx 280896 cycles per frame)
-        if (stepCount % 280000 == 0) {
-             std::cout << "--- State Dump ---" << std::endl;
-             std::cout << "PC=0x" << std::hex << registers[15] << " Mode=" << (thumbMode?"T":"A") << std::dec << std::endl;
-             std::cout << "R0=" << std::hex << registers[0] << " R1=" << registers[1] << " R2=" << registers[2] << " R3=" << registers[3] << std::dec << std::endl;
-             std::cout << "R12=" << std::hex << registers[12] << " SP=" << registers[13] << " LR=" << registers[14] << std::dec << std::endl;
-             std::cout << "Branch History:" << std::endl;
-             for (const auto& pair : branchLog) {
-                 std::cout << "  0x" << std::hex << pair.first << " -> 0x" << pair.second << std::dec << std::endl;
-             }
-             std::cout << "------------------" << std::endl;
+        // Detect invalid PC addresses
+        if (registers[15] == 0xFFFFFFFF || registers[15] == 0xFFFFFFFE || 
+            registers[15] == 0xFFFFFFFC || registers[15] == 0xFFFFFFFD) {
+            std::cerr << "[FATAL] Invalid PC: 0x" << std::hex << registers[15] << std::dec << std::endl;
+            halted = true;
+            return;
         }
 
-        // Canonicalize PC if in Mirror (Fixes falling off the end of IWRAM mirrors)
+        // Detect entry into 0x0C/0x0D range
+        if (registers[15] >= 0x0C000000 && registers[15] < 0x0E000000) {
+             std::cerr << "[FATAL] PC entered Wait State 2 ROM Mirror (0x" << std::hex << registers[15] << ")" << std::endl;
+             std::cerr << "Last PC: 0x" << lastPC << std::endl;
+             std::cerr << "LR: 0x" << registers[14] << std::endl;
+             std::cerr << "SP: 0x" << registers[13] << std::endl;
+             std::cerr << "CPSR: 0x" << cpsr << std::endl;
+             std::cerr << "Mode: 0x" << (cpsr & 0x1F) << std::endl;
+             
+             // Dump Stack
+             uint32_t sp = registers[13];
+             std::cerr << "Stack Dump:" << std::endl;
+             for (int i = 0; i < 64; i+=4) {
+                 std::cerr << "0x" << (sp + i) << ": 0x" << memory.Read32(sp + i) << std::endl;
+             }
+             
+             // Dump Instructions around Last PC
+             std::cerr << "Code around Last PC (0x" << lastPC << "):" << std::endl;
+             for (int i = -16; i <= 16; i+=2) {
+                 uint32_t addr = lastPC + i;
+                 if (addr >= 0x08000000) {
+                     uint16_t val = memory.Read16(addr);
+                     std::cerr << "0x" << addr << ": " << val << (i==0 ? " <--" : "") << std::endl;
+                 }
+             }
+
+             exit(1);
+        }
+
+        // Canonicalize PC if in Mirror region
         if (registers[15] >= 0x03008000 && registers[15] < 0x04000000) {
             registers[15] = 0x03000000 | (registers[15] & 0x7FFF);
         }
@@ -273,119 +222,74 @@ namespace AIO::Emulator::GBA {
             registers[15] = 0x02000000 | (registers[15] & 0x3FFFF);
         }
 
-        // Fetch
         uint32_t pc = registers[15];
-        memory.debugPC = pc;
 
-        // Debug Tracing for IRQ Handler
-        static bool tracing = false;
-        static int traceCount = 0;
-        
-        // Trace around the crash site (SWI 0xC at 0x809dfbc)
-        if (pc >= 0x0809dfb0 && pc <= 0x0809dfd0) {
-            tracing = true;
-            traceCount = 0; // Reset count to keep tracing in this region
-        }
-        
-        // Also trace if we jump to 0x4000 (catch the jump)
-        if (pc == 0x4000) {
-             std::cout << "PC reached 0x4000! Dumping registers:" << std::endl;
-             std::cout << "R0=" << std::hex << registers[0] << " R1=" << registers[1] << " R2=" << registers[2] << " R3=" << registers[3] << std::endl;
-             std::cout << "R12=" << registers[12] << " SP=" << registers[13] << " LR=" << registers[14] << " PC=" << registers[15] << std::dec << std::endl;
-             std::cout << "Branch History:" << std::endl;
-             for (const auto& pair : branchLog) {
-                 std::cout << "  0x" << std::hex << pair.first << " -> 0x" << pair.second << std::dec << std::endl;
-             }
-        }
-
-        if (tracing) {
-            std::cout << "Trace: PC=0x" << std::hex << pc << " Mode=" << (thumbMode?"T":"A") << " R0=" << registers[0] << " R1=" << registers[1] << " R2=" << registers[2] << " R3=" << registers[3] << " SP=" << registers[13] << " LR=" << registers[14] << std::dec << std::endl;
-            traceCount++;
-            if (traceCount > 50) { // Short trace
-                tracing = false;
-            }
-        }
-
-        // Debug: Print PC if it looks suspicious (not in ROM/RAM/BIOS)
-        bool valid = false;
-        if (pc >= 0x08000000 && pc < 0x0E000000) valid = true; // ROM
-        else if (pc >= 0x03000000 && pc < 0x04000000) valid = true; // IWRAM (Mirrored)
-        else if (pc >= 0x02000000 && pc < 0x03000000) valid = true; // WRAM (Mirrored)
-        else if (pc < 0x4000) valid = true; // BIOS
-        
-        if (!valid) {
-             static int invalidCount = 0;
-             if (invalidCount < 10) {
-                 std::cerr << "INVALID PC DETECTED: 0x" << std::hex << pc << std::dec << std::endl;
-                 std::cerr << "Mode: " << (thumbMode ? "Thumb" : "ARM") << std::endl;
-                 std::cerr << "Registers:" << std::endl;
-                 for(int i=0; i<16; ++i) std::cerr << "R" << i << "=0x" << std::hex << registers[i] << std::dec << std::endl;
-                 std::cerr << "Branch History:" << std::endl;
-                 for (const auto& pair : branchLog) {
-                     std::cerr << "  0x" << std::hex << pair.first << " -> 0x" << pair.second << std::dec << std::endl;
-                 }
-                 invalidCount++;
-             }
-             // Force crash
-             halted = true;
-             return;
-        }
-
-        if (pc == 0x0801dd3e) {
-             // Debugging removed
-        }
-
-        // Hack: Force Enable Interrupts if stuck in Wait Loop at 0x800052e
+        // Debug SMA2 Crash - DISABLED
         /*
-        if (pc == 0x0800052e) {
-             static bool forced = false;
-             if (!forced) {
-                 std::cout << "Detected Wait Loop at 0x800052e. Forcing IME=1, IE=VBlank, CPSR IRQ Enable." << std::endl;
-                 memory.Write16(0x04000208, 1); // IME
-                 uint16_t ie = memory.Read16(0x04000200);
-                 memory.Write16(0x04000200, ie | 1); // IE (VBlank)
-                 cpsr &= ~0x80; // Enable IRQ in CPSR
-                 forced = true;
+        if (pc == 0x080014b8) {
+             uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+             std::cout << "[DEBUG] At Crash Point? PC=0x" << std::hex << pc << " Instr=0x" << instr << " Mode=" << (thumbMode?"Thumb":"ARM") 
+                       << " LR=0x" << registers[14] << " SP=0x" << registers[13] << std::dec << std::endl;
+             
+             uint32_t lr = registers[14];
+             std::cout << "Dumping BIOS at LR (0x" << std::hex << lr << "):" << std::endl;
+             for (int i = 0; i < 16; i+=4) {
+                 std::cout << "0x" << (lr + i) << ": 0x" << memory.Read32(lr + i) << std::endl;
              }
+             
+             uint32_t sp = registers[13];
+             std::cout << "Dumping Stack at SP (0x" << sp << "):" << std::endl;
+             for (int i = 0; i < 32; i+=4) {
+                 std::cout << "0x" << (sp + i) << ": 0x" << memory.Read32(sp + i) << std::endl;
+             }
+             std::cout << std::dec;
         }
         */
 
-        // Debug: Check for Wait Loop at 0x08000F78
-        if (pc == 0x08000F78 || pc == 0x08000F78 + 2) {
-             // std::cout << "PC=0x08000F78 (Wait Loop?) R0=" << std::hex << registers[0] << " R1=" << registers[1] << " R3=" << registers[3] << std::dec << std::endl;
+        // Trace Interrupt Handler
+        /*
+        if ((pc >= 0x180 && pc <= 0x220) || (pc >= 0x03002364 && pc <= 0x03002600) || (pc >= 0x08000578 && pc <= 0x08000600) || (pc >= 0x08000400 && pc <= 0x08000550)) {
+             uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+             std::cout << "[Trace] PC=0x" << std::hex << pc << " Instr=0x" << instr << " Mode=" << (thumbMode?"Thumb":"ARM") 
+                       << " R0=" << registers[0] << " R1=" << registers[1] << " R2=" << registers[2] << " R3=" << registers[3] << " R12=" << registers[12] << " LR=" << registers[14] << std::dec << std::endl;
         }
+        */
         
-        if (pc == 0x08035778 || pc == 0x08035778 + 2) {
-             // std::cout << "PC=0x08035778 R0=" << std::hex << registers[0] << " R1=" << registers[1] << " R2=" << registers[2] << " R5=" << registers[5] << " R7=" << registers[7] << std::dec << std::endl;
-        }
-
-        if (pc == 0x080015d8) {
-             // std::cout << "PC reached Patch Start: 0x080015d8" << std::endl;
-        }
-        if (pc == 0x08000000) {
-             // std::cout << "PC at ROM Entry: 0x08000000" << std::endl;
-        }
-
-        if (thumbMode) {
-            uint16_t instruction = memory.Read16(pc);
+        
+        // Validate PC is in executable region
+        bool valid = (pc >= 0x08000000 && pc < 0x0E000000) ||
+                     (pc >= 0x03000000 && pc < 0x04000000) ||
+                     (pc >= 0x02000000 && pc < 0x03000000) ||
+                     (pc < 0x4000);
+        
+        if (!valid) {
+            std::cerr << "INVALID PC: 0x" << std::hex << pc << " (Last PC: 0x" << lastPC << ")" << std::dec << std::endl;
             
-            static int iwram_trace_count = 0;
-            if (pc >= 0x03000000 && pc < 0x03008000 && iwram_trace_count < 500) {
-                std::cout << "IWRAM PC: 0x" << std::hex << pc << " Op: 0x" << instruction << " Mode: T" << std::dec << std::endl;
-                iwram_trace_count++;
+            if (pc == 0xe000000 && lastPC != 0x1bc) {
+                std::cerr << "!!! ORIGINAL CRASH DETECTED !!!" << std::endl;
+                std::cerr << "Jumped to 0xe000000 from 0x" << std::hex << lastPC << std::dec << std::endl;
+                exit(1);
             }
 
+            halted = true;
+            return;
+        }
+
+        lastPC = pc;
+
+        if (thumbMode) {
+            uint16_t instruction = memory.ReadInstruction16(pc);
+            
+            // DEBUG: Trace instruction at PC near 0x80323c6
+            if (pc >= 0x80323c0 && pc <= 0x80323d0) {
+                std::cout << "[THUMB] PC=0x" << std::hex << pc 
+                          << " instr=0x" << instruction << std::dec << std::endl;
+            }
+            
             registers[15] += 2;
             DecodeThumb(instruction);
         } else {
-            uint32_t instruction = memory.Read32(pc);
-
-            static int iwram_trace_count = 0;
-            if (pc >= 0x03000000 && pc < 0x03008000 && iwram_trace_count < 500) {
-                std::cout << "IWRAM PC: 0x" << std::hex << pc << " Op: 0x" << instruction << " Mode: A" << std::dec << std::endl;
-                iwram_trace_count++;
-            }
-
+            uint32_t instruction = memory.ReadInstruction32(pc);
             registers[15] += 4;
             Decode(instruction);
         }
@@ -517,9 +421,6 @@ namespace AIO::Emulator::GBA {
         uint32_t target = currentPC + 4 + offset;
         LogBranch(currentPC - 4, target); // Log from actual instruction address
         registers[15] = target;
-        
-        // Flush pipeline (if we were simulating it)
-        // std::cout << "Branch Taken! New PC: 0x" << std::hex << registers[15] << std::endl;
     }
 
     void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
@@ -535,24 +436,76 @@ namespace AIO::Emulator::GBA {
             // Immediate
             uint32_t rotate = (instruction >> 8) & 0xF;
             uint32_t imm = instruction & 0xFF;
-            // Rotate right by 2 * rotate
             uint32_t shift = rotate * 2;
             op2 = (imm >> shift) | (imm << (32 - shift));
         } else {
-            // Register
-            // TODO: Implement Barrel Shifter for Register operands
+            // Register with optional shift
             uint32_t rm = instruction & 0xF;
-            op2 = registers[rm];
+            uint32_t rmVal = registers[rm];
+            if (rm == 15) rmVal += 4; // PC is Instruction + 8 (registers[15] is Instruction + 4)
+            
+            bool shiftByReg = (instruction >> 4) & 1;
+            uint32_t shiftType = (instruction >> 5) & 3;
+            uint32_t shiftAmount;
+            
+            if (shiftByReg) {
+                uint32_t rs = (instruction >> 8) & 0xF;
+                shiftAmount = registers[rs] & 0xFF;
+            } else {
+                shiftAmount = (instruction >> 7) & 0x1F;
+            }
+            
+            // Apply shift
+            switch (shiftType) {
+                case 0: // LSL
+                    if (shiftAmount == 0) {
+                        op2 = rmVal;
+                    } else if (shiftAmount < 32) {
+                        op2 = rmVal << shiftAmount;
+                    } else {
+                        op2 = 0;
+                    }
+                    break;
+                case 1: // LSR
+                    if (shiftAmount == 0) {
+                        op2 = 0;
+                    } else if (shiftAmount < 32) {
+                        op2 = rmVal >> shiftAmount;
+                    } else {
+                        op2 = 0;
+                    }
+                    break;
+                case 2: // ASR
+                    if (shiftAmount == 0) {
+                        op2 = (rmVal & 0x80000000) ? 0xFFFFFFFF : 0;
+                    } else if (shiftAmount < 32) {
+                        op2 = (int32_t)rmVal >> shiftAmount;
+                    } else {
+                        op2 = (rmVal & 0x80000000) ? 0xFFFFFFFF : 0;
+                    }
+                    break;
+                case 3: // ROR
+                    if (shiftAmount == 0) {
+                        bool carryIn = (cpsr >> 29) & 1;
+                        op2 = (carryIn << 31) | (rmVal >> 1);
+                    } else {
+                        shiftAmount &= 31;
+                        if (shiftAmount == 0) {
+                            op2 = rmVal;
+                        } else {
+                            op2 = (rmVal >> shiftAmount) | (rmVal << (32 - shiftAmount));
+                        }
+                    }
+                    break;
+            }
         }
 
         uint32_t result = 0;
         uint32_t rnVal = registers[rn];
+        if (rn == 15) rnVal += 4; // PC is Instruction + 8 (registers[15] is Instruction + 4)
         bool carry = (cpsr >> 29) & 1;
         bool overflow = (cpsr >> 28) & 1;
-        bool cOut = carry; // Default to current carry (for logical ops)
-
-        // For logical ops with shift, cOut should be the shifter carry out.
-        // TODO: Implement shifter carry out.
+        bool cOut = carry;
 
         switch (opcode) {
             case 0x0: // AND
@@ -564,7 +517,7 @@ namespace AIO::Emulator::GBA {
             case 0x2: // SUB
             case 0xA: // CMP
                 result = rnVal - op2;
-                cOut = (rnVal >= op2); // No Borrow
+                cOut = (rnVal >= op2);
                 {
                     bool sign1 = (rnVal >> 31) & 1;
                     bool sign2 = (op2 >> 31) & 1;
@@ -654,11 +607,54 @@ namespace AIO::Emulator::GBA {
         // Update Flags (CPSR) if S is set
         if (S) {
             if (rd == 15) {
-                // If Rd is PC, restore CPSR from SPSR
-                cpsr = spsr;
+                uint32_t oldMode = cpsr & 0x1F;  // Save old mode BEFORE modifying cpsr
+                if ((cpsr & 0x1F) == 0x1F) {
+                    // System Mode - Hack for BIOS IRQ return
+                    // Assume we came from IRQ and use SPSR_irq
+                    cpsr = spsr_irq;
+                } else {
+                    cpsr = spsr;
+                }
+                uint32_t newMode = cpsr & 0x1F;
+                // Force proper mode switch by passing old mode
+                if (oldMode != newMode) {
+                    // Manually do what SwitchMode does but with correct old mode
+                    switch (oldMode) {
+                        case 0x10: case 0x1F: // User/System
+                            r13_usr = registers[13];
+                            r14_usr = registers[14];
+                            break;
+                        case 0x12: // IRQ
+                            r13_irq = registers[13];
+                            r14_irq = registers[14];
+                            spsr_irq = spsr;
+                            break;
+                        case 0x13: // Supervisor
+                            r13_svc = registers[13];
+                            r14_svc = registers[14];
+                            spsr_svc = spsr;
+                            break;
+                    }
+                    switch (newMode) {
+                        case 0x10: case 0x1F: // User/System
+                            registers[13] = r13_usr;
+                            registers[14] = r14_usr;
+                            break;
+                        case 0x12: // IRQ
+                            registers[13] = r13_irq;
+                            registers[14] = r14_irq;
+                            spsr = spsr_irq;
+                            break;
+                        case 0x13: // Supervisor
+                            registers[13] = r13_svc;
+                            registers[14] = r14_svc;
+                            spsr = spsr_svc;
+                            break;
+                    }
+                }
+                thumbMode = (cpsr & 0x20) != 0;
             } else {
                 SetZN(result);
-                // Update C and V
                 if (cOut) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
                 if (overflow) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
             }
@@ -677,24 +673,19 @@ namespace AIO::Emulator::GBA {
         uint32_t offset = 0;
 
         if (!I) {
-            // Immediate Offset
             offset = instruction & 0xFFF;
         } else {
-            // Register Offset
-            // TODO: Implement Shifted Register Offset
             uint32_t rm = instruction & 0xF;
             offset = registers[rm];
         }
 
         uint32_t baseAddr = registers[rn];
         if (rn == 15) {
-            // PC is 8 bytes ahead
             baseAddr += 4; 
         }
 
         uint32_t targetAddr = baseAddr;
         if (P) {
-            // Pre-indexing
             if (U) targetAddr += offset;
             else   targetAddr -= offset;
         }
@@ -702,36 +693,27 @@ namespace AIO::Emulator::GBA {
         if (L) {
             // Load
             if (B) {
-                uint8_t val = memory.Read8(targetAddr);
-                registers[rd] = val;
-                // std::cout << "LDRB: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << (uint32_t)val << std::endl;
+                registers[rd] = memory.Read8(targetAddr);
             } else {
                 uint32_t val = memory.Read32(targetAddr);
-                // Rotate if unaligned (TODO)
                 if (rd == 15) {
                     LogBranch(registers[15] - 4, val);
                 }
                 registers[rd] = val;
-                // std::cout << "LDR: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << val << std::endl;
             }
         } else {
             // Store
             uint32_t val = registers[rd];
-            if (rd == 15) val += 4; // Storing PC stores PC+12 (Instr+8+4?? Check docs) - usually PC+12
+            if (rd == 15) val += 8; // PC+12 (registers[15] is PC+4)
 
             if (B) {
                 memory.Write8(targetAddr, val & 0xFF);
-                // std::cout << "STRB: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << (val & 0xFF) << std::endl;
             } else {
                 memory.Write32(targetAddr, val);
-                // std::cout << "STR: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << val << std::endl;
             }
         }
 
         if (!P || W) {
-            // Write-back
-            // Post-indexing always writes back
-            // Pre-indexing writes back if W bit is set
             uint32_t newBase = baseAddr;
             if (U) newBase += offset;
             else   newBase -= offset;
@@ -789,6 +771,14 @@ namespace AIO::Emulator::GBA {
                     // Store (STM)
                     uint32_t val = registers[i];
                     if (i == 15) val += 4; // PC store quirk? Usually PC+12
+                    
+                    // DEBUG: Trace ARM STM to 0x3001500
+                    if ((currentAddr >> 24) == 0x03 && (currentAddr & 0x7FFF) >= 0x1500 && (currentAddr & 0x7FFF) < 0x1510) {
+                        std::cout << "[ARM STM] PC=0x" << std::hex << (registers[15] - 8)
+                                  << " [0x" << currentAddr << "] <- R" << std::dec << i 
+                                  << " (0x" << std::hex << val << ")" << std::endl;
+                    }
+                    
                     memory.Write32(currentAddr, val);
                     // std::cout << "STM: [0x" << std::hex << currentAddr << "] <- R" << i << " (0x" << val << ")" << std::endl;
                 }
@@ -797,9 +787,14 @@ namespace AIO::Emulator::GBA {
         }
 
         // Writeback
+        // For LDM, if Rn is in the list, writeback is ignored (loaded value persists)
+        // For STM, writeback always happens (base is updated)
         if (writeBack) {
-            if (U) registers[rn] = startAddress + (numRegs * 4);
-            else   registers[rn] = startAddress - (numRegs * 4);
+            bool rnInList = (regList >> rn) & 1;
+            if (!L || !rnInList) {
+                if (U) registers[rn] = startAddress + (numRegs * 4);
+                else   registers[rn] = startAddress - (numRegs * 4);
+            }
         }
         
         // TODO: Handle S bit (User mode registers or CPSR restore)
@@ -826,7 +821,7 @@ namespace AIO::Emulator::GBA {
         }
 
         uint32_t baseAddr = registers[rn];
-        if (rn == 15) baseAddr += 8; // PC+8
+        if (rn == 15) baseAddr += 4; // PC+8 (registers[15] is PC+4)
 
         uint32_t targetAddr = baseAddr;
         if (P) {
@@ -838,21 +833,17 @@ namespace AIO::Emulator::GBA {
             // Load
             if (opcode == 1) { // LDRH (Unsigned Halfword)
                 registers[rd] = memory.Read16(targetAddr);
-                // std::cout << "LDRH: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << registers[rd] << std::endl;
             } else if (opcode == 2) { // LDRSB (Signed Byte)
                 int8_t val = (int8_t)memory.Read8(targetAddr);
                 registers[rd] = (int32_t)val;
-                // std::cout << "LDRSB: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << registers[rd] << std::endl;
             } else if (opcode == 3) { // LDRSH (Signed Halfword)
                 int16_t val = (int16_t)memory.Read16(targetAddr);
                 registers[rd] = (int32_t)val;
-                // std::cout << "LDRSH: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << registers[rd] << std::endl;
             }
         } else {
             // Store
             if (opcode == 1) { // STRH
                 memory.Write16(targetAddr, registers[rd] & 0xFFFF);
-                // std::cout << "STRH: Rd=R" << rd << " Addr=0x" << std::hex << targetAddr << " Val=0x" << (registers[rd] & 0xFFFF) << std::endl;
             }
         }
 
@@ -865,82 +856,246 @@ namespace AIO::Emulator::GBA {
     void ARM7TDMI::ExecuteBX(uint32_t instruction) {
         uint32_t rm = instruction & 0xF;
         uint32_t target = registers[rm];
-        
-        if (target >= 0x03000000 && target < 0x04000000) {
-             std::cout << "BX to IWRAM detected! Rm=R" << rm << " Val=0x" << std::hex << target << std::endl;
-             /*
-             if ((target & 1) == 0) {
-                 std::cout << "Hack: Forcing Thumb mode for even IWRAM target" << std::endl;
-                 target |= 1;
-             }
-             */
-        }
 
         LogBranch(registers[15] - 4, target);
 
         if (target & 1) {
             thumbMode = true;
+            cpsr |= 0x20;  // Set T bit in CPSR
             registers[15] = target & 0xFFFFFFFE;
-            // std::cout << "BX to Thumb: 0x" << std::hex << registers[15] << std::endl;
         } else {
             thumbMode = false;
+            cpsr &= ~0x20; // Clear T bit in CPSR
             registers[15] = target & 0xFFFFFFFC; // Align to 4 bytes
-            // std::cout << "BX to ARM: 0x" << std::hex << registers[15] << std::endl;
         }
     }
 
     void ARM7TDMI::ExecuteSWI(uint32_t comment) {
-        std::cout << "SWI 0x" << std::hex << comment << " at PC=" << (thumbMode ? registers[15]-2 : registers[15]-4) << std::endl;
-        
-        if (comment == 0x00) {
-             std::cout << "SoftReset (SWI 0) called!" << std::endl;
-        }
-
         switch (comment) {
             case 0x00: // SoftReset
-                // TODO: Implement SoftReset (Clear registers, jump to 0x8000000, etc.)
-                // For now, just jump to ROM start
                 registers[15] = 0x08000000;
                 registers[13] = 0x03007F00; // Reset SP
                 break;
-            case 0x01: // RegisterRamReset
-                std::cout << "RegisterRamReset: Flags=0x" << std::hex << registers[0] << std::endl;
-                // TODO: Clear RAM regions based on flags
+            case 0x01: // RegisterRamReset - Clear/Initialize RAM and registers
+            {
+                uint8_t flags = registers[0] & 0xFF;
+                
+                // Bit 0: Clear 256K EWRAM (0x02000000-0x0203FFFF)
+                if (flags & 0x01) {
+                    for (uint32_t addr = 0x02000000; addr < 0x02040000; addr++) {
+                        memory.Write8(addr, 0);
+                    }
+                }
+                
+                // Bit 1: Clear 32K IWRAM (0x03000000-0x03007FFF, excluding last 0x200 bytes)
+                if (flags & 0x02) {
+                    for (uint32_t addr = 0x03000000; addr < 0x03007E00; addr++) {
+                        memory.Write8(addr, 0);
+                    }
+                }
+                
+                // Bit 2: Clear Palette RAM (0x05000000-0x050003FF)
+                if (flags & 0x04) {
+                    for (uint32_t addr = 0x05000000; addr < 0x05000400; addr++) {
+                        memory.Write8(addr, 0);
+                    }
+                }
+                
+                // Bit 3: Clear VRAM (0x06000000-0x06017FFF)
+                if (flags & 0x08) {
+                    for (uint32_t addr = 0x06000000; addr < 0x06018000; addr++) {
+                        memory.Write8(addr, 0);
+                    }
+                }
+                
+                // Bit 4: Clear OAM (0x07000000-0x070003FF)
+                if (flags & 0x10) {
+                    for (uint32_t addr = 0x07000000; addr < 0x07000400; addr++) {
+                        memory.Write8(addr, 0);
+                    }
+                }
+                
+                // Bits 5-6: Reset SIO registers (bit 5=0x04000120-0x04000159, bit 6=0x04000300)
+                // TODO: Implement SIO register reset if needed
+                
+                // Bit 7: Reset other registers
+                if (flags & 0x80) {
+                    // Reset most IO registers to defaults
+                    // DISPCNT, DISPSTAT, BG control, etc.
+                    memory.Write16(0x04000000, 0x0080); // DISPCNT: Force blank
+                    memory.Write16(0x04000004, 0x0000); // DISPSTAT
+                    memory.Write16(0x04000008, 0x0000); // BG0CNT
+                    memory.Write16(0x0400000A, 0x0000); // BG1CNT
+                    memory.Write16(0x0400000C, 0x0000); // BG2CNT
+                    memory.Write16(0x0400000E, 0x0000); // BG3CNT
+                    // Reset sound registers
+                    for (uint32_t addr = 0x04000060; addr <= 0x040000A6; addr += 2) {
+                        memory.Write16(addr, 0);
+                    }
+                    // Reset DMA registers
+                    for (uint32_t addr = 0x040000B0; addr <= 0x040000DE; addr += 2) {
+                        memory.Write16(addr, 0);
+                    }
+                }
                 break;
+            }
             case 0x02: // Halt
                 halted = true;
                 break;
+            case 0x03: // Stop/Sleep
+                halted = true;
+                break;
             case 0x04: // IntrWait
-                std::cout << "SWI 0x04 (IntrWait) R0=" << registers[0] << " R1=" << registers[1] << std::endl;
-                // Enable IME
-                memory.Write16(0x04000208, 1);
-                // Enable requested interrupts in IE
-                {
-                    uint16_t ie = memory.Read16(0x04000200);
-                    memory.Write16(0x04000200, ie | (registers[1] & 0xFFFF));
+            intrwait_entry:
+            {
+                // R0 = Clear Old Flags (1=Clear), R1 = Wait Flags
+                uint32_t clearOld = registers[0];
+                uint32_t waitFlags = registers[1];
+
+                if (clearOld) {
+                    uint32_t currentFlags = memory.Read32(0x03007FF8);
+                    memory.Write32(0x03007FF8, currentFlags & ~waitFlags);
+                    registers[0] = 0; // Clear the "Clear Old" flag so we don't do it again on resume
                 }
-                // Force Enable IRQs in CPSR (Hack for HLE)
-                cpsr &= ~0x80;
+
+                uint32_t currentFlags = memory.Read32(0x03007FF8);
+                if (currentFlags & waitFlags) {
+                    // Condition met! Return.
+                    // Acknowledge flags in BIOS_IF (Standard BIOS behavior)
+                    memory.Write32(0x03007FF8, currentFlags & ~waitFlags);
+                    return;
+                }
+
+                // Condition not met. Enable interrupts and Halt.
+                memory.Write16(0x04000208, 1); // IME=1
+                uint16_t ie = memory.Read16(0x04000200);
+                memory.Write16(0x04000200, ie | (waitFlags & 0xFFFF)); // Enable required IRQs
+                cpsr &= ~0x80; // Enable IRQ in CPSR
                 halted = true;
+
+                // Rewind PC to re-execute this SWI instruction
+                if (thumbMode) registers[15] -= 2;
+                else registers[15] -= 4;
                 break;
+            }
             case 0x05: // VBlankIntrWait
-                std::cout << "SWI 0x05 (VBlankIntrWait) R0=" << registers[0] << " R1=" << registers[1] << std::endl;
-                // Enable IME
-                memory.Write16(0x04000208, 1);
-                // Enable VBlank IRQ in IE (Bit 0)
-                {
-                    uint16_t ie = memory.Read16(0x04000200);
-                    memory.Write16(0x04000200, ie | 1);
+            {
+                // VBlankIntrWait is equivalent to:
+                // R0 = 1 (clear old flags)
+                // R1 = 1 (wait for VBlank IRQ, bit 0)
+                // Then call IntrWait (SWI 0x04)
+                
+                // Enable VBlank IRQ in DISPSTAT (Bit 3) - Required for VBlank IRQ to fire
+                uint16_t dispstat = memory.Read16(0x04000004);
+                memory.Write16(0x04000004, dispstat | 0x0008);
+                
+                // Set up for IntrWait: R0=1, R1=1
+                registers[0] = 1; // Clear old flags
+                registers[1] = 1; // Wait for VBlank IRQ (bit 0)
+                
+                // Fall through to IntrWait logic
+                goto intrwait_entry;
+            }
+            case 0x06: // Div - R0 = R0 / R1, R1 = R0 % R1, R3 = abs(R0 / R1)
+            {
+                int32_t num = (int32_t)registers[0];
+                int32_t denom = (int32_t)registers[1];
+                if (denom == 0) {
+                    // Division by zero
+                    // R0 = 0 (if R0=0), +1 (if R0>0), -1 (if R0<0)
+                    // R1 = R0
+                    // R3 = 0 (if R0=0), +1 (if R0!=0)
+                    if (num == 0) {
+                        registers[0] = 0;
+                        registers[3] = 0;
+                    } else {
+                        registers[0] = (num < 0) ? -1 : 1;
+                        registers[3] = 1;
+                    }
+                    registers[1] = num;
+                } else {
+                    int32_t result = num / denom;
+                    int32_t remainder = num % denom;
+                    registers[0] = (uint32_t)result;
+                    registers[1] = (uint32_t)remainder;
+                    registers[3] = (uint32_t)(result < 0 ? -result : result);
                 }
-                // Enable VBlank IRQ in DISPSTAT (Bit 3)
-                {
-                    uint16_t dispstat = memory.Read16(0x04000004);
-                    memory.Write16(0x04000004, dispstat | 0x0008);
-                }
-                // Force Enable IRQs in CPSR (Hack for HLE)
-                cpsr &= ~0x80;
-                halted = true;
                 break;
+            }
+            case 0x07: // DivArm - Same as Div but with R0 and R1 swapped
+            {
+                int32_t num = (int32_t)registers[1];
+                int32_t denom = (int32_t)registers[0];
+                if (denom == 0) {
+                    if (num == 0) {
+                        registers[0] = 0;
+                        registers[3] = 0;
+                    } else {
+                        registers[0] = (num < 0) ? -1 : 1;
+                        registers[3] = 1;
+                    }
+                    registers[1] = num;
+                } else {
+                    int32_t result = num / denom;
+                    int32_t remainder = num % denom;
+                    registers[0] = (uint32_t)result;
+                    registers[1] = (uint32_t)remainder;
+                    registers[3] = (uint32_t)(result < 0 ? -result : result);
+                }
+                break;
+            }
+            case 0x08: // Sqrt - R0 = sqrt(R0)
+            {
+                uint32_t val = registers[0];
+                uint32_t result = 0;
+                uint32_t bit = 1 << 30; // Start with highest bit
+                
+                while (bit > val) bit >>= 2;
+                
+                while (bit != 0) {
+                    if (val >= result + bit) {
+                        val -= result + bit;
+                        result = (result >> 1) + bit;
+                    } else {
+                        result >>= 1;
+                    }
+                    bit >>= 2;
+                }
+                registers[0] = result;
+                break;
+            }
+            case 0x09: // ArcTan - R0 = arctan(R0)
+            {
+                // R0 is a signed 16.16 fixed-point value representing tan(θ)
+                // Result is a signed 16.16 fixed-point angle in range -π/4 to π/4
+                int32_t x = (int32_t)registers[0];
+                // Convert to double, calculate, convert back
+                double tanVal = x / 65536.0;
+                double angle = atan(tanVal);
+                // Convert to 16.16 fixed point (but result is actually in 1.15 format for BIOS)
+                // BIOS returns value in range -0x4000 to 0x4000 (-π/4 to π/4 scaled)
+                registers[0] = (uint32_t)(int32_t)(angle / (2.0 * 3.14159265358979323846) * 65536.0);
+                break;
+            }
+            case 0x0A: // ArcTan2 - R0 = arctan2(R0, R1)
+            {
+                // R0 = Y, R1 = X (both signed 16.16 fixed-point)
+                // Result is angle from 0 to 2π mapped to 0x0000-0xFFFF
+                int32_t y = (int32_t)registers[0];
+                int32_t x = (int32_t)registers[1];
+                double yVal = y / 65536.0;
+                double xVal = x / 65536.0;
+                double angle = atan2(yVal, xVal); // Returns -PI to PI
+                
+                if (angle < 0) {
+                    angle += 2.0 * 3.14159265358979323846;
+                }
+                
+                // Map 0-2PI to 0-FFFF
+                uint16_t result = (uint16_t)(angle / (2.0 * 3.14159265358979323846) * 65536.0);
+                registers[0] = result;
+                break;
+            }
             case 0x0B: // CpuSet (R0=Src, R1=Dst, R2=Cnt/Ctrl)
             {
                 uint32_t src = registers[0];
@@ -949,7 +1104,12 @@ namespace AIO::Emulator::GBA {
                 bool fixedSrc = (registers[2] >> 24) & 1;
                 bool is32Bit = (registers[2] >> 26) & 1;
                 
-                std::cout << "CpuSet: Src=" << std::hex << src << " Dst=" << dst << " Len=" << len << " 32Bit=" << is32Bit << " Fixed=" << fixedSrc << std::endl;
+                // Debug: trace CpuSet to VRAM
+                if ((dst & 0xFF000000) == 0x06000000) {
+                    std::cout << "[SWI 0x0B] CpuSet to VRAM: src=0x" << std::hex << src
+                              << " dst=0x" << dst << " len=" << std::dec << len
+                              << " 32bit=" << is32Bit << " fixed=" << fixedSrc << std::endl;
+                }
 
                 if (is32Bit) {
                     for (uint32_t i = 0; i < len; ++i) {
@@ -974,10 +1134,15 @@ namespace AIO::Emulator::GBA {
                 uint32_t dst = registers[1];
                 uint32_t len = registers[2] & 0x1FFFFF;
                 
-                std::cout << "CpuFastSet: Src=" << std::hex << src << " Dst=" << dst << " Len=" << len << " Fixed=" << ((registers[2] >> 24) & 1) << std::endl;
-
                 // len is the word count (must be multiple of 8)
                 bool fixedSrc = (registers[2] >> 24) & 1;
+                
+                // Debug: trace CpuFastSet to VRAM
+                if ((dst & 0xFF000000) == 0x06000000) {
+                    std::cout << "[SWI 0x0C] CpuFastSet to VRAM: src=0x" << std::hex << src
+                              << " dst=0x" << dst << " len=" << std::dec << len
+                              << " fixed=" << fixedSrc << std::endl;
+                }
                 
                 // Always 32-bit
                 for (uint32_t i = 0; i < len; ++i) {
@@ -986,6 +1151,446 @@ namespace AIO::Emulator::GBA {
                     dst += 4;
                     if (!fixedSrc) src += 4;
                 }
+                break;
+            }
+            case 0x0E: // BgAffineSet
+            {
+                // R0 = Source Address, R1 = Destination Address, R2 = Number of calculations
+                // Source: 4 bytes OrigCenterX, 4 bytes OrigCenterY, 2 bytes DisplayCenterX, 2 bytes DisplayCenterY
+                //         2 bytes ScaleX, 2 bytes ScaleY, 2 bytes Angle
+                // Destination: 2 bytes PA, 2 bytes PB, 2 bytes PC, 2 bytes PD, 4 bytes StartX, 4 bytes StartY
+                uint32_t src = registers[0];
+                uint32_t dst = registers[1];
+                uint32_t count = registers[2];
+                
+                for (uint32_t i = 0; i < count; ++i) {
+                    // Read source parameters
+                    int32_t origCenterX = (int32_t)memory.Read32(src);       // 8.8 fixed point
+                    int32_t origCenterY = (int32_t)memory.Read32(src + 4);   // 8.8 fixed point
+                    int16_t dispCenterX = (int16_t)memory.Read16(src + 8);
+                    int16_t dispCenterY = (int16_t)memory.Read16(src + 10);
+                    int16_t scaleX = (int16_t)memory.Read16(src + 12);       // 8.8 fixed point
+                    int16_t scaleY = (int16_t)memory.Read16(src + 14);       // 8.8 fixed point
+                    uint16_t angle = memory.Read16(src + 16);                // 0-FFFF = 0-360°
+                    
+                    // Convert angle to radians (0-FFFF maps to 0-2π)
+                    double theta = (angle / 65536.0) * 2.0 * 3.14159265358979323846;
+                    double cosA = cos(theta);
+                    double sinA = sin(theta);
+                    
+                    // Calculate affine parameters (8.8 fixed point)
+                    // PA = cos / scaleX, PB = sin / scaleX, PC = -sin / scaleY, PD = cos / scaleY
+                    int16_t pa = (int16_t)((cosA * 256.0) / (scaleX / 256.0));
+                    int16_t pb = (int16_t)((sinA * 256.0) / (scaleX / 256.0));
+                    int16_t pc = (int16_t)((-sinA * 256.0) / (scaleY / 256.0));
+                    int16_t pd = (int16_t)((cosA * 256.0) / (scaleY / 256.0));
+                    
+                    // Calculate start position (19.8 fixed point)
+                    // StartX = OrigCenterX - (PA * DispCenterX + PB * DispCenterY)
+                    // StartY = OrigCenterY - (PC * DispCenterX + PD * DispCenterY)
+                    int32_t startX = origCenterX - ((pa * dispCenterX + pb * dispCenterY) >> 8);
+                    int32_t startY = origCenterY - ((pc * dispCenterX + pd * dispCenterY) >> 8);
+                    
+                    // Write destination
+                    memory.Write16(dst, (uint16_t)pa);
+                    memory.Write16(dst + 2, (uint16_t)pb);
+                    memory.Write16(dst + 4, (uint16_t)pc);
+                    memory.Write16(dst + 6, (uint16_t)pd);
+                    memory.Write32(dst + 8, (uint32_t)startX);
+                    memory.Write32(dst + 12, (uint32_t)startY);
+                    
+                    src += 20;  // Source is 20 bytes
+                    dst += 16;  // Destination is 16 bytes
+                }
+                break;
+            }
+            case 0x0F: // ObjAffineSet
+            {
+                // R0 = Source Address, R1 = Destination Address, R2 = Number of calculations, R3 = Offset
+                // Source: 2 bytes ScaleX, 2 bytes ScaleY, 2 bytes Angle (each entry is 8 bytes, padded)
+                // Destination: 2 bytes PA, 2 bytes PB, 2 bytes PC, 2 bytes PD (written with R3 offset between each)
+                uint32_t src = registers[0];
+                uint32_t dst = registers[1];
+                uint32_t count = registers[2];
+                uint32_t offset = registers[3];
+                
+                for (uint32_t i = 0; i < count; ++i) {
+                    // Read source parameters (8.8 fixed point)
+                    int16_t scaleX = (int16_t)memory.Read16(src);     // 8.8 fixed point, 0x100 = 1.0
+                    int16_t scaleY = (int16_t)memory.Read16(src + 2); // 8.8 fixed point
+                    uint16_t angle = memory.Read16(src + 4);          // 0-FFFF = 0-360°
+                    
+                    // Convert angle to radians (0-FFFF maps to 0-2π)
+                    double theta = (angle / 65536.0) * 2.0 * 3.14159265358979323846;
+                    double cosA = cos(theta);
+                    double sinA = sin(theta);
+                    
+                    // Calculate affine parameters
+                    // For ObjAffineSet, the formula is different from BgAffineSet:
+                    // PA = cos * scaleX / 256, PB = sin * scaleX / 256
+                    // PC = -sin * scaleY / 256, PD = cos * scaleY / 256
+                    // This is because we're scaling UP (the inverse of background scaling)
+                    int16_t pa = (int16_t)(cosA * scaleX / 256.0 * 256.0);   // Result is 8.8 fixed
+                    int16_t pb = (int16_t)(sinA * scaleX / 256.0 * 256.0);
+                    int16_t pc = (int16_t)(-sinA * scaleY / 256.0 * 256.0);
+                    int16_t pd = (int16_t)(cosA * scaleY / 256.0 * 256.0);
+                    
+                    // Write destination with offset
+                    memory.Write16(dst, (uint16_t)pa);
+                    memory.Write16(dst + offset, (uint16_t)pb);
+                    memory.Write16(dst + offset * 2, (uint16_t)pc);
+                    memory.Write16(dst + offset * 3, (uint16_t)pd);
+                    
+                    src += 8;                  // Source entries are 8 bytes apart
+                    dst += offset * 4;         // Move to next destination entry
+                }
+                break;
+            }
+            case 0x10: // BitUnPack
+            {
+                // R0 = Source, R1 = Dest, R2 = Pointer to UnPackInfo
+                // UnPackInfo: 2 bytes SrcLen, 1 byte SrcWidth, 1 byte DestWidth, 4 bytes DataOffset
+                uint32_t src = registers[0];
+                uint32_t dst = registers[1];
+                uint32_t info = registers[2];
+                
+                uint16_t srcLen = memory.Read16(info);
+                uint8_t srcWidth = memory.Read8(info + 2);
+                uint8_t dstWidth = memory.Read8(info + 3);
+                uint32_t dataOffset = memory.Read32(info + 4);
+                
+                uint32_t srcMask = (1 << srcWidth) - 1;
+                uint32_t dstBuffer = 0;
+                int dstBitPos = 0;
+                int srcBitPos = 0;
+                uint8_t srcByte = 0;
+                
+                for (uint32_t i = 0; i < srcLen; ) {
+                    if (srcBitPos == 0) {
+                        srcByte = memory.Read8(src++);
+                        i++;
+                    }
+                    
+                    uint32_t val = (srcByte >> srcBitPos) & srcMask;
+                    srcBitPos += srcWidth;
+                    if (srcBitPos >= 8) srcBitPos = 0;
+                    
+                    // Apply data offset if value is non-zero or zero-data flag set
+                    if (val != 0 || (dataOffset & 0x80000000)) {
+                        val += (dataOffset & 0x7FFFFFFF);
+                    }
+                    
+                    dstBuffer |= (val << dstBitPos);
+                    dstBitPos += dstWidth;
+                    
+                    if (dstBitPos >= 32) {
+                        memory.Write32(dst, dstBuffer);
+                        dst += 4;
+                        dstBuffer = 0;
+                        dstBitPos = 0;
+                    }
+                }
+                
+                // Write any remaining bits
+                if (dstBitPos > 0) {
+                    memory.Write32(dst, dstBuffer);
+                }
+                break;
+            }
+            case 0x11: // LZ77UnCompWram - Decompress LZ77 to WRAM (8-bit writes)
+            case 0x12: // LZ77UnCompVram - Decompress LZ77 to VRAM (16-bit writes)
+            {
+                uint32_t src = registers[0];
+                uint32_t dst = registers[1];
+                bool toVram = (comment == 0x12);
+                
+
+                // Read header: bits 4-7 = compression type (1 = LZ77), bits 8-31 = decompressed size
+                uint32_t header = memory.Read32(src);
+                uint32_t decompSize = header >> 8;
+                
+                // Debug: trace LZ77 to VRAM
+                if (toVram && (dst & 0xFF000000) == 0x06000000) {
+                    std::cout << "[SWI 0x12] LZ77 to VRAM: src=0x" << std::hex << src
+                              << " dst=0x" << dst << " size=" << std::dec << decompSize << std::endl;
+                }
+                src += 4;
+                
+                uint32_t written = 0;
+                uint16_t vramBuffer = 0;
+                bool vramBufferFull = false;
+                
+                while (written < decompSize) {
+                    uint8_t flags = memory.Read8(src++);
+                    
+                    for (int i = 7; i >= 0 && written < decompSize; --i) {
+                        if (flags & (1 << i)) {
+                            // Compressed block
+                            uint8_t byte1 = memory.Read8(src++);
+                            uint8_t byte2 = memory.Read8(src++);
+                            uint32_t length = ((byte1 >> 4) & 0xF) + 3;
+                            uint32_t offset = ((byte1 & 0xF) << 8) | byte2;
+                            offset += 1;
+                            
+                            for (uint32_t j = 0; j < length && written < decompSize; ++j) {
+                                uint8_t val = memory.Read8(dst - offset);
+                                if (toVram) {
+                                    if (!vramBufferFull) {
+                                        vramBuffer = val;
+                                        vramBufferFull = true;
+                                    } else {
+                                        vramBuffer |= (val << 8);
+                                        memory.Write16(dst & ~1, vramBuffer);
+                                        vramBufferFull = false;
+                                    }
+                                } else {
+                                    memory.Write8(dst, val);
+                                }
+                                dst++;
+                                written++;
+                            }
+                        } else {
+                            // Uncompressed byte
+                            uint8_t val = memory.Read8(src++);
+                            if (toVram) {
+                                if (!vramBufferFull) {
+                                    vramBuffer = val;
+                                    vramBufferFull = true;
+                                } else {
+                                    vramBuffer |= (val << 8);
+                                    memory.Write16(dst & ~1, vramBuffer);
+                                    vramBufferFull = false;
+                                }
+                            } else {
+                                memory.Write8(dst, val);
+                            }
+                            dst++;
+                            written++;
+                        }
+                    }
+                }
+                break;
+            }
+            case 0x13: // HuffUnComp - Huffman decompression (based on mGBA)
+            {
+                // GBA BIOS Huffman Decompression (SWI 0x13)
+                // Exact port from mGBA src/gba/bios.c _unHuffman()
+                
+                uint32_t source = registers[0] & 0xFFFFFFFC;  // Align to 4 bytes
+                uint32_t dest = registers[1];
+                
+                std::printf("[SWI 0x13 HuffUnComp] src=0x%08X dst=0x%08X\n", source, dest);
+                
+                // Read header (4 bytes)
+                uint32_t header = memory.Read32(source);
+                int remaining = header >> 8;  // Decompressed size
+                unsigned bits = header & 0xF;  // 4 or 8 bits per symbol
+                
+                if (bits == 0) {
+                    bits = 8;  // mGBA defaults to 8 if 0
+                }
+                if (32 % bits || bits == 1) {
+                    // Unaligned Huffman not supported
+                    break;
+                }
+                
+                // Tree size: (size_byte << 1) + 1 = actual tree table size in bytes
+                int treesize = (memory.Read8(source + 4) << 1) + 1;
+                
+                // Tree base is at source + 5 (after header + tree size byte)
+                uint32_t treeBase = source + 5;
+                
+                // Bitstream starts after tree table
+                uint32_t bitSource = source + 5 + treesize;
+                
+                // Current node pointer, starts at root
+                uint32_t nPointer = treeBase;
+                
+                // Read root node data
+                uint8_t node = memory.Read8(nPointer);
+                
+                int block = 0;
+                int bitsSeen = 0;
+                
+                while (remaining > 0) {
+                    // Load next 32-bit word of compressed bitstream
+                    uint32_t bitstream = memory.Read32(bitSource);
+                    bitSource += 4;
+                    
+                    // Process all 32 bits
+                    for (int bitsRemaining = 32; bitsRemaining > 0 && remaining > 0; --bitsRemaining, bitstream <<= 1) {
+                        // Calculate next child address
+                        // Offset field is bits 0-5 of node
+                        uint32_t offset = node & 0x3F;
+                        uint32_t next = (nPointer & ~1u) + offset * 2 + 2;
+                        
+                        int readBits;
+                        
+                        if (bitstream & 0x80000000) {
+                            // Bit is 1 - go right (Node1)
+                            // RTerm is bit 6 - if set, right child is data
+                            if (node & 0x40) {
+                                // Terminal node - read data
+                                readBits = memory.Read8(next + 1);
+                            } else {
+                                // Non-terminal - continue traversal
+                                nPointer = next + 1;
+                                node = memory.Read8(nPointer);
+                                continue;
+                            }
+                        } else {
+                            // Bit is 0 - go left (Node0)
+                            // LTerm is bit 7 - if set, left child is data
+                            if (node & 0x80) {
+                                // Terminal node - read data
+                                readBits = memory.Read8(next);
+                            } else {
+                                // Non-terminal - continue traversal
+                                nPointer = next;
+                                node = memory.Read8(nPointer);
+                                continue;
+                            }
+                        }
+                        
+                        // Accumulate decoded bits into output block
+                        // Mask to only use 'bits' bits (4 or 8)
+                        block |= (readBits & ((1 << bits) - 1)) << bitsSeen;
+                        bitsSeen += bits;
+                        
+                        // Reset to root for next symbol
+                        nPointer = treeBase;
+                        node = memory.Read8(nPointer);
+                        
+                        // Write when we have 32 bits
+                        if (bitsSeen == 32) {
+                            bitsSeen = 0;
+                            memory.Write32(dest, block);
+                            dest += 4;
+                            remaining -= 4;
+                            block = 0;
+                        }
+                    }
+                }
+                
+                // Update registers like real BIOS
+                registers[0] = bitSource;
+                registers[1] = dest;
+                
+                break;
+            }
+            case 0x14: // RLUnCompWram - Run-Length decompression to WRAM
+            case 0x15: // RLUnCompVram - Run-Length decompression to VRAM
+            {
+                uint32_t src = registers[0];
+                uint32_t dst = registers[1];
+                bool toVram = (comment == 0x15);
+                
+                uint32_t header = memory.Read32(src);
+                uint32_t decompSize = header >> 8;
+                src += 4;
+                
+                uint32_t written = 0;
+                uint16_t vramBuffer = 0;
+                bool vramBufferFull = false;
+                
+                while (written < decompSize) {
+                    uint8_t flag = memory.Read8(src++);
+                    
+                    if (flag & 0x80) {
+                        // Compressed run
+                        uint32_t length = (flag & 0x7F) + 3;
+                        uint8_t val = memory.Read8(src++);
+                        
+                        for (uint32_t i = 0; i < length && written < decompSize; ++i) {
+                            if (toVram) {
+                                if (!vramBufferFull) {
+                                    vramBuffer = val;
+                                    vramBufferFull = true;
+                                } else {
+                                    vramBuffer |= (val << 8);
+                                    memory.Write16(dst & ~1, vramBuffer);
+                                    vramBufferFull = false;
+                                }
+                            } else {
+                                memory.Write8(dst, val);
+                            }
+                            dst++;
+                            written++;
+                        }
+                    } else {
+                        // Uncompressed run
+                        uint32_t length = (flag & 0x7F) + 1;
+                        
+                        for (uint32_t i = 0; i < length && written < decompSize; ++i) {
+                            uint8_t val = memory.Read8(src++);
+                            if (toVram) {
+                                if (!vramBufferFull) {
+                                    vramBuffer = val;
+                                    vramBufferFull = true;
+                                } else {
+                                    vramBuffer |= (val << 8);
+                                    memory.Write16(dst & ~1, vramBuffer);
+                                    vramBufferFull = false;
+                                }
+                            } else {
+                                memory.Write8(dst, val);
+                            }
+                            dst++;
+                            written++;
+                        }
+                    }
+                }
+                break;
+            }
+            case 0x16: // Diff8bitUnFilterWram
+            case 0x17: // Diff8bitUnFilterVram
+            case 0x18: // Diff16bitUnFilter
+            {
+                // Differential unfilter - used less commonly
+                uint32_t src = registers[0];
+                uint32_t dst = registers[1];
+                
+                uint32_t header = memory.Read32(src);
+                uint32_t size = header >> 8;
+                src += 4;
+                
+                if (comment == 0x18) {
+                    // 16-bit differential
+                    uint16_t prev = 0;
+                    for (uint32_t i = 0; i < size; i += 2) {
+                        uint16_t diff = memory.Read16(src);
+                        src += 2;
+                        prev += diff;
+                        memory.Write16(dst, prev);
+                        dst += 2;
+                    }
+                } else {
+                    // 8-bit differential
+                    uint8_t prev = 0;
+                    for (uint32_t i = 0; i < size; ++i) {
+                        uint8_t diff = memory.Read8(src++);
+                        prev += diff;
+                        memory.Write8(dst++, prev);
+                    }
+                }
+                break;
+            }
+            case 0x19: // SoundBias - Set sound bias
+            {
+                // R0 = delay, bias level
+                // Not critical for most games
+                break;
+            }
+            case 0x1F: // MidiKey2Freq - MIDI to frequency conversion
+            {
+                // Used for sound - not critical for gameplay
+                // R0 = WaveData pointer, R1 = MIDI key, R2 = Fine adjust
+                // Returns frequency in R0
+                uint32_t key = registers[1];
+                uint32_t fine = registers[2];
+                // Approximate conversion
+                double freq = 440.0 * pow(2.0, (key - 69 + fine / 256.0) / 12.0);
+                registers[0] = (uint32_t)(freq * 2048.0); // Fixed-point result
                 break;
             }
             default:
@@ -997,9 +1602,37 @@ namespace AIO::Emulator::GBA {
     void ARM7TDMI::DecodeThumb(uint16_t instruction) {
         // Thumb Instruction Decoding
         
+        // Trace VBlank handler button processing - DISABLED for clean output
         /*
-        if (registers[15] >= 0x08005520 && registers[15] <= 0x08005530) {
-             std::cout << "Thumb Decode at PC=" << std::hex << (registers[15]-2) << " Instr=" << instruction << std::endl;
+        uint32_t execPC = registers[15] - 2;
+        
+        // Trace only first few button events
+        if (execPC >= 0x80014c2 && execPC <= 0x80014e0) {
+            // Check if this is button input processing with actual buttons
+            if (registers[0] != 0x3ff && registers[0] != 0xfffffc00 && 
+                registers[0] != 0xfc000000 && registers[0] != 0xfc00 &&
+                registers[0] != 0 && registers[0] != 0xffffffff) {
+                static int btnTraceCount = 0;
+                if (btnTraceCount++ < 20) {
+                    std::cout << "[BTN TRACE] PC=0x" << std::hex << execPC 
+                              << " Instr=0x" << instruction
+                              << " R0=0x" << registers[0] 
+                              << " R1=0x" << registers[1]
+                              << " R2=0x" << registers[2]
+                              << " R3=0x" << registers[3]
+                              << " R4=0x" << registers[4] << std::dec << std::endl;
+                }
+            }
+        }
+        */
+        
+        // Trace main loop - DISABLED
+        /*
+        uint32_t execPC = registers[15] - 2;
+        if (execPC >= 0x08000510 && execPC <= 0x08000550) {
+             std::cout << "[MAIN LOOP] PC=0x" << std::hex << execPC << " Instr=0x" << instruction
+                       << " R0=" << registers[0] << " R1=" << registers[1] << " R2=" << registers[2]
+                       << " CPSR=" << cpsr << std::dec << std::endl;
         }
         */
 
@@ -1083,6 +1716,18 @@ namespace AIO::Emulator::GBA {
                 }
             }
             
+            // Debug shift operations at VBlank handler input processing - DISABLED
+            /*
+            if (registers[15] >= 0x80014c4 && registers[15] <= 0x80014ca) {
+                static int shiftLogCount = 0;
+                if (shiftLogCount++ < 200 || (val != 0xfffffc00 && val != 0xfc000000)) {
+                    std::cout << "[SHIFT at VBlankHandler] PC=0x" << std::hex << registers[15]
+                              << " opcode=" << std::dec << opcode << " offset=" << offset
+                              << " val=0x" << std::hex << val << " res=0x" << res << std::dec << std::endl;
+                }
+            }
+            */
+            
             SetZN(res);
             if (carry) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
             registers[rd] = res;
@@ -1160,17 +1805,37 @@ namespace AIO::Emulator::GBA {
                     registers[rd] = res;
                     break;
                 case 0x5: // ADC
-                    // TODO: Carry
-                    res = val + op2; 
+                {
+                    bool carryIn = (cpsr >> 29) & 1;
+                    uint64_t result64 = (uint64_t)val + (uint64_t)op2 + carryIn;
+                    res = (uint32_t)result64;
                     SetZN(res);
+                    // Set carry if overflow occurred
+                    if (result64 > 0xFFFFFFFF) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
+                    // Set overflow
+                    bool sign1 = (val >> 31) & 1;
+                    bool sign2 = (op2 >> 31) & 1;
+                    bool signR = (res >> 31) & 1;
+                    if (sign1 == sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
                     registers[rd] = res;
                     break;
+                }
                 case 0x6: // SBC
-                    // TODO: Carry
-                    res = val - op2; 
+                {
+                    bool carryIn = (cpsr >> 29) & 1;
+                    // SBC: Rd = Rd - Rs - NOT(Carry)
+                    res = val - op2 - !carryIn;
                     SetZN(res);
+                    // Set carry if NO borrow
+                    if (val >= (uint64_t)op2 + !carryIn) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
+                    // Set overflow
+                    bool sign1 = (val >> 31) & 1;
+                    bool sign2 = (op2 >> 31) & 1;
+                    bool signR = (res >> 31) & 1;
+                    if (sign1 != sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
                     registers[rd] = res;
                     break;
+                }
                 case 0x7: // ROR
                     op2 &= 0xFF;
                     op2 &= 0x1F;
@@ -1238,14 +1903,23 @@ namespace AIO::Emulator::GBA {
             uint32_t regM = rm | (h2 << 3);
             
             if (opcode == 0) { // ADD Rd, Rm
+                // PC as source needs +2 adjustment in Thumb mode
+                uint32_t rmVal = (regM == 15) ? (registers[15] + 2) : registers[regM];
                 if (regD == 15) {
-                     LogBranch(registers[15] - 2, registers[15] + registers[regM]);
+                     // For ADD PC, Rm: PC is destination, use current registers[15]
+                     uint32_t newPC = registers[15] + rmVal;
+                     LogBranch(registers[15] - 2, newPC);
+                     // In Thumb, ADD to PC should clear bit 0 (PC must be aligned)
+                     registers[15] = newPC & 0xFFFFFFFE;
+                } else {
+                    // Normal ADD Rd, Rm where Rd is not PC
+                    registers[regD] += rmVal;
                 }
-                registers[regD] += registers[regM];
-                // Format 5 ADD does NOT set flags (except if Rd=PC? No)
+                // Format 5 ADD does NOT set flags
             } else if (opcode == 1) { // CMP Rd, Rm
-                uint32_t val = registers[regD];
-                uint32_t op2 = registers[regM];
+                // PC as source needs +2 adjustment in Thumb mode
+                uint32_t val = (regD == 15) ? (registers[15] + 2) : registers[regD];
+                uint32_t op2 = (regM == 15) ? (registers[15] + 2) : registers[regM];
                 uint32_t res = val - op2;
                 SetZN(res);
                 // Set C if NOT borrow (val >= op2)
@@ -1257,9 +1931,16 @@ namespace AIO::Emulator::GBA {
                 if (sign1 != sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
             } else if (opcode == 2) { // MOV Rd, Rm
                 if (regD == 15) {
-                     LogBranch(registers[15] - 2, registers[regM]);
+                     // PC as source needs +2 adjustment in Thumb mode
+                     uint32_t val = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                     LogBranch(registers[15] - 2, val);
+                     // In Thumb, MOV PC, Rm should clear bit 0 (not interworking on ARM7TDMI)
+                     registers[15] = val & 0xFFFFFFFE;
+                } else {
+                    // PC as source needs +2 adjustment in Thumb mode
+                    uint32_t val = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                    registers[regD] = val;
                 }
-                registers[regD] = registers[regM];
             } else if (opcode == 3) { // BX Rm
                 uint32_t target = registers[regM];
                 
@@ -1273,9 +1954,11 @@ namespace AIO::Emulator::GBA {
                 LogBranch(registers[15] - 2, target);
                 if (target & 1) {
                     thumbMode = true;
+                    cpsr |= 0x20;  // Set T bit in CPSR
                     registers[15] = target & 0xFFFFFFFE;
                 } else {
                     thumbMode = false;
+                    cpsr &= ~0x20; // Clear T bit in CPSR
                     registers[15] = target & 0xFFFFFFFC;
                 }
             }
@@ -1337,18 +2020,20 @@ namespace AIO::Emulator::GBA {
             
             uint32_t addr = registers[rn] + (imm * (B ? 1 : 4));
 
-            if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
-                 // std::cout << "Format 9: " << (L?"LDR":"STR") << (B?"B":"") << " Rd=R" << rd << " Rn=R" << rn << " Addr=0x" << std::hex << addr << " Val=0x" << registers[rd] << std::endl;
+            // DEBUG: Trace ALL STR to 0x03xxxxxx range 
+            if (!L && !B && (addr >> 24) == 0x03) {
+                static int strCount = 0;
+                if (strCount++ < 100 || ((addr & 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600)) {
+                    std::cout << "[F9 STR] PC=0x" << std::hex << (registers[15] - 2) 
+                              << " instr=0x" << instruction
+                              << " Addr=0x" << addr << " Val=0x" << registers[rd] 
+                              << " (R" << std::dec << rd << "=[R" << rn << "+#" << (imm*4) << "])" << std::endl;
+                }
             }
 
             if (L) { // Load
                 if (B) {
                     registers[rd] = memory.Read8(addr);
-                    /*
-                    if (registers[15] == 0x08005524 + 2) {
-                         std::cout << "LDRB Result: R" << rd << " = 0x" << std::hex << registers[rd] << " from [0x" << addr << "]" << std::endl;
-                    }
-                    */
                 }
                 else   registers[rd] = memory.Read32(addr);
             } else { // Store
@@ -1366,8 +2051,40 @@ namespace AIO::Emulator::GBA {
             
             uint32_t addr = registers[rn] + (imm * 2);
             
-            if (L) registers[rd] = memory.Read16(addr);
-            else   memory.Write16(addr, registers[rd] & 0xFFFF);
+            if (L) {
+                registers[rd] = memory.Read16(addr);
+            }
+            else {
+                // Debug STRH to button state memory at 0x3002b94 - DISABLED
+                /*
+                if (addr == 0x3002b94) {
+                    static int strhCount = 0;
+                    if (strhCount++ < 200 || (registers[rd] & 0xFFFF) != 0xfc00) {
+                        std::cout << "[STRH to button state] addr=0x" << std::hex << addr 
+                                  << " rd=" << std::dec << rd << " val=0x" << std::hex << (registers[rd] & 0xFFFF)
+                                  << " PC=0x" << registers[15] << std::dec << std::endl;
+                    }
+                }
+                */
+                memory.Write16(addr, registers[rd] & 0xFFFF);
+            }
+        }
+        // Format 9: SP-relative Load/Store (CRITICAL - was missing!)
+        // 1001 xxxx xxxx xxxx
+        else if ((instruction & 0xF000) == 0x9000) {
+            bool L = (instruction >> 11) & 1;  // 0=STR, 1=LDR
+            uint32_t rd = (instruction >> 8) & 0x7;
+            uint32_t imm = instruction & 0xFF;
+            
+            uint32_t addr = registers[13] + (imm * 4);  // SP + offset*4
+            
+            if (L) {
+                // LDR Rd, [SP, #imm]
+                registers[rd] = memory.Read32(addr);
+            } else {
+                // STR Rd, [SP, #imm]
+                memory.Write32(addr, registers[rd]);
+            }
         }
         // Format 11: Load/Store Multiple
         // 1100 xxxx xxxx xxxx
@@ -1377,12 +2094,39 @@ namespace AIO::Emulator::GBA {
             uint8_t rList = instruction & 0xFF;
             
             uint32_t addr = registers[rb];
+            uint32_t startAddr = addr;
+            
+            // DEBUG: Trace STMIA to DMA2 control registers (0x40000C8-0x40000D3)
+            bool traceDMA2 = (!L && addr >= 0x40000C8 && addr <= 0x40000D3);
+            if (traceDMA2) {
+                std::cout << "[STMIA DMA2] PC=0x" << std::hex << (registers[15] - 2)
+                          << " R" << std::dec << rb << "=0x" << std::hex << addr
+                          << " rList=0x" << (int)rList;
+                for (int i=0; i<8; ++i) {
+                    if ((rList >> i) & 1) {
+                        std::cout << " R" << i << "=0x" << registers[i];
+                    }
+                }
+                std::cout << std::dec << std::endl;
+            }
+            
+            // DEBUG: Trace STMIA to 0x3001500
+            bool traceMixbuf = (!L && (addr & 0xFF000000) == 0x03000000 && (addr & 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600);
+            if (traceMixbuf) {
+                std::cout << "[STMIA] PC=0x" << std::hex << (registers[15] - 2) 
+                          << " R" << std::dec << rb << "=0x" << std::hex << addr
+                          << " rList=0x" << (int)rList << std::dec << std::endl;
+            }
             
             for (int i=0; i<8; ++i) {
                 if ((rList >> i) & 1) {
                     if (L) { // Load
                         registers[i] = memory.Read32(addr);
                     } else { // Store
+                        if (traceMixbuf) {
+                            std::cout << "  Store R" << i << "=0x" << std::hex << registers[i] 
+                                      << " to 0x" << addr << std::dec << std::endl;
+                        }
                         memory.Write32(addr, registers[i]);
                     }
                     addr += 4;
@@ -1390,6 +2134,10 @@ namespace AIO::Emulator::GBA {
             }
             
             // Write-back
+            if (traceMixbuf) {
+                std::cout << "  Writeback R" << std::dec << rb << ": 0x" << std::hex << startAddr 
+                          << " -> 0x" << addr << std::dec << std::endl;
+            }
             registers[rb] = addr;
         }
         // Format 13: Add Offset to Stack Pointer
@@ -1399,8 +2147,13 @@ namespace AIO::Emulator::GBA {
             uint32_t imm = instruction & 0x7F;
             imm *= 4;
             
-            if (S) registers[13] -= imm; // SUB
-            else   registers[13] += imm; // ADD
+            uint32_t oldSP = registers[13];
+            if (S) registers[13] = oldSP - imm; // SUB
+            else   registers[13] = oldSP + imm; // ADD
+            
+            if (registers[13] < 0x02000000) {
+                 std::cerr << "[SP WARNING] Format 13: SP changed from 0x" << std::hex << oldSP << " to 0x" << registers[13] << " at PC=0x" << (registers[15]-2) << std::dec << std::endl;
+            }
         }
         // Format 14: Push/Pop Registers
         // 1011 x10x xxxx xxxx
@@ -1408,6 +2161,8 @@ namespace AIO::Emulator::GBA {
             bool L = (instruction >> 11) & 1; // 0=Push, 1=Pop
             bool R = (instruction >> 8) & 1; // PC/LR
             uint8_t rList = instruction & 0xFF;
+            
+            uint32_t oldSP = registers[13];
             
             if (!L) { // PUSH
                 // Decrement SP, Store Registers
@@ -1450,21 +2205,15 @@ namespace AIO::Emulator::GBA {
                     uint32_t pc = memory.Read32(currentAddr);
                     LogBranch(registers[15] - 2, pc);
                     registers[15] = pc & 0xFFFFFFFE; // Pop PC (Thumb)
-                    // If bit 0 is 0, switch to ARM? Usually POP PC stays in Thumb unless BX is used?
-                    // Actually POP {PC} is interworking in ARMv5T, but on ARM7TDMI (ARMv4T) it might just be a load to PC.
-                    // In Thumb state, loading PC sets bit 0 to 0?
-                    // Docs say: "If the PC is in the register list, the instruction causes a branch to the address popped off the stack."
-                    // "Bit 0 of the loaded value is treated as the new Thumb bit."
-                    // So if popped value has bit 0 set, stay in Thumb. If 0, switch to ARM?
-                    // Wait, ARM7TDMI POP PC in Thumb:
-                    // "The value popped into R15 has bit 0 ignored and the processor remains in Thumb state." - Some sources.
-                    // "In ARMv4T, POP {PC} in Thumb state does NOT support interworking."
-                    // So it stays in Thumb.
                     registers[15] &= ~1; 
                     currentAddr += 4;
                 }
                 
                 registers[13] = currentAddr;
+            }
+            
+            if (registers[13] < 0x02000000) {
+                 std::cerr << "[SP WARNING] Format 14: SP changed from 0x" << std::hex << oldSP << " to 0x" << registers[13] << " at PC=0x" << (registers[15]-2) << std::dec << std::endl;
             }
         }
         // Format 16: Conditional Branch
@@ -1504,16 +2253,23 @@ namespace AIO::Emulator::GBA {
                 offset = (offset << 12);
                 if (offset & 0x400000) offset |= 0xFF800000; // Sign extend
                 registers[14] = registers[15] + 2 + offset; // Store in LR (PC+4+offset)
+                // std::cout << "[BL High] PC=" << std::hex << (registers[15]-2) << " LR=" << registers[14] << std::dec << std::endl;
             } else { // Second instruction (Low)
                 uint32_t nextPC = registers[15] - 2; // Instruction address + 2 (already incremented)
                 uint32_t target = registers[14] + (offset << 1);
                 LogBranch(nextPC, target);
+                
+                // Debug BL
+                if (nextPC == 0x080005b2) {
+                     std::cout << "[BL Low] PC=" << std::hex << nextPC << " LR_in=" << registers[14] << " Offset=" << offset << " Target=" << target << std::dec << std::endl;
+                }
+
                 registers[14] = (nextPC + 2) | 1; // LR = Return Address + 1 (Thumb) -> Next Instruction
                 registers[15] = target;
             }
         }
         else {
-            // std::cout << "Unknown Thumb: 0x" << std::hex << instruction << " at PC: 0x" << (registers[15]-2) << std::endl;
+            // Unknown Thumb instruction
         }
     }
 
