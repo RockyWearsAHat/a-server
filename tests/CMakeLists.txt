@@ -12,8 +12,12 @@ enable_testing()
 add_executable(CPUTests CPUTests.cpp)
 target_link_libraries(CPUTests PRIVATE GTest::gtest_main GBAEmulator)
 
+add_executable(EEPROMTests EEPROMTests.cpp)
+target_link_libraries(EEPROMTests PRIVATE GTest::gtest_main GBAEmulator)
+
 add_executable(HeadlessTest HeadlessTest.cpp)
 target_link_libraries(HeadlessTest PRIVATE GBAEmulator)
 
 include(GoogleTest)
 gtest_discover_tests(CPUTests)
+gtest_discover_tests(EEPROMTests)

@@ -19,6 +19,7 @@ namespace AIO::Emulator::GBA {
         void SetRegister(int index, uint32_t value) { registers[index] = value; }
         uint32_t GetCPSR() const { return cpsr; }
         void SetThumbMode(bool thumb) { thumbMode = thumb; }
+        bool IsHalted() const { return halted; }
 
     private:
         GBAMemory& memory;
@@ -81,6 +82,8 @@ namespace AIO::Emulator::GBA {
         };
         std::vector<IrqContext> irqStack;
         static const uint32_t MAGIC_IRQ_RETURN = 0xFFFFFF00;
+
+        uint16_t irqPendingClear = 0;
 
     };
 

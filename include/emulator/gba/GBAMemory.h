@@ -1,26 +1,43 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <cstdio>
 
 namespace AIO::Emulator::GBA {
+
+    class APU; // Forward declaration
+    class PPU; // Forward declaration
+    class ARM7TDMI; // Forward declaration
 
     class GBAMemory {
     public:
         GBAMemory();
         ~GBAMemory();
 
-        uint32_t debugPC = 0; // Debug PC for logging
-
         void Reset();
         void LoadGamePak(const std::vector<uint8_t>& data);
         void LoadSave(const std::vector<uint8_t>& data);
         std::vector<uint8_t> GetSaveData() const;
+        
+        void SetSavePath(const std::string& path);
+        void FlushSave(); // Write EEPROM/SRAM to disk immediately
+        void InitializeHLEBIOS(); // Initialize High-Level Emulated BIOS
+        
+        // APU connection for sound callbacks
+        void SetAPU(APU* apuPtr) { apu = apuPtr; }
+        // PPU connection for DMA updates
+        void SetPPU(PPU* ppuPtr) { ppu = ppuPtr; }
+        // CPU connection for debug
+        void SetCPU(ARM7TDMI* cpuPtr) { cpu = cpuPtr; }
 
         // Debug/Test helper
         void WriteROM(uint32_t address, uint8_t value) {
             uint32_t offset = address & 0x01FFFFFF;
             if (offset < rom.size()) {
+                if (address == 0x14EC) printf("[WriteROM] 0x14EC = 0x%02X\n", value);
                 rom[offset] = value;
+            } else {
+                printf("[WriteROM] Failed! Offset 0x%X >= Size 0x%zX\n", offset, rom.size());
             }
         }
         void WriteROM32(uint32_t address, uint32_t value) {
@@ -37,30 +54,53 @@ namespace AIO::Emulator::GBA {
         uint16_t Read16(uint32_t address);
         uint32_t Read32(uint32_t address);
 
+        // Instruction Fetch (Bypasses EEPROM logic for ROM mirrors)
+        uint16_t ReadInstruction16(uint32_t address);
+        uint32_t ReadInstruction32(uint32_t address);
+
         void Write8(uint32_t address, uint8_t value);
+        void Write8Internal(uint32_t address, uint8_t value); // Bypasses GBA 8-bit write quirks
         void Write16(uint32_t address, uint16_t value);
         void Write32(uint32_t address, uint32_t value);
 
         // Internal IO Write (Bypasses Read-Only checks)
         void WriteIORegisterInternal(uint32_t offset, uint16_t value);
+        
+        // Callback for IO Writes (Used by PPU to track Affine Registers)
+        using IOWriteCallback = void(*)(void* context, uint32_t offset, uint16_t value);
+        void SetIOWriteCallback(IOWriteCallback callback, void* context);
 
         void PerformDMA(int channel);
         void CheckDMA(int timing);
         void UpdateTimers(int cycles);
 
+        int GetLastDMACycles() { int c = lastDMACycles; lastDMACycles = 0; return c; }
+
     private:
+        int lastDMACycles = 0;
         int cycleCount = 0;
         int timerPrescalerCounters[4] = {0};
         uint16_t timerCounters[4] = {0};
+        
+        // Internal DMA address registers (shadow registers for repeat DMAs)
+        uint32_t dmaInternalSrc[4] = {0};
+        uint32_t dmaInternalDst[4] = {0};
 
         // Flash State
         int flashState = 0; // 0=Idle, 1=Cmd1(AA), 2=Cmd2(55), 3=ID Mode
+        int flashCmd = 0;   // Current Flash Command
+        int flashBank = 0;  // Flash Bank (for 1Mbit)
+        bool isFlash = false; // True if Flash, False if SRAM/EEPROM
+        bool hasSRAM = false; // True if SRAM/Flash is present, False if EEPROM only
+        bool saveTypeLocked = false; // If true, prevent dynamic save type switching
+        std::string gameCode; // Store the game code for game-specific hacks
 
         // EEPROM State
         enum class EEPROMState {
             Idle,
             ReadCommand,
             ReadAddress,
+            ReadStopBit,
             ReadDummy,
             ReadData,
             WriteAddress,
@@ -73,6 +113,9 @@ namespace AIO::Emulator::GBA {
         int eepromBitCounter = 0;
         uint64_t eepromBuffer = 0;
         uint32_t eepromAddress = 0;
+        int eepromWriteDelay = 0;
+        bool eepromIs64Kbit = true; // Default to 64Kbit for SMA2
+        uint16_t eepromLatch = 0; // Latch for open bus behavior on EEPROM line
 
         // GBA Memory Map Regions
         // 00000000 - 00003FFF: BIOS (16KB)
@@ -98,6 +141,16 @@ namespace AIO::Emulator::GBA {
         // EEPROM Helpers
         uint16_t ReadEEPROM();
         void WriteEEPROM(uint16_t value);
+        bool Is4KbitEEPROM(const std::vector<uint8_t>& data);
+        bool ScanForEEPROMSize(const std::vector<uint8_t>& data);
+        
+        IOWriteCallback ioWriteCallback = nullptr;
+        void* ioWriteContext = nullptr;
+        
+        std::string savePath; // Path to save file for auto-flush
+        APU* apu = nullptr;   // APU pointer for sound callbacks
+        PPU* ppu = nullptr;   // PPU pointer for DMA updates
+        ARM7TDMI* cpu = nullptr; // CPU pointer for debug
     };
 
 }
