@@ -3,4 +3,3 @@ build
 *log*.txt
 *log*.log
 *log*.md
-!logs.txt
