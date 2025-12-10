@@ -1,8 +1,8 @@
-#include "emulator/gba/GBAMemory.h"
-#include "emulator/gba/ARM7TDMI.h"
-#include "emulator/gba/APU.h"
-#include "emulator/gba/PPU.h"
-#include "emulator/gba/GameDB.h"
+#include <emulator/gba/GBAMemory.h>
+#include <emulator/gba/ARM7TDMI.h>
+#include <emulator/gba/APU.h>
+#include <emulator/gba/PPU.h>
+#include <emulator/gba/GameDB.h>
 #include <cstring>
 #include <iostream>
 #include <iomanip>
@@ -594,14 +594,10 @@ namespace AIO::Emulator::GBA {
             case 0x0B:
             case 0x0C:
             {
-                 // Implement ROM Mirroring (max 32MB space, mirrored every rom.size())
-                 // Standard GBA ROMs are power of 2 size usually, but we handle arbitrary
+                 // Universal ROM Mirroring (max 32MB space, mirrored every rom.size())
                  uint32_t offset = address & 0x01FFFFFF;
                  if (!rom.empty()) {
-                     uint8_t val = rom[offset % rom.size()];
-                     // Debug: trace specific ROM reads (disabled)
-                     // if (offset == 0x14EC) printf("[ReadROM] 0x14EC = 0x%02X\n", val);
-                     return val;
+                     return rom[offset % rom.size()];
                  }
                  break;
             }
@@ -642,14 +638,11 @@ namespace AIO::Emulator::GBA {
     }
 
     uint16_t GBAMemory::Read16(uint32_t address) {
-        // EEPROM Handling
-        // Allow reads from 0x08-0x0D if EEPROM is active
-        // Also allow reads from 0x0D specifically for Ready/Busy polling even if Idle
-        uint8_t region = (address >> 24);
-        // FIX: Only allow EEPROM reads from 0x0D (Wait State 2 Mirror) to prevent hijacking code/data from 0x08 (Wait State 0)
-        if (region == 0x0D /* || ((region >= 0x08 && region <= 0x0C) && eepromState != EEPROMState::Idle) */) {
-             return ReadEEPROM();
-        }
+           // Universal EEPROM Handling: Only allow reads from 0x0D region
+           uint8_t region = (address >> 24);
+           if (region == 0x0D) {
+               return ReadEEPROM();
+           }
 
         uint16_t val = Read8(address) | (Read8(address + 1) << 8);
 
@@ -684,10 +677,9 @@ namespace AIO::Emulator::GBA {
     }
 
     uint32_t GBAMemory::Read32(uint32_t address) {
-        // EEPROM Handling - 32-bit read performs two 16-bit reads
+        // Universal EEPROM Handling - 32-bit read performs two 16-bit reads from 0x0D region only
         uint8_t region = (address >> 24);
-        // FIX: Only allow EEPROM reads from 0x0D (Wait State 2 Mirror) to prevent hijacking code/data from 0x08 (Wait State 0)
-        if (region == 0x0D /* || ((region >= 0x08 && region <= 0x0C) && eepromState != EEPROMState::Idle) */) {
+        if (region == 0x0D) {
             uint16_t low = ReadEEPROM();
             uint16_t high = ReadEEPROM();
             return low | (high << 16);

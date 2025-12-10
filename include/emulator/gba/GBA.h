@@ -29,6 +29,7 @@ namespace AIO::Emulator::GBA {
         uint16_t ReadMem16(uint32_t addr); // Debug helper
         uint32_t ReadMem32(uint32_t addr); // Debug helper
         void WriteMem(uint32_t addr, uint32_t val); // Debug helper
+        void WriteMem16(uint32_t addr, uint16_t val); // Debug helper
         uint32_t GetPC() const; // Debug helper
         bool IsThumbMode() const; // Debug helper
         uint32_t GetRegister(int reg) const; // Debug helper

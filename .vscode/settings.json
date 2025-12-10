@@ -60,5 +60,14 @@
     "unordered_set": "cpp",
     "variant": "cpp",
     "algorithm": "cpp"
-  }
+  },
+  "cmake.sourceDirectory": "${workspaceFolder}/cmake",
+  "cmake.buildDirectory": "${workspaceFolder}/build/generated/cmake",
+  "makefile.configurations": [
+    {
+      "name": "Default",
+      "makeDirectory": "${workspaceFolder}/cmake",
+      "makefilePath": "${workspaceFolder}/cmake/Makefile"
+    }
+  ]
 }

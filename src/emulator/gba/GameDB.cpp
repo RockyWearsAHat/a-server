@@ -1,4 +1,4 @@
-#include "emulator/gba/GameDB.h"
+#include <emulator/gba/GameDB.h>
 #include <iostream>
 #include <algorithm>
 #include <vector>

@@ -4,11 +4,12 @@
 #include <QMap>
 #include <QKeyEvent>
 #include <QSettings>
-#include <SDL.h>
+#include <SDL2/SDL.h>
 
-namespace AIO::Input {
+namespace AIO {
+namespace Input {
 
-    enum GBAButton {
+enum GBAButton {
         Button_A = 0,
         Button_B = 1,
         Button_Select = 2,
@@ -63,4 +64,5 @@ namespace AIO::Input {
         uint16_t gamepadState = 0xFFFF;
     };
 
-}
+} // namespace Input
+} // namespace AIO

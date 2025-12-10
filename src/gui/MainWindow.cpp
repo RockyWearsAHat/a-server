@@ -1,152 +1,164 @@
-#include "gui/MainWindow.h"
-#include "input/InputManager.h"
-#include "gui/InputConfigDialog.h"
-#include "emulator/switch/GpuCore.h"
+#include <QApplication>
+#include <QMessageBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <iostream>
 #include <QKeyEvent>
-#include <QApplication>
-#include <sstream>
-#include <iomanip>
-#include <cstring>
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QListWidget>
 #include <QDir>
 #include <QFileInfo>
 #include <QFileDialog>
-#include <QMessageBox>
 #include <QCoreApplication>
 #include <QGroupBox>
 #include <QPainter>
 #include <QPixmap>
 #include <QDirIterator>
+#include <QLabel>
+#include <QTimer>
+#include <QImage>
+#include <QCheckBox>
+#include <QElapsedTimer>
+#include <QSettings>
+#include <SDL2/SDL.h>
+#include <iostream>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
 
-namespace AIO::GUI {
+// Include all project headers BEFORE opening namespace
+#include "gui/MainWindow.h"
+#include "gui/LogViewerDialog.h"
+#include "gui/InputConfigDialog.h"
+#include "input/InputManager.h"
+#include "emulator/common/Logger.h"
+#include "emulator/gba/ARM7TDMI.h"
+#include "emulator/switch/GpuCore.h"
 
-    // Static pointer for audio callback (SDL uses C callback)
-    static MainWindow* audioInstance = nullptr;
+// Helper function at global scope to avoid Qt template instantiation issues
+static bool crashPopupShown = false;
 
-    MainWindow::MainWindow(QWidget *parent) 
-        : QMainWindow(parent), settings("AIOServer", "GBAEmulator") 
-    {
-        setWindowTitle("AIO Server");
-        resize(800, 600); 
-
-        // --- UI THEME ---
-        // Dark Theme for "Entertainment Center" look
-        QString styleSheet = R"(
-            QMainWindow {
-                background-color: #121212;
-                color: #ffffff;
-            }
-            QWidget {
-                background-color: #121212;
-                color: #ffffff;
-                font-family: "Segoe UI", "Helvetica Neue", sans-serif;
-                font-size: 16px;
-            }
-            QLabel {
-                color: #e0e0e0;
-            }
-            QPushButton {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                border: 1px solid #3d3d3d;
-                border-radius: 8px;
-                padding: 15px;
-                font-size: 18px;
-                font-weight: bold;
-                min-height: 50px;
-            }
-            QPushButton:hover {
-                background-color: #3d3d3d;
-                border: 1px solid #505050;
-            }
-            QPushButton:pressed {
-                background-color: #505050;
-            }
-            QListWidget {
-                background-color: #1e1e1e;
-                border: 1px solid #333;
-                border-radius: 8px;
-                padding: 10px;
-                font-size: 18px;
-            }
-            QListWidget::item {
-                padding: 10px;
-                border-bottom: 1px solid #2a2a2a;
-            }
-            QListWidget::item:selected {
-                background-color: #3d3d3d;
-                color: #ffffff;
-            }
-            QGroupBox {
-                border: 1px solid #333;
-                border-radius: 8px;
-                margin-top: 20px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        )";
-        setStyleSheet(styleSheet);
-        // ----------------
-
-        loadSettings();
-
-        stackedWidget = new QStackedWidget(this);
-        setCentralWidget(stackedWidget);
-
-        setupMainMenu();
-        setupEmulatorSelect();
-        setupGameSelect();
-        setupEmulatorView();
-        setupSettingsPage();
-
-        stackedWidget->addWidget(mainMenuPage);
-        stackedWidget->addWidget(emulatorSelectPage);
-        stackedWidget->addWidget(gameSelectPage);
-        stackedWidget->addWidget(emulatorPage);
-        stackedWidget->addWidget(settingsPage);
-
-        stackedWidget->setCurrentWidget(mainMenuPage);
-
-        gameTimer = new QTimer(this);
-        connect(gameTimer, &QTimer::timeout, this, &MainWindow::GameLoop);
-
-        // Initialize display image
-        displayImage = QImage(240, 160, QImage::Format_ARGB32);
-        displayImage.fill(Qt::black);
-        
-        // Ensure main window can receive keyboard focus
-        setFocusPolicy(Qt::StrongFocus);
-        setFocus();
-        
-        // Initialize FPS timer
-        fpsTimer.start();
-        
-        // Initialize SDL audio
-        initAudio();
+static void ShowCrashPopup(const char* logPath) {
+    if (crashPopupShown) return;
+    crashPopupShown = true;
+    QMessageBox msg;
+    msg.setWindowTitle("Emulator Crash Detected");
+    msg.setText("The emulator has crashed. A detailed log has been saved.\nWould you like to view the log?");
+    msg.setIcon(QMessageBox::Critical);
+    msg.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    int ret = msg.exec();
+    if (ret == QMessageBox::Yes) {
+        AIO::GUI::LogViewerDialog* dlg = new AIO::GUI::LogViewerDialog(nullptr);
+        dlg->loadLogFile(QString::fromUtf8(logPath));
+        dlg->exec();
+        delete dlg;
     }
+    QApplication::quit();
+}
 
-    MainWindow::~MainWindow() {
-        closeAudio();
-    }
+namespace AIO {
+namespace GUI {
 
-    void MainWindow::initAudio() {
-        if (SDL_Init(SDL_INIT_AUDIO) < 0) {
-            std::cerr << "SDL audio init failed: " << SDL_GetError() << std::endl;
-            return;
+static MainWindow* audioInstance = nullptr;
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent), settings("AIOServer", "GBAEmulator")
+{
+    QString styleSheet = R"(
+        QMainWindow {
+            background-color: #121212;
+            color: #ffffff;
         }
+        QWidget {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+            font-size: 16px;
+        }
+        QLabel {
+            color: #e0e0e0;
+        }
+        QPushButton {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border: 1px solid #3d3d3d;
+            border-radius: 8px;
+            padding: 15px;
+            font-size: 18px;
+            font-weight: bold;
+            min-height: 50px;
+        }
+        QPushButton:hover {
+            background-color: #3d3d3d;
+            border: 1px solid #505050;
+        }
+        QPushButton:pressed {
+            background-color: #505050;
+        }
+        QListWidget {
+            background-color: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 18px;
+        }
+        QListWidget::item {
+            padding: 10px;
+            border-bottom: 1px solid #2a2a2a;
+        }
+        QListWidget::item:selected {
+            background-color: #3d3d3d;
+            color: #ffffff;
+        }
+        QGroupBox {
+            border: 1px solid #333;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-weight: bold;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+        }
+    )";
+    setStyleSheet(styleSheet);
+    loadSettings();
+    stackedWidget = new QStackedWidget(this);
+    setCentralWidget(stackedWidget);
+    setupMainMenu();
+    setupEmulatorSelect();
+    setupGameSelect();
+    setupEmulatorView();
+    setupSettingsPage();
+    stackedWidget->addWidget(mainMenuPage);
+    stackedWidget->addWidget(emulatorSelectPage);
+    stackedWidget->addWidget(gameSelectPage);
+    stackedWidget->addWidget(emulatorPage);
+    stackedWidget->addWidget(settingsPage);
+    stackedWidget->setCurrentWidget(mainMenuPage);
+    gameTimer = new QTimer(this);
+    connect(gameTimer, &QTimer::timeout, this, &MainWindow::GameLoop);
+    displayImage = QImage(240, 160, QImage::Format_ARGB32);
+    displayImage.fill(Qt::black);
+    setFocusPolicy(Qt::StrongFocus);
+    setFocus();
+    fpsTimer.start();
+    initAudio();
+}
 
-        SDL_AudioSpec want, have;
-        SDL_memset(&want, 0, sizeof(want));
-        want.freq = AUDIO_SAMPLE_RATE;
+MainWindow::~MainWindow() {
+    closeAudio();
+}
+
+void MainWindow::initAudio() {
+    if (SDL_Init(SDL_INIT_AUDIO) < 0) {
+        ::std::cerr << "SDL audio init failed: " << SDL_GetError() << ::std::endl;
+        return;
+    }
+    SDL_AudioSpec want, have;
+    SDL_memset(&want, 0, sizeof(want));
+    want.freq = AUDIO_SAMPLE_RATE;
         want.format = AUDIO_S16SYS;  // Signed 16-bit, system byte order
         want.channels = 2;  // Stereo
         want.samples = AUDIO_BUFFER_SIZE;
@@ -155,12 +167,12 @@ namespace AIO::GUI {
 
         audioDevice = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
         if (audioDevice == 0) {
-            std::cerr << "SDL audio device open failed: " << SDL_GetError() << std::endl;
+            ::std::cerr << "SDL audio device open failed: " << SDL_GetError() << ::std::endl;
             return;
         }
 
-        std::cout << "Audio initialized: " << have.freq << " Hz, " 
-                  << (int)have.channels << " channels, buffer " << have.samples << std::endl;
+        ::std::cout << "Audio initialized: " << have.freq << " Hz, " 
+                  << (int)have.channels << " channels, buffer " << have.samples << ::std::endl;
 
         // Start audio playback
         SDL_PauseAudioDevice(audioDevice, 0);
@@ -219,7 +231,7 @@ namespace AIO::GUI {
         return pressed.join(" + ");
     }
 
-    void MainWindow::LoadROM(const std::string& path) {
+void MainWindow::LoadROM(const std::string& path) {
         bool success = false;
         
         if (currentEmulator == EmulatorType::GBA) {
@@ -255,7 +267,7 @@ namespace AIO::GUI {
 
     void MainWindow::GameLoop() {
         // Update Input
-        uint16_t inputState = Input::InputManager::instance().update();
+        uint16_t inputState = AIO::Input::InputManager::instance().update();
         
         if (currentEmulator == EmulatorType::GBA) {
             gba.UpdateInput(inputState);
@@ -273,14 +285,14 @@ namespace AIO::GUI {
 
         // Update dev panel if visible
         if (devPanelLabel->isVisible()) {
-            std::stringstream ss;
-            ss << "<b>FPS:</b> " << std::fixed << std::setprecision(1) << currentFPS << "<br>";
+            ::std::stringstream ss;
+            ss << "<b>FPS:</b> " << ::std::fixed << ::std::setprecision(1) << currentFPS << "<br>";
             
             if (currentEmulator == EmulatorType::GBA) {
                 uint16_t gameKeyInput = gba.ReadMem16(0x04000130);
-                ss << "<b>PC:</b> 0x" << std::hex << std::setfill('0') << std::setw(8) << gba.GetPC() << "<br>";
+                ss << "<b>PC:</b> 0x" << ::std::hex << ::std::setfill('0') << ::std::setw(8) << gba.GetPC() << "<br>";
                 ss << "<b>Input:</b> " << formatInputState(inputState).toStdString() << "<br>";
-                ss << "<b>VCount:</b> " << std::dec << gba.ReadMem16(0x04000006);
+                ss << "<b>VCount:</b> " << ::std::dec << gba.ReadMem16(0x04000006);
             } else if (currentEmulator == EmulatorType::Switch) {
                 ss << switchEmulator.GetDebugInfo();
             }
@@ -633,5 +645,5 @@ namespace AIO::GUI {
         }
     }
 
-
-}
+} // namespace GUI
+} // namespace AIO

@@ -1,5 +1,21 @@
 .DS_Store
-build
+
+# Build directory structure:
+# build/bin/           - All executables (AIOServer, tests)
+# build/lib/           - All libraries
+# build/generated/     - Qt autogen and test discovery files
+# build/cmake_meta/    - CMake internal files (isolated from outputs)
+build/
+
 *log*.txt
 *log*.log
 *log*.md
+
+# Qt generated files (now in build/generated/autogen/)
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# Save files
+*.sav
+*.srm
