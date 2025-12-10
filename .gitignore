@@ -19,3 +19,8 @@ qrc_*.cpp
 # Save files
 *.sav
 *.srm
+
+# ROM files - do not commit (copyright protected)
+*.gba
+*.gb
+*.gbc
