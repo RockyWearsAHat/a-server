@@ -1,3 +1,5 @@
+#pragma once
+
 #include <QMainWindow>
 #include <QLabel>
 #include <QTimer>
@@ -9,16 +11,18 @@
 #include <QListWidget>
 #include <QSettings>
 #include <SDL2/SDL.h>
+#include <string>
 
 class QKeyEvent;
 
 #include "emulator/gba/GBA.h"
 #include "emulator/switch/SwitchEmulator.h"
 
-namespace AIO::GUI {
+namespace AIO {
+namespace GUI {
 
-    class MainWindow : public QMainWindow {
-        Q_OBJECT
+class MainWindow : public QMainWindow {
+    Q_OBJECT
 
     public:
         MainWindow(QWidget *parent = nullptr);
@@ -104,6 +108,8 @@ namespace AIO::GUI {
         SDL_AudioDeviceID audioDevice = 0;
         static constexpr int AUDIO_SAMPLE_RATE = 32768;
         static constexpr int AUDIO_BUFFER_SIZE = 1024;
-    };
+};
 
-}
+} // namespace GUI
+} // namespace AIO
+

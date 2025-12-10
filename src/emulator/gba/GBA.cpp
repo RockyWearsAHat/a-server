@@ -1,13 +1,17 @@
-#include "emulator/gba/GBA.h"
-#include "emulator/gba/ARM7TDMI.h"
-#include "emulator/gba/GBAMemory.h"
-#include "emulator/gba/APU.h"
-#include "emulator/gba/GameDB.h"
+#include <emulator/gba/GBA.h>
+#include <emulator/gba/ARM7TDMI.h>
+#include <emulator/gba/GBAMemory.h>
+#include <emulator/gba/APU.h>
+#include <emulator/gba/GameDB.h>
 #include <iostream>
 #include <fstream>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
+
+    void GBA::WriteMem16(uint32_t addr, uint16_t val) {
+        if (memory) memory->Write16(addr, val);
+    }
 
     GBA::GBA() {
         memory = std::make_unique<GBAMemory>();

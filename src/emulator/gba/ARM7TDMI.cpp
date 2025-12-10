@@ -1,5 +1,5 @@
-#include "emulator/gba/ARM7TDMI.h"
-#include "emulator/gba/GBAMemory.h"
+#include <emulator/gba/ARM7TDMI.h>
+#include <emulator/gba/GBAMemory.h>
 #include <cstring>
 #include <cmath>
 #include <iostream>
@@ -8,13 +8,13 @@
 
 namespace AIO::Emulator::GBA {
 
-    // Branch logging - only used for debugging invalid jumps
-    #ifdef DEBUG_BRANCHES
+    // Branch logging - used for debugging invalid jumps and crash logs
     static std::deque<std::pair<uint32_t, uint32_t>> branchLog;
-    #endif
+
+    // Crash notification callback (set by GUI)
+    void (*CrashPopupCallback)(const char* logPath) = nullptr;
     
     static void LogBranch([[maybe_unused]] uint32_t from, [[maybe_unused]] uint32_t to) {
-        #ifdef DEBUG_BRANCHES
         branchLog.push_back({from, to});
         if (branchLog.size() > 50) branchLog.pop_front();
 
@@ -23,11 +23,9 @@ namespace AIO::Emulator::GBA {
                      (to >= 0x02000000 && to < 0x03000000) ||
                      (to < 0x4000) ||
                      ((to & 0xFFFFFF00) == 0xFFFFFF00);
-        
         if (!valid) {
             std::cerr << "BAD BRANCH: 0x" << std::hex << from << " -> 0x" << to << std::dec << std::endl;
         }
-        #endif
     }
 
     ARM7TDMI::ARM7TDMI(GBAMemory& mem) : memory(mem) {
@@ -177,74 +175,56 @@ namespace AIO::Emulator::GBA {
             return;
         }
         
-        // Detect invalid PC addresses
-        if (registers[15] == 0xFFFFFFFF || registers[15] == 0xFFFFFFFE || 
-            registers[15] == 0xFFFFFFFC || registers[15] == 0xFFFFFFFD) {
-            std::cerr << "[FATAL] Invalid PC: 0x" << std::hex << registers[15] << std::dec << std::endl;
+        // Universal PC region validation and mirroring
+        // Canonicalize IWRAM/EWRAM/VRAM/ROM
+        uint32_t pc = registers[15];
+        if (pc >= 0x03008000 && pc < 0x04000000)
+            pc = 0x03000000 | (pc & 0x7FFF);
+        if (pc >= 0x02040000 && pc < 0x03000000)
+            pc = 0x02000000 | (pc & 0x3FFFF);
+        if (pc >= 0x06018000 && pc < 0x07000000)
+            pc = 0x06000000 | (pc & 0x17FFF);
+        if (pc >= 0x08000000 && pc < 0x10000000)
+            pc = 0x08000000 | (pc & 0x1FFFFFF);
+        registers[15] = pc;
+
+        // Validate PC region
+        bool valid = false;
+        if (pc < 0x00004000) valid = true; // BIOS
+        if (pc >= 0x02000000 && pc < 0x02040000) valid = true; // EWRAM
+        if (pc >= 0x03000000 && pc < 0x03008000) valid = true; // IWRAM
+        if (pc >= 0x06000000 && pc < 0x06018000) valid = true; // VRAM
+        if (pc >= 0x08000000 && pc < 0x10000000) valid = true; // ROM
+        if (!valid) {
+            std::cerr << "[FATAL] Invalid PC: 0x" << std::hex << pc << std::dec << std::endl;
             halted = true;
+            // Write crash info to log file asynchronously
+            FILE* logFile = fopen("crash_log.txt", "a");
+            if (logFile) {
+                fprintf(logFile, "==== Emulator Crash ====");
+                fprintf(logFile, "\nPC: 0x%08X\n", pc);
+                for (int i = 0; i < 16; ++i)
+                    fprintf(logFile, "R%d: 0x%08X\n", i, registers[i]);
+                fprintf(logFile, "CPSR: 0x%08X\n", cpsr);
+                fprintf(logFile, "ThumbMode: %d\n", thumbMode);
+                fprintf(logFile, "BranchLog (last 50):\n");
+                for (const auto& br : branchLog)
+                    fprintf(logFile, "  0x%08X -> 0x%08X\n", br.first, br.second);
+                // Optionally dump a small memory region around SP
+                uint32_t sp = registers[13];
+                fprintf(logFile, "Stack Dump:\n");
+                for (int i = 0; i < 64; i += 4)
+                    fprintf(logFile, "  0x%08X: 0x%08X\n", sp + i, memory.Read32(sp + i));
+                fclose(logFile);
+            }
+            // Signal GUI to show crash popup and allow log viewing if callback is set
+            if (CrashPopupCallback) CrashPopupCallback("crash_log.txt");
             return;
         }
 
-        // Detect entry into 0x0C/0x0D range
-        if (registers[15] >= 0x0C000000 && registers[15] < 0x0E000000) {
-             std::cerr << "[FATAL] PC entered Wait State 2 ROM Mirror (0x" << std::hex << registers[15] << ")" << std::endl;
-             std::cerr << "Last PC: 0x" << lastPC << std::endl;
-             std::cerr << "LR: 0x" << registers[14] << std::endl;
-             std::cerr << "SP: 0x" << registers[13] << std::endl;
-             std::cerr << "CPSR: 0x" << cpsr << std::endl;
-             std::cerr << "Mode: 0x" << (cpsr & 0x1F) << std::endl;
-             
-             // Dump Stack
-             uint32_t sp = registers[13];
-             std::cerr << "Stack Dump:" << std::endl;
-             for (int i = 0; i < 64; i+=4) {
-                 std::cerr << "0x" << (sp + i) << ": 0x" << memory.Read32(sp + i) << std::endl;
-             }
-             
-             // Dump Instructions around Last PC
-             std::cerr << "Code around Last PC (0x" << lastPC << "):" << std::endl;
-             for (int i = -16; i <= 16; i+=2) {
-                 uint32_t addr = lastPC + i;
-                 if (addr >= 0x08000000) {
-                     uint16_t val = memory.Read16(addr);
-                     std::cerr << "0x" << addr << ": " << val << (i==0 ? " <--" : "") << std::endl;
-                 }
-             }
+        pc = registers[15];
 
-             exit(1);
-        }
-
-        // Canonicalize PC if in Mirror region
-        if (registers[15] >= 0x03008000 && registers[15] < 0x04000000) {
-            registers[15] = 0x03000000 | (registers[15] & 0x7FFF);
-        }
-        if (registers[15] >= 0x02040000 && registers[15] < 0x03000000) {
-            registers[15] = 0x02000000 | (registers[15] & 0x3FFFF);
-        }
-
-        uint32_t pc = registers[15];
-
-        // Debug SMA2 Crash - DISABLED
-        /*
-        if (pc == 0x080014b8) {
-             uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
-             std::cout << "[DEBUG] At Crash Point? PC=0x" << std::hex << pc << " Instr=0x" << instr << " Mode=" << (thumbMode?"Thumb":"ARM") 
-                       << " LR=0x" << registers[14] << " SP=0x" << registers[13] << std::dec << std::endl;
-             
-             uint32_t lr = registers[14];
-             std::cout << "Dumping BIOS at LR (0x" << std::hex << lr << "):" << std::endl;
-             for (int i = 0; i < 16; i+=4) {
-                 std::cout << "0x" << (lr + i) << ": 0x" << memory.Read32(lr + i) << std::endl;
-             }
-             
-             uint32_t sp = registers[13];
-             std::cout << "Dumping Stack at SP (0x" << sp << "):" << std::endl;
-             for (int i = 0; i < 32; i+=4) {
-                 std::cout << "0x" << (sp + i) << ": 0x" << memory.Read32(sp + i) << std::endl;
-             }
-             std::cout << std::dec;
-        }
-        */
+        // ...existing code...
 
         // Trace Interrupt Handler
         /*
@@ -322,42 +302,7 @@ namespace AIO::Emulator::GBA {
                       << " SP=0x" << registers[13] << std::dec << std::endl;
         }
         
-        // Validate PC is in executable region
-        bool valid = (pc >= 0x08000000 && pc < 0x0E000000) ||
-                     (pc >= 0x03000000 && pc < 0x04000000) ||
-                     (pc >= 0x02000000 && pc < 0x03000000) ||
-                     (pc < 0x4000);
-        
-        if (!valid) {
-            static int invalidCount = 0;
-            invalidCount++;
-            std::cerr << "INVALID PC: 0x" << std::hex << pc << " (Last PC: 0x" << lastPC << ")" << std::dec;
-            if (invalidCount <= 3) {
-                // Show more detail on first few invalid PCs
-                std::cerr << " LR=0x" << std::hex << registers[14] 
-                          << " R0=0x" << registers[0]
-                          << " R12=0x" << registers[12]
-                          << " ThumbMode=" << thumbMode;
-                if (lastPC >= 0x03000000 && lastPC < 0x04000000) {
-                    // Last PC in IWRAM - show instruction there
-                    uint32_t lastInstr = thumbMode ? memory.ReadInstruction16(lastPC) : memory.ReadInstruction32(lastPC);
-                    std::cerr << " lastInstr=0x" << lastInstr;
-                }
-                // Show values near the corrupted R0 in IWRAM
-                std::cerr << std::endl;
-                std::cerr << "  R0 came from unknown location, checking if it looks like IWRAM ptr + corruption";
-            }
-            std::cerr << std::dec << std::endl;
-            
-            if (pc == 0xe000000 && lastPC != 0x1bc) {
-                std::cerr << "!!! ORIGINAL CRASH DETECTED !!!" << std::endl;
-                std::cerr << "Jumped to 0xe000000 from 0x" << std::hex << lastPC << std::dec << std::endl;
-                exit(1);
-            }
-
-            halted = true;
-            return;
-        }
+        // ...existing code...
 
         lastPC = pc;
 

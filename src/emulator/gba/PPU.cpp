@@ -1,5 +1,5 @@
-#include "emulator/gba/PPU.h"
-#include "emulator/gba/GBAMemory.h"
+#include <emulator/gba/PPU.h>
+#include <emulator/gba/GBAMemory.h>
 #include <algorithm>
 #include <iostream>
 #include <iomanip>

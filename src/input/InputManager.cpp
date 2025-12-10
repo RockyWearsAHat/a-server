@@ -2,7 +2,8 @@
 #include <QDebug>
 #include <iostream>
 
-namespace AIO::Input {
+namespace AIO {
+namespace Input {
 
     InputManager& InputManager::instance() {
         static InputManager _instance;
@@ -214,4 +215,6 @@ namespace AIO::Input {
         settings.endGroup();
     }
 
-}
+} // namespace Input
+} // namespace AIO
+

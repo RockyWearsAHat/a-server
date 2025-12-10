@@ -5,11 +5,15 @@
       "includePath": [
         "${workspaceFolder}/**",
         "${workspaceFolder}/include",
+        "/opt/homebrew/include",
+        "/opt/homebrew/lib/QtWidgets.framework/Headers",
+        "/opt/homebrew/lib/QtGui.framework/Headers",
+        "/opt/homebrew/lib/QtCore.framework/Headers",
         "/opt/homebrew/opt/qt/include/**",
         "/opt/homebrew/opt/qt/lib/**",
         "/opt/homebrew/opt/sdl2/include"
       ],
-      "defines": [],
+      "defines": ["QT_WIDGETS_LIB", "QT_GUI_LIB", "QT_CORE_LIB"],
       "macFrameworkPath": [
         "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
         "/opt/homebrew/opt/qt/lib"

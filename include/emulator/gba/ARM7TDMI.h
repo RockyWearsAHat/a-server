@@ -4,6 +4,9 @@
 
 namespace AIO::Emulator::GBA {
 
+    // Crash notification callback (set by GUI)
+    extern void (*CrashPopupCallback)(const char* logPath);
+
     class GBAMemory;
 
     class ARM7TDMI {

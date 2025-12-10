@@ -1,13 +1,25 @@
-BUILD_DIR = build
+# Root Makefile wrapper - delegates to cmake/Makefile
+# Run this from the project root directory
 
-.PHONY: all clean
+.PHONY: all clean configure build test help
 
-all: $(BUILD_DIR)/Makefile
-	$(MAKE) -C $(BUILD_DIR)
+%:
+	@$(MAKE) -C cmake $@
 
-$(BUILD_DIR)/Makefile:
-	mkdir -p $(BUILD_DIR)
-	cd $(BUILD_DIR) && cmake ..
+all:
+	@$(MAKE) -C cmake all
 
 clean:
-	rm -rf $(BUILD_DIR)
+	@$(MAKE) -C cmake clean
+
+configure:
+	@$(MAKE) -C cmake configure
+
+build:
+	@$(MAKE) -C cmake build
+
+test:
+	@$(MAKE) -C cmake test
+
+help:
+	@$(MAKE) -C cmake help
