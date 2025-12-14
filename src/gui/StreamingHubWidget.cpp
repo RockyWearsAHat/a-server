@@ -5,34 +5,11 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPushButton>
+#include <QStyle>
 #include <QVBoxLayout>
 
 namespace AIO {
 namespace GUI {
-
-static QString tileStyle(bool focused) {
-    if (focused) {
-        return "QPushButton {"
-               "  background-color: #1f3a4d;"
-               "  border: 2px solid #00aaff;"
-               "  border-radius: 16px;"
-               "  padding: 22px;"
-               "  font-size: 22px;"
-               "  font-weight: 700;"
-               "}"
-               "QPushButton:hover { background-color: #24485f; }";
-    }
-
-    return "QPushButton {"
-           "  background-color: #202020;"
-           "  border: 1px solid #3d3d3d;"
-           "  border-radius: 16px;"
-           "  padding: 22px;"
-           "  font-size: 22px;"
-           "  font-weight: 700;"
-           "}"
-           "QPushButton:hover { background-color: #2a2a2a; }";
-}
 
 StreamingHubWidget::StreamingHubWidget(QWidget* parent)
     : QWidget(parent) {
@@ -48,7 +25,7 @@ void StreamingHubWidget::setupUi() {
 
     title_ = new QLabel("STREAMING", this);
     title_->setAlignment(Qt::AlignCenter);
-    title_->setStyleSheet("font-size: 30px; font-weight: 800; color: #00aaff; letter-spacing: 1px;");
+    title_->setProperty("role", "title");
     root->addWidget(title_);
 
     grid_ = new QGridLayout();
@@ -70,6 +47,7 @@ void StreamingHubWidget::setupUi() {
         btn->setCursor(Qt::PointingHandCursor);
         btn->setMinimumHeight(140);
         btn->setFocusPolicy(Qt::NoFocus);
+        btn->setProperty("tile", true);
         tiles_[i] = btn;
 
         connect(btn, &QPushButton::clicked, this, [this, app = entries[i].app]() { emit launchRequested(app); });
@@ -83,13 +61,16 @@ void StreamingHubWidget::setupUi() {
 
     auto* hint = new QLabel("Enter/A to open • Esc/B to go back", this);
     hint->setAlignment(Qt::AlignCenter);
-    hint->setStyleSheet("color: #777; font-size: 12px;");
+    hint->setProperty("role", "subtitle");
     root->addWidget(hint);
 }
 
 void StreamingHubWidget::updateFocusStyle() {
     for (int i = 0; i < 4; ++i) {
-        tiles_[i]->setStyleSheet(tileStyle(i == focusedIndex_));
+        tiles_[i]->setProperty("selected", i == focusedIndex_);
+        tiles_[i]->style()->unpolish(tiles_[i]);
+        tiles_[i]->style()->polish(tiles_[i]);
+        tiles_[i]->update();
     }
 }
 

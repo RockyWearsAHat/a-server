@@ -10,6 +10,8 @@
 #include <QJsonArray>
 #include <QString>
 
+#include <cstdlib>
+
 namespace AIO {
 namespace Streaming {
 
@@ -21,6 +23,28 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 
 YouTubeService::YouTubeService() : authenticated_(false) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+void YouTubeService::ensureAuthenticatedFromEnvironment() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (authenticated_ && (!apiKey_.empty() || !accessToken_.empty())) {
+        return;
+    }
+
+    const char* apiKey = std::getenv("YOUTUBE_API_KEY");
+    if (apiKey && *apiKey) {
+        apiKey_ = apiKey;
+        authenticated_ = true;
+    }
+
+    const char* region = std::getenv("YOUTUBE_REGION");
+    if (region && *region) {
+        regionCode_ = region;
+    }
+
+    if (authenticated_) {
+        std::cout << "[YouTube] Auto-auth from environment (region=" << regionCode_ << ")" << std::endl;
+    }
 }
 
 bool YouTubeService::authenticate(const StreamingCredentials& creds) {
@@ -61,6 +85,16 @@ void YouTubeService::logout() {
 }
 
 std::string YouTubeService::makeApiRequest(const std::string& endpoint, const std::string& params) {
+    ensureAuthenticatedFromEnvironment();
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (apiKey_.empty() && accessToken_.empty()) {
+            std::cerr << "[YouTube] Missing credentials. Set YOUTUBE_API_KEY in .env" << std::endl;
+            return {};
+        }
+    }
+
     CURL* curl = curl_easy_init();
     std::string response;
     
@@ -157,7 +191,14 @@ std::vector<VideoContent> YouTubeService::parseVideoResults(const std::string& j
 std::vector<VideoContent> YouTubeService::getTrending(int limit) {
     std::cout << "[YouTube] Fetching trending videos (limit: " << limit << ")" << std::endl;
     
-    std::string params = "part=snippet,contentDetails&chart=mostPopular&maxResults=" + std::to_string(limit);
+    ensureAuthenticatedFromEnvironment();
+
+    std::string region;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        region = regionCode_;
+    }
+    std::string params = "part=snippet,contentDetails&chart=mostPopular&maxResults=" + std::to_string(limit) + "&regionCode=" + region;
     std::string response = makeApiRequest("videos", params);
     
     return parseVideoResults(response);
@@ -165,6 +206,8 @@ std::vector<VideoContent> YouTubeService::getTrending(int limit) {
 
 std::vector<VideoContent> YouTubeService::search(const std::string& query, int limit) {
     std::cout << "[YouTube] Searching for: " << query << " (limit: " << limit << ")" << std::endl;
+
+    ensureAuthenticatedFromEnvironment();
 
     // URL-encode query (minimal encoding for safety)
     std::ostringstream enc;
@@ -178,7 +221,12 @@ std::vector<VideoContent> YouTubeService::search(const std::string& query, int l
         }
     }
 
-    std::string params = "part=snippet&type=video&q=" + enc.str() + "&maxResults=" + std::to_string(limit);
+    std::string region;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        region = regionCode_;
+    }
+    std::string params = "part=snippet&type=video&q=" + enc.str() + "&maxResults=" + std::to_string(limit) + "&regionCode=" + region;
     std::string response = makeApiRequest("search", params);
     
     return parseVideoResults(response);

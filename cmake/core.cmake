@@ -47,6 +47,9 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/LogViewerDialog.cpp
     ${PROJECT_ROOT}/src/gui/StreamingHubWidget.cpp
     ${PROJECT_ROOT}/src/gui/StreamingWebViewPage.cpp
+    ${PROJECT_ROOT}/src/gui/YouTubeBrowsePage.cpp
+    ${PROJECT_ROOT}/src/gui/YouTubePlayerPage.cpp
+    ${PROJECT_ROOT}/src/gui/ThumbnailCache.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
     ${PROJECT_ROOT}/src/streaming/StreamingManager.cpp
     ${PROJECT_ROOT}/src/streaming/YouTubeService.cpp
@@ -59,6 +62,9 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/LogViewerDialog.h
     ${PROJECT_ROOT}/include/gui/StreamingHubWidget.h
     ${PROJECT_ROOT}/include/gui/StreamingWebViewPage.h
+    ${PROJECT_ROOT}/include/gui/YouTubeBrowsePage.h
+    ${PROJECT_ROOT}/include/gui/YouTubePlayerPage.h
+    ${PROJECT_ROOT}/include/gui/ThumbnailCache.h
     ${PROJECT_ROOT}/include/common/Dotenv.h
     ${PROJECT_ROOT}/include/input/InputManager.h
     ${PROJECT_ROOT}/include/streaming/StreamingManager.h
@@ -78,7 +84,7 @@ target_include_directories(AIOServer PRIVATE
     $<TARGET_PROPERTY:Qt6::Widgets,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets GBAEmulator SwitchEmulator SDL2::SDL2 CURL::libcurl)
+target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network GBAEmulator SwitchEmulator SDL2::SDL2 CURL::libcurl)
 
 # Set autogen directory for AIOServer
 set_target_properties(AIOServer PROPERTIES

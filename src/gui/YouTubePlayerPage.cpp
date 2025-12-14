@@ -1,6 +1,4 @@
-#include "gui/StreamingWebViewPage.h"
-
-#include "gui/StreamingHubWidget.h"
+#include "gui/YouTubePlayerPage.h"
 
 #include <QEvent>
 #include <QHBoxLayout>
@@ -15,10 +13,12 @@
 #include <QtWebEngineCore/QWebEngineSettings>
 #include <QtWebEngineCore/QWebEngineFullScreenRequest>
 
+#include "input/InputManager.h"
+
 namespace AIO {
 namespace GUI {
 
-StreamingWebViewPage::StreamingWebViewPage(QWidget* parent)
+YouTubePlayerPage::YouTubePlayerPage(QWidget* parent)
     : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
 
@@ -45,7 +45,7 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget* parent)
     homeButton_->setFocusPolicy(Qt::NoFocus);
     homeButton_->setProperty("variant", "secondary");
 
-    titleLabel_ = new QLabel("", topBar_);
+    titleLabel_ = new QLabel("YouTube", topBar_);
     titleLabel_->setProperty("role", "subtitle");
 
     barLayout->addWidget(backButton_);
@@ -60,9 +60,7 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget* parent)
     root->addWidget(topBar_);
     root->addWidget(view_, 1);
 
-    connect(backButton_, &QToolButton::clicked, this, [this]() {
-        if (view_->history()->canGoBack()) view_->back();
-    });
+    connect(backButton_, &QToolButton::clicked, this, [this]() { emit backRequested(); });
     connect(homeButton_, &QToolButton::clicked, this, [this]() { emit homeRequested(); });
 
     connect(view_->page(), &QWebEnginePage::fullScreenRequested, this, [this](QWebEngineFullScreenRequest request) {
@@ -75,17 +73,13 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget* parent)
     });
 
     applyWebSettings();
-
-    // Help the view reliably receive key events.
-    view_->installEventFilter(this);
-    view_->page()->installEventFilter(this);
 }
 
-void StreamingWebViewPage::applyWebSettings() {
+void YouTubePlayerPage::applyWebSettings() {
     auto* profile = view_->page()->profile();
     profile->setPersistentCookiesPolicy(QWebEngineProfile::ForcePersistentCookies);
     profile->setHttpUserAgent(
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 AIOStreaming/1.0"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 AIOYouTubePlayer/1.0"
     );
 
     auto* settings = view_->settings();
@@ -95,60 +89,23 @@ void StreamingWebViewPage::applyWebSettings() {
     settings->setAttribute(QWebEngineSettings::FullScreenSupportEnabled, true);
 }
 
-QString StreamingWebViewPage::titleForApp(AIO::GUI::StreamingApp app) const {
-    switch (app) {
-        case StreamingApp::YouTube: return "YouTube";
-        case StreamingApp::Netflix: return "Netflix";
-        case StreamingApp::DisneyPlus: return "Disney+";
-        case StreamingApp::Hulu: return "Hulu";
-    }
-    return "Streaming";
-}
-
-QString StreamingWebViewPage::urlForApp(AIO::GUI::StreamingApp app) const {
-    switch (app) {
-        case StreamingApp::YouTube: return "about:blank";
-        case StreamingApp::Netflix: return "https://www.netflix.com/browse";
-        case StreamingApp::DisneyPlus: return "https://www.disneyplus.com/home";
-        case StreamingApp::Hulu: return "https://www.hulu.com/hub/home";
-    }
-    return "https://www.youtube.com";
-}
-
-void StreamingWebViewPage::setTopBarText(const QString& text) {
+void YouTubePlayerPage::setTopBarText(const QString& text) {
     titleLabel_->setText(text);
 }
 
-void StreamingWebViewPage::openApp(AIO::GUI::StreamingApp app) {
-    setTopBarText(titleForApp(app));
-    view_->setUrl(QUrl(urlForApp(app)));
+void YouTubePlayerPage::playVideoUrl(const QString& url) {
+    setTopBarText("YouTube");
+    view_->setUrl(QUrl(url));
     view_->setFocus();
 }
 
-bool StreamingWebViewPage::eventFilter(QObject* watched, QEvent* event) {
-    // Ensure the parent page-level shortcuts still work.
-    if (event->type() == QEvent::FocusIn) {
-        setFocus();
-    }
-    return QWidget::eventFilter(watched, event);
-}
-
-void StreamingWebViewPage::keyPressEvent(QKeyEvent* event) {
-    // Global navigation keys for 10-foot UI.
+void YouTubePlayerPage::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Backspace) {
-        emit homeRequested();
+        emit backRequested();
         event->accept();
         return;
     }
 
-    // Alt+Left like browsers.
-    if ((event->modifiers() & Qt::AltModifier) && event->key() == Qt::Key_Left) {
-        if (view_->history()->canGoBack()) view_->back();
-        event->accept();
-        return;
-    }
-
-    // Otherwise let the webview handle typing/navigation.
     if (view_) {
         QKeyEvent forwarded(event->type(), event->key(), event->modifiers(), event->text(), event->isAutoRepeat(), event->count());
         QCoreApplication::sendEvent(view_, &forwarded);
@@ -159,6 +116,34 @@ void StreamingWebViewPage::keyPressEvent(QKeyEvent* event) {
     }
 
     QWidget::keyPressEvent(event);
+}
+
+void YouTubePlayerPage::onControllerInput(uint16_t keyInput) {
+    auto pressedNow = [&](int bit) {
+        return (keyInput & (1u << bit)) == 0;
+    };
+    auto pressedEdge = [&](int bit) {
+        const bool now = pressedNow(bit);
+        const bool prev = ((lastControllerState_ & (1u << bit)) == 0);
+        return now && !prev;
+    };
+
+    // B = back to browse
+    if (pressedEdge(AIO::Input::Button_B)) {
+        emit backRequested();
+    }
+
+    // Select = home
+    if (pressedEdge(AIO::Input::Button_Select)) {
+        emit homeRequested();
+    }
+
+    // Start toggles the top bar (useful during playback)
+    if (pressedEdge(AIO::Input::Button_Start)) {
+        topBar_->setVisible(!topBar_->isVisible());
+    }
+
+    lastControllerState_ = keyInput;
 }
 
 } // namespace GUI

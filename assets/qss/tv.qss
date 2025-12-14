@@ -1,0 +1,258 @@
+/* AIO Entertainment System - 10-foot UI theme
+   Goal: cohesive, controller-friendly, high-contrast TV UI.
+*/
+
+/* Palette (Qt style sheets do NOT support variables; keep as comments) */
+/* bg0: #0b0c0f */
+/* bg1: #111318 */
+/* panel: #141822 */
+/* card: #151a23 */
+/* cardHover: #1a2130 */
+/* border: #2a3140 */
+/* text: #eef2ff */
+/* muted: #aab3c5 */
+/* accent: #3ea6ff */
+/* accent2: #8b5cf6 */
+/* danger: #ff4d4d */
+
+/* Global */
+QMainWindow {
+  background-color: #0b0c0f;
+  color: #eef2ff;
+}
+
+QWidget {
+  background-color: transparent;
+  color: #eef2ff;
+  font-family: "SF Pro Display", "Helvetica Neue", "Arial";
+  font-size: 16px;
+}
+
+QLabel {
+  color: #eef2ff;
+}
+
+QLabel[role="title"] {
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: #eef2ff;
+}
+
+QLabel[role="subtitle"] {
+  font-size: 16px;
+  color: #aab3c5;
+}
+
+/* Top bars (web/player + emulator overlay) */
+#aioTopBar {
+  background-color: rgba(16, 18, 24, 0.92);
+  border-bottom: 1px solid #2a3140;
+}
+
+QToolButton {
+  background-color: rgba(36, 42, 56, 0.85);
+  border: 1px solid rgba(70, 80, 105, 0.9);
+  border-radius: 14px;
+  padding: 10px 14px;
+  color: #eef2ff;
+  font-weight: 800;
+}
+
+QToolButton:hover {
+  background-color: rgba(54, 63, 84, 0.92);
+}
+
+QToolButton:focus {
+  outline: none;
+  border: 3px solid #3ea6ff;
+}
+
+/* Buttons (tiles + actions) */
+QPushButton {
+  background-color: #151a23;
+  color: #eef2ff;
+  border: 1px solid #2a3140;
+  border-radius: 16px;
+  padding: 18px 18px;
+  font-size: 20px;
+  font-weight: 800;
+  min-height: 56px;
+}
+
+/* Generic "selected" state for tile-style buttons */
+QPushButton[selected="true"] {
+  border: 3px solid @accent;
+  background-color: rgba(36, 66, 92, 0.75);
+}
+
+QPushButton:hover {
+  background-color: #1a2130;
+  border: 1px solid #3a4660;
+}
+
+QPushButton:pressed {
+  background-color: #202942;
+}
+
+/* Focus ring: make controller focus obvious */
+QPushButton:focus {
+  outline: none;
+  border: 3px solid #3ea6ff;
+}
+
+/* Secondary buttons */
+QPushButton[variant="secondary"] {
+  background-color: rgba(18, 21, 33, 0.85);
+  border: 1px solid rgba(60, 70, 95, 0.9);
+  color: #aab3c5;
+}
+
+QPushButton[variant="secondary"]:hover {
+  background-color: rgba(34, 40, 54, 0.95);
+  border: 1px solid rgba(110, 135, 200, 0.95);
+}
+
+QPushButton[variant="danger"] {
+  background-color: rgba(80, 20, 28, 0.75);
+  border: 1px solid rgba(180, 60, 75, 0.7);
+}
+
+QPushButton[variant="danger"]:hover {
+  border: 1px solid rgba(255, 86, 110, 0.9);
+}
+
+/* Lists / grids */
+QListWidget {
+  background-color: rgba(20, 24, 34, 0.7);
+  border: 1px solid #2a3140;
+  border-radius: 18px;
+  padding: 12px;
+  font-size: 18px;
+}
+
+QListWidget::item {
+  padding: 10px;
+  border-radius: 12px;
+}
+
+QListWidget::item:selected {
+  background-color: rgba(62, 166, 255, 0.20);
+  border: 2px solid rgba(62, 166, 255, 0.75);
+}
+
+QListWidget::item:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Inputs */
+QLineEdit {
+  background-color: rgba(20, 24, 34, 0.9);
+  border: 1px solid #2a3140;
+  border-radius: 999px;
+  padding: 12px 16px;
+  font-size: 18px;
+  color: #eef2ff;
+}
+
+QLineEdit:focus {
+  border: 2px solid rgba(62, 166, 255, 0.9);
+}
+
+QCheckBox {
+  color: #eef2ff;
+}
+
+QGroupBox {
+  border: 1px solid #2a3140;
+  border-radius: 18px;
+  margin-top: 18px;
+  padding: 12px;
+  background-color: rgba(20, 24, 34, 0.55);
+}
+
+QGroupBox::title {
+  subcontrol-origin: margin;
+  left: 12px;
+  padding: 0 6px;
+  color: #aab3c5;
+  font-weight: 800;
+}
+
+/* Path label (settings) */
+#aioPathLabel {
+  padding: 12px;
+  border-radius: 14px;
+  background-color: rgba(20, 24, 34, 0.65);
+  border: 1px solid #2a3140;
+  color: #eef2ff;
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 13px;
+}
+
+/* YouTube browse tiles */
+#aioTile {
+  background-color: rgba(20, 24, 34, 0.65);
+  border: 1px solid rgba(42, 49, 64, 1);
+  border-radius: 18px;
+}
+
+#aioTile[aio_tile_selected="true"] {
+  border: 3px solid #3ea6ff;
+  background-color: rgba(24, 40, 58, 0.75);
+}
+
+#aioTile[aio_tile_hovered="true"] {
+  border: 2px solid rgba(170, 179, 197, 0.75);
+}
+
+QLabel[role="thumb"] {
+  background-color: rgba(10, 12, 16, 0.8);
+  border-radius: 12px;
+  color: rgba(170, 179, 197, 0.9);
+  font-weight: 800;
+}
+
+QLabel[role="tileTitle"] {
+  color: #eef2ff;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+/* Emulator display surface + dev overlay */
+#aioDisplaySurface {
+  background-color: #000;
+}
+
+#aioDevPanel {
+  background-color: rgba(0, 0, 0, 0.78);
+  color: #7CFF7C;
+  font-family: "SF Mono", "Menlo", monospace;
+  padding: 10px;
+  border-left: 1px solid rgba(42, 49, 64, 1);
+}
+
+/* Scrollbars */
+QScrollBar:vertical {
+  background: transparent;
+  width: 10px;
+  margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+  background: rgba(255,255,255,0.18);
+  border-radius: 5px;
+  min-height: 40px;
+}
+
+QScrollBar::handle:vertical:hover {
+  background: rgba(255,255,255,0.28);
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+  background: transparent;
+  height: 0px;
+}

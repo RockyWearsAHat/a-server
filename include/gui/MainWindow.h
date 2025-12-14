@@ -89,6 +89,8 @@ class MainWindow : public QMainWindow {
         QWidget *emulatorPage;
         QWidget *settingsPage;
         QWidget *streamingHubPage;
+        QWidget *youTubeBrowsePage;
+        QWidget *youTubePlayerPage;
         QWidget *streamingWebPage;
         
         QListWidget *gameListWidget;

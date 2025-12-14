@@ -52,7 +52,7 @@ endforeach()
 
 # Find Qt6
 set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
-find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets Network)
 
 # Find SDL2
 find_package(SDL2 REQUIRED)

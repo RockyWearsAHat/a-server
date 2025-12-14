@@ -29,8 +29,11 @@ public:
     StreamingServiceType getServiceType() const override { return StreamingServiceType::YouTube; }
 
 private:
+    void ensureAuthenticatedFromEnvironment();
     std::string makeApiRequest(const std::string& endpoint, const std::string& params = "");
     std::vector<VideoContent> parseVideoResults(const std::string& jsonResponse);
+
+    std::string regionCode_ = "US";
     
     std::string apiKey_;
     std::string accessToken_;

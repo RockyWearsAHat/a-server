@@ -1,5 +1,7 @@
 #include <QApplication>
 #include <QMessageBox>
+#include <QFile>
+#include <QTextStream>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -20,6 +22,8 @@
 #include <QCheckBox>
 #include <QElapsedTimer>
 #include <QSettings>
+#include <QDesktopServices>
+#include <QUrl>
 #include <SDL2/SDL.h>
 #include <sys/select.h>
 #include <termios.h>
@@ -35,6 +39,8 @@
 #include "gui/InputConfigDialog.h"
 #include "gui/StreamingHubWidget.h"
 #include "gui/StreamingWebViewPage.h"
+#include "gui/YouTubeBrowsePage.h"
+#include "gui/YouTubePlayerPage.h"
 #include "input/InputManager.h"
 #include "emulator/common/Logger.h"
 #include "emulator/gba/ARM7TDMI.h"
@@ -69,65 +75,22 @@ static MainWindow* audioInstance = nullptr;
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), settings("AIOServer", "GBAEmulator")
 {
-    QString styleSheet = R"(
-        QMainWindow {
-            background-color: #121212;
-            color: #ffffff;
-        }
-        QWidget {
-            background-color: #121212;
-            color: #ffffff;
-            font-family: "Segoe UI", "Helvetica Neue", sans-serif;
-            font-size: 16px;
-        }
-        QLabel {
-            color: #e0e0e0;
-        }
-        QPushButton {
-            background-color: #2d2d2d;
-            color: #ffffff;
-            border: 1px solid #3d3d3d;
-            border-radius: 8px;
-            padding: 15px;
-            font-size: 18px;
-            font-weight: bold;
-            min-height: 50px;
-        }
-        QPushButton:hover {
-            background-color: #3d3d3d;
-            border: 1px solid #505050;
-        }
-        QPushButton:pressed {
-            background-color: #505050;
-        }
-        QListWidget {
-            background-color: #1e1e1e;
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 10px;
-            font-size: 18px;
-        }
-        QListWidget::item {
-            padding: 10px;
-            border-bottom: 1px solid #2a2a2a;
-        }
-        QListWidget::item:selected {
-            background-color: #3d3d3d;
-            color: #ffffff;
-        }
-        QGroupBox {
-            border: 1px solid #333;
-            border-radius: 8px;
-            margin-top: 20px;
-            font-weight: bold;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px;
-        }
-    )";
-    setStyleSheet(styleSheet);
+    // Load unified 10-foot UI theme.
+    QString styleSheet;
+    QFile f(QCoreApplication::applicationDirPath() + "/../assets/qss/tv.qss");
+    if (!f.exists()) {
+        // Fallback for running from build tree.
+        f.setFileName(QCoreApplication::applicationDirPath() + "/../../assets/qss/tv.qss");
+    }
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream ts(&f);
+        styleSheet = ts.readAll();
+        f.close();
+    }
+
+    if (!styleSheet.isEmpty()) {
+        setStyleSheet(styleSheet);
+    }
     loadSettings();
     stackedWidget = new QStackedWidget(this);
     setCentralWidget(stackedWidget);
@@ -143,6 +106,8 @@ MainWindow::MainWindow(QWidget *parent)
     stackedWidget->addWidget(emulatorPage);
     stackedWidget->addWidget(settingsPage);
     stackedWidget->addWidget(streamingHubPage);
+    stackedWidget->addWidget(youTubeBrowsePage);
+    stackedWidget->addWidget(youTubePlayerPage);
     stackedWidget->addWidget(streamingWebPage);
     stackedWidget->setCurrentWidget(mainMenuPage);
     
@@ -387,9 +352,97 @@ void MainWindow::LoadROM(const std::string& path) {
         
         // Update Input
         uint16_t inputState = AIO::Input::InputManager::instance().update();
+
+        // Route input based on the active UI page.
+        // When the user is in streaming UI, do not feed the emulator.
+        QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+        const bool inStreamingUi = (current == streamingHubPage) || (current == streamingWebPage) ||
+                                  (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+
+        // Feed controller navigation into UI pages.
+        // Pages that implement explicit controller handlers:
+        if (current == youTubeBrowsePage) {
+            if (auto* yt = qobject_cast<YouTubeBrowsePage*>(youTubeBrowsePage)) yt->onControllerInput(inputState);
+        } else if (current == youTubePlayerPage) {
+            if (auto* p = qobject_cast<YouTubePlayerPage*>(youTubePlayerPage)) p->onControllerInput(inputState);
+        } else {
+            // Fallback: synthesize key presses so existing keyPressEvent handlers work.
+            // Includes repeat for held directions to make controller navigation consistent.
+            QWidget* target = QApplication::focusWidget();
+            if (!target) target = current ? current : this;
+            if (target && target->focusProxy()) target = target->focusProxy();
+
+            auto sendKey = [&](int qtKey) {
+                QKeyEvent ev(QEvent::KeyPress, qtKey, Qt::NoModifier);
+                QCoreApplication::sendEvent(target, &ev);
+            };
+
+            auto pressed = [&](int bit) { return (inputState & (1u << bit)) == 0; };
+
+            // Persistent UI controller state for repeat handling.
+            struct RepeatState {
+                bool down = false;
+                qint64 nextMs = 0;
+            };
+            static uint16_t lastUiState = 0x03FF;
+            static RepeatState repLeft, repRight, repUp, repDown;
+            static QElapsedTimer uiRepeatTimer;
+            if (!uiRepeatTimer.isValid()) uiRepeatTimer.start();
+            const qint64 nowMs = uiRepeatTimer.elapsed();
+
+            constexpr qint64 INITIAL_DELAY_MS = 220;
+            constexpr qint64 REPEAT_MS = 70;
+
+            auto handleRepeat = [&](int bit, int qtKey, RepeatState& st) {
+                const bool isDown = pressed(bit);
+                const bool wasDown = (lastUiState & (1u << bit)) == 0;
+
+                if (isDown && !wasDown) {
+                    // Initial press
+                    st.down = true;
+                    st.nextMs = nowMs + INITIAL_DELAY_MS;
+                    sendKey(qtKey);
+                    return;
+                }
+
+                if (isDown && wasDown) {
+                    // Held
+                    if (st.down && nowMs >= st.nextMs) {
+                        sendKey(qtKey);
+                        st.nextMs = nowMs + REPEAT_MS;
+                    }
+                    return;
+                }
+
+                // Released
+                st.down = false;
+            };
+
+            handleRepeat(AIO::Input::Button_Left, Qt::Key_Left, repLeft);
+            handleRepeat(AIO::Input::Button_Right, Qt::Key_Right, repRight);
+            handleRepeat(AIO::Input::Button_Up, Qt::Key_Up, repUp);
+            handleRepeat(AIO::Input::Button_Down, Qt::Key_Down, repDown);
+
+            // Buttons (edge-triggered)
+            auto edge = [&](int bit) {
+                const bool isDown = pressed(bit);
+                const bool wasDown = ((lastUiState & (1u << bit)) == 0);
+                return isDown && !wasDown;
+            };
+
+            if (edge(AIO::Input::Button_A)) sendKey(Qt::Key_Return);
+            if (edge(AIO::Input::Button_B)) sendKey(Qt::Key_Escape);
+
+            lastUiState = inputState;
+        }
         
         if (currentEmulator == EmulatorType::GBA) {
-            gba.UpdateInput(inputState);
+            if (!inStreamingUi) {
+                gba.UpdateInput(inputState);
+            } else {
+                // Release all keys when in streaming UI (KEYINPUT is active-low).
+                gba.UpdateInput(0x03FF);
+            }
             
             // Copy framebuffer to display image
             const auto& buffer = gba.GetPPU().GetFramebuffer();
@@ -476,21 +529,24 @@ void MainWindow::LoadROM(const std::string& path) {
         
         QLabel *title = new QLabel("AIO ENTERTAINMENT SYSTEM", mainMenuPage);
         title->setAlignment(Qt::AlignCenter);
-        title->setStyleSheet("font-size: 32px; font-weight: bold; color: #00aaff; margin-bottom: 40px; letter-spacing: 2px;");
+        title->setProperty("role", "title");
         layout->addWidget(title);
 
         QPushButton *emuBtn = new QPushButton("EMULATORS", mainMenuPage);
         emuBtn->setCursor(Qt::PointingHandCursor);
+        emuBtn->setFocusPolicy(Qt::StrongFocus);
         connect(emuBtn, &QPushButton::clicked, this, &MainWindow::goToEmulatorSelect);
         layout->addWidget(emuBtn);
 
         QPushButton *streamBtn = new QPushButton("STREAMING", mainMenuPage);
         streamBtn->setCursor(Qt::PointingHandCursor);
+        streamBtn->setFocusPolicy(Qt::StrongFocus);
         connect(streamBtn, &QPushButton::clicked, this, &MainWindow::openStreaming);
         layout->addWidget(streamBtn);
 
         QPushButton *settingsBtn = new QPushButton("SETTINGS", mainMenuPage);
         settingsBtn->setCursor(Qt::PointingHandCursor);
+        settingsBtn->setFocusPolicy(Qt::StrongFocus);
         connect(settingsBtn, &QPushButton::clicked, this, &MainWindow::goToSettings);
         layout->addWidget(settingsBtn);
 
@@ -498,7 +554,7 @@ void MainWindow::LoadROM(const std::string& path) {
         
         QLabel *footer = new QLabel("v1.0.0 | System Ready", mainMenuPage);
         footer->setAlignment(Qt::AlignCenter);
-        footer->setStyleSheet("color: #666; font-size: 12px;");
+        footer->setProperty("role", "subtitle");
         layout->addWidget(footer);
     }
 
@@ -511,6 +567,12 @@ void MainWindow::LoadROM(const std::string& path) {
         auto* hub = new StreamingHubWidget(this);
         streamingHubPage = hub;
 
+        auto* yt = new YouTubeBrowsePage(this);
+        youTubeBrowsePage = yt;
+
+        auto* ytPlayer = new YouTubePlayerPage(this);
+        youTubePlayerPage = ytPlayer;
+
         auto* web = new StreamingWebViewPage(this);
         streamingWebPage = web;
 
@@ -521,13 +583,45 @@ void MainWindow::LoadROM(const std::string& path) {
             stackedWidget->setCurrentWidget(streamingHubPage);
             streamingHubPage->setFocus();
         });
+
+        connect(yt, &YouTubeBrowsePage::homeRequested, this, [this]() {
+            stackedWidget->setCurrentWidget(streamingHubPage);
+            streamingHubPage->setFocus();
+        });
+
+        connect(yt, &YouTubeBrowsePage::videoRequested, this, [this](const QString& url) {
+            auto* player = qobject_cast<YouTubePlayerPage*>(youTubePlayerPage);
+            if (!player) return;
+            stackedWidget->setCurrentWidget(youTubePlayerPage);
+            player->playVideoUrl(url);
+            youTubePlayerPage->setFocus();
+        });
+
+        connect(ytPlayer, &YouTubePlayerPage::homeRequested, this, [this]() {
+            stackedWidget->setCurrentWidget(streamingHubPage);
+            streamingHubPage->setFocus();
+        });
+        connect(ytPlayer, &YouTubePlayerPage::backRequested, this, [this]() {
+            stackedWidget->setCurrentWidget(youTubeBrowsePage);
+            youTubeBrowsePage->setFocus();
+        });
     }
 
     void MainWindow::launchStreamingApp(int app) {
+        const auto selectedApp = static_cast<AIO::GUI::StreamingApp>(app);
+
+        // YouTube uses the Data API + native Qt UI (no WebEngine).
+        if (selectedApp == AIO::GUI::StreamingApp::YouTube) {
+            if (!youTubeBrowsePage) return;
+            stackedWidget->setCurrentWidget(youTubeBrowsePage);
+            youTubeBrowsePage->setFocus();
+            return;
+        }
+
         auto* web = qobject_cast<StreamingWebViewPage*>(streamingWebPage);
         if (!web) return;
         stackedWidget->setCurrentWidget(streamingWebPage);
-        web->openApp(static_cast<AIO::GUI::StreamingApp>(app));
+        web->openApp(selectedApp);
         streamingWebPage->setFocus();
     }
 
@@ -538,7 +632,7 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QLabel *title = new QLabel("SYSTEM SETTINGS", settingsPage);
         title->setAlignment(Qt::AlignCenter);
-        title->setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 30px; color: #aaaaaa;");
+        title->setProperty("role", "title");
         layout->addWidget(title);
 
         // ROM Directory Setting
@@ -547,11 +641,12 @@ void MainWindow::LoadROM(const std::string& path) {
         
         romPathLabel = new QLabel(romDirectory, romGroup);
         romPathLabel->setWordWrap(true);
-        romPathLabel->setStyleSheet("border: 1px solid #444; padding: 10px; background-color: #1a1a1a; border-radius: 4px; color: #00ff00; font-family: monospace;");
+        romPathLabel->setObjectName("aioPathLabel");
         romLayout->addWidget(romPathLabel);
 
         QPushButton *browseBtn = new QPushButton("BROWSE FOLDER...", romGroup);
         browseBtn->setCursor(Qt::PointingHandCursor);
+        browseBtn->setFocusPolicy(Qt::StrongFocus);
         connect(browseBtn, &QPushButton::clicked, this, &MainWindow::selectRomDirectory);
         romLayout->addWidget(browseBtn);
 
@@ -561,7 +656,8 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QPushButton *backBtn = new QPushButton("BACK TO MENU", settingsPage);
         backBtn->setCursor(Qt::PointingHandCursor);
-        backBtn->setStyleSheet("background-color: #444;"); // Slightly different for back button
+        backBtn->setFocusPolicy(Qt::StrongFocus);
+        backBtn->setProperty("variant", "secondary");
         connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToMainMenu);
         layout->addWidget(backBtn);
     }
@@ -574,12 +670,13 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QLabel *title = new QLabel("SELECT SYSTEM", emulatorSelectPage);
         title->setAlignment(Qt::AlignCenter);
-        title->setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 30px; color: #aaaaaa;");
+        title->setProperty("role", "title");
         layout->addWidget(title);
 
         QPushButton *gbaBtn = new QPushButton("GAME BOY ADVANCE", emulatorSelectPage);
         gbaBtn->setCursor(Qt::PointingHandCursor);
-        gbaBtn->setStyleSheet("text-align: left; padding-left: 30px; border-left: 5px solid #6a0dad;"); 
+        gbaBtn->setFocusPolicy(Qt::StrongFocus);
+        gbaBtn->setStyleSheet("text-align: left; padding-left: 24px; border-left: 6px solid #8b5cf6;"); 
         connect(gbaBtn, &QPushButton::clicked, this, [this]() {
             currentEmulator = EmulatorType::GBA;
             goToGameSelect();
@@ -588,7 +685,8 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QPushButton *switchBtn = new QPushButton("NINTENDO SWITCH", emulatorSelectPage);
         switchBtn->setCursor(Qt::PointingHandCursor);
-        switchBtn->setStyleSheet("text-align: left; padding-left: 30px; border-left: 5px solid #e60012;");
+        switchBtn->setFocusPolicy(Qt::StrongFocus);
+        switchBtn->setStyleSheet("text-align: left; padding-left: 24px; border-left: 6px solid #ff4d4d;");
         connect(switchBtn, &QPushButton::clicked, this, [this]() {
             currentEmulator = EmulatorType::Switch;
             goToGameSelect();
@@ -599,7 +697,8 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QPushButton *backBtn = new QPushButton("BACK", emulatorSelectPage);
         backBtn->setCursor(Qt::PointingHandCursor);
-        backBtn->setStyleSheet("background-color: #444;");
+        backBtn->setFocusPolicy(Qt::StrongFocus);
+        backBtn->setProperty("variant", "secondary");
         connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToMainMenu);
         layout->addWidget(backBtn);
     }
@@ -697,10 +796,11 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QLabel *title = new QLabel("SELECT GAME", gameSelectPage);
         title->setAlignment(Qt::AlignCenter);
-        title->setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 20px; color: #aaaaaa;");
+        title->setProperty("role", "title");
         layout->addWidget(title);
 
         gameListWidget = new QListWidget(gameSelectPage);
+        gameListWidget->setFocusPolicy(Qt::StrongFocus);
         gameListWidget->setIconSize(QSize(180, 120));
         gameListWidget->setViewMode(QListWidget::IconMode);
         gameListWidget->setResizeMode(QListWidget::Adjust);
@@ -716,7 +816,8 @@ void MainWindow::LoadROM(const std::string& path) {
 
         QPushButton *backBtn = new QPushButton("BACK", gameSelectPage);
         backBtn->setCursor(Qt::PointingHandCursor);
-        backBtn->setStyleSheet("background-color: #444;");
+        backBtn->setFocusPolicy(Qt::StrongFocus);
+        backBtn->setProperty("variant", "secondary");
         connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToEmulatorSelect);
         layout->addWidget(backBtn);
     }
@@ -729,19 +830,19 @@ void MainWindow::LoadROM(const std::string& path) {
 
         // Top Bar (Menu)
         QWidget *topBar = new QWidget(emulatorPage);
-        topBar->setStyleSheet("background-color: #1a1a1a; border-bottom: 1px solid #333;");
+        topBar->setObjectName("aioTopBar");
         topBar->setFixedHeight(40);
         QHBoxLayout *topLayout = new QHBoxLayout(topBar);
         topLayout->setContentsMargins(10, 0, 10, 0);
 
         QPushButton *stopBtn = new QPushButton("STOP", topBar);
         stopBtn->setFixedSize(80, 30);
-        stopBtn->setStyleSheet("font-size: 12px; padding: 5px; min-height: 0;");
+        stopBtn->setProperty("variant", "secondary");
         connect(stopBtn, &QPushButton::clicked, this, &MainWindow::stopGame);
         topLayout->addWidget(stopBtn);
 
         statusLabel = new QLabel("Ready", topBar);
-        statusLabel->setStyleSheet("color: #888; font-size: 12px;");
+        statusLabel->setProperty("role", "subtitle");
         topLayout->addWidget(statusLabel);
         
         topLayout->addStretch();
@@ -749,7 +850,7 @@ void MainWindow::LoadROM(const std::string& path) {
         QPushButton *devBtn = new QPushButton("DEV", topBar);
         devBtn->setCheckable(true);
         devBtn->setFixedSize(60, 30);
-        devBtn->setStyleSheet("font-size: 12px; padding: 5px; min-height: 0;");
+        devBtn->setProperty("variant", "secondary");
         connect(devBtn, &QPushButton::toggled, this, &MainWindow::toggleDevPanel);
         topLayout->addWidget(devBtn);
 
@@ -764,13 +865,13 @@ void MainWindow::LoadROM(const std::string& path) {
         // Display
         displayLabel = new QLabel(gameArea);
         displayLabel->setAlignment(Qt::AlignCenter);
-        displayLabel->setStyleSheet("background-color: #000;");
+        displayLabel->setObjectName("aioDisplaySurface");
         displayLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         gameLayout->addWidget(displayLabel);
 
         // Dev Panel (Overlay or Side)
         devPanelLabel = new QLabel(gameArea);
-        devPanelLabel->setStyleSheet("background-color: rgba(0, 0, 0, 0.8); color: #0f0; font-family: monospace; padding: 10px; border-left: 1px solid #333;");
+        devPanelLabel->setObjectName("aioDevPanel");
         devPanelLabel->setFixedWidth(250);
         devPanelLabel->setAlignment(Qt::AlignTop | Qt::AlignLeft);
         devPanelLabel->setVisible(false);

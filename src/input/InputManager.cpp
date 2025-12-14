@@ -28,37 +28,20 @@ namespace Input {
     bool InputManager::processKeyEvent(QKeyEvent* event) {
         int key = event->key();
         
-        std::cout << "[INPUT] Key event: key=" << key << " type=" 
-                  << (event->type() == QEvent::KeyPress ? "Press" : "Release")
-                  << " mapped=" << keyToButtonMap.contains(key) << std::endl;
-        std::cout.flush();
-        
         if (!keyToButtonMap.contains(key)) {
             return false;
         }
 
-        std::cout << "[INPUT] Getting button for key=" << key << std::endl;
-        std::cout.flush();
-        
         GBAButton btn = keyToButtonMap[key];
         int bit = static_cast<int>(btn);
-        
-        std::cout << "[INPUT] Got button, bit=" << bit << std::endl;
-        std::cout.flush();
 
         if (event->type() == QEvent::KeyPress) {
             // 0 = Pressed
             keyboardState &= ~(1 << bit);
-            std::cout << "[INPUT] Button bit=" << bit 
-                      << " PRESSED, keyboardState=0x" << std::hex << keyboardState << std::dec << std::endl;
-            std::cout.flush();
         } else if (event->type() == QEvent::KeyRelease) {
             // 1 = Released
             if (!event->isAutoRepeat()) {
                 keyboardState |= (1 << bit);
-                std::cout << "[INPUT] Button bit=" << bit 
-                          << " RELEASED, keyboardState=0x" << std::hex << keyboardState << std::dec << std::endl;
-                std::cout.flush();
             }
         }
 
@@ -103,6 +86,24 @@ namespace Input {
                     gamepadState &= ~(1 << gbaBtn); // Pressed (0)
                 }
             }
+
+            // Also treat analog sticks as D-pad directions (for UI navigation).
+            // Deadzone chosen to avoid drift.
+            constexpr int DEADZONE = 12000;
+            const int lx = (int)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+            const int ly = (int)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+            const int rx = (int)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
+            const int ry = (int)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+
+            auto applyAxisDir = [&](int x, int y) {
+                if (x <= -DEADZONE) gamepadState &= ~(1 << Button_Left);
+                if (x >= DEADZONE) gamepadState &= ~(1 << Button_Right);
+                if (y <= -DEADZONE) gamepadState &= ~(1 << Button_Up);
+                if (y >= DEADZONE) gamepadState &= ~(1 << Button_Down);
+            };
+
+            applyAxisDir(lx, ly);
+            applyAxisDir(rx, ry);
         }
 
         uint16_t result = (keyboardState & gamepadState) & 0x03FF; // Only lower 10 bits are valid for KEYINPUT
