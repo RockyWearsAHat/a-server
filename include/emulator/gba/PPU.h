@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 namespace AIO::Emulator::GBA {
 
@@ -16,6 +17,7 @@ namespace AIO::Emulator::GBA {
 
         void Update(int cycles);
         const std::vector<uint32_t>& GetFramebuffer() const;
+        void SwapBuffers(); // Call this after frame complete to make it visible to GUI
 
     private:
         void DrawScanline();
@@ -42,7 +44,12 @@ namespace AIO::Emulator::GBA {
         void HandleIOWrite(uint32_t offset, uint16_t value);
 
         GBAMemory& memory;
-        std::vector<uint32_t> framebuffer;
+        
+        // Double buffering for thread-safe framebuffer access
+        std::vector<uint32_t> backBuffer;  // PPU renders to this
+        std::vector<uint32_t> frontBuffer; // GUI reads from this
+        mutable std::mutex bufferMutex;
+        
         // Priority buffer: stores priority (0-3) for each pixel, 4 = backdrop (lowest)
         std::vector<uint8_t> priorityBuffer;
         int cycleCounter;

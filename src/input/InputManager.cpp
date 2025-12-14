@@ -31,25 +31,34 @@ namespace Input {
         std::cout << "[INPUT] Key event: key=" << key << " type=" 
                   << (event->type() == QEvent::KeyPress ? "Press" : "Release")
                   << " mapped=" << keyToButtonMap.contains(key) << std::endl;
+        std::cout.flush();
         
         if (!keyToButtonMap.contains(key)) {
             return false;
         }
 
+        std::cout << "[INPUT] Getting button for key=" << key << std::endl;
+        std::cout.flush();
+        
         GBAButton btn = keyToButtonMap[key];
         int bit = static_cast<int>(btn);
+        
+        std::cout << "[INPUT] Got button, bit=" << bit << std::endl;
+        std::cout.flush();
 
         if (event->type() == QEvent::KeyPress) {
             // 0 = Pressed
             keyboardState &= ~(1 << bit);
-            std::cout << "[INPUT] Button " << getButtonName(btn).toStdString() 
+            std::cout << "[INPUT] Button bit=" << bit 
                       << " PRESSED, keyboardState=0x" << std::hex << keyboardState << std::dec << std::endl;
+            std::cout.flush();
         } else if (event->type() == QEvent::KeyRelease) {
             // 1 = Released
             if (!event->isAutoRepeat()) {
                 keyboardState |= (1 << bit);
-                std::cout << "[INPUT] Button " << getButtonName(btn).toStdString() 
+                std::cout << "[INPUT] Button bit=" << bit 
                           << " RELEASED, keyboardState=0x" << std::hex << keyboardState << std::dec << std::endl;
+                std::cout.flush();
             }
         }
 

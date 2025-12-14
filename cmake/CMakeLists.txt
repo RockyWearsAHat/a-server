@@ -52,10 +52,13 @@ endforeach()
 
 # Find Qt6
 set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets)
 
 # Find SDL2
 find_package(SDL2 REQUIRED)
+
+# Optional: libcurl (used by YouTube service skeleton)
+find_package(CURL REQUIRED)
 
 
 # Centralized build logic

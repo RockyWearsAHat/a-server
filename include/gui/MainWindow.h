@@ -11,7 +11,11 @@
 #include <QListWidget>
 #include <QSettings>
 #include <SDL2/SDL.h>
+#include <termios.h>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <mutex>
 
 class QKeyEvent;
 
@@ -29,13 +33,18 @@ class MainWindow : public QMainWindow {
         ~MainWindow();
 
         void LoadROM(const std::string& path);
+        void SetEmulatorType(int type); // 0=GBA, 1=Switch
+        // Debugger controls via GUI/CLI
+        void EnableDebugger(bool enabled);
+        void AddBreakpoint(uint32_t addr);
 
     protected:
         void keyPressEvent(QKeyEvent *event) override;
         void keyReleaseEvent(QKeyEvent *event) override;
 
     private slots:
-        void GameLoop();
+        void UpdateDisplay();
+        void GameLoop();  // Deprecated, kept for compatibility
         void toggleDevPanel(bool enabled);
         
         // Navigation Slots
@@ -43,6 +52,8 @@ class MainWindow : public QMainWindow {
         void goToEmulatorSelect();
         void goToGameSelect();
         void goToSettings();
+        void openStreaming();
+        void launchStreamingApp(int app);
         void selectRomDirectory();
         void startGame(const QString& path);
         void stopGame();
@@ -53,12 +64,18 @@ class MainWindow : public QMainWindow {
         void closeAudio();
         static void audioCallback(void* userdata, Uint8* stream, int len);
         
+        // Emulator thread management
+        void StartEmulatorThread();
+        void StopEmulatorThread();
+        void EmulatorThreadMain();
+        
         // UI Setup
         void setupMainMenu();
         void setupEmulatorSelect();
         void setupGameSelect();
         void setupEmulatorView();
         void setupSettingsPage();
+        void setupStreamingPages();
         
         void loadSettings();
         void saveSettings();
@@ -71,6 +88,8 @@ class MainWindow : public QMainWindow {
         QWidget *gameSelectPage;
         QWidget *emulatorPage;
         QWidget *settingsPage;
+        QWidget *streamingHubPage;
+        QWidget *streamingWebPage;
         
         QListWidget *gameListWidget;
         QLabel *romPathLabel;
@@ -91,7 +110,7 @@ class MainWindow : public QMainWindow {
         AIO::Emulator::GBA::GBA gba;
         AIO::Emulator::Switch::SwitchEmulator switchEmulator;
         
-        QTimer *gameTimer;
+        QTimer *displayTimer;  // UI update timer (60 Hz)
         QImage displayImage;
         uint16_t keyInputState = 0x03FF; // Default: All keys released (1)
         
@@ -104,10 +123,26 @@ class MainWindow : public QMainWindow {
         int frameCount = 0;
         double currentFPS = 0.0;
         
+        // Periodic save flushing (every 60 frames = 1 second at 60 FPS)
+        int saveFlushCounter = 0;
+        static constexpr int SAVE_FLUSH_INTERVAL = 60;
+        
         // SDL Audio
         SDL_AudioDeviceID audioDevice = 0;
         static constexpr int AUDIO_SAMPLE_RATE = 32768;
         static constexpr int AUDIO_BUFFER_SIZE = 1024;
+        
+        // Emulator thread
+        std::thread emulatorThread;
+        std::atomic<bool> emulatorRunning{false};
+        std::atomic<bool> emulatorPaused{false};
+        std::mutex emulatorStateMutex;
+
+        // Debugger flags
+        bool debuggerEnabled = false;
+        bool debuggerContinue = false;
+        bool stdinRawEnabled = false;
+        struct termios rawTermios;
 };
 
 } // namespace GUI

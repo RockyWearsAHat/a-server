@@ -4,11 +4,12 @@
 #include <memory>
 #include "PPU.h"
 #include "APU.h"
+#include "GBAMemory.h"
+#include "ROMMetadataAnalyzer.h"
 
 namespace AIO::Emulator::GBA {
 
     class ARM7TDMI;
-    class GBAMemory;
 
     class GBA {
     public:
@@ -24,6 +25,8 @@ namespace AIO::Emulator::GBA {
 
         const PPU& GetPPU() const { return *ppu; }
         APU& GetAPU() { return *apu; }
+        GBAMemory& GetMemory() { return *memory; }
+        const GBAMemory& GetMemory() const { return *memory; }
         
         uint32_t ReadMem(uint32_t addr); // Debug helper
         uint16_t ReadMem16(uint32_t addr); // Debug helper
@@ -37,6 +40,15 @@ namespace AIO::Emulator::GBA {
         uint32_t GetCPSR() const; // Debug helper
         void PatchROM(uint32_t addr, uint32_t val);
 
+        // Debugger controls (forwarded to ARM7TDMI)
+        void AddBreakpoint(uint32_t addr);
+        void ClearBreakpoints();
+        void SetSingleStep(bool enabled);
+        bool IsHalted() const; // CPU halted or debugger break
+        void Continue();
+        void DumpCPUState(std::ostream& os) const;
+        void StepBack();
+
 
     private:
         std::unique_ptr<ARM7TDMI> cpu;
@@ -46,6 +58,19 @@ namespace AIO::Emulator::GBA {
         
         bool romLoaded = false;
         std::string savePath;
+        ROMMetadata romMetadata;
+
+        // Configure boot state based on intelligently detected ROM metadata
+        void ConfigureBootStateFromMetadata(const ROMMetadata& metadata);
+        
+        // Apply game-specific ROM patches for known compatibility issues
+        void ApplyROMPatches(const ROMMetadata& metadata);
+
+        // PC stall detection (treat long stalls as crash-equivalent)
+        uint32_t lastPcForStall = 0;
+        uint64_t stallCycleAccumulator = 0;
+        bool stallCrashTriggered = false;
+        static constexpr uint64_t STALL_CYCLE_THRESHOLD = 167800000ULL; // ~10s @16.78MHz
     };
 
 }

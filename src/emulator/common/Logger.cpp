@@ -1,8 +1,11 @@
 #include "emulator/common/Logger.h"
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <ctime>
+#include <cstdlib>
 
 namespace AIO::Emulator::Common {
 
@@ -25,6 +28,14 @@ void Logger::Log(LogLevel level, const std::string& category, const std::string&
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
 
+    // Buffer all logs for crash dump
+    m_logBuffer.push_back(entry);
+    
+    // Keep last 1000 entries
+    if (m_logBuffer.size() > 1000) {
+        m_logBuffer.erase(m_logBuffer.begin());
+    }
+
     if (m_callback) {
         m_callback(entry);
     } else {
@@ -39,6 +50,15 @@ void Logger::Log(LogLevel level, const std::string& category, const std::string&
             case LogLevel::Fatal: levelStr = "FATAL"; break;
         }
         out << "[" << levelStr << "] [" << category << "] " << message << std::endl;
+    }
+    
+    // Handle fatal errors
+    if (level == LogLevel::Fatal) {
+        WriteCrashLog("FATAL ERROR: " + message);
+        if (m_exitOnCrash) {
+            std::cerr << "\nExiting due to fatal error (--exit-on-crash enabled)" << std::endl;
+            std::exit(1);
+        }
     }
 }
 
@@ -79,6 +99,82 @@ bool Logger::IsCategoryEnabled(const std::string& category) const {
 void Logger::SetLevel(LogLevel level) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_minLevel = level;
+}
+
+void Logger::SetLogFile(const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_logFilePath = path;
+}
+
+void Logger::SetExitOnCrash(bool exit) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_exitOnCrash = exit;
+}
+
+void Logger::WriteCrashLog(const std::string& message) {
+    // Write all buffered logs + crash message to file
+    std::ofstream file(m_logFilePath, std::ios::trunc);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open log file: " << m_logFilePath << std::endl;
+        return;
+    }
+
+    // Write header
+    std::time_t now = std::time(nullptr);
+    char timeStr[100];
+    std::strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    
+    file << "==========================================================\n";
+    file << "AIO Server Crash Log\n";
+    file << "Time: " << timeStr << "\n";
+    file << "==========================================================\n\n";
+    
+    file << "CRASH MESSAGE:\n" << message << "\n\n";
+    file << "==========================================================\n";
+    file << "RECENT LOG ENTRIES (last " << m_logBuffer.size() << " entries):\n";
+    file << "==========================================================\n\n";
+
+    // Write buffered logs
+    for (const auto& entry : m_logBuffer) {
+        const char* levelStr = "INFO";
+        switch (entry.level) {
+            case LogLevel::Debug: levelStr = "DEBUG"; break;
+            case LogLevel::Info: levelStr = "INFO"; break;
+            case LogLevel::Warning: levelStr = "WARN"; break;
+            case LogLevel::Error: levelStr = "ERROR"; break;
+            case LogLevel::Fatal: levelStr = "FATAL"; break;
+        }
+        file << "[" << levelStr << "] [" << entry.category << "] " 
+             << entry.message << "\n";
+    }
+
+    file << "\n==========================================================\n";
+    file << "End of crash log\n";
+    file << "==========================================================\n";
+    file.close();
+    
+    std::cerr << "\nCrash log written to: " << m_logFilePath << std::endl;
+}
+
+void Logger::FlushLogs() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    // Write current buffer to file without crash message
+    std::ofstream file(m_logFilePath, std::ios::trunc);
+    if (!file.is_open()) return;
+
+    for (const auto& entry : m_logBuffer) {
+        const char* levelStr = "INFO";
+        switch (entry.level) {
+            case LogLevel::Debug: levelStr = "DEBUG"; break;
+            case LogLevel::Info: levelStr = "INFO"; break;
+            case LogLevel::Warning: levelStr = "WARN"; break;
+            case LogLevel::Error: levelStr = "ERROR"; break;
+            case LogLevel::Fatal: levelStr = "FATAL"; break;
+        }
+        file << "[" << levelStr << "] [" << entry.category << "] " 
+             << entry.message << "\n";
+    }
+    file.close();
 }
 
 } // namespace AIO::Emulator::Common

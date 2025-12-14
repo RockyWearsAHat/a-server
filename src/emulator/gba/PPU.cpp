@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 
 namespace AIO::Emulator::GBA {
 
     PPU::PPU(GBAMemory& mem) : memory(mem), cycleCounter(0), scanline(0), frameCount(0) {
-        // Initialize framebuffer with black
-        framebuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
+        // Initialize double buffers with black
+        backBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
+        frontBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
         // Initialize priority buffer (4 = backdrop, lowest priority)
         priorityBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 4);
     }
@@ -21,6 +23,18 @@ namespace AIO::Emulator::GBA {
         // 240 pixels + 68 HBlank = 308 pixels per line
         // 308 * 4 = 1232 cycles per line
         // 160 lines + 68 VBlank = 228 lines total
+        
+        static int updateCallCount = 0;
+        static int totalCyclesReceived = 0;
+        if (updateCallCount < 10) {
+            updateCallCount++;
+            totalCyclesReceived += cycles;
+            std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
+            dbg << "[PPU::Update #" << updateCallCount << "] cycles=" << cycles 
+                << " total=" << totalCyclesReceived << " cycleCounter=" << cycleCounter 
+                << " scanline=" << scanline << std::endl;
+            dbg.close();
+        }
         
         while (cycles > 0) {
             // Determine how many cycles we can advance in this step
@@ -74,7 +88,18 @@ namespace AIO::Emulator::GBA {
                 if (scanline >= 228) {
                     scanline = 0;
                     frameCount++;
-
+                    
+                    // Swap buffers after frame completion for thread-safe display
+                    SwapBuffers();
+                    
+                    // Log every frame completion
+                    static int frameLogCount = 0;
+                    if (frameLogCount < 100) {  // Log first 100 frames
+                        frameLogCount++;
+                        std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
+                        dbg << "[PPU FRAME #" << frameCount << "] Completed at cycles" << std::endl;
+                        dbg.close();
+                    }
                 }
                 
                 // Update VCOUNT
@@ -89,6 +114,7 @@ namespace AIO::Emulator::GBA {
 
                 if (isVBlank) {
                     dispstat |= 1; // Set VBlank
+                    // std::cout << "[PPU DISPSTAT VBlank=1] Scanline=" << scanline << " Frame=" << frameCount << std::endl;
                     
                     // Trigger VBlank IRQ on rising edge
                     if (!wasVBlank) {
@@ -120,10 +146,22 @@ namespace AIO::Emulator::GBA {
                         if (dispstat & 0x8) { // VBlank IRQ Enable
                             uint16_t if_reg = memory.Read16(0x04000202) | 1;
                             memory.WriteIORegisterInternal(0x202, if_reg);
+                            
+                            // Also set BIOS_IF for IntrWait/VBlankIntrWait
+                            uint16_t biosIF = memory.Read16(0x03007FF8) | 1;
+                            memory.Write16(0x03007FF8, biosIF);
+                            
+                            static int vblankCount = 0;
+                            if (++vblankCount % 60 == 0) { // Log every 60 frames = 1 second
+                                std::cout << "[PPU] VBlank #" << vblankCount << " Frame=" << frameCount << std::endl;
+                            }
                         }
                     }
                 } else {
                     dispstat &= ~1; // Clear VBlank
+                    if (wasVBlank) {
+                        // std::cout << "[PPU DISPSTAT VBlank=0] Scanline=" << scanline << " Frame=" << frameCount << std::endl;
+                    }
                 }
                 
                 // V-Counter Match
@@ -154,9 +192,36 @@ namespace AIO::Emulator::GBA {
         uint8_t b = ((backdropColor >> 10) & 0x1F) << 3;
         uint32_t backdropARGB = 0xFF000000 | (r << 16) | (g << 8) | b;
 
-        // Clear line with backdrop color
-        std::fill(framebuffer.begin() + scanline * SCREEN_WIDTH, 
-                  framebuffer.begin() + (scanline + 1) * SCREEN_WIDTH, 
+        static int backdropLogCount = 0;
+        if (backdropLogCount < 5 && scanline == 0) {
+            backdropLogCount++;
+            std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
+            dbg << "[PPU DrawScanline] scanline=0 backdropColor=0x" << std::hex << backdropColor 
+                << " RGB=(" << std::dec << (int)r << "," << (int)g << "," << (int)b << ")"
+                << " ARGB=0x" << std::hex << backdropARGB << std::endl;
+            // Sample first few pixels of the buffer after drawing
+            if (!backBuffer.empty()) {
+                dbg << "  Buffer[0]=0x" << std::hex << backBuffer[0] 
+                    << " Buffer[100]=0x" << backBuffer[100] 
+                    << " Buffer[1000]=0x" << backBuffer[1000] << std::endl;
+            }
+            dbg.close();
+        }
+
+                static int drawScanlineCount = 0;
+                if (drawScanlineCount < 5 && scanline < 5) {
+                    drawScanlineCount++;
+                    // Also dump palette from 0x05000000 directly
+                    uint16_t pal0 = memory.Read16(0x05000000);
+                    uint16_t pal1 = memory.Read16(0x05000002);
+                    uint16_t pal2 = memory.Read16(0x05000004);
+                    uint16_t pal3 = memory.Read16(0x05000006);
+                    std::cout << "[PPU DrawScanline] scanline=" << scanline << " backdrop=0x" << std::hex << backdropColor
+                              << " pal[0-3]=0x" << pal0 << "/0x" << pal1 << "/0x" << pal2 << "/0x" << pal3
+                              << " ARGB=0x" << backdropARGB << " mode=" << std::dec << mode << std::endl;
+                }        // Clear line with backdrop color
+        std::fill(backBuffer.begin() + scanline * SCREEN_WIDTH, 
+                  backBuffer.begin() + (scanline + 1) * SCREEN_WIDTH, 
                   backdropARGB);
         
         // Reset priority buffer for this scanline (4 = backdrop, lowest priority)
@@ -349,8 +414,8 @@ namespace AIO::Emulator::GBA {
                             if (inTileX & 1) colorIndex = (byte >> 4) & 0xF;
                             else colorIndex = byte & 0xF;
                         }
-                    }
 
+                    }
                     if (colorIndex != 0) {
                         // Check if OBJ layer is enabled by window settings at this pixel
                         if (!IsLayerEnabledAtPixel(screenX, scanline, 4)) {
@@ -379,7 +444,7 @@ namespace AIO::Emulator::GBA {
                             uint8_t g = ((color >> 5) & 0x1F) << 3;
                             uint8_t b = ((color >> 10) & 0x1F) << 3;
                             
-                            framebuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                            backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
                             // Update priority buffer (OBJ takes this priority slot)
                             priorityBuffer[pixelIndex] = priority;
                         }
@@ -505,7 +570,7 @@ namespace AIO::Emulator::GBA {
                         uint8_t g = ((color >> 5) & 0x1F) << 3;
                         uint8_t b = ((color >> 10) & 0x1F) << 3;
                         
-                        framebuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                        backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
                         priorityBuffer[pixelIndex] = bgPriority;
                     }
                 }
@@ -537,7 +602,7 @@ namespace AIO::Emulator::GBA {
             uint8_t g = ((color >> 5) & 0x1F) << 3;
             uint8_t b = ((color >> 10) & 0x1F) << 3;
             
-            framebuffer[scanline * SCREEN_WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            backBuffer[scanline * SCREEN_WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
     }
 
@@ -564,7 +629,7 @@ namespace AIO::Emulator::GBA {
                 uint8_t g = ((color >> 5) & 0x1F) << 3;
                 uint8_t b = ((color >> 10) & 0x1F) << 3;
                 
-                framebuffer[scanline * SCREEN_WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                backBuffer[scanline * SCREEN_WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
             // If colorIndex == 0, backdrop is already filled
         }
@@ -598,7 +663,7 @@ namespace AIO::Emulator::GBA {
                 uint8_t g = ((color >> 5) & 0x1F) << 3;
                 uint8_t b = ((color >> 10) & 0x1F) << 3;
                 
-                framebuffer[scanline * SCREEN_WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                backBuffer[scanline * SCREEN_WIDTH + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
         // Scanlines >= 128 will just show backdrop
@@ -656,6 +721,13 @@ namespace AIO::Emulator::GBA {
     void PPU::RenderMode0() {
         // Mode 0: Tiled, BG0-BG3
         uint16_t dispcnt = ReadRegister(0x00);
+        
+        static int renderMode0Count = 0;
+        if (renderMode0Count < 5) {
+            renderMode0Count++;
+            std::cout << "[PPU RenderMode0] DISPCNT=0x" << std::hex << dispcnt << " BG enables: 0x" 
+                      << ((dispcnt >> 8) & 0xF) << " scanline=" << std::dec << scanline << std::endl;
+        }
         
         // Render backgrounds from lowest priority to highest
         // BG priority is in bits 0-1 of BGxCNT (0 = highest, 3 = lowest)
@@ -815,8 +887,8 @@ namespace AIO::Emulator::GBA {
                         paletteAddr += (paletteBank * 32) + (colorIndex * 2);
                     } else {
                         paletteAddr += (colorIndex * 2);
-                    }
 
+                    }
                     uint16_t color = memory.Read16(paletteAddr);
                     
                     // Convert 15-bit BGR to 32-bit ARGB
@@ -825,7 +897,7 @@ namespace AIO::Emulator::GBA {
                     uint8_t g = ((color >> 5) & 0x1F) << 3;
                     uint8_t b = ((color >> 10) & 0x1F) << 3;
 
-                    framebuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                    backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
                     priorityBuffer[pixelIndex] = bgPriority;
                 }
             }
@@ -838,7 +910,13 @@ namespace AIO::Emulator::GBA {
     }
 
     const std::vector<uint32_t>& PPU::GetFramebuffer() const {
-        return framebuffer;
+        std::lock_guard<std::mutex> lock(bufferMutex);
+        return frontBuffer;
+    }
+    
+    void PPU::SwapBuffers() {
+        std::lock_guard<std::mutex> lock(bufferMutex);
+        std::swap(frontBuffer, backBuffer);
     }
     
     // Get window enable bits for a given pixel position
@@ -968,7 +1046,7 @@ namespace AIO::Emulator::GBA {
                 continue;
             }
             
-            uint32_t color = framebuffer[pixelIndex];
+            uint32_t color = backBuffer[pixelIndex];
             uint8_t r = (color >> 16) & 0xFF;
             uint8_t g = (color >> 8) & 0xFF;
             uint8_t b = color & 0xFF;
@@ -998,7 +1076,7 @@ namespace AIO::Emulator::GBA {
             // Mode 1 (alpha blending) requires knowing both layers at each pixel
             // which needs more complex tracking - skip for now
             
-            framebuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
     }
 

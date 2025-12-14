@@ -1,4 +1,10 @@
 {
+  "cmake.ctestEnabled": true,
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.generator": "Unix Makefiles",
+  "cmake.configureOnOpen": true
+}{
   "files.associations": {
     "iostream": "cpp",
     "ios": "cpp",

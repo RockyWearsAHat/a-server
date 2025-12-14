@@ -15,12 +15,8 @@ namespace AIO::Emulator::GBA {
         {"AMQJ", {"AMQJ", "Super Mario Advance 2", SaveType::EEPROM_64K, {{0x494, 0x03002BD0}, {0x560, 0x03002BD0}}}},
         
         // Super Mario Advance 2 (Alternate Version - e.g. Player's Choice)
-        // Same fix as AMQE - patch literal pools to match ISR write address
-        // IMPORTANT: Use 0x03002BD0 because LDRH needs aligned address
-        {"AA2E", {"AA2E", "Super Mario Advance 2 (Alt)", SaveType::EEPROM_64K, {
-            {0x494, 0x03002BD0},   // Setup code: R8 base address
-            {0x560, 0x03002BD0}    // Main loop: LDRH watch address
-        }}},
+        // Same patches as other versions - the main loop address mismatch affects all versions
+        {"AA2E", {"AA2E", "Super Mario Advance 2 (Alt)", SaveType::EEPROM_64K, {{0x494, 0x03002BD0}, {0x560, 0x03002BD0}}}},
 
         // Donkey Kong Country
         {"BDQE", {"BDQE", "Donkey Kong Country", SaveType::EEPROM_64K, {}}},

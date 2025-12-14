@@ -1,5 +1,6 @@
 #include <emulator/gba/APU.h>
 #include <emulator/gba/GBAMemory.h>
+#include <emulator/gba/IORegs.h>
 #include <iostream>
 #include <cstring>
 
@@ -61,8 +62,8 @@ namespace AIO::Emulator::GBA {
 
     void APU::Update(int cycles) {
         // Read current sound control registers
-        soundcntX = memory.Read16(0x04000084);
-        soundcntH = memory.Read16(0x04000082);
+        soundcntX = memory.Read16(IORegs::REG_SOUNDCNT_X);
+        soundcntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
         
         // Nothing else to do here - samples are pushed on timer overflow
     }
@@ -72,7 +73,7 @@ namespace AIO::Emulator::GBA {
         overflowCount++;
         
         // Read SOUNDCNT_H to check which timer each FIFO uses
-        uint16_t scntH = memory.Read16(0x04000082);
+        uint16_t scntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
         
         // FIFO A uses timer specified in bit 10 (0=Timer0, 1=Timer1)
         int fifoATimer = (scntH >> 10) & 1;
@@ -81,8 +82,8 @@ namespace AIO::Emulator::GBA {
         
         // Read Timer 0 registers (or Timer 1 depending on which is used for audio)
         int audioTimer = fifoATimer; // Use FIFO A's timer for rate calculation
-        uint16_t tmReload = memory.Read16(0x04000100 + audioTimer * 4);
-        uint16_t tmControl = memory.Read16(0x04000102 + audioTimer * 4);
+        uint16_t tmReload = memory.Read16(IORegs::BASE + IORegs::TM0CNT_L + audioTimer * IORegs::TIMER_CHANNEL_SIZE);
+        uint16_t tmControl = memory.Read16(IORegs::BASE + IORegs::TM0CNT_H + audioTimer * IORegs::TIMER_CHANNEL_SIZE);
         
         // Calculate the actual sample rate from timer configuration
         int prescaler = 1;
@@ -122,7 +123,7 @@ namespace AIO::Emulator::GBA {
         }
         
         // Check if master sound is enabled
-        uint16_t scntX = memory.Read16(0x04000084);
+        uint16_t scntX = memory.Read16(IORegs::REG_SOUNDCNT_X);
         if (!(scntX & 0x80)) {
             PushSample(0, 0);
             return;

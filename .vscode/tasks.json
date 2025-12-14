@@ -2,13 +2,53 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build AIO Server",
+      "label": "Build",
       "type": "shell",
       "command": "make",
-      "args": [],
-      "isBackground": false,
-      "problemMatcher": ["$gcc"],
-      "group": "build"
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "CTest",
+      "type": "shell",
+      "command": "ctest",
+      "args": ["--output-on-failure"],
+      "options": { "cwd": "${workspaceFolder}/build" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Test",
+      "type": "shell",
+      "command": "echo Running tests",
+      "dependsOn": ["Build", "CTest"],
+      "group": { "kind": "test" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Clean Workspace",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/clean.sh",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build" },
+      "problemMatcher": []
+    },
+    {
+      "label": "CPUTests",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/bin/CPUTests",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "test" },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "EEPROMTests",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/bin/EEPROMTests",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "test" },
+      "problemMatcher": ["$gcc"]
     }
   ]
 }

@@ -1,5 +1,6 @@
 #include <emulator/gba/Fuzzer.h>
 #include <emulator/gba/GBA.h>
+#include <emulator/gba/IORegs.h>
 #include <emulator/gba/Logger.h>
 #include <iostream>
 #include <fstream>
@@ -172,9 +173,9 @@ void Fuzzer::RunMemFuzz(const std::string& romPath, int iterations) {
         if (event == 0) {
             // We can't easily fire IRQ from outside without access to internal state.
             // But we can write to IF register.
-            uint16_t if_val = gba.ReadMem16(0x04000202);
+                uint16_t if_val = gba.ReadMem16(IORegs::REG_IF);
             if_val |= (1 << (eventDist(rng) % 14));
-            gba.WriteMem16(0x04000202, if_val);
+                gba.WriteMem16(IORegs::REG_IF, if_val);
             // Logger::Log(LogCategory::IRQ, "[Fuzzer] Injected IRQ");
         }
         

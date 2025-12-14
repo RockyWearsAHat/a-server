@@ -1,5 +1,7 @@
 #include <emulator/gba/ARM7TDMI.h>
 #include <emulator/gba/GBAMemory.h>
+#include <emulator/gba/IORegs.h>
+#include <emulator/common/Logger.h>
 #include <cstring>
 #include <cmath>
 #include <iostream>
@@ -7,6 +9,8 @@
 #include <deque>
 
 namespace AIO::Emulator::GBA {
+    using AIO::Emulator::Common::Logger;
+    using AIO::Emulator::Common::LogLevel;
 
     // Branch logging - used for debugging invalid jumps and crash logs
     static std::deque<std::pair<uint32_t, uint32_t>> branchLog;
@@ -14,9 +18,30 @@ namespace AIO::Emulator::GBA {
     // Crash notification callback (set by GUI)
     void (*CrashPopupCallback)(const char* logPath) = nullptr;
     
+    static GBAMemory* g_memoryForLog = nullptr;
+    static bool g_thumbModeForLog = false;
+    
     static void LogBranch([[maybe_unused]] uint32_t from, [[maybe_unused]] uint32_t to) {
         branchLog.push_back({from, to});
         if (branchLog.size() > 50) branchLog.pop_front();
+
+        // Log branches beyond actual ROM size (4MB = 0x08000000 + 0x400000 = 0x08400000)
+        if (to >= 0x08400000 && to < 0x0E000000) {
+            uint32_t instr = 0;
+            if (g_memoryForLog) {
+                instr = g_thumbModeForLog ? g_memoryForLog->ReadInstruction16(from & ~1) : g_memoryForLog->ReadInstruction32(from & ~3);
+            }
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "BRANCH BEYOND ROM: from=0x%08x to=0x%08x instr=0x%08x thumbMode=%d", from, to, instr, g_thumbModeForLog);
+        }
+
+        // Log branches to data regions (lookup table areas)
+        if ((to >= 0x08125C00 && to < 0x08127000)) {
+            uint32_t instr = 0;
+            if (g_memoryForLog) {
+                instr = g_thumbModeForLog ? g_memoryForLog->ReadInstruction16(from & ~1) : g_memoryForLog->ReadInstruction32(from & ~3);
+            }
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "BRANCH TO DATA SECTION: from=0x%08x to=0x%08x instr=0x%08x thumbMode=%d", from, to, instr, g_thumbModeForLog);
+        }
 
         bool valid = (to >= 0x08000000 && to < 0x0E000000) ||
                      (to >= 0x03000000 && to < 0x04000000) ||
@@ -24,7 +49,7 @@ namespace AIO::Emulator::GBA {
                      (to < 0x4000) ||
                      ((to & 0xFFFFFF00) == 0xFFFFFF00);
         if (!valid) {
-            std::cerr << "BAD BRANCH: 0x" << std::hex << from << " -> 0x" << to << std::dec << std::endl;
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "BAD BRANCH TO INVALID MEMORY: 0x%08x -> 0x%08x", from, to);
         }
     }
 
@@ -36,7 +61,7 @@ namespace AIO::Emulator::GBA {
 
     void ARM7TDMI::Reset() {
         std::memset(registers, 0, sizeof(registers));
-        cpsr = 0x1F; // System Mode
+        cpsr = CPUMode::SYSTEM; // System Mode
         spsr = 0;
         thumbMode = false;
         halted = false;
@@ -51,58 +76,106 @@ namespace AIO::Emulator::GBA {
         r13_usr = 0x03007F00;
         r14_usr = 0;
 
-        // Skip BIOS for now, start at ROM entry
-        registers[15] = 0x08000000; 
-        registers[13] = r13_usr; // Initialize SP (User/System)
+        // DirectBoot mode: Skip BIOS and jump straight to ROM entry (0x08000000)
+        // Hardware state is initialized by GBAMemory::Reset() to match what BIOS would set up
+        registers[Register::PC] = 0x08000000; 
+        registers[Register::SP] = r13_usr; // Initialize SP (User/System)
     }
 
     void ARM7TDMI::SwitchMode(uint32_t newMode) {
-        uint32_t oldMode = cpsr & 0x1F;
+        uint32_t oldMode = GetCPUMode(cpsr);
         if (oldMode == newMode) return;
 
         // Save current registers to bank
         switch (oldMode) {
-            case 0x10: case 0x1F: // User/System
-                r13_usr = registers[13];
-                r14_usr = registers[14];
+            case CPUMode::USER: case CPUMode::SYSTEM: // User/System
+                r13_usr = registers[Register::SP];
+                r14_usr = registers[Register::LR];
                 break;
-            case 0x12: // IRQ
-                r13_irq = registers[13];
-                r14_irq = registers[14];
+            case CPUMode::IRQ:
+                r13_irq = registers[Register::SP];
+                r14_irq = registers[Register::LR];
                 spsr_irq = spsr;
+                
+                // Debug: Track IRQ stack changes with detailed context
+                static uint32_t last_r13_irq = 0x03007FA0;
+                if (r13_irq != last_r13_irq) {
+                    std::cerr << "[MODE SWITCH SAVE] IRQ SP changed: 0x" << std::hex << last_r13_irq 
+                              << " -> 0x" << r13_irq << " (from registers[13]=0x" << registers[Register::SP]
+                              << ") PC=0x" << registers[15] << std::dec << std::endl;
+                    last_r13_irq = r13_irq;
+                }
                 break;
-            case 0x13: // Supervisor
-                r13_svc = registers[13];
-                r14_svc = registers[14];
+            case CPUMode::SUPERVISOR:
+                r13_svc = registers[Register::SP];
+                r14_svc = registers[Register::LR];
                 spsr_svc = spsr;
                 break;
         }
 
         // Load new registers from bank
         switch (newMode) {
-            case 0x10: case 0x1F: // User/System
-                registers[13] = r13_usr;
-                registers[14] = r14_usr;
+            case CPUMode::USER: case CPUMode::SYSTEM: // User/System
+                registers[Register::SP] = r13_usr;
+                registers[Register::LR] = r14_usr;
                 break;
-            case 0x12: // IRQ
-                registers[13] = r13_irq;
-                registers[14] = r14_irq;
+            case CPUMode::IRQ:
+                std::cerr << "[MODE SWITCH LOAD] Loading IRQ mode: r13_irq=0x" << std::hex << r13_irq 
+                          << " r14_irq=0x" << r14_irq << " PC=0x" << registers[15] << std::dec << std::endl;
+                registers[Register::SP] = r13_irq;
+                std::cerr << "[MODE SWITCH LOAD] After assignment: registers[13]=0x" << std::hex << registers[Register::SP] << std::dec << std::endl;
+                registers[Register::LR] = r14_irq;
                 spsr = spsr_irq;
+                
+                // Safety check: IRQ stack should never be 0
+                if (registers[Register::SP] == 0) {
+                    std::cerr << "[FATAL] IRQ stack corrupted! r13_irq=0x" << std::hex << r13_irq 
+                              << " Re-initializing to 0x03007FA0 PC=0x" << registers[15] 
+                              << std::dec << std::endl;
+                    r13_irq = 0x03007FA0;
+                    registers[Register::SP] = r13_irq;
+                }
+                
+                // Debug: Log IRQ mode entry
+                static int irq_entry_count = 0;
+                if (irq_entry_count++ < 10) {
+                    std::cerr << "[MODE SWITCH] Entering IRQ mode, SP=0x" << std::hex 
+                              << registers[Register::SP] << " PC=0x" << registers[15] 
+                              << std::dec << std::endl;
+                }
                 break;
-            case 0x13: // Supervisor
-                registers[13] = r13_svc;
-                registers[14] = r14_svc;
+            case CPUMode::SUPERVISOR:
+                registers[Register::SP] = r13_svc;
+                registers[Register::LR] = r14_svc;
                 spsr = spsr_svc;
                 break;
         }
 
-        cpsr = (cpsr & ~0x1F) | newMode;
+        SetCPUMode(cpsr, newMode);
     }
 
     void ARM7TDMI::CheckInterrupts() {
-        uint16_t ime = memory.Read16(0x04000208);
-        uint16_t ie = memory.Read16(0x04000200);
-        uint16_t if_reg = memory.Read16(0x04000202);
+        // Log if we're about to check interrupts during BIOS execution
+        if (registers[15] >= 0x180 && registers[15] < 0x1d0) {
+            uint16_t ie = memory.Read16(IORegs::REG_IE);
+            uint16_t if_reg = memory.Read16(IORegs::REG_IF);
+            uint16_t ime = memory.Read16(IORegs::REG_IME);
+            std::cerr << "[CheckInterrupts during BIOS] PC=0x" << std::hex << registers[15]
+                      << " IE=0x" << ie << " IF=0x" << if_reg << " IME=0x" << ime 
+                      << " IRQDisabled=" << IRQDisabled(cpsr) << std::dec << std::endl;
+        }
+        
+        uint16_t ime = memory.Read16(IORegs::REG_IME);
+        uint16_t ie = memory.Read16(IORegs::REG_IE);
+        uint16_t if_reg = memory.Read16(IORegs::REG_IF);
+
+        // Debug logging (throttled)
+        // static int debugCount = 0;
+        // if (debugCount++ == 0 || debugCount % 60000 == 0) {
+        //     std::cout << "[CheckIRQ] IME=" << ime << " IE=0x" << std::hex << ie 
+        //               << " IF=0x" << if_reg << " CPSR.I=" << (IRQDisabled(cpsr) ? 1 : 0)
+        //               << " PC=0x" << registers[15] << std::dec << std::endl;
+        // }
 
         // Wake from halt if any enabled interrupt is pending
         if (halted && (ie & if_reg)) {
@@ -110,7 +183,7 @@ namespace AIO::Emulator::GBA {
         }
 
         if (!(ime & 1)) return;
-        if (cpsr & 0x80) return; // IRQ disabled in CPSR
+        if (IRQDisabled(cpsr)) return; // IRQ disabled in CPSR
 
         if (ie & if_reg) {
             // Calculate triggered interrupts NOW before PPU/Timers run
@@ -121,53 +194,148 @@ namespace AIO::Emulator::GBA {
             uint32_t biosIF = memory.Read32(0x03007FF8);
             memory.Write32(0x03007FF8, biosIF | triggered);
             
+            // std::cout << "[IRQ ENTRY] Triggered=0x" << std::hex << triggered << " BIOS_IF updated=0x" << (biosIF | triggered) << std::dec << std::endl;
+            
             // Also write to a scratch location the BIOS can read
             // We'll use 0x03007FF4 as a temp storage for triggered bits
             memory.Write16(0x03007FF4, triggered);
             
+            // Capture current execution state before switching modes
+            const bool wasThumb = thumbMode;
+
             // Save CPSR to SPSR_irq
             uint32_t oldCpsr = cpsr;
-            if (thumbMode) oldCpsr |= 0x20; else oldCpsr &= ~0x20;
+            SetCPSRFlag(oldCpsr, CPSR::FLAG_T, wasThumb);
             
             // Switch to IRQ Mode
-            SwitchMode(0x12);
+            SwitchMode(CPUMode::IRQ);
             spsr = oldCpsr;
             spsr_irq = oldCpsr; // Also save to banked SPSR for System Mode return
             
             // Disable Thumb, enable IRQ mask
             thumbMode = false;
-            cpsr &= ~0x20;
-            cpsr |= 0x80;
+            SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
+            SetCPSRFlag(cpsr, CPSR::FLAG_I, true);
+
+            // Calculate return address with correct pipeline offset based on
+            // the execution state *before* switching to IRQ mode.
+            registers[Register::LR] = registers[15] + (wasThumb ? 2 : 4);
+            r14_irq = registers[Register::LR]; // CRITICAL: Update banked LR_irq!
+            std::cerr << "[IRQ SETUP] After LR assignment: LR=0x" << std::hex << registers[Register::LR] 
+                      << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
             
-            // Calculate return address (LR = PC_next + 4)
-            // registers[15] points to the next instruction to be executed
-            registers[14] = registers[15] + 4;
+            // std::cout << "[IRQ EXIT] LR=0x" << std::hex << registers[Register::LR] 
+            //           << " Jumping to BIOS IRQ=0x" << ExceptionVector::IRQ << std::dec << std::endl;
             
-            // Jump to BIOS IRQ Trampoline at 0x180
-            registers[15] = 0x180;
+            // Jump to BIOS IRQ Trampoline at ExceptionVector::IRQ
+            registers[Register::PC] = ExceptionVector::IRQ;
+            std::cerr << "[IRQ SETUP] After PC assignment: PC=0x" << std::hex << registers[Register::PC] 
+                      << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
         }
     }
 
+    // Public wrapper to allow emulation core to service IRQs immediately after
+    // peripherals (PPU/Timers/APU) update, reducing latency in tight polling loops.
+    void ARM7TDMI::PollInterrupts() {
+        CheckInterrupts();
+    }
+
     void ARM7TDMI::Step() {
+        // Record CPU state snapshot only when debugger features are active (breakpoints or single-step)
+        static const size_t kMaxHistory = 1024;
+        const bool recordHistory = singleStep || !breakpoints.empty();
+        if (recordHistory) {
+            cpuHistory.push_back({});
+            auto &s = cpuHistory.back();
+            for (int i = 0; i < 16; ++i) s.registers[i] = registers[i];
+            s.cpsr = cpsr;
+            s.spsr = spsr;
+            s.thumbMode = thumbMode;
+            if (cpuHistory.size() > kMaxHistory) cpuHistory.erase(cpuHistory.begin());
+        }
         static uint32_t lastPC = 0;
+
+        // Breakpoint / single-step handling
+        uint32_t bpPC = registers[15];
+        for (auto addr : breakpoints) {
+            if (bpPC == addr) {
+                halted = true;
+                std::cout << "[BREAKPOINT] Hit at PC=0x" << std::hex << bpPC << std::dec << std::endl;
+                DumpState(std::cout);
+                return;
+            }
+        }
+        if (singleStep) {
+            // Execute exactly one instruction then halt
+            singleStep = false;
+            // fall-through to instruction execution
+        }
         
-        // Sanity Check SP
+        // Sanity Check SP - crash with detailed diagnostics
         if (registers[13] == 0) {
-             std::cerr << "[FATAL] SP is 0! CPSR=0x" << std::hex << cpsr << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
+             std::cerr << "\n[FATAL] SP is 0! CPSR=0x" << std::hex << cpsr << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
              std::cerr << "Last PC: 0x" << std::hex << lastPC << std::dec << std::endl;
-             std::cerr << "PC: 0x" << std::hex << registers[15] << std::dec << std::endl;
+             std::cerr << "Current PC: 0x" << std::hex << registers[15] << std::dec << std::endl;
+             std::cerr << "Thumb mode: " << (thumbMode ? "YES" : "NO") << std::endl;
+             std::cerr << "r13_irq: 0x" << std::hex << r13_irq << std::dec << std::endl;
+             std::cerr << "r13_usr: 0x" << std::hex << r13_usr << std::dec << std::endl;
              
-             // Dump Instructions around Last PC
-             std::cerr << "Code around Last PC (0x" << lastPC << "):" << std::endl;
-             for (int i = -16; i <= 16; i+=2) {
-                 uint32_t addr = lastPC + i;
-                 if (addr >= 0x08000000) {
-                     uint16_t val = memory.Read16(addr);
-                     std::cerr << "0x" << addr << ": " << val << (i==0 ? " <--" : "") << std::endl;
-                 }
+             // Show the instruction that's about to execute
+             if (registers[15] < 0x4000) {
+                 uint32_t opcode = memory.Read32(registers[15]);
+                 std::cerr << "Next instruction at PC: 0x" << std::hex << opcode << std::dec << std::endl;
              }
+             
+             // Dump memory around IRQ stack to see if it's been overwritten
+             std::cerr << "\nMemory at IRQ stack base (0x03007FA0):" << std::endl;
+             for (uint32_t addr = 0x03007FA0; addr < 0x03007FC0; addr += 4) {
+                 uint32_t val = memory.Read32(addr);
+                 std::cerr << "  0x" << std::hex << addr << ": 0x" << val << std::dec << std::endl;
+             }
+             
+             std::cerr << "\n** SP CORRUPTION DETECTED - IRQ stack has been overwritten. **\n" << std::endl;
              exit(1);
         }
+        
+        // Log BIOS IRQ return path (0x1c0-0x1d0) with LR value
+        if (registers[15] >= 0x1c0 && registers[15] <= 0x1d0) {
+            std::cerr << "[BIOS IRQ RETURN] PC=0x" << std::hex << registers[15] 
+                      << " SP=0x" << registers[13] 
+                      << " LR_irq=0x" << r14_irq 
+                      << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
+        }
+        
+        // Log ALL BIOS trampoline execution (0x180-0x1d0)
+        if (registers[15] >= 0x180 && registers[15] < 0x1d0) {
+            uint32_t nextInstr = memory.ReadInstruction32(registers[15]);
+            std::cerr << "[BIOS TRAMPOLINE] PC=0x" << std::hex << registers[15]
+                      << " Instr=0x" << nextInstr
+                      << " SP=0x" << registers[13]
+                      << " R3=0x" << registers[3]
+                      << " R7=0x" << registers[7]
+                      << " LR=0x" << registers[14]
+                      << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
+            
+            // At 0x1b4, we load the user IRQ handler from [R3+4]
+            if (registers[15] == 0x1b4) {
+                uint32_t handlerAddr = memory.Read32(registers[3] + 4);
+                std::cerr << "[BIOS] Loading IRQ handler from 0x" << std::hex << (registers[3] + 4)
+                          << " -> 0x" << handlerAddr << std::dec << std::endl;
+            }
+        }
+        
+        // Log jumps near the crash location (0x809e390-0x809e3a0)
+        if (registers[15] >= 0x809e390 && registers[15] <= 0x809e3a0) {
+            uint32_t instr = memory.ReadInstruction32(registers[15]);
+            std::cerr << "[NEAR CRASH LOCATION] PC=0x" << std::hex << registers[15]
+                      << " SP=0x" << registers[13]
+                      << " LR_irq=0x" << r14_irq
+                      << " Mode=0x" << (cpsr & 0x1F)
+                      << " Instruction=0x" << instr << std::dec << std::endl;
+        }
+        
+        // Disable verbose step logging - too much output
+        // std::cerr << "[Step PC=0x" << std::hex << registers[15] << " SP=0x" << registers[13] << std::dec << "]" << std::endl;
 
         CheckInterrupts();
 
@@ -250,26 +418,28 @@ namespace AIO::Emulator::GBA {
         
         // Trace early ROM startup (first 100 instructions from 0x08000000)
         static int earlyTraceCount = 0;
-        if (pc >= 0x08000000 && pc <= 0x08000200 && earlyTraceCount < 100) {
-            earlyTraceCount++;
-            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
-            std::cout << "[EarlyTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
-                      << " R0=0x" << registers[0] << " R1=0x" << registers[1]
-                      << " R13=0x" << registers[13] << " LR=0x" << registers[14]
-                      << std::dec << std::endl;
-        }
+            // DISABLED: Too verbose during boot
+            // if (pc >= 0x08000000 && pc <= 0x08000200 && earlyTraceCount < 100) {
+            //     earlyTraceCount++;
+            //     uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            //     std::cout << "[EarlyTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+            //               << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+            //               << " R13=0x" << registers[13] << " LR=0x" << registers[14]
+            //               << std::dec << std::endl;
+            // }
         
         // Trace 0x800023d to 0x8000996 (before DMA#1)
         static int preDmaTraceCount = 0;
-        if (pc >= 0x0800023c && pc <= 0x080009a0 && preDmaTraceCount < 200) {
-            preDmaTraceCount++;
-            uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
-            std::cout << "[PreDMA] PC=0x" << std::hex << pc << " Instr=0x" << instr 
-                      << " R0=0x" << registers[0] << " R1=0x" << registers[1]
-                      << " R2=0x" << registers[2] << " R3=0x" << registers[3]
-                      << " SP=0x" << registers[13]
-                      << (thumbMode?" T":" A") << std::dec << std::endl;
-        }
+            // DISABLED: Too verbose during boot
+            // if (pc >= 0x0800023c && pc <= 0x080009a0 && preDmaTraceCount < 200) {
+            //     preDmaTraceCount++;
+            //     uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
+            //     std::cout << "[PreDMA] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+            //               << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+            //               << " R2=0x" << registers[2] << " R3=0x" << registers[3]
+            //               << " SP=0x" << registers[13]
+            //               << (thumbMode?" T":" A") << std::dec << std::endl;
+            // }
         
         // Trace the entry point 0x30032b0 to 0x3003400 (expanded to cover branch targets)
         if (pc >= 0x30032b0 && pc <= 0x3003400 && !crashTraceEnabled) {
@@ -306,7 +476,18 @@ namespace AIO::Emulator::GBA {
 
         lastPC = pc;
 
+        // BIOS HLE: Direct BIOS calls are problematic because games may call
+        // intermediate BIOS addresses that we don't handle correctly.
+        // For now, disable direct BIOS intercept - games should use SWI instead.
+        // TODO: Implement full BIOS ROM or more complete HLE
+        // if (pc < 0x4000) {
+        //     ExecuteBIOSFunction(pc);
+        //     return;
+        // }
+
         if (thumbMode) {
+            g_memoryForLog = &memory;
+            g_thumbModeForLog = true;
             uint16_t instruction = memory.ReadInstruction16(pc);
             
             // DEBUG: Trace instruction at PC near 0x80323c6 (disabled)
@@ -318,9 +499,71 @@ namespace AIO::Emulator::GBA {
             registers[15] += 2;
             DecodeThumb(instruction);
         } else {
+            g_memoryForLog = &memory;
+            g_thumbModeForLog = false;
             uint32_t instruction = memory.ReadInstruction32(pc);
             registers[15] += 4;
             Decode(instruction);
+        }
+    }
+
+    void ARM7TDMI::StepBack() {
+        if (cpuHistory.size() < 2) return; // Need previous state
+        // Pop current snapshot, restore previous
+        cpuHistory.pop_back();
+            auto &s = cpuHistory.back();
+        // Restore IWRAM first
+            // Lazy IWRAM snapshot: capture current IWRAM when debugger actually uses StepBack
+            // This way IWRAM snapshotting only happens in debugger mode, not during normal play
+            if (s.iwram.empty()) {
+                s.iwram.resize(0x8000);
+                for (size_t off = 0; off < 0x8000; ++off) {
+                    s.iwram[off] = memory.Read8(0x03000000 + (uint32_t)off);
+                }
+            } else {
+                // Restore IWRAM from previous snapshot
+                for (size_t off = 0; off < s.iwram.size(); ++off) {
+                    memory.Write8(0x03000000 + (uint32_t)off, s.iwram[off]);
+                }
+            }
+        for (int i = 0; i < 16; ++i) registers[i] = s.registers[i];
+        cpsr = s.cpsr;
+        spsr = s.spsr;
+        thumbMode = s.thumbMode;
+        halted = true; // stay halted in debugger
+    }
+
+    // Debugger API implementations
+    void ARM7TDMI::AddBreakpoint(uint32_t addr) {
+        breakpoints.push_back(addr);
+    }
+    void ARM7TDMI::RemoveBreakpoint(uint32_t addr) {
+        breakpoints.erase(std::remove(breakpoints.begin(), breakpoints.end(), addr), breakpoints.end());
+    }
+    void ARM7TDMI::ClearBreakpoints() { breakpoints.clear(); }
+    const std::vector<uint32_t>& ARM7TDMI::GetBreakpoints() const { return breakpoints; }
+    void ARM7TDMI::SetSingleStep(bool enabled) { singleStep = enabled; }
+    bool ARM7TDMI::IsSingleStep() const { return singleStep; }
+    void ARM7TDMI::Continue() { halted = false; }
+    void ARM7TDMI::DumpState(std::ostream& os) const {
+        os << std::hex;
+        os << "CPSR=0x" << cpsr << " Thumb=" << thumbMode << "\n";
+        for (int i = 0; i < 16; ++i) os << "R" << i << "=0x" << registers[i] << (i==15?"":" ");
+        os << std::dec << "\n";
+        // Dump a small window of ROM around PC
+        uint32_t pc = registers[15];
+        os << "Disasm window around PC:" << "\n";
+        for (int i = -8; i <= 8; i += (thumbMode?2:4)) {
+            uint32_t addr = pc + i;
+            if (addr >= 0x08000000) {
+                if (thumbMode) {
+                    uint16_t op = memory.Read16(addr);
+                    os << "  0x" << std::hex << addr << ": 0x" << op << (i==0?" <--":"") << std::dec << "\n";
+                } else {
+                    uint32_t op = memory.Read32(addr);
+                    os << "  0x" << std::hex << addr << ": 0x" << op << (i==0?" <--":"") << std::dec << "\n";
+                }
+            }
         }
     }
 
@@ -329,56 +572,34 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::Decode(uint32_t instruction) {
-        // Check Condition Code (Bits 31-28)
-        uint32_t cond = (instruction >> 28) & 0xF;
+        // Extract Condition Code (CPSR[31:28])
+        uint32_t cond = ExtractBits(instruction, ARMInstructionFormat::COND_SHIFT, 0xF);
         
-        if (cond != 0xE) { // Optimization: AL (Always) is most common
-            if (!CheckCondition(cond)) {
+        if (cond != Condition::AL) { // Optimization: AL (Always) is most common
+            if (!ConditionSatisfied(cond, cpsr)) {
                 return; // Condition failed, instruction acts as NOP
             }
         }
 
-        // Identify Instruction Type
+        // Identify Instruction Type based on GBATEK specification
         // Branch and Exchange (BX): xxxx 0001 0010 xxxx xxxx xxxx 0001 xxxx
-        if ((instruction & 0x0FFFFFF0) == 0x012FFF10) {
+        if ((instruction & ARMInstructionFormat::BX_MASK) == ARMInstructionFormat::BX_PATTERN) {
             ExecuteBX(instruction);
         }
         // Branch: xxxx 101x xxxx xxxx xxxx xxxx xxxx xxxx
-        else if ((instruction & 0x0E000000) == 0x0A000000) {
+        else if ((instruction & ARMInstructionFormat::B_MASK) == ARMInstructionFormat::B_PATTERN) {
             ExecuteBranch(instruction);
         } 
         // Multiply: xxxx 0000 00xx xxxx xxxx 1001 xxxx
-        else if ((instruction & 0x0FC000F0) == 0x00000090) {
+        else if ((instruction & ARMInstructionFormat::MUL_MASK) == ARMInstructionFormat::MUL_PATTERN) {
             ExecuteMultiply(instruction);
         }
         // Multiply Long: xxxx 0000 1xxx xxxx xxxx 1001 xxxx
-        else if ((instruction & 0x0F8000F0) == 0x00800090) {
+        else if ((instruction & ARMInstructionFormat::MULL_MASK) == ARMInstructionFormat::MULL_PATTERN) {
             ExecuteMultiplyLong(instruction);
         }
-        // Halfword Data Transfer: xxxx 000x xxxx xxxx xxxx 1011 xxxx
-        // Note: Bit 22 (I/Immediate) distinguishes from Multiply? No.
-        // Mul: 0000 00AS ... 1001 ...
-        // Halfword: 000P U1WI ... 1SH1 ...
-        // Halfword Register: 000P U0WI ... 1SH1 ...
-        // Common: 000x ... 1xx1 ...
-        // Mul has bits 7-4 as 1001. Halfword has 1011 or 1101 or 1111.
-        // So checking (instruction & 0x0E000090) == 0x00000090 covers both?
-        // No, 0x90 is 1001 0000.
-        // Mul: 1001 (9). Halfword: 1011 (B), 1101 (D), 1111 (F).
-        // My Halfword check was: (instruction & 0x0E000090) == 0x00000090.
-        // This matches 9, B, D, F.
-        // So it matches Multiply too!
-        // But Multiply is checked before.
-        // So if we move this check here, it will catch Halfword (B, D, F) and ignore Multiply (9) because Multiply is already handled?
-        // Wait, if I move it here, I must ensure it doesn't match Data Processing that happens to have bits 7-4 as 1xx1.
-        // Data Processing: 00xx ...
-        // If Opcode makes it look like Halfword?
-        // SWP is also here.
-        // Let's use a stricter check for Halfword.
-        // Bits 7 and 4 must be 1.
-        // Bit 6 (S) and 5 (H) cannot be both 0 (SWP).
-        // So (instruction & 0x60) != 0.
-        else if ((instruction & 0x0E000090) == 0x00000090 && (instruction & 0x60) != 0) {
+        // Halfword / Signed Data Transfer: (bits27-25=000, bits7=1, bit4=1)
+        else if ((instruction & 0x0E000090) == 0x00000090) {
             ExecuteHalfwordDataTransfer(instruction);
         }
         // MRS: xxxx 0001 0x00 1111 xxxx 0000 0000 0000
@@ -394,22 +615,19 @@ namespace AIO::Emulator::GBA {
             ExecuteMSR(instruction);
         }
         // Data Processing: xxxx 00xx xxxx xxxx xxxx xxxx xxxx xxxx
-        // Exclude Multiply (xxxx 0000 00xx xxxx xxxx 1001 xxxx) and Halfword Transfer (xxxx 000x xxxx xxxx xxxx 1011 xxxx)
-        else if ((instruction & 0x0C000000) == 0x00000000) {
-             // Simple check for now, assuming valid Data Proc if not Mul/Halfword
-             // TODO: Add stricter checks for Multiply and Halfword Transfer
-             ExecuteDataProcessing(instruction);
+        else if ((instruction & ARMInstructionFormat::DP_MASK) == ARMInstructionFormat::DP_PATTERN) {
+            ExecuteDataProcessing(instruction);
         }
         // Single Data Transfer: xxxx 01xx xxxx xxxx xxxx xxxx xxxx xxxx
-        else if ((instruction & 0x0C000000) == 0x04000000) {
+        else if ((instruction & ARMInstructionFormat::SDT_MASK) == ARMInstructionFormat::SDT_PATTERN) {
             ExecuteSingleDataTransfer(instruction);
         }
         // Block Data Transfer: xxxx 100x xxxx xxxx xxxx xxxx xxxx xxxx
-        else if ((instruction & 0x0E000000) == 0x08000000) {
+        else if ((instruction & ARMInstructionFormat::BDT_MASK) == ARMInstructionFormat::BDT_PATTERN) {
             ExecuteBlockDataTransfer(instruction);
         }
         // Software Interrupt: xxxx 1111 xxxx xxxx xxxx xxxx xxxx xxxx
-        else if ((instruction & 0x0F000000) == 0x0F000000) {
+        else if ((instruction & ARMInstructionFormat::SWI_MASK) == ARMInstructionFormat::SWI_PATTERN) {
             ExecuteSWI((instruction >> 16) & 0xFF);
         }
         else {
@@ -422,34 +640,23 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::ExecuteBranch(uint32_t instruction) {
-        // Format: Cond | 101 | L | Offset
-        bool link = (instruction >> 24) & 1;
-        int32_t offset = instruction & 0xFFFFFF;
-
-        // Sign extend 24-bit offset to 32-bit
-        if (offset & 0x800000) {
-            offset |= 0xFF000000;
-        }
+        // ARM Branch Format: Cond[31:28] | 101[27:25] | L[24] | Offset[23:0]
+        bool link = (instruction & ARMInstructionFormat::BL_BIT) != 0;
+        int32_t offset = ExtractBranchOffset(instruction);
 
         // Shift left by 2 (word aligned)
         offset <<= 2;
 
-        // PC is already +4 from fetch, but pipeline behavior means PC is effectively +8 during execution
-        // So target = (PC + 4) + offset
-        // Wait, in Step() we did registers[15] += 4.
-        // The PC value used for calculation should be the address of the current instruction + 8.
-        // Current PC in registers[15] is (InstructionAddr + 4).
-        // So we need to add another 4 to simulate the pipeline effect for the calculation.
-        
+        // PC behavior: register[15] is already +4 from fetch, so target = (PC + 4) + offset
         uint32_t currentPC = registers[15]; 
         
         if (link) {
-            registers[14] = currentPC; // LR = PC - 4 (instruction following branch)
+            registers[Register::LR] = currentPC; // LR = PC (instruction following branch)
         }
 
         uint32_t target = currentPC + 4 + offset;
         
-        // DEBUG: Trace branches in DKC audio code
+        // DEBUG: Trace branches in audio code
         if (currentPC >= 0x30032b0 && currentPC <= 0x3003400) {
             std::cout << "[BRANCH DEBUG] PC=0x" << std::hex << (currentPC - 4) 
                       << " instr=0x" << instruction << " offset=" << offset 
@@ -457,102 +664,70 @@ namespace AIO::Emulator::GBA {
         }
         
         LogBranch(currentPC - 4, target); // Log from actual instruction address
-        registers[15] = target;
+        registers[Register::PC] = target;
     }
 
     void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
-        bool I = (instruction >> 25) & 1;
-        uint32_t opcode = (instruction >> 21) & 0xF;
-        bool S = (instruction >> 20) & 1;
-        uint32_t rn = (instruction >> 16) & 0xF;
-        uint32_t rd = (instruction >> 12) & 0xF;
+        const bool I = (instruction & ARMInstructionFormat::DP_I_BIT) != 0;
+        const uint32_t opcode = ExtractBits(instruction, ARMInstructionFormat::DP_OPCODE_SHIFT, 0xF);
+        const bool S = (instruction & ARMInstructionFormat::DP_S_BIT) != 0;
+        const uint32_t rn = ExtractRegisterField(instruction, ARMInstructionFormat::DP_RN_SHIFT);
+        const uint32_t rd = ExtractRegisterField(instruction, ARMInstructionFormat::DP_RD_SHIFT);
+
         uint32_t op2 = 0;
+        bool shifterCarry = CarryFlagSet(cpsr);
 
         // Calculate Operand 2
         if (I) {
-            // Immediate
-            uint32_t rotate = (instruction >> 8) & 0xF;
+            // Immediate operand with rotate right by even number of bits
+            uint32_t rotate = ExtractBits(instruction, 8, 0xF);
             uint32_t imm = instruction & 0xFF;
             uint32_t shift = rotate * 2;
-            op2 = (imm >> shift) | (imm << (32 - shift));
+            if (shift == 0) {
+                op2 = imm;
+            } else {
+                op2 = RotateRight(imm, shift, cpsr, false);
+                shifterCarry = (op2 >> 31) & 1;
+            }
         } else {
             // Register with optional shift
-            uint32_t rm = instruction & 0xF;
+            uint32_t rm = ExtractRegisterField(instruction, 0);
             uint32_t rmVal = registers[rm];
-            if (rm == 15) rmVal += 4; // PC is Instruction + 8 (registers[15] is Instruction + 4)
-            
+            if (rm == Register::PC) rmVal += 4; // PC is Instruction + 8 (registers[15] is Instruction + 4)
+
             bool shiftByReg = (instruction >> 4) & 1;
-            uint32_t shiftType = (instruction >> 5) & 3;
-            uint32_t shiftAmount;
-            
+            uint32_t shiftType = ExtractBits(instruction, 5, 0x3);
+            uint32_t shiftAmount = 0;
+
             if (shiftByReg) {
-                uint32_t rs = (instruction >> 8) & 0xF;
+                uint32_t rs = ExtractRegisterField(instruction, 8);
                 shiftAmount = registers[rs] & 0xFF;
             } else {
-                shiftAmount = (instruction >> 7) & 0x1F;
+                shiftAmount = ExtractBits(instruction, 7, 0x1F);
             }
-            
-            // Apply shift
-            switch (shiftType) {
-                case 0: // LSL
-                    if (shiftAmount == 0) {
-                        op2 = rmVal;
-                    } else if (shiftAmount < 32) {
-                        op2 = rmVal << shiftAmount;
-                    } else {
-                        op2 = 0;
-                    }
-                    break;
-                case 1: // LSR
-                    if (shiftAmount == 0) {
-                        op2 = 0;
-                    } else if (shiftAmount < 32) {
-                        op2 = rmVal >> shiftAmount;
-                    } else {
-                        op2 = 0;
-                    }
-                    break;
-                case 2: // ASR
-                    if (shiftAmount == 0) {
-                        op2 = (rmVal & 0x80000000) ? 0xFFFFFFFF : 0;
-                    } else if (shiftAmount < 32) {
-                        op2 = (int32_t)rmVal >> shiftAmount;
-                    } else {
-                        op2 = (rmVal & 0x80000000) ? 0xFFFFFFFF : 0;
-                    }
-                    break;
-                case 3: // ROR
-                    if (shiftAmount == 0) {
-                        bool carryIn = (cpsr >> 29) & 1;
-                        op2 = (carryIn << 31) | (rmVal >> 1);
-                    } else {
-                        shiftAmount &= 31;
-                        if (shiftAmount == 0) {
-                            op2 = rmVal;
-                        } else {
-                            op2 = (rmVal >> shiftAmount) | (rmVal << (32 - shiftAmount));
-                        }
-                    }
-                    break;
-            }
+
+            // Use a temp CPSR to compute shifter carry without mutating flags yet
+            uint32_t tempCpsr = cpsr;
+            op2 = BarrelShift(rmVal, shiftType, shiftAmount, tempCpsr, true);
+            shifterCarry = CarryFlagSet(tempCpsr);
         }
 
         uint32_t result = 0;
         uint32_t rnVal = registers[rn];
-        if (rn == 15) rnVal += 4; // PC is Instruction + 8 (registers[15] is Instruction + 4)
-        bool carry = (cpsr >> 29) & 1;
-        bool overflow = (cpsr >> 28) & 1;
+        if (rn == Register::PC) rnVal += 4; // PC is Instruction + 8 (registers[15] is Instruction + 4)
+        bool carry = CarryFlagSet(cpsr);
+        bool overflow = OverflowFlagSet(cpsr);
         bool cOut = carry;
 
         switch (opcode) {
-            case 0x0: // AND
+            case DPOpcode::AND: // AND
                 result = rnVal & op2;
                 break;
-            case 0x1: // EOR
+            case DPOpcode::EOR: // EOR
                 result = rnVal ^ op2;
                 break;
-            case 0x2: // SUB
-            case 0xA: // CMP
+            case DPOpcode::SUB: // SUB
+            case DPOpcode::CMP: // CMP
                 result = rnVal - op2;
                 cOut = (rnVal >= op2);
                 {
@@ -562,7 +737,7 @@ namespace AIO::Emulator::GBA {
                     overflow = (sign1 != sign2 && sign1 != signR);
                 }
                 break;
-            case 0x3: // RSB
+            case DPOpcode::RSB: // RSB
                 result = op2 - rnVal;
                 cOut = (op2 >= rnVal); // No Borrow
                 {
@@ -572,8 +747,8 @@ namespace AIO::Emulator::GBA {
                     overflow = (sign1 != sign2 && sign1 != signR);
                 }
                 break;
-            case 0x4: // ADD
-            case 0xB: // CMN
+            case DPOpcode::ADD: // ADD
+            case DPOpcode::CMN: // CMN
                 result = rnVal + op2;
                 cOut = (result < rnVal); // Carry
                 {
@@ -583,7 +758,7 @@ namespace AIO::Emulator::GBA {
                     overflow = (sign1 == sign2 && sign1 != signR);
                 }
                 break;
-            case 0x5: // ADC
+            case DPOpcode::ADC: // ADC
                 result = rnVal + op2 + carry;
                 cOut = (rnVal + op2 < rnVal) || (rnVal + op2 + carry < rnVal + op2); // Carry if either addition overflows
                 {
@@ -593,7 +768,7 @@ namespace AIO::Emulator::GBA {
                     overflow = (sign1 == sign2 && sign1 != signR);
                 }
                 break;
-            case 0x6: // SBC
+            case DPOpcode::SBC: // SBC
                 result = rnVal - op2 - !carry;
                 cOut = (rnVal >= (uint64_t)op2 + !carry); // No Borrow
                 {
@@ -603,7 +778,7 @@ namespace AIO::Emulator::GBA {
                     overflow = (sign1 != sign2 && sign1 != signR);
                 }
                 break;
-            case 0x7: // RSC
+            case DPOpcode::RSC: // RSC
                 result = op2 - rnVal - !carry;
                 cOut = (op2 >= (uint64_t)rnVal + !carry); // No Borrow
                 {
@@ -613,29 +788,47 @@ namespace AIO::Emulator::GBA {
                     overflow = (sign1 != sign2 && sign1 != signR);
                 }
                 break;
-            case 0x8: // TST
+            case DPOpcode::TST: // TST
                 result = rnVal & op2;
                 break;
-            case 0x9: // TEQ
+            case DPOpcode::TEQ: // TEQ
                 result = rnVal ^ op2;
                 break;
-            case 0xC: // ORR
+            case DPOpcode::ORR: // ORR
                 result = rnVal | op2;
                 break;
-            case 0xD: // MOV
+            case DPOpcode::MOV: // MOV
                 result = op2;
                 break;
-            case 0xE: // BIC
+            case DPOpcode::BIC: // BIC
                 result = rnVal & (~op2);
                 break;
-            case 0xF: // MVN
+            case DPOpcode::MVN: // MVN
                 result = ~op2;
                 break;
         }
 
+        // Logical ops use shifter carry (ARM spec); keep previous behavior fallback if not updated above
+        switch (opcode) {
+            case DPOpcode::AND: case DPOpcode::EOR: case DPOpcode::TST: case DPOpcode::TEQ:
+            case DPOpcode::ORR: case DPOpcode::MOV: case DPOpcode::BIC: case DPOpcode::MVN:
+                cOut = shifterCarry;
+                break;
+            default:
+                break;
+        }
+
         // Write back result if not a test instruction
-        if (opcode != 0x8 && opcode != 0x9 && opcode != 0xA && opcode != 0xB) {
-            if (rd == 15) {
+        if (opcode != DPOpcode::TST && opcode != DPOpcode::TEQ && opcode != DPOpcode::CMP && opcode != DPOpcode::CMN) {
+            if (rd == Register::PC) {
+                // DEBUG: Log PC writes during IRQ return
+                if (S && opcode == DPOpcode::SUB) {
+                    uint32_t currentMode = GetCPUMode(cpsr);
+                    std::cerr << "[IRQ RETURN] Mode=0x" << std::hex << currentMode 
+                              << " LR(r14)=0x" << registers[Register::LR]
+                              << " LR_irq=0x" << r14_irq
+                              << " result=0x" << result << std::dec << std::endl;
+                }
                 LogBranch(registers[15] - 4, result);
             }
             registers[rd] = result;
@@ -643,81 +836,81 @@ namespace AIO::Emulator::GBA {
 
         // Update Flags (CPSR) if S is set
         if (S) {
-            if (rd == 15) {
-                uint32_t oldMode = cpsr & 0x1F;  // Save old mode BEFORE modifying cpsr
-                if ((cpsr & 0x1F) == 0x1F) {
+            if (rd == Register::PC) {
+                uint32_t oldMode = GetCPUMode(cpsr);  // Save old mode BEFORE modifying cpsr
+                if (oldMode == CPUMode::SYSTEM) {
                     // System Mode - Hack for BIOS IRQ return
                     // Assume we came from IRQ and use SPSR_irq
                     cpsr = spsr_irq;
                 } else {
                     cpsr = spsr;
                 }
-                uint32_t newMode = cpsr & 0x1F;
+                uint32_t newMode = GetCPUMode(cpsr);
                 // Force proper mode switch by passing old mode
                 if (oldMode != newMode) {
                     // Manually do what SwitchMode does but with correct old mode
                     switch (oldMode) {
-                        case 0x10: case 0x1F: // User/System
-                            r13_usr = registers[13];
-                            r14_usr = registers[14];
+                        case CPUMode::USER: case CPUMode::SYSTEM:
+                            r13_usr = registers[Register::SP];
+                            r14_usr = registers[Register::LR];
                             break;
-                        case 0x12: // IRQ
-                            r13_irq = registers[13];
-                            r14_irq = registers[14];
+                        case CPUMode::IRQ:
+                            r13_irq = registers[Register::SP];
+                            r14_irq = registers[Register::LR];
                             spsr_irq = spsr;
                             break;
-                        case 0x13: // Supervisor
-                            r13_svc = registers[13];
-                            r14_svc = registers[14];
+                        case CPUMode::SUPERVISOR:
+                            r13_svc = registers[Register::SP];
+                            r14_svc = registers[Register::LR];
                             spsr_svc = spsr;
                             break;
                     }
                     switch (newMode) {
-                        case 0x10: case 0x1F: // User/System
-                            registers[13] = r13_usr;
-                            registers[14] = r14_usr;
+                        case CPUMode::USER: case CPUMode::SYSTEM:
+                            registers[Register::SP] = r13_usr;
+                            registers[Register::LR] = r14_usr;
                             break;
-                        case 0x12: // IRQ
-                            registers[13] = r13_irq;
-                            registers[14] = r14_irq;
+                        case CPUMode::IRQ:
+                            registers[Register::SP] = r13_irq;
+                            registers[Register::LR] = r14_irq;
                             spsr = spsr_irq;
                             break;
-                        case 0x13: // Supervisor
-                            registers[13] = r13_svc;
-                            registers[14] = r14_svc;
+                        case CPUMode::SUPERVISOR:
+                            registers[Register::SP] = r13_svc;
+                            registers[Register::LR] = r14_svc;
                             spsr = spsr_svc;
                             break;
                     }
                 }
-                thumbMode = (cpsr & 0x20) != 0;
+                thumbMode = IsThumbMode(cpsr);
             } else {
-                SetZN(result);
-                if (cOut) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                if (overflow) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
+                UpdateNZFlags(cpsr, result);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, cOut);
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, overflow);
             }
         }
     }
 
     void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
-        bool I = (instruction >> 25) & 1;
-        bool P = (instruction >> 24) & 1;
-        bool U = (instruction >> 23) & 1;
-        bool B = (instruction >> 22) & 1;
-        bool W = (instruction >> 21) & 1;
-        bool L = (instruction >> 20) & 1;
-        uint32_t rn = (instruction >> 16) & 0xF;
-        uint32_t rd = (instruction >> 12) & 0xF;
+        const bool I = (instruction >> 25) & 1;
+        const bool P = (instruction >> 24) & 1;
+        const bool U = (instruction >> 23) & 1;
+        const bool B = (instruction >> 22) & 1;
+        const bool W = (instruction >> 21) & 1;
+        const bool L = (instruction >> 20) & 1;
+        const uint32_t rn = ExtractRegisterField(instruction, 16);
+        const uint32_t rd = ExtractRegisterField(instruction, 12);
         uint32_t offset = 0;
 
         if (!I) {
             offset = instruction & 0xFFF;
         } else {
-            uint32_t rm = instruction & 0xF;
+            uint32_t rm = ExtractRegisterField(instruction, 0);
             offset = registers[rm];
         }
 
         uint32_t baseAddr = registers[rn];
-        if (rn == 15) {
+        if (rn == Register::PC) {
             baseAddr += 4; 
         }
 
@@ -733,15 +926,15 @@ namespace AIO::Emulator::GBA {
                 registers[rd] = memory.Read8(targetAddr);
             } else {
                 uint32_t val = memory.Read32(targetAddr);
-                if (rd == 15) {
-                    LogBranch(registers[15] - 4, val);
+                if (rd == Register::PC) {
+                    LogBranch(registers[Register::PC] - 4, val);
                 }
                 registers[rd] = val;
             }
         } else {
             // Store
             uint32_t val = registers[rd];
-            if (rd == 15) val += 8; // PC+12 (registers[15] is PC+4)
+            if (rd == Register::PC) val += 8; // PC+12 (registers[15] is PC+4)
 
             if (B) {
                 memory.Write8(targetAddr, val & 0xFF);
@@ -759,13 +952,24 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
-        bool P = (instruction >> 24) & 1;
-        bool U = (instruction >> 23) & 1;
-        bool S = (instruction >> 22) & 1;
-        bool W = (instruction >> 21) & 1;
-        bool L = (instruction >> 20) & 1;
-        uint32_t rn = (instruction >> 16) & 0xF;
+        const bool P = (instruction >> 24) & 1;
+        const bool U = (instruction >> 23) & 1;
+        const bool S = (instruction >> 22) & 1;
+        const bool W = (instruction >> 21) & 1;
+        const bool L = (instruction >> 20) & 1;
+        const uint32_t rn = ExtractRegisterField(instruction, 16);
         uint16_t regList = instruction & 0xFFFF;
+
+        // Debug: Log LDM/STM near crash location
+        if (registers[15] >= 0x809e390 && registers[15] <= 0x809e3a0) {
+            std::cerr << "[LDM/STM DEBUG] PC=0x" << std::hex << (registers[15] - 8)
+                      << " Instruction=0x" << instruction
+                      << " P=" << P << " U=" << U << " S=" << S << " W=" << W << " L=" << L
+                      << " Rn=R" << std::dec << rn << std::hex
+                      << " (0x" << registers[rn] << ")"
+                      << " RegList=0x" << regList
+                      << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
+        }
 
         uint32_t address = registers[rn];
         uint32_t startAddress = address;
@@ -794,6 +998,11 @@ namespace AIO::Emulator::GBA {
         uint32_t currentAddr = address;
         bool writeBack = W;
 
+        // Handle S bit: In privileged modes, access user-mode register bank instead
+        // of current mode's banked registers (R8-R14). PC in list means restore CPSR.
+        bool userMode = S && GetCPUMode(cpsr) != CPUMode::USER && GetCPUMode(cpsr) != CPUMode::SYSTEM;
+        bool pcInList = (regList >> 15) & 1;
+
         for (int i = 0; i < 16; ++i) {
             if ((regList >> i) & 1) {
                 if (L) {
@@ -801,12 +1010,37 @@ namespace AIO::Emulator::GBA {
                     uint32_t val = memory.Read32(currentAddr);
                     if (i == 15) {
                         LogBranch(registers[15] - 4, val);
+                        // S bit with PC: Restore CPSR from SPSR
+                        if (S) {
+                            cpsr = spsr;
+                            thumbMode = (cpsr & (1 << 5)) != 0;
+                            // Mode might have changed, reload banked registers
+                            SwitchMode(GetCPUMode(cpsr));
+                        }
                     }
-                    registers[i] = val;
+                    
+                    // Write to register: respect user-mode bank if S bit set
+                    if (userMode && i >= 13 && i <= 14) {
+                        // Access user-mode R13/R14 instead of current mode's bank
+                        if (i == 13) r13_usr = val;
+                        else if (i == 14) r14_usr = val;
+                    } else {
+                        registers[i] = val;
+                    }
                     // std::cout << "LDM: R" << i << " <- [0x" << std::hex << currentAddr << "] (0x" << registers[i] << ")" << std::endl;
                 } else {
                     // Store (STM)
-                    uint32_t val = registers[i];
+                    uint32_t val;
+                    
+                    // Read from register: respect user-mode bank if S bit set
+                    if (userMode && i >= 13 && i <= 14) {
+                        // Access user-mode R13/R14 instead of current mode's bank
+                        if (i == 13) val = r13_usr;
+                        else if (i == 14) val = r14_usr;
+                    } else {
+                        val = registers[i];
+                    }
+                    
                     if (i == 15) val += 4; // PC store quirk? Usually PC+12
                     
                     // DEBUG: Trace ARM STM to 0x3001500
@@ -833,18 +1067,16 @@ namespace AIO::Emulator::GBA {
                 else   registers[rn] = startAddress - (numRegs * 4);
             }
         }
-        
-        // TODO: Handle S bit (User mode registers or CPSR restore)
     }
 
     void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
-        bool P = (instruction >> 24) & 1;
-        bool U = (instruction >> 23) & 1;
-        bool I = (instruction >> 22) & 1;
-        bool W = (instruction >> 21) & 1;
-        bool L = (instruction >> 20) & 1;
-        uint32_t rn = (instruction >> 16) & 0xF;
-        uint32_t rd = (instruction >> 12) & 0xF;
+        const bool P = (instruction >> 24) & 1;
+        const bool U = (instruction >> 23) & 1;
+        const bool I = (instruction >> 22) & 1;
+        const bool W = (instruction >> 21) & 1;
+        const bool L = (instruction >> 20) & 1;
+        const uint32_t rn = ExtractRegisterField(instruction, 16);
+        const uint32_t rd = ExtractRegisterField(instruction, 12);
         uint32_t offset = 0;
         uint32_t opcode = (instruction >> 5) & 0x3; // H, SB, SH
 
@@ -853,12 +1085,12 @@ namespace AIO::Emulator::GBA {
             offset = ((instruction >> 4) & 0xF0) | (instruction & 0xF);
         } else {
             // Register Offset
-            uint32_t rm = instruction & 0xF;
+            uint32_t rm = ExtractRegisterField(instruction, 0);
             offset = registers[rm];
         }
 
         uint32_t baseAddr = registers[rn];
-        if (rn == 15) baseAddr += 4; // PC+8 (registers[15] is PC+4)
+        if (rn == Register::PC) baseAddr += 4; // PC+8 (registers[15] is PC+4)
 
         uint32_t targetAddr = baseAddr;
         if (P) {
@@ -869,7 +1101,15 @@ namespace AIO::Emulator::GBA {
         if (L) {
             // Load
             if (opcode == 1) { // LDRH (Unsigned Halfword)
-                registers[rd] = memory.Read16(targetAddr);
+                uint16_t value = memory.Read16(targetAddr);
+                // Log LDRH at 0x188 specifically
+                if (registers[15] == 0x190) { // PC is already +8 when we execute
+                    std::cerr << "[LDRH at 0x188] targetAddr=0x" << std::hex << targetAddr
+                              << " value=0x" << value 
+                              << " rd=" << rd
+                              << " Current PC after fetch=0x" << registers[15] << std::dec << std::endl;
+                }
+                registers[rd] = value;
             } else if (opcode == 2) { // LDRSB (Signed Byte)
                 int8_t val = (int8_t)memory.Read8(targetAddr);
                 registers[rd] = (int32_t)val;
@@ -891,19 +1131,116 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::ExecuteBX(uint32_t instruction) {
-        uint32_t rm = instruction & 0xF;
+        uint32_t rm = ExtractRegisterField(instruction, 0);
         uint32_t target = registers[rm];
 
         LogBranch(registers[15] - 4, target);
 
         if (target & 1) {
             thumbMode = true;
-            cpsr |= 0x20;  // Set T bit in CPSR
-            registers[15] = target & 0xFFFFFFFE;
+            SetCPSRFlag(cpsr, CPSR::FLAG_T, true); // Set T bit in CPSR
+            registers[Register::PC] = target & 0xFFFFFFFE;
         } else {
             thumbMode = false;
-            cpsr &= ~0x20; // Clear T bit in CPSR
-            registers[15] = target & 0xFFFFFFFC; // Align to 4 bytes
+            SetCPSRFlag(cpsr, CPSR::FLAG_T, false); // Clear T bit in CPSR
+            registers[Register::PC] = target & 0xFFFFFFFC; // Align to 4 bytes
+        }
+    }
+
+    void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
+        // BIOS HLE: Games call BIOS functions directly by jumping to BIOS ROM (0x0-0x3FFF)
+        // We don't have BIOS ROM, so provide HLE implementations based on entry point
+        // LR (R14) contains return address - we'll jump back there after HLE function
+        
+        // Common BIOS entry points (from GBATEK and reverse engineering):
+        // 0x000: Reset
+        // 0x188: VBlankIntrWait
+        // 0x194: IntrWait
+        // 0x1C0: Div
+        // 0x1C8: DivArm
+        // Many games also call intermediate addresses which are part of BIOS subroutines
+        
+        uint32_t returnAddr = registers[14]; // LR holds return address
+        
+        // Identify BIOS function by entry point
+        // For unknown entry points, just return (no-op)
+        switch (biosPC) {
+            case 0x188: // VBlankIntrWait
+                registers[0] = 1;
+                registers[1] = 0x0001;
+                [[fallthrough]];
+                
+            case 0x194: // IntrWait(discard, flags)
+            {
+                uint32_t discardOld = registers[0];
+                uint32_t waitFlags = registers[1];
+                
+                uint32_t biosIF = memory.Read16(0x03007FF8);
+                
+                if (discardOld) {
+                    memory.Write16(0x03007FF8, biosIF & ~waitFlags);
+                }
+                
+                biosIF = memory.Read16(0x03007FF8);
+                if (biosIF & waitFlags) {
+                    memory.Write16(0x03007FF8, biosIF & ~waitFlags);
+                } else {
+                    uint16_t ime = memory.Read16(0x04000208);
+                    if (ime == 0) {
+                        memory.Write16(0x04000208, 1);
+                    }
+                    
+                    // Rewind PC to re-execute BIOS call after interrupt
+                    registers[15] = biosPC;
+                    return;
+                }
+                break;
+            }
+            
+            case 0x1C0: // Div
+            case 0x1C8: // DivArm
+            {
+                int32_t numerator = (int32_t)registers[0];
+                int32_t denominator = (int32_t)registers[1];
+                
+                if (denominator == 0) {
+                    registers[0] = (numerator < 0) ? 1 : -1;
+                    registers[1] = numerator;
+                    registers[3] = 1;
+                } else {
+                    int32_t quotient = numerator / denominator;
+                    int32_t remainder = numerator % denominator;
+                    
+                    registers[0] = quotient;
+                    registers[1] = remainder;
+                    registers[3] = (quotient < 0) ? -quotient : quotient;
+                }
+                break;
+            }
+            
+            case 0x1F8: // GetBiosChecksum
+                registers[0] = 0xBAAE187F;
+                break;
+                
+            case 0x000: // Reset
+                registers[15] = 0x08000000;
+                thumbMode = false;
+                return;
+                
+            default:
+                // Unknown BIOS entry point - just return
+                // Most unknown addresses are internal BIOS subroutines
+                // Returning immediately is safer than crashing
+                break;
+        }
+        
+        // Return to caller by jumping to LR
+        if (returnAddr & 1) {
+            thumbMode = true;
+            registers[15] = returnAddr & 0xFFFFFFFE;
+        } else {
+            thumbMode = false;
+            registers[15] = returnAddr & 0xFFFFFFFC;
         }
     }
 
@@ -912,6 +1249,7 @@ namespace AIO::Emulator::GBA {
             case 0x00: // SoftReset
                 registers[15] = 0x08000000;
                 registers[13] = 0x03007F00; // Reset SP
+                thumbMode = false;
                 break;
             case 0x01: // RegisterRamReset - Clear/Initialize RAM and registers
             {
@@ -958,19 +1296,19 @@ namespace AIO::Emulator::GBA {
                 // Bit 7: Reset other registers
                 if (flags & 0x80) {
                     // Reset most IO registers to defaults
-                    // DISPCNT, DISPSTAT, BG control, etc.
-                    memory.Write16(0x04000000, 0x0080); // DISPCNT: Force blank
-                    memory.Write16(0x04000004, 0x0000); // DISPSTAT
-                    memory.Write16(0x04000008, 0x0000); // BG0CNT
-                    memory.Write16(0x0400000A, 0x0000); // BG1CNT
-                    memory.Write16(0x0400000C, 0x0000); // BG2CNT
-                    memory.Write16(0x0400000E, 0x0000); // BG3CNT
+                    // DISPSTAT, BG control, etc. (do not force blank display)
+                    // Real BIOS leaves display state for the game to manage; keep DISPCNT unchanged here.
+                    memory.Write16(IORegs::REG_DISPSTAT, 0x0000);
+                    memory.Write16(IORegs::REG_BG0CNT, 0x0000);
+                    memory.Write16(IORegs::REG_BG1CNT, 0x0000);
+                    memory.Write16(IORegs::REG_BG2CNT, 0x0000);
+                    memory.Write16(IORegs::REG_BG3CNT, 0x0000);
                     // Reset sound registers
-                    for (uint32_t addr = 0x04000060; addr <= 0x040000A6; addr += 2) {
+                    for (uint32_t addr = IORegs::BASE + 0x60; addr <= IORegs::BASE + 0xA6; addr += 2) {
                         memory.Write16(addr, 0);
                     }
                     // Reset DMA registers
-                    for (uint32_t addr = 0x040000B0; addr <= 0x040000DE; addr += 2) {
+                    for (uint32_t addr = IORegs::BASE + 0xB0; addr <= IORegs::BASE + 0xDE; addr += 2) {
                         memory.Write16(addr, 0);
                     }
                 }
@@ -1004,9 +1342,9 @@ namespace AIO::Emulator::GBA {
                 }
 
                 // Condition not met. Enable interrupts and Halt.
-                memory.Write16(0x04000208, 1); // IME=1
-                uint16_t ie = memory.Read16(0x04000200);
-                memory.Write16(0x04000200, ie | (waitFlags & 0xFFFF)); // Enable required IRQs
+                memory.Write16(IORegs::REG_IME, 1); // IME=1
+                uint16_t ie = memory.Read16(IORegs::REG_IE);
+                memory.Write16(IORegs::REG_IE, ie | (waitFlags & 0xFFFF)); // Enable required IRQs
                 cpsr &= ~0x80; // Enable IRQ in CPSR
                 halted = true;
 
@@ -1023,8 +1361,8 @@ namespace AIO::Emulator::GBA {
                 // Then call IntrWait (SWI 0x04)
                 
                 // Enable VBlank IRQ in DISPSTAT (Bit 3) - Required for VBlank IRQ to fire
-                uint16_t dispstat = memory.Read16(0x04000004);
-                memory.Write16(0x04000004, dispstat | 0x0008);
+                uint16_t dispstat = memory.Read16(IORegs::REG_DISPSTAT);
+                memory.Write16(IORegs::REG_DISPSTAT, dispstat | 0x0008);
                 
                 // Set up for IntrWait: R0=1, R1=1
                 registers[0] = 1; // Clear old flags
@@ -1142,27 +1480,51 @@ namespace AIO::Emulator::GBA {
                 bool is32Bit = (registers[2] >> 26) & 1;
                 
                 // Debug: trace CpuSet to VRAM
-                if ((dst & 0xFF000000) == 0x06000000) {
-                    std::cout << "[SWI 0x0B] CpuSet to VRAM: src=0x" << std::hex << src
-                              << " dst=0x" << dst << " len=" << std::dec << len
-                              << " 32bit=" << is32Bit << " fixed=" << fixedSrc << std::endl;
-                }
+                // DISABLED: Too verbose during boot
+                // if ((dst & 0xFF000000) == 0x06000000) {
+                //     std::cout << "[SWI 0x0B] CpuSet to VRAM: src=0x" << std::hex << src
+                //               << " dst=0x" << dst << " len=" << std::dec << len
+                //               << " 32bit=" << is32Bit << " fixed=" << fixedSrc << std::endl;
+                // }
 
+                int perUnitCycles = is32Bit ? 4 : 2;
+                const uint32_t batchSize = 64;  // Update PPU every 64 units
+                
                 if (is32Bit) {
+                    uint32_t fixedVal = fixedSrc ? memory.Read32(src) : 0;
                     for (uint32_t i = 0; i < len; ++i) {
-                        uint32_t val = memory.Read32(src);
+                        uint32_t val = fixedSrc ? fixedVal : memory.Read32(src);
                         memory.Write32(dst, val);
                         dst += 4;
                         if (!fixedSrc) src += 4;
+                        
+                        // Periodically advance PPU/timers to allow VBlank/HBlank
+                        if ((i + 1) % batchSize == 0) {
+                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                        }
                     }
                 } else {
+                    uint16_t fixedVal = fixedSrc ? memory.Read16(src) : 0;
                     for (uint32_t i = 0; i < len; ++i) {
-                        uint16_t val = memory.Read16(src);
+                        uint16_t val = fixedSrc ? fixedVal : memory.Read16(src);
                         memory.Write16(dst, val);
                         dst += 2;
                         if (!fixedSrc) src += 2;
+                        
+                        // Periodically advance PPU/timers to allow VBlank/HBlank
+                        if ((i + 1) % batchSize == 0) {
+                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                        }
                     }
                 }
+                
+                // Advance remaining cycles for any partial batch
+                uint32_t remaining = len % batchSize;
+                if (remaining > 0) {
+                    memory.AdvanceCycles(perUnitCycles * remaining);
+                }
+                // Advance SWI overhead
+                memory.AdvanceCycles(2);
                 break;
             }
             case 0x0C: // CpuFastSet (R0=Src, R1=Dst, R2=Cnt/Ctrl)
@@ -1175,19 +1537,50 @@ namespace AIO::Emulator::GBA {
                 bool fixedSrc = (registers[2] >> 24) & 1;
                 
                 // Debug: trace CpuFastSet to VRAM
-                if ((dst & 0xFF000000) == 0x06000000) {
-                    std::cout << "[SWI 0x0C] CpuFastSet to VRAM: src=0x" << std::hex << src
-                              << " dst=0x" << dst << " len=" << std::dec << len
-                              << " fixed=" << fixedSrc << std::endl;
+                // DISABLED: Too verbose during boot
+                // if ((dst & 0xFF000000) == 0x06000000) {
+                //     std::cout << "[SWI 0x0C] CpuFastSet to VRAM: src=0x" << std::hex << src
+                //               << " dst=0x" << dst << " len=" << std::dec << len
+                //               << " fixed=" << fixedSrc << std::endl;
+                // }
+                
+                // Always 32-bit; CpuFastSet requires length multiple of 8
+                uint32_t units = (len / 8) * 8;
+                const uint32_t batchSize = 64;  // Update PPU every 64 units
+                const int perUnitCycles = 4;
+                
+                if (fixedSrc) {
+                    uint32_t fixedVal = memory.Read32(src);
+                    for (uint32_t i = 0; i < units; ++i) {
+                        memory.Write32(dst, fixedVal);
+                        dst += 4;
+                        
+                        // Periodically advance PPU/timers to allow VBlank/HBlank
+                        if ((i + 1) % batchSize == 0) {
+                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                        }
+                    }
+                } else {
+                    for (uint32_t i = 0; i < units; ++i) {
+                        uint32_t val = memory.Read32(src);
+                        memory.Write32(dst, val);
+                        dst += 4;
+                        src += 4;
+                        
+                        // Periodically advance PPU/timers to allow VBlank/HBlank
+                        if ((i + 1) % batchSize == 0) {
+                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                        }
+                    }
                 }
                 
-                // Always 32-bit
-                for (uint32_t i = 0; i < len; ++i) {
-                    uint32_t val = memory.Read32(src);
-                    memory.Write32(dst, val);
-                    dst += 4;
-                    if (!fixedSrc) src += 4;
+                // Advance remaining cycles for any partial batch
+                uint32_t remaining = units % batchSize;
+                if (remaining > 0) {
+                    memory.AdvanceCycles(perUnitCycles * remaining);
                 }
+                // Advance SWI overhead
+                memory.AdvanceCycles(2);
                 break;
             }
             case 0x0E: // BgAffineSet
@@ -1637,6 +2030,18 @@ namespace AIO::Emulator::GBA {
     void ARM7TDMI::DecodeThumb(uint16_t instruction) {
         // Thumb Instruction Decoding
         
+        // DEBUG: Trace EEPROM validation loop at 0x809e1cc
+        // static int eepromLoopCount = 0;
+        // if (registers[15] >= 0x0809E1CC && registers[15] <= 0x0809E1F0) {
+        //     if (eepromLoopCount++ % 100 == 0) { // Log every 100 iterations
+        //         std::cerr << "[EEPROM LOOP #" << eepromLoopCount << "] PC=0x" << std::hex << registers[15]
+        //                   << " instr=0x" << instruction
+        //                   << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+        //                   << " R2=0x" << registers[2] << " R3=0x" << registers[3]
+        //                   << std::dec << std::endl;
+        //     }
+        // }
+        
         // Trace VBlank handler button processing - DISABLED for clean output
         /*
         uint32_t execPC = registers[15] - 2;
@@ -1686,24 +2091,14 @@ namespace AIO::Emulator::GBA {
             
             if (sub) {
                 res = val - op2;
-                SetZN(res);
-                // Set C if NOT borrow (val >= op2)
-                if (val >= op2) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                // Set V if overflow
-                bool sign1 = (val >> 31) & 1;
-                bool sign2 = (op2 >> 31) & 1;
-                bool signR = (res >> 31) & 1;
-                if (sign1 != sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
+                UpdateNZFlags(cpsr, res);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, op2));
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, op2, res));
             } else {
                 res = val + op2;
-                SetZN(res);
-                // Set C if carry (overflow for unsigned)
-                if (res < val) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                // Set V if overflow
-                bool sign1 = (val >> 31) & 1;
-                bool sign2 = (op2 >> 31) & 1;
-                bool signR = (res >> 31) & 1;
-                if (sign1 == sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
+                UpdateNZFlags(cpsr, res);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, DetectAddCarry(val, op2));
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, op2, res));
             }
             
             registers[rd] = res;
@@ -1722,33 +2117,13 @@ namespace AIO::Emulator::GBA {
             
             uint32_t val = registers[rs];
             uint32_t res = 0;
-            bool carry = (cpsr >> 29) & 1;
-
+            uint32_t tempCPSR = cpsr;
             if (opcode == 0) { // LSL
-                if (offset != 0) {
-                    carry = (val >> (32 - offset)) & 1;
-                    res = val << offset;
-                } else {
-                    res = val; // LSL #0 is MOV
-                }
+                res = LogicalShiftLeft(val, offset, tempCPSR, true);
             } else if (opcode == 1) { // LSR
-                if (offset == 0) offset = 32;
-                if (offset == 32) {
-                    carry = (val >> 31) & 1;
-                    res = 0;
-                } else {
-                    carry = (val >> (offset - 1)) & 1;
-                    res = val >> offset;
-                }
+                res = LogicalShiftRight(val, offset == 0 ? 32 : offset, tempCPSR, true);
             } else if (opcode == 2) { // ASR
-                if (offset == 0) offset = 32;
-                if (offset >= 32) {
-                    carry = (val >> 31) & 1;
-                    res = ((int32_t)val) >> 31; // Fill with sign bit
-                } else {
-                    carry = (val >> (offset - 1)) & 1;
-                    res = (int32_t)val >> offset;
-                }
+                res = ArithmeticShiftRight(val, offset == 0 ? 32 : offset, tempCPSR, true);
             }
             
             // Debug shift operations at VBlank handler input processing - DISABLED
@@ -1763,8 +2138,8 @@ namespace AIO::Emulator::GBA {
             }
             */
             
-            SetZN(res);
-            if (carry) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
+            UpdateNZFlags(cpsr, res);
+            SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
             registers[rd] = res;
 
             if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
@@ -1780,20 +2155,24 @@ namespace AIO::Emulator::GBA {
             
             if (opcode == 0) { // MOV Rd, #Offset8
                 registers[rd] = imm;
-                SetZN(registers[rd]);
+                UpdateNZFlags(cpsr, registers[rd]);
             } else if (opcode == 1) { // CMP Rd, #Offset8
                 uint32_t result = registers[rd] - imm;
-                SetZN(result);
-                // TODO: Set C and V
-                if (registers[rd] >= imm) cpsr |= 0x20000000; else cpsr &= ~0x20000000; // Simple C
+                UpdateNZFlags(cpsr, result);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(registers[rd], imm));
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(registers[rd], imm, result));
             } else if (opcode == 2) { // ADD Rd, #Offset8
-                registers[rd] += imm;
-                SetZN(registers[rd]);
-                // TODO: Set C and V
+                uint32_t val = registers[rd];
+                registers[rd] = val + imm;
+                UpdateNZFlags(cpsr, registers[rd]);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, DetectAddCarry(val, imm));
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, imm, registers[rd]));
             } else if (opcode == 3) { // SUB Rd, #Offset8
-                registers[rd] -= imm;
-                SetZN(registers[rd]);
-                // TODO: Set C and V
+                uint32_t val = registers[rd];
+                registers[rd] = val - imm;
+                UpdateNZFlags(cpsr, registers[rd]);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, imm));
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, imm, registers[rd]));
             }
         }
         // Format 4: ALU Operations
@@ -1810,117 +2189,115 @@ namespace AIO::Emulator::GBA {
             switch (opcode) {
                 case 0x0: // AND
                     res = val & op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
                 case 0x1: // EOR
                     res = val ^ op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
                 case 0x2: // LSL
-                    op2 &= 0xFF;
-                    if (op2 >= 32) res = 0; // TODO: Carry
-                    else res = val << op2;
-                    SetZN(res);
+                {
+                    uint32_t shiftAmount = op2 & 0xFF;
+                    uint32_t tempCPSR = cpsr;
+                    res = LogicalShiftLeft(val, shiftAmount, tempCPSR, true);
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
                     registers[rd] = res;
                     break;
+                }
                 case 0x3: // LSR
-                    op2 &= 0xFF;
-                    if (op2 >= 32) res = 0; // TODO: Carry
-                    else res = val >> op2;
-                    SetZN(res);
+                {
+                    uint32_t shiftAmount = op2 & 0xFF;
+                    uint32_t tempCPSR = cpsr;
+                    res = LogicalShiftRight(val, shiftAmount, tempCPSR, true);
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
                     registers[rd] = res;
                     break;
+                }
                 case 0x4: // ASR
-                    op2 &= 0xFF;
-                    if (op2 >= 32) res = ((int32_t)val) >> 31; // TODO: Carry
-                    else res = (int32_t)val >> op2;
-                    SetZN(res);
+                {
+                    uint32_t shiftAmount = op2 & 0xFF;
+                    uint32_t tempCPSR = cpsr;
+                    res = ArithmeticShiftRight(val, shiftAmount, tempCPSR, true);
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
                     registers[rd] = res;
                     break;
+                }
                 case 0x5: // ADC
                 {
-                    bool carryIn = (cpsr >> 29) & 1;
-                    uint64_t result64 = (uint64_t)val + (uint64_t)op2 + carryIn;
-                    res = (uint32_t)result64;
-                    SetZN(res);
-                    // Set carry if overflow occurred
-                    if (result64 > 0xFFFFFFFF) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                    // Set overflow
-                    bool sign1 = (val >> 31) & 1;
-                    bool sign2 = (op2 >> 31) & 1;
-                    bool signR = (res >> 31) & 1;
-                    if (sign1 == sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
+                    bool carryIn = CarryFlagSet(cpsr);
+                    uint64_t result64 = static_cast<uint64_t>(val) + static_cast<uint64_t>(op2) + static_cast<uint64_t>(carryIn);
+                    res = static_cast<uint32_t>(result64);
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, result64 > 0xFFFFFFFFULL);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, op2 + carryIn, res));
                     registers[rd] = res;
                     break;
                 }
                 case 0x6: // SBC
                 {
-                    bool carryIn = (cpsr >> 29) & 1;
-                    // SBC: Rd = Rd - Rs - NOT(Carry)
-                    res = val - op2 - !carryIn;
-                    SetZN(res);
-                    // Set carry if NO borrow
-                    if (val >= (uint64_t)op2 + !carryIn) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                    // Set overflow
-                    bool sign1 = (val >> 31) & 1;
-                    bool sign2 = (op2 >> 31) & 1;
-                    bool signR = (res >> 31) & 1;
-                    if (sign1 != sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
+                    bool carryIn = CarryFlagSet(cpsr);
+                    uint32_t operand = op2 + static_cast<uint32_t>(!carryIn);
+                    res = val - operand;
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, operand));
+                    SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, operand, res));
                     registers[rd] = res;
                     break;
                 }
                 case 0x7: // ROR
-                    op2 &= 0xFF;
-                    op2 &= 0x1F;
-                    if (op2 == 0) res = val;
-                    else res = (val >> op2) | (val << (32 - op2));
-                    SetZN(res);
+                {
+                    uint32_t shiftAmount = op2 & 0x1F;
+                    uint32_t tempCPSR = cpsr;
+                    res = RotateRight(val, shiftAmount, tempCPSR, true);
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
                     registers[rd] = res;
                     break;
+                }
                 case 0x8: // TST
                     res = val & op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     break;
                 case 0x9: // NEG (RSB Rd, Rs, #0)
                     res = 0 - op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
                 case 0xA: // CMP
                     res = val - op2;
-                    SetZN(res);
-                    if (val >= op2) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                    {
-                        bool sign1 = (val >> 31) & 1;
-                        bool sign2 = (op2 >> 31) & 1;
-                        bool signR = (res >> 31) & 1;
-                        if (sign1 != sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
-                    }
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, op2));
+                    SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, op2, res));
                     break;
                 case 0xB: // CMN
                     res = val + op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
+                    SetCPSRFlag(cpsr, CPSR::FLAG_C, DetectAddCarry(val, op2));
+                    SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, op2, res));
                     break;
                 case 0xC: // ORR
                     res = val | op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
                 case 0xD: // MUL
                     res = val * op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
                 case 0xE: // BIC
                     res = val & (~op2);
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
                 case 0xF: // MVN
                     res = ~op2;
-                    SetZN(res);
+                    UpdateNZFlags(cpsr, res);
                     registers[rd] = res;
                     break;
             }
@@ -1943,6 +2320,9 @@ namespace AIO::Emulator::GBA {
                 if (regD == 15) {
                      // For ADD PC, Rm: PC is destination, use current registers[15]
                      uint32_t newPC = registers[15] + rmVal;
+                     if (newPC >= 0x08125C00 && newPC < 0x08127000) {
+                         Logger::Instance().LogFmt(LogLevel::Error, "CPU", "ADD PC instruction: PC=0x%08x Rm=%d RmVal=0x%08x newPC=0x%08x", registers[15]-2, regM, rmVal, newPC);
+                     }
                      LogBranch(registers[15] - 2, newPC);
                      // In Thumb, ADD to PC should clear bit 0 (PC must be aligned)
                      registers[15] = newPC & 0xFFFFFFFE;
@@ -1956,18 +2336,16 @@ namespace AIO::Emulator::GBA {
                 uint32_t val = (regD == 15) ? (registers[15] + 2) : registers[regD];
                 uint32_t op2 = (regM == 15) ? (registers[15] + 2) : registers[regM];
                 uint32_t res = val - op2;
-                SetZN(res);
-                // Set C if NOT borrow (val >= op2)
-                if (val >= op2) cpsr |= 0x20000000; else cpsr &= ~0x20000000;
-                // Set V
-                bool sign1 = (val >> 31) & 1;
-                bool sign2 = (op2 >> 31) & 1;
-                bool signR = (res >> 31) & 1;
-                if (sign1 != sign2 && sign1 != signR) cpsr |= 0x10000000; else cpsr &= ~0x10000000;
+                UpdateNZFlags(cpsr, res);
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, op2));
+                SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, op2, res));
             } else if (opcode == 2) { // MOV Rd, Rm
                 if (regD == 15) {
                      // PC as source needs +2 adjustment in Thumb mode
                      uint32_t val = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                     if (val >= 0x08125C00 && val < 0x08127000) {
+                         Logger::Instance().LogFmt(LogLevel::Error, "CPU", "MOV PC instruction: PC=0x%08x Rm=%d val=0x%08x", registers[15]-2, regM, val);
+                     }
                      LogBranch(registers[15] - 2, val);
                      // In Thumb, MOV PC, Rm should clear bit 0 (not interworking on ARM7TDMI)
                      registers[15] = val & 0xFFFFFFFE;
@@ -1986,6 +2364,9 @@ namespace AIO::Emulator::GBA {
                 }
                 */
 
+                if (target >= 0x08125C00 && target < 0x08127000) {
+                    Logger::Instance().LogFmt(LogLevel::Error, "CPU", "BX instruction: PC=0x%08x Rm=%d target=0x%08x", registers[15]-2, regM, target);
+                }
                 LogBranch(registers[15] - 2, target);
                 if (target & 1) {
                     thumbMode = true;
@@ -2238,6 +2619,9 @@ namespace AIO::Emulator::GBA {
                 }
                 if (R) {
                     uint32_t pc = memory.Read32(currentAddr);
+                    if (pc >= 0x08125C00 && pc < 0x08127000) {
+                        Logger::Instance().LogFmt(LogLevel::Error, "CPU", "POP {PC} instruction: PC=0x%08x SP=0x%08x popped_pc=0x%08x", registers[15]-2, currentAddr, pc);
+                    }
                     LogBranch(registers[15] - 2, pc);
                     registers[15] = pc & 0xFFFFFFFE; // Pop PC (Thumb)
                     registers[15] &= ~1; 
@@ -2258,7 +2642,22 @@ namespace AIO::Emulator::GBA {
             int8_t offset = (int8_t)(instruction & 0xFF); // Signed 8-bit
             
             if (cond != 0xF) { // 0xF is SWI
-                if (CheckCondition(cond)) {
+                bool condSatisfied = CheckCondition(cond);
+                
+                // DEBUG: Log branches in EEPROM loop
+                // Disabled: EEPROM branch logging
+                // static int branchCount = 0;
+                // if (registers[15] >= 0x0809E1CC && registers[15] <= 0x0809E1F0) {
+                //     if (branchCount++ % 50 == 0) {
+                //         std::cerr << "[EEPROM BRANCH #" << branchCount << "] PC=0x" << std::hex << registers[15]
+                //                   << " cond=" << cond << " satisfied=" << condSatisfied
+                //                   << " offset=" << (int)offset
+                //                   << " Z=" << ((cpsr & CPSR::FLAG_Z) ? 1 : 0)
+                //                   << std::dec << std::endl;
+                //     }
+                // }
+                
+                if (condSatisfied) {
                     uint32_t target = registers[15] + 2 + (offset * 2);
                     LogBranch(registers[15] - 2, target);
                     registers[15] = target;
@@ -2275,6 +2674,9 @@ namespace AIO::Emulator::GBA {
             if (offset & 0x400) offset |= 0xFFFFF800; // Sign extend
             offset <<= 1;
             uint32_t target = registers[15] + 2 + offset;
+            if (target >= 0x08125C00 && target < 0x08127000) {
+                Logger::Instance().LogFmt(LogLevel::Error, "CPU", "B (unconditional) instruction: PC=0x%08x instr=0x%04x offset=%d target=0x%08x", registers[15]-2, instruction, offset, target);
+            }
             LogBranch(registers[15] - 2, target);
             registers[15] = target; 
         }
@@ -2288,16 +2690,11 @@ namespace AIO::Emulator::GBA {
                 offset = (offset << 12);
                 if (offset & 0x400000) offset |= 0xFF800000; // Sign extend
                 registers[14] = registers[15] + 2 + offset; // Store in LR (PC+4+offset)
-                // std::cout << "[BL High] PC=" << std::hex << (registers[15]-2) << " LR=" << registers[14] << std::dec << std::endl;
             } else { // Second instruction (Low)
                 uint32_t nextPC = registers[15] - 2; // Instruction address + 2 (already incremented)
                 uint32_t target = registers[14] + (offset << 1);
-                LogBranch(nextPC, target);
                 
-                // Debug BL
-                if (nextPC == 0x080005b2) {
-                     std::cout << "[BL Low] PC=" << std::hex << nextPC << " LR_in=" << registers[14] << " Offset=" << offset << " Target=" << target << std::dec << std::endl;
-                }
+                LogBranch(nextPC, target);
 
                 registers[14] = (nextPC + 2) | 1; // LR = Return Address + 1 (Thumb) -> Next Instruction
                 registers[15] = target;
@@ -2311,46 +2708,23 @@ namespace AIO::Emulator::GBA {
 
 
     void ARM7TDMI::SetZN(uint32_t result) {
-        if (result == 0) cpsr |= 0x40000000; // Set Z
-        else             cpsr &= ~0x40000000; // Clear Z
-        
-        if (result & 0x80000000) cpsr |= 0x80000000; // Set N
-        else                     cpsr &= ~0x80000000; // Clear N
+        // Thumb helpers still call SetZN; delegate to shared helper for clarity
+        UpdateNZFlags(cpsr, result);
     }
 
     bool ARM7TDMI::CheckCondition(uint32_t cond) {
-        bool N = (cpsr >> 31) & 1;
-        bool Z = (cpsr >> 30) & 1;
-        bool C = (cpsr >> 29) & 1;
-        bool V = (cpsr >> 28) & 1;
-
-        switch (cond) {
-            case 0x0: return Z; // EQ
-            case 0x1: return !Z; // NE
-            case 0x2: return C; // CS/HS
-            case 0x3: return !C; // CC/LO
-            case 0x4: return N; // MI
-            case 0x5: return !N; // PL
-            case 0x6: return V; // VS
-            case 0x7: return !V; // VC
-            case 0x8: return C && !Z; // HI
-            case 0x9: return !C || Z; // LS
-            case 0xA: return N == V; // GE
-            case 0xB: return N != V; // LT
-            case 0xC: return !Z && (N == V); // GT
-            case 0xD: return Z || (N != V); // LE
-            case 0xE: return true; // AL
-            default: return true;
-        }
+        // Use the centralized helper function from ARM7TDMIHelpers
+        return ConditionSatisfied(cond, cpsr);
     }
 
     void ARM7TDMI::ExecuteMultiply(uint32_t instruction) {
-        bool A = (instruction >> 21) & 1; // Accumulate
-        bool S = (instruction >> 20) & 1; // Set Flags
-        uint32_t rd = (instruction >> 16) & 0xF;
-        uint32_t rn = (instruction >> 12) & 0xF;
-        uint32_t rs = (instruction >> 8) & 0xF;
-        uint32_t rm = instruction & 0xF;
+        // ARM Multiply: Cond[31:28] | 000000[27:22] | A[21] | S[20] | Rd[19:16] | Rn[15:12] | Rs[11:8] | 1001[7:4] | Rm[3:0]
+        bool A = (instruction >> 21) & 1; // Accumulate bit
+        bool S = (instruction >> 20) & 1; // Set Flags bit
+        uint32_t rd = ExtractRegisterField(instruction, 16);
+        uint32_t rn = ExtractRegisterField(instruction, 12);
+        uint32_t rs = ExtractRegisterField(instruction, 8);
+        uint32_t rm = ExtractRegisterField(instruction, 0);
 
         uint32_t op1 = registers[rm];
         uint32_t op2 = registers[rs];
@@ -2363,26 +2737,27 @@ namespace AIO::Emulator::GBA {
         registers[rd] = result;
 
         if (S) {
-            SetZN(result);
+            UpdateNZFlags(cpsr, result);
         }
     }
 
     void ARM7TDMI::ExecuteMultiplyLong(uint32_t instruction) {
-        bool U = (instruction >> 22) & 1; // Unsigned/Signed
-        bool A = (instruction >> 21) & 1; // Accumulate
-        bool S = (instruction >> 20) & 1; // Set Flags
-        uint32_t rdHi = (instruction >> 16) & 0xF;
-        uint32_t rdLo = (instruction >> 12) & 0xF;
-        uint32_t rs = (instruction >> 8) & 0xF;
-        uint32_t rm = instruction & 0xF;
+        // ARM Multiply Long: Cond[31:28] | 00001[27:23] | U[22] | A[21] | S[20] | RdHi[19:16] | RdLo[15:12] | Rs[11:8] | 1001[7:4] | Rm[3:0]
+        bool U = (instruction >> 22) & 1; // Unsigned/Signed bit (1=Signed, 0=Unsigned)
+        bool A = (instruction >> 21) & 1; // Accumulate bit
+        bool S = (instruction >> 20) & 1; // Set Flags bit
+        uint32_t rdHi = ExtractRegisterField(instruction, 16);
+        uint32_t rdLo = ExtractRegisterField(instruction, 12);
+        uint32_t rs = ExtractRegisterField(instruction, 8);
+        uint32_t rm = ExtractRegisterField(instruction, 0);
 
         uint64_t op1, op2, result;
 
-        if (U) { // Signed
+        if (U) { // Signed multiply
             op1 = (int64_t)(int32_t)registers[rm];
             op2 = (int64_t)(int32_t)registers[rs];
             result = op1 * op2;
-        } else { // Unsigned
+        } else { // Unsigned multiply
             op1 = (uint64_t)registers[rm];
             op2 = (uint64_t)registers[rs];
             result = op1 * op2;
@@ -2397,18 +2772,18 @@ namespace AIO::Emulator::GBA {
         registers[rdHi] = (uint32_t)(result >> 32);
 
         if (S) {
-            SetZN(registers[rdHi]); // N and Z are set based on 64-bit result?
-            // ARM docs: N bit set to bit 63 of result. Z bit set if 64-bit result is 0.
-            if (result == 0) cpsr |= 0x40000000; else cpsr &= ~0x40000000;
-
-            if ((result >> 63) & 1) cpsr |= 0x80000000; else cpsr &= ~0x80000000;
-            // V and C are undefined (or V unaffected, C meaningless)
+            // N bit set to bit 63 of result
+            SetCPSRFlag(cpsr, CPSR::FLAG_N, (result >> 63) & 1);
+            // Z bit set if 64-bit result is zero
+            SetCPSRFlag(cpsr, CPSR::FLAG_Z, result == 0);
+            // V and C are undefined (V unaffected, C has no meaning)
         }
     }
 
     void ARM7TDMI::ExecuteMRS(uint32_t instruction) {
-        bool R = (instruction >> 22) & 1;
-        uint32_t rd = (instruction >> 12) & 0xF;
+        // ARM MRS: Cond[31:28] | 00010[27:23] | R[22] | 001111[21:16] | Rd[15:12] | 00000000[11:0]
+        bool R = (instruction >> 22) & 1;  // R bit (0=CPSR, 1=SPSR)
+        uint32_t rd = ExtractRegisterField(instruction, 12);
         
         if (R) { // SPSR
             registers[rd] = spsr;

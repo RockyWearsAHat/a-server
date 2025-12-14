@@ -1,8 +1,12 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include "ARM7TDMIConstants.h"
+#include "ARM7TDMIHelpers.h"
 
 namespace AIO::Emulator::GBA {
+    using namespace ARM7TDMIConstants;
+    using namespace ARM7TDMIHelpers;
 
     // Crash notification callback (set by GUI)
     extern void (*CrashPopupCallback)(const char* logPath);
@@ -16,6 +20,19 @@ namespace AIO::Emulator::GBA {
 
         void Reset();
         void Step();
+        // Poll interrupts explicitly (for synchronizing after peripherals run)
+        void PollInterrupts();
+        void StepBack();
+        // Debugger API
+        void AddBreakpoint(uint32_t addr);
+        void RemoveBreakpoint(uint32_t addr);
+        void ClearBreakpoints();
+        const std::vector<uint32_t>& GetBreakpoints() const;
+        void SetSingleStep(bool enabled);
+        bool IsSingleStep() const;
+        // Halt state
+        void Continue();
+        void DumpState(std::ostream& os) const;
 
         // Test Helpers
         uint32_t GetRegister(int index) const { return registers[index]; }
@@ -23,6 +40,15 @@ namespace AIO::Emulator::GBA {
         uint32_t GetCPSR() const { return cpsr; }
         void SetThumbMode(bool thumb) { thumbMode = thumb; }
         bool IsHalted() const { return halted; }
+        bool IsThumbModeFlag() const { return thumbMode; }
+        struct CpuSnapshot {
+            uint32_t registers[16];
+            uint32_t cpsr;
+            uint32_t spsr;
+            bool thumbMode;
+            std::vector<uint8_t> iwram; // 32KB snapshot of IWRAM
+        };
+        std::vector<CpuSnapshot> cpuHistory;
 
     private:
         GBAMemory& memory;
@@ -40,6 +66,9 @@ namespace AIO::Emulator::GBA {
         uint32_t spsr;
         bool thumbMode = false;
         bool halted = false;
+        // Debugger
+        std::vector<uint32_t> breakpoints;
+        bool singleStep{false};
 
         // Pipeline
         // ARM7TDMI has a 3-stage pipeline: Fetch, Decode, Execute
@@ -59,6 +88,7 @@ namespace AIO::Emulator::GBA {
         void ExecuteSingleDataTransfer(uint32_t instruction);
         void ExecuteHalfwordDataTransfer(uint32_t instruction);
         void ExecuteBlockDataTransfer(uint32_t instruction);
+        void ExecuteBIOSFunction(uint32_t biosPC);
         void ExecuteSWI(uint32_t comment);
         void ExecuteMRS(uint32_t instruction);
         void ExecuteMSR(uint32_t instruction);

@@ -42,13 +42,6 @@ set_target_properties(EEPROMTests PROPERTIES
 )
 target_link_libraries(EEPROMTests PRIVATE GTest::gtest_main GBAEmulator)
 
-add_executable(HeadlessTest ${PROJECT_ROOT}/tests/HeadlessTest.cpp)
-set_target_properties(HeadlessTest PROPERTIES 
-    RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
-    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/HeadlessTest"
-)
-target_link_libraries(HeadlessTest PRIVATE GBAEmulator)
-
 include(GoogleTest)
 gtest_discover_tests(CPUTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

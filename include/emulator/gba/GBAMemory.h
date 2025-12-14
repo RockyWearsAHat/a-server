@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <cstdio>
+#include "GameDB.h"
 
 namespace AIO::Emulator::GBA {
 
@@ -20,6 +21,7 @@ namespace AIO::Emulator::GBA {
         std::vector<uint8_t> GetSaveData() const;
         
         void SetSavePath(const std::string& path);
+        void SetSaveType(SaveType type); // Configure save type from metadata analysis
         void FlushSave(); // Write EEPROM/SRAM to disk immediately
         void InitializeHLEBIOS(); // Initialize High-Level Emulated BIOS
         
@@ -73,10 +75,31 @@ namespace AIO::Emulator::GBA {
         void PerformDMA(int channel);
         void CheckDMA(int timing);
         void UpdateTimers(int cycles);
+        void AdvanceCycles(int cycles); // Advance timers, PPU, and APU together
 
         int GetLastDMACycles() { int c = lastDMACycles; lastDMACycles = 0; return c; }
 
+        // Control verbose internal logging (default: false)
+        void SetVerboseLogs(bool enabled) { verboseLogs = enabled; }
+        
+        // Cycle-accurate memory access timing
+        int GetAccessCycles(uint32_t address, int accessSize) const;
+
     private:
+        // EEPROM protocol constants (self-documenting, no magic numbers)
+        struct EEPROMConsts {
+            static constexpr uint8_t DUMMY_BITS = 4;            // Number of dummy bits before data phase
+            static constexpr uint8_t DATA_BITS = 64;            // 64-bit data payload per transaction
+            static constexpr uint8_t ADDR_BITS_4K = 6;          // 4Kbit EEPROM uses 6-bit address
+            static constexpr uint8_t ADDR_BITS_64K = 14;        // 64Kbit EEPROM uses 14-bit address
+            static constexpr uint16_t READY_HIGH = 1;           // Line pulled high when idle/ready
+            static constexpr uint16_t BUSY_LOW = 0;             // Line driven low when busy/outputting
+            static constexpr uint16_t BIT_MASK = 0x0001;        // Single-bit mask for input writes
+            static constexpr uint32_t BLOCKS_4K = 64;           // Number of 8-byte blocks in 4Kbit
+            static constexpr uint32_t BLOCKS_64K = 1024;        // Number of 8-byte blocks in 64Kbit
+            static constexpr uint32_t BYTES_PER_BLOCK = 8;      // EEPROM transfers 8 bytes per block
+        };
+
         int lastDMACycles = 0;
         int cycleCount = 0;
         int timerPrescalerCounters[4] = {0};
@@ -116,6 +139,7 @@ namespace AIO::Emulator::GBA {
         int eepromWriteDelay = 0;
         bool eepromIs64Kbit = true; // Default to 64Kbit for SMA2
         uint16_t eepromLatch = 0; // Latch for open bus behavior on EEPROM line
+        bool eepromBufferValid = false; // True when buffer prepared for current transaction
 
         // GBA Memory Map Regions
         // 00000000 - 00003FFF: BIOS (16KB)
@@ -151,6 +175,8 @@ namespace AIO::Emulator::GBA {
         APU* apu = nullptr;   // APU pointer for sound callbacks
         PPU* ppu = nullptr;   // PPU pointer for DMA updates
         ARM7TDMI* cpu = nullptr; // CPU pointer for debug
+
+        bool verboseLogs = false; // Guard for heavy std::cout traces
     };
 
 }

@@ -39,6 +39,12 @@ public:
     bool IsCategoryEnabled(const std::string& category) const;
 
     void SetLevel(LogLevel level);
+    
+    // Crash handling and configuration
+    void SetLogFile(const std::string& path);
+    void SetExitOnCrash(bool exit);
+    void WriteCrashLog(const std::string& message);
+    void FlushLogs();
 
 private:
     Logger() = default;
@@ -49,6 +55,9 @@ private:
     LogLevel m_minLevel = LogLevel::Info;
     std::mutex m_mutex;
     bool m_allCategoriesEnabled = true;
+    std::string m_logFilePath = "crash_log.txt";
+    bool m_exitOnCrash = false;
+    std::vector<LogEntry> m_logBuffer;
 };
 
 } // namespace AIO::Emulator::Common

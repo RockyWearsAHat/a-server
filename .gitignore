@@ -1,4 +1,25 @@
-.DS_Store
+# Build artifacts
+build/
+build/**
+generated/
+
+# VS Code and editor junk (optional; keep if not used)
+.vscode/
+*.code-workspace
+
+# Logs and transient outputs
+debug.log
+*.log
+
+# Local environment secrets
+.env
+
+# Emulator runtime files
+*.sav
+*.state
+
+# OS files
+.DS_Store.DS_Store
 
 # Build directory structure:
 # build/bin/           - All executables (AIOServer, tests)

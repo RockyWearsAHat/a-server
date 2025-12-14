@@ -21,6 +21,9 @@
 #include <QElapsedTimer>
 #include <QSettings>
 #include <SDL2/SDL.h>
+#include <sys/select.h>
+#include <termios.h>
+#include <unistd.h>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -30,6 +33,8 @@
 #include "gui/MainWindow.h"
 #include "gui/LogViewerDialog.h"
 #include "gui/InputConfigDialog.h"
+#include "gui/StreamingHubWidget.h"
+#include "gui/StreamingWebViewPage.h"
 #include "input/InputManager.h"
 #include "emulator/common/Logger.h"
 #include "emulator/gba/ARM7TDMI.h"
@@ -131,14 +136,20 @@ MainWindow::MainWindow(QWidget *parent)
     setupGameSelect();
     setupEmulatorView();
     setupSettingsPage();
+    setupStreamingPages();
     stackedWidget->addWidget(mainMenuPage);
     stackedWidget->addWidget(emulatorSelectPage);
     stackedWidget->addWidget(gameSelectPage);
     stackedWidget->addWidget(emulatorPage);
     stackedWidget->addWidget(settingsPage);
+    stackedWidget->addWidget(streamingHubPage);
+    stackedWidget->addWidget(streamingWebPage);
     stackedWidget->setCurrentWidget(mainMenuPage);
-    gameTimer = new QTimer(this);
-    connect(gameTimer, &QTimer::timeout, this, &MainWindow::GameLoop);
+    
+    // Display update timer: UI refresh at 60 Hz (not CPU stepping)
+    displayTimer = new QTimer(this);
+    connect(displayTimer, &QTimer::timeout, this, &MainWindow::UpdateDisplay);
+    
     displayImage = QImage(240, 160, QImage::Format_ARGB32);
     displayImage.fill(Qt::black);
     setFocusPolicy(Qt::StrongFocus);
@@ -148,6 +159,7 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
+    StopEmulatorThread();
     closeAudio();
 }
 
@@ -210,6 +222,33 @@ void MainWindow::initAudio() {
         }
     }
 
+    void MainWindow::EnableDebugger(bool enabled) {
+        debuggerEnabled = enabled;
+        if (enabled) {
+            gba.SetSingleStep(true);
+            // Enable terminal raw mode for arrow/enter handling
+            struct termios tio;
+            if (tcgetattr(STDIN_FILENO, &tio) == 0) {
+                rawTermios = tio;
+                tio.c_lflag &= ~(ICANON | ECHO);
+                tio.c_cc[VMIN] = 0;
+                tio.c_cc[VTIME] = 0;
+                tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+                stdinRawEnabled = true;
+            }
+        } else {
+            gba.SetSingleStep(false);
+            if (stdinRawEnabled) {
+                tcsetattr(STDIN_FILENO, TCSANOW, &rawTermios);
+                stdinRawEnabled = false;
+            }
+        }
+    }
+
+    void MainWindow::AddBreakpoint(uint32_t addr) {
+        gba.AddBreakpoint(addr);
+    }
+
     QString MainWindow::formatInputState(uint16_t state) {
         // GBA KEYINPUT: 0 = pressed, 1 = released
         // Bits: 0=A, 1=B, 2=Select, 3=Start, 4=Right, 5=Left, 6=Up, 7=Down, 8=R, 9=L
@@ -254,8 +293,12 @@ void MainWindow::LoadROM(const std::string& path) {
         if (success) {
             statusLabel->setText("ROM Loaded: " + QString::fromStdString(path));
             
-            // 60 FPS roughly = 16ms
-            gameTimer->start(16);
+            // Start emulator thread and display update timer
+            StartEmulatorThread();
+            displayTimer->start(16);  // ~60 Hz display updates
+            
+            // Switch to emulator view
+            stackedWidget->setCurrentWidget(emulatorPage);
             
             // Ensure keyboard focus for input
             setFocus();
@@ -265,14 +308,107 @@ void MainWindow::LoadROM(const std::string& path) {
         }
     }
 
+    void MainWindow::SetEmulatorType(int type) {
+        if (type == 0) {
+            currentEmulator = EmulatorType::GBA;
+            std::cout << "[MainWindow] Set emulator type to GBA" << std::endl;
+        } else if (type == 1) {
+            currentEmulator = EmulatorType::Switch;
+            std::cout << "[MainWindow] Set emulator type to Switch" << std::endl;
+        }
+    }
+
     void MainWindow::GameLoop() {
+        // DEPRECATED: This function is now replaced by threading model
+        // Kept for compatibility, but UpdateDisplay() handles UI now
+    }
+
+    void MainWindow::StartEmulatorThread() {
+        if (emulatorRunning.exchange(true)) {
+            return; // Already running
+        }
+        emulatorThread = std::thread(&MainWindow::EmulatorThreadMain, this);
+    }
+
+    void MainWindow::StopEmulatorThread() {
+        emulatorRunning = false;
+        if (emulatorThread.joinable()) {
+            emulatorThread.join();
+        }
+    }
+
+    void MainWindow::EmulatorThreadMain() {
+        // Emulator loop runs on background thread
+        // Executes CPU cycles independent of Qt event processing
+        auto frameStartTime = std::chrono::high_resolution_clock::now();
+        const int FRAME_TIME_MS = 16;  // ~60 FPS target
+        
+        while (emulatorRunning) {
+            if (emulatorPaused) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            frameStartTime = std::chrono::high_resolution_clock::now();
+            
+            if (currentEmulator == EmulatorType::GBA) {
+                // Run one frame's worth of cycles (280k @ 16.78 MHz = ~16.7ms)
+                int totalCycles = 0;
+                const int TARGET_CYCLES = 280000;
+                
+                while (totalCycles < TARGET_CYCLES && emulatorRunning) {
+                    totalCycles += gba.Step();
+                }
+                
+                // Periodically flush save
+                saveFlushCounter++;
+                if (saveFlushCounter >= SAVE_FLUSH_INTERVAL) {
+                    saveFlushCounter = 0;
+                    gba.GetMemory().FlushSave();
+                }
+            } else if (currentEmulator == EmulatorType::Switch) {
+                switchEmulator.RunFrame();
+            }
+            
+            // Sync to ~60 FPS: sleep for remaining frame time
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::high_resolution_clock::now() - frameStartTime
+            ).count();
+            int sleepMs = FRAME_TIME_MS - (int)elapsed;
+            if (sleepMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+            }
+        }
+    }
+
+    void MainWindow::UpdateDisplay() {
+        // UI timer callback: update display from emulator state
+        // Runs on main Qt thread at 60 Hz
+        
         // Update Input
         uint16_t inputState = AIO::Input::InputManager::instance().update();
         
         if (currentEmulator == EmulatorType::GBA) {
             gba.UpdateInput(inputState);
+            
+            // Copy framebuffer to display image
+            const auto& buffer = gba.GetPPU().GetFramebuffer();
+            if ((int)buffer.size() >= 240 * 160) {
+                for (int y = 0; y < 160; ++y) {
+                    const uint32_t* src = &buffer[y * 240];
+                    uchar* dst = displayImage.scanLine(y);
+                    memcpy(dst, src, 240 * sizeof(uint32_t));
+                }
+            }
+        } else if (currentEmulator == EmulatorType::Switch) {
+            auto* gpu = switchEmulator.GetGPU();
+            if (gpu) {
+                const auto& buffer = gpu->GetFramebuffer();
+                if (buffer.size() >= 1280 * 720) {
+                    memcpy(displayImage.bits(), buffer.data(), buffer.size() * sizeof(uint32_t));
+                }
+            }
         }
-        // Switch input handling TODO
 
         // FPS calculation
         frameCount++;
@@ -292,7 +428,8 @@ void MainWindow::LoadROM(const std::string& path) {
                 uint16_t gameKeyInput = gba.ReadMem16(0x04000130);
                 ss << "<b>PC:</b> 0x" << ::std::hex << ::std::setfill('0') << ::std::setw(8) << gba.GetPC() << "<br>";
                 ss << "<b>Input:</b> " << formatInputState(inputState).toStdString() << "<br>";
-                ss << "<b>VCount:</b> " << ::std::dec << gba.ReadMem16(0x04000006);
+                ss << "<b>VCount:</b> " << ::std::dec << gba.ReadMem16(0x04000006) << "<br>";
+                ss << "<b>DISPCNT:</b> 0x" << ::std::hex << ::std::setw(4) << gba.ReadMem16(0x04000000);
             } else if (currentEmulator == EmulatorType::Switch) {
                 ss << switchEmulator.GetDebugInfo();
             }
@@ -300,41 +437,7 @@ void MainWindow::LoadROM(const std::string& path) {
             devPanelLabel->setText(QString::fromStdString(ss.str()));
         }
 
-        if (currentEmulator == EmulatorType::GBA) {
-            // Run a batch of instructions per frame
-            // GBA CPU is 16.78 MHz. 16.78M / 60 ~= 280,000 cycles per frame.
-            int cycles = 0;
-            while (cycles < 280000) {
-                cycles += gba.Step();
-            }
-            
-            // Update Display
-            const auto& buffer = gba.GetPPU().GetFramebuffer();
-            for (int y = 0; y < 160; ++y) {
-                for (int x = 0; x < 240; ++x) {
-                    displayImage.setPixel(x, y, buffer[y * 240 + x]);
-                }
-            }
-        } else if (currentEmulator == EmulatorType::Switch) {
-            switchEmulator.RunFrame();
-            
-            // Update Display
-            auto* gpu = switchEmulator.GetGPU();
-            if (gpu) {
-                const auto& buffer = gpu->GetFramebuffer();
-                // Buffer is 1280x720 uint32_t (RGBA)
-                if (buffer.size() >= 1280 * 720) {
-                    // Direct copy if format matches (ARGB32 expects 0xAARRGGBB)
-                    // Switch buffer is likely RGBA or ABGR. Let's assume ARGB for now or fix later.
-                    // Actually QImage::Format_ARGB32 expects 0xAARRGGBB.
-                    // If buffer is raw bytes, we might need conversion.
-                    // Assuming buffer is vector<uint32_t>
-                    memcpy(displayImage.bits(), buffer.data(), buffer.size() * sizeof(uint32_t));
-                }
-            }
-        }
-
-        // Scale up for visibility
+        // Scale and display
         displayLabel->setPixmap(QPixmap::fromImage(displayImage).scaled(displayLabel->size(), Qt::KeepAspectRatio));
     }
 
@@ -342,6 +445,17 @@ void MainWindow::LoadROM(const std::string& path) {
         if (Input::InputManager::instance().processKeyEvent(event)) {
             // Input handled
         } else {
+            // Debugger controls via GUI
+            if (debuggerEnabled) {
+                if (event->key() == Qt::Key_Down || event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+                    gba.SetSingleStep(true);
+                    gba.Step();
+                } else if (event->key() == Qt::Key_Up) {
+                    gba.StepBack();
+                } else if (event->key() == Qt::Key_C) {
+                    debuggerContinue = true;
+                }
+            }
             QMainWindow::keyPressEvent(event);
         }
     }
@@ -370,6 +484,11 @@ void MainWindow::LoadROM(const std::string& path) {
         connect(emuBtn, &QPushButton::clicked, this, &MainWindow::goToEmulatorSelect);
         layout->addWidget(emuBtn);
 
+        QPushButton *streamBtn = new QPushButton("STREAMING", mainMenuPage);
+        streamBtn->setCursor(Qt::PointingHandCursor);
+        connect(streamBtn, &QPushButton::clicked, this, &MainWindow::openStreaming);
+        layout->addWidget(streamBtn);
+
         QPushButton *settingsBtn = new QPushButton("SETTINGS", mainMenuPage);
         settingsBtn->setCursor(Qt::PointingHandCursor);
         connect(settingsBtn, &QPushButton::clicked, this, &MainWindow::goToSettings);
@@ -381,6 +500,35 @@ void MainWindow::LoadROM(const std::string& path) {
         footer->setAlignment(Qt::AlignCenter);
         footer->setStyleSheet("color: #666; font-size: 12px;");
         layout->addWidget(footer);
+    }
+
+    void MainWindow::openStreaming() {
+        stackedWidget->setCurrentWidget(streamingHubPage);
+        streamingHubPage->setFocus();
+    }
+
+    void MainWindow::setupStreamingPages() {
+        auto* hub = new StreamingHubWidget(this);
+        streamingHubPage = hub;
+
+        auto* web = new StreamingWebViewPage(this);
+        streamingWebPage = web;
+
+        connect(hub, &StreamingHubWidget::launchRequested, this, [this](AIO::GUI::StreamingApp app) {
+            launchStreamingApp(static_cast<int>(app));
+        });
+        connect(web, &StreamingWebViewPage::homeRequested, this, [this]() {
+            stackedWidget->setCurrentWidget(streamingHubPage);
+            streamingHubPage->setFocus();
+        });
+    }
+
+    void MainWindow::launchStreamingApp(int app) {
+        auto* web = qobject_cast<StreamingWebViewPage*>(streamingWebPage);
+        if (!web) return;
+        stackedWidget->setCurrentWidget(streamingWebPage);
+        web->openApp(static_cast<AIO::GUI::StreamingApp>(app));
+        streamingWebPage->setFocus();
     }
 
     void MainWindow::setupSettingsPage() {
@@ -520,9 +668,8 @@ void MainWindow::LoadROM(const std::string& path) {
     }
 
     void MainWindow::stopGame() {
-        gameTimer->stop();
-        // Maybe reset emulator?
-        // gba.Reset(); 
+        StopEmulatorThread();
+        displayTimer->stop();
         goToGameSelect();
     }
 
