@@ -46,7 +46,7 @@ void StreamingHubWidget::setupUi() {
         auto* btn = new QPushButton(entries[i].label, this);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setMinimumHeight(140);
-        btn->setFocusPolicy(Qt::NoFocus);
+        btn->setFocusPolicy(Qt::StrongFocus);
         btn->setProperty("tile", true);
         tiles_[i] = btn;
 

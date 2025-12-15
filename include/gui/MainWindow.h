@@ -17,6 +17,13 @@
 #include <atomic>
 #include <mutex>
 
+#include "gui/NavigationController.h"
+#include "gui/UIActionMapper.h"
+
+namespace AIO::GUI {
+class MainMenuAdapter;
+}
+
 class QKeyEvent;
 
 #include "emulator/gba/GBA.h"
@@ -41,6 +48,11 @@ class MainWindow : public QMainWindow {
     protected:
         void keyPressEvent(QKeyEvent *event) override;
         void keyReleaseEvent(QKeyEvent *event) override;
+        void mouseMoveEvent(QMouseEvent* event) override;
+        void mousePressEvent(QMouseEvent* event) override;
+        void mouseReleaseEvent(QMouseEvent* event) override;
+        bool event(QEvent* e) override;
+        bool eventFilter(QObject* watched, QEvent* event) override;
 
     private slots:
         void UpdateDisplay();
@@ -80,6 +92,16 @@ class MainWindow : public QMainWindow {
         void loadSettings();
         void saveSettings();
         void refreshGameList();
+
+        // Global navigation (state-driven)
+        void setupNavigation();
+        void onPageChanged();
+        void onUIAction(const AIO::GUI::UIActionFrame& frame);
+
+        std::unique_ptr<AIO::GUI::MainMenuAdapter> mainMenuAdapter;
+        AIO::GUI::NavigationController nav;
+        AIO::GUI::UIActionMapper actionMapper;
+        QTimer* navTimer = nullptr;
 
         // Widgets
         QStackedWidget *stackedWidget;
@@ -129,6 +151,7 @@ class MainWindow : public QMainWindow {
         int saveFlushCounter = 0;
         static constexpr int SAVE_FLUSH_INTERVAL = 60;
         
+        
         // SDL Audio
         SDL_AudioDeviceID audioDevice = 0;
         static constexpr int AUDIO_SAMPLE_RATE = 32768;
@@ -145,8 +168,16 @@ class MainWindow : public QMainWindow {
         bool debuggerContinue = false;
         bool stdinRawEnabled = false;
         struct termios rawTermios;
+        
+        // Input mode tracking
+        enum class InputMode { Mouse, Controller };
+        InputMode currentInputMode = InputMode::Mouse;
+        
+        // Mouse hover tracking (for sticky hover until mouse leaves)
+        QPushButton* lastHoveredButton = nullptr;
 };
 
 } // namespace GUI
 } // namespace AIO
+
 

@@ -50,6 +50,9 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/YouTubeBrowsePage.cpp
     ${PROJECT_ROOT}/src/gui/YouTubePlayerPage.cpp
     ${PROJECT_ROOT}/src/gui/ThumbnailCache.cpp
+    ${PROJECT_ROOT}/src/gui/NavigationController.cpp
+    ${PROJECT_ROOT}/src/gui/UIActionMapper.cpp
+    ${PROJECT_ROOT}/src/gui/MainMenuAdapter.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
     ${PROJECT_ROOT}/src/streaming/StreamingManager.cpp
     ${PROJECT_ROOT}/src/streaming/YouTubeService.cpp

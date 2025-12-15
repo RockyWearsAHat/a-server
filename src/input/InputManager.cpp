@@ -11,7 +11,10 @@ namespace Input {
     }
 
     InputManager::InputManager() {
-        if (SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
+        // Only initialize the GameController subsystem here.
+        // SDL audio is initialized/owned by MainWindow; calling SDL_Quit() from this
+        // singleton would shut down audio and other SDL subsystems globally.
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
             qWarning() << "SDL could not initialize! SDL Error:" << SDL_GetError();
         }
         loadConfig();
@@ -22,7 +25,8 @@ namespace Input {
         for (auto c : controllers) {
             SDL_GameControllerClose(c);
         }
-        SDL_Quit();
+        // Do not call SDL_Quit() here; other parts of the app (audio) may still be using SDL.
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
     }
 
     bool InputManager::processKeyEvent(QKeyEvent* event) {

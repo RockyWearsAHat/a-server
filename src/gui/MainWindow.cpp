@@ -5,6 +5,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QListWidget>
@@ -20,10 +21,15 @@
 #include <QTimer>
 #include <QImage>
 #include <QCheckBox>
+#include <QLineEdit>
+#include <QTextEdit>
+#include <QPlainTextEdit>
 #include <QElapsedTimer>
 #include <QSettings>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QEvent>
+#include <QCursor>
 #include <SDL2/SDL.h>
 #include <sys/select.h>
 #include <termios.h>
@@ -41,6 +47,9 @@
 #include "gui/StreamingWebViewPage.h"
 #include "gui/YouTubeBrowsePage.h"
 #include "gui/YouTubePlayerPage.h"
+#include "gui/MainMenuAdapter.h"
+#include "gui/NavigationController.h"
+#include "gui/UIActionMapper.h"
 #include "input/InputManager.h"
 #include "emulator/common/Logger.h"
 #include "emulator/gba/ARM7TDMI.h"
@@ -72,6 +81,7 @@ namespace GUI {
 
 static MainWindow* audioInstance = nullptr;
 
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), settings("AIOServer", "GBAEmulator")
 {
@@ -91,15 +101,44 @@ MainWindow::MainWindow(QWidget *parent)
     if (!styleSheet.isEmpty()) {
         setStyleSheet(styleSheet);
     }
+
+    // NOTE: avoid app-wide event filters here; QtWebEngine + macOS has shown crashes
+    // in QApplication::notify when filters are present.
     loadSettings();
     stackedWidget = new QStackedWidget(this);
     setCentralWidget(stackedWidget);
+    // Ensure key events have a stable focus target.
+    stackedWidget->setFocusPolicy(Qt::StrongFocus);
+    setFocusProxy(stackedWidget);
     setupMainMenu();
     setupEmulatorSelect();
     setupGameSelect();
     setupEmulatorView();
     setupSettingsPage();
-    setupStreamingPages();
+    // QtWebEngine on macOS can assert inside AppKit when the app isn't running
+    // from a proper .app bundle (mainBundlePath == nil). That crash happens
+    // before we can validate navigation/input. Keep streaming disabled unless
+    // explicitly enabled.
+    const bool enableStreaming = qEnvironmentVariableIntValue("AIO_ENABLE_STREAMING") == 1;
+    if (enableStreaming) {
+        setupStreamingPages();
+    } else {
+        streamingHubPage = new QWidget(this);
+        auto* layout = new QVBoxLayout(streamingHubPage);
+        auto* label = new QLabel("Streaming disabled (set AIO_ENABLE_STREAMING=1)", streamingHubPage);
+        label->setAlignment(Qt::AlignCenter);
+        auto* backBtn = new QPushButton("Back", streamingHubPage);
+        backBtn->setFocusPolicy(Qt::StrongFocus);
+        layout->addWidget(label);
+        layout->addWidget(backBtn);
+        layout->setAlignment(backBtn, Qt::AlignHCenter);
+        connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToMainMenu);
+
+        // Placeholders so stackedWidget indices remain valid.
+        youTubeBrowsePage = new QWidget(this);
+        youTubePlayerPage = new QWidget(this);
+        streamingWebPage = new QWidget(this);
+    }
     stackedWidget->addWidget(mainMenuPage);
     stackedWidget->addWidget(emulatorSelectPage);
     stackedWidget->addWidget(gameSelectPage);
@@ -110,10 +149,32 @@ MainWindow::MainWindow(QWidget *parent)
     stackedWidget->addWidget(youTubePlayerPage);
     stackedWidget->addWidget(streamingWebPage);
     stackedWidget->setCurrentWidget(mainMenuPage);
+
+    // Keep focus on the currently visible page by default.
+    QObject::connect(stackedWidget, &QStackedWidget::currentChanged, this, [this](int) {
+        QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+        if (!current) return;
+        current->setFocusPolicy(Qt::StrongFocus);
+        if (!QApplication::focusWidget() || !current->isAncestorOf(QApplication::focusWidget())) {
+            current->setFocus(Qt::OtherFocusReason);
+        }
+    });
+
+    // Ensure initial focus is on the first actionable item.
+    QTimer::singleShot(0, this, [this]() {
+        if (!mainMenuPage) return;
+        if (auto* btn = mainMenuPage->findChild<QPushButton*>()) {
+            btn->setFocus();
+        } else {
+            mainMenuPage->setFocus();
+        }
+    });
     
-    // Display update timer: UI refresh at 60 Hz (not CPU stepping)
+    // Display update timer: starts when a game starts.
     displayTimer = new QTimer(this);
     connect(displayTimer, &QTimer::timeout, this, &MainWindow::UpdateDisplay);
+
+    setupNavigation();
     
     displayImage = QImage(240, 160, QImage::Format_ARGB32);
     displayImage.fill(Qt::black);
@@ -121,6 +182,163 @@ MainWindow::MainWindow(QWidget *parent)
     setFocus();
     fpsTimer.start();
     initAudio();
+}
+
+void MainWindow::setupNavigation() {
+    navTimer = new QTimer(this);
+    connect(navTimer, &QTimer::timeout, this, [this]() {
+        const uint16_t inputState = AIO::Input::InputManager::instance().update();
+        const auto frame = actionMapper.update(inputState);
+
+        // Detect if controller/keyboard input occurred
+        bool hasControllerInput = (frame.source == AIO::GUI::UIInputSource::Controller || 
+                                   frame.source == AIO::GUI::UIInputSource::Keyboard) &&
+                                  frame.primary != AIO::GUI::UIAction::None;
+        
+        if (hasControllerInput) {
+            // Controller input detected - switch to controller mode
+            if (currentInputMode != InputMode::Controller) {
+                std::cout << "[INPUT_MODE] Detected controller input, switching to Controller mode" << std::endl;
+                currentInputMode = InputMode::Controller;
+                
+                // Hide cursor on main window and all child widgets
+                QApplication::setOverrideCursor(Qt::BlankCursor);
+                std::cout << "[CURSOR] Set to BlankCursor globally" << std::endl;
+                
+                lastHoveredButton = nullptr; // Clear mouse hover tracking
+                
+                // Clear mouse hover visual overlay and restore controller selection
+                if (mainMenuAdapter) {
+                    nav.setHoverFromMouse(-1);  // Clears mouseHover_
+                    
+                    // Restore controller selection from saved position
+                    // This updates BOTH the adapter AND the NavigationController's internal state
+                    int resumeIndex = mainMenuAdapter->getLastResumeIndex();
+                    if (resumeIndex >= 0) {
+                        nav.setControllerSelection(resumeIndex);
+                        std::cout << "[STATE] Resumed controller from index " << resumeIndex << std::endl;
+                    }
+                    std::cout << "[HOVER] Cleared mouse hover, restored controller selection" << std::endl;
+                }
+            }
+        }
+        
+        // Only poll mouse hover when in mouse mode
+        if (currentInputMode == InputMode::Mouse && 
+            stackedWidget && stackedWidget->currentWidget() == mainMenuPage && mainMenuAdapter) {
+            
+            QPoint mousePos = QCursor::pos();
+            QPushButton* currentlyUnderMouse = nullptr;
+            
+            // Find which button (if any) the mouse is currently over
+            for (const auto& btn : mainMenuAdapter->getButtons()) {
+                auto* btnPtr = btn.data();
+                if (btnPtr && btnPtr->isVisible()) {
+                    QPoint localMousePos = btnPtr->mapFromGlobal(mousePos);
+                    if (btnPtr->rect().contains(localMousePos)) {
+                        currentlyUnderMouse = btnPtr;
+                        break;
+                    }
+                }
+            }
+            
+            // If mouse position changed, update hover
+            if (currentlyUnderMouse != lastHoveredButton) {
+                if (currentlyUnderMouse) {
+                    // Mouse entered a button - set hover (overrides controller selection visually)
+                    const int idx = mainMenuAdapter->indexOfButton(currentlyUnderMouse);
+                    if (idx >= 0) {
+                        nav.setHoverFromMouse(idx);
+                        std::cout << "[MOUSE_HOVER] Button " << idx << " now hovered" << std::endl;
+                    }
+                } else if (lastHoveredButton) {
+                    // Mouse left all buttons - clear hover (shows controller selection again)
+                    nav.setHoverFromMouse(-1);
+                    std::cout << "[MOUSE_HOVER] All buttons left, cleared mouse hover" << std::endl;
+                }
+                lastHoveredButton = currentlyUnderMouse;
+            }
+        }
+
+        if (frame.primary == AIO::GUI::UIAction::None) return;
+
+        // Process controller/keyboard action
+        onUIAction(frame);
+    });
+    navTimer->start(16);
+
+    connect(stackedWidget, &QStackedWidget::currentChanged, this, [this](int) {
+        onPageChanged();
+    });
+    
+    // Install global event filter to catch mouse events from any widget
+    // This ensures we detect mouse movement even when cursor is over buttons/pages
+    QApplication::instance()->installEventFilter(this);
+    
+    onPageChanged();
+}
+
+void MainWindow::onPageChanged() {
+    QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+    if (!current) return;
+
+    if (current == mainMenuPage) {
+        nav.setAdapter(mainMenuAdapter.get());
+
+        // Initialize styling - ensure buttons have aio_hovered property set properly
+        // This is called after nav.setAdapter so the adapter is ready
+        if (mainMenuAdapter) {
+            mainMenuAdapter->applyHovered();
+        }
+
+        // No need to install event filters anymore; we poll mouse in nav timer.
+        return;
+    }
+
+    // TODO: add adapters for other pages.
+    nav.setAdapter(nullptr);
+}
+
+bool MainWindow::event(QEvent* e) {
+    // Let the specific mouse event handlers deal with mouse events
+    return QMainWindow::event(e);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    // Handle global mouse events to detect mouse movement even when cursor is over child widgets
+    if (event->type() == QEvent::MouseMove || 
+        event->type() == QEvent::MouseButtonPress || 
+        event->type() == QEvent::MouseButtonRelease) {
+        
+        // If we're in controller mode, switch to mouse mode
+        if (currentInputMode == InputMode::Controller) {
+            std::cout << "[INPUT_MODE] Global mouse event detected (" << event->type() 
+                      << "), switching to Mouse mode" << std::endl;
+            currentInputMode = InputMode::Mouse;
+            lastHoveredButton = nullptr;  // Force re-polling on next frame
+            
+            // Show cursor - restore from override
+            QApplication::restoreOverrideCursor();
+            std::cout << "[CURSOR] Restored cursor globally" << std::endl;
+            
+            // Save controller state and clear visual display
+            if (mainMenuAdapter) {
+                mainMenuAdapter->saveControllerIndexBeforeMouse();
+                mainMenuAdapter->setHoveredIndex(-1);
+                std::cout << "[STATE] Cleared visual state on mouse mode entry (global)" << std::endl;
+            }
+        }
+        
+        actionMapper.notifyMouseActivity();
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::onUIAction(const AIO::GUI::UIActionFrame& frame) {
+    if (nav.adapter()) {
+        nav.apply(frame);
+        return;
+    }
 }
 
 MainWindow::~MainWindow() {
@@ -495,9 +713,17 @@ void MainWindow::LoadROM(const std::string& path) {
     }
 
     void MainWindow::keyPressEvent(QKeyEvent *event) {
-        if (Input::InputManager::instance().processKeyEvent(event)) {
-            // Input handled
-        } else {
+        // Always keep keyboard mapping updated for emulator core.
+        const bool mapped = Input::InputManager::instance().processKeyEvent(event);
+
+        // If we're not in an active emulator run, treat arrows/enter/esc as UI navigation.
+        const bool inEmu = (stackedWidget && stackedWidget->currentWidget() == emulatorPage && emulatorRunning);
+        if (!inEmu) {
+            QMainWindow::keyPressEvent(event);
+            return;
+        }
+
+        if (!mapped) {
             // Debugger controls via GUI
             if (debuggerEnabled) {
                 if (event->key() == Qt::Key_Down || event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
@@ -520,6 +746,103 @@ void MainWindow::LoadROM(const std::string& path) {
             QMainWindow::keyReleaseEvent(event);
         }
     }
+
+    void MainWindow::mouseMoveEvent(QMouseEvent* event) {
+        // Show cursor and switch to mouse mode on mouse movement
+        setCursor(Qt::ArrowCursor);
+        if (stackedWidget) stackedWidget->setCursor(Qt::ArrowCursor);
+        if (mainMenuPage) mainMenuPage->setCursor(Qt::ArrowCursor);
+        if (mainMenuAdapter) {
+            for (const auto& btn : mainMenuAdapter->getButtons()) {
+                if (auto* btnPtr = btn.data()) {
+                    btnPtr->setCursor(Qt::ArrowCursor);
+                }
+            }
+        }
+        
+        // Switch from controller mode to mouse mode
+        if (currentInputMode == InputMode::Controller) {
+            std::cout << "[INPUT_MODE] Mouse movement detected, switching to Mouse mode" << std::endl;
+            currentInputMode = InputMode::Mouse;
+            lastHoveredButton = nullptr;  // Force re-polling on next frame
+            
+            // Save controller state and clear visual display
+            if (mainMenuAdapter) {
+                mainMenuAdapter->saveControllerIndexBeforeMouse();
+                // Clear controller display, show nothing (both hovered and mouseHover are -1)
+                mainMenuAdapter->setHoveredIndex(-1);
+                std::cout << "[STATE] Cleared visual state on mouse mode entry" << std::endl;
+            }
+        }
+        
+        actionMapper.notifyMouseActivity();
+        QMainWindow::mouseMoveEvent(event);
+    }
+
+    void MainWindow::mousePressEvent(QMouseEvent* event) {
+        // Show cursor and switch to mouse mode on mouse press
+        setCursor(Qt::ArrowCursor);
+        if (stackedWidget) stackedWidget->setCursor(Qt::ArrowCursor);
+        if (mainMenuPage) mainMenuPage->setCursor(Qt::ArrowCursor);
+        if (mainMenuAdapter) {
+            for (const auto& btn : mainMenuAdapter->getButtons()) {
+                if (auto* btnPtr = btn.data()) {
+                    btnPtr->setCursor(Qt::ArrowCursor);
+                }
+            }
+        }
+        
+        // Switch from controller mode to mouse mode
+        if (currentInputMode == InputMode::Controller) {
+            std::cout << "[INPUT_MODE] Mouse press detected, switching to Mouse mode" << std::endl;
+            currentInputMode = InputMode::Mouse;
+            lastHoveredButton = nullptr;
+            
+            // Save controller state and clear visual display
+            if (mainMenuAdapter) {
+                mainMenuAdapter->saveControllerIndexBeforeMouse();
+                // Clear controller display, show nothing (both hovered and mouseHover are -1)
+                mainMenuAdapter->setHoveredIndex(-1);
+                std::cout << "[STATE] Cleared visual state on mouse mode entry" << std::endl;
+            }
+        }
+        
+        actionMapper.notifyMouseActivity();
+        QMainWindow::mousePressEvent(event);
+    }
+
+    void MainWindow::mouseReleaseEvent(QMouseEvent* event) {
+        // Show cursor and switch to mouse mode on mouse release
+        setCursor(Qt::ArrowCursor);
+        if (stackedWidget) stackedWidget->setCursor(Qt::ArrowCursor);
+        if (mainMenuPage) mainMenuPage->setCursor(Qt::ArrowCursor);
+        if (mainMenuAdapter) {
+            for (const auto& btn : mainMenuAdapter->getButtons()) {
+                if (auto* btnPtr = btn.data()) {
+                    btnPtr->setCursor(Qt::ArrowCursor);
+                }
+            }
+        }
+        
+        // Switch from controller mode to mouse mode
+        if (currentInputMode == InputMode::Controller) {
+            std::cout << "[INPUT_MODE] Mouse release detected, switching to Mouse mode" << std::endl;
+            currentInputMode = InputMode::Mouse;
+            lastHoveredButton = nullptr;
+            
+            // Save controller state and clear visual display
+            if (mainMenuAdapter) {
+                mainMenuAdapter->saveControllerIndexBeforeMouse();
+                // Clear controller display, show nothing (both hovered and mouseHover are -1)
+                mainMenuAdapter->setHoveredIndex(-1);
+                std::cout << "[STATE] Cleared visual state on mouse mode entry" << std::endl;
+            }
+        }
+        
+        actionMapper.notifyMouseActivity();
+        QMainWindow::mouseReleaseEvent(event);
+    }
+
 
     void MainWindow::setupMainMenu() {
         mainMenuPage = new QWidget(this);
@@ -556,6 +879,10 @@ void MainWindow::LoadROM(const std::string& path) {
         footer->setAlignment(Qt::AlignCenter);
         footer->setProperty("role", "subtitle");
         layout->addWidget(footer);
+
+        // State-driven navigation adapter (single unified outline).
+        mainMenuAdapter = std::make_unique<AIO::GUI::MainMenuAdapter>(this, mainMenuPage,
+            std::vector<QPushButton*>{emuBtn, streamBtn, settingsBtn});
     }
 
     void MainWindow::openStreaming() {
@@ -774,19 +1101,37 @@ void MainWindow::LoadROM(const std::string& path) {
 
     void MainWindow::goToMainMenu() {
         stackedWidget->setCurrentWidget(mainMenuPage);
+        if (mainMenuPage) {
+            if (auto* btn = mainMenuPage->findChild<QPushButton*>()) btn->setFocus();
+            else mainMenuPage->setFocus();
+        }
     }
 
     void MainWindow::goToSettings() {
         stackedWidget->setCurrentWidget(settingsPage);
+        if (settingsPage) {
+            if (auto* btn = settingsPage->findChild<QPushButton*>()) btn->setFocus();
+            else settingsPage->setFocus();
+        }
     }
 
     void MainWindow::goToEmulatorSelect() {
         stackedWidget->setCurrentWidget(emulatorSelectPage);
+        if (emulatorSelectPage) {
+            if (auto* btn = emulatorSelectPage->findChild<QPushButton*>()) btn->setFocus();
+            else emulatorSelectPage->setFocus();
+        }
     }
 
     void MainWindow::goToGameSelect() {
         refreshGameList();
         stackedWidget->setCurrentWidget(gameSelectPage);
+        if (gameListWidget) {
+            if (gameListWidget->count() > 0) gameListWidget->setCurrentRow(0);
+            gameListWidget->setFocus();
+        } else if (gameSelectPage) {
+            gameSelectPage->setFocus();
+        }
     }
 
     void MainWindow::setupGameSelect() {
