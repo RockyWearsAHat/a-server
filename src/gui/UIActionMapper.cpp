@@ -41,8 +41,8 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
     setSourceIfAnyDown();
 
     // Directional repeat.
-    constexpr qint64 INITIAL_DELAY_MS = 220;
-    constexpr qint64 REPEAT_MS = 70;
+    constexpr qint64 INITIAL_DELAY_MS = 400;  // Longer initial delay to prevent double inputs
+    constexpr qint64 REPEAT_MS = 150;  // Slower repeats overall
 
     auto startRepeat = [&](int bit) {
         repeatBit_ = bit;
