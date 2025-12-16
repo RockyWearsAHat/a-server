@@ -22,6 +22,9 @@
 
 namespace AIO::GUI {
 class MainMenuAdapter;
+class EmulatorSelectAdapter;
+class GameSelectAdapter;
+class SettingsMenuAdapter;
 }
 
 class QKeyEvent;
@@ -54,16 +57,19 @@ class MainWindow : public QMainWindow {
         bool event(QEvent* e) override;
         bool eventFilter(QObject* watched, QEvent* event) override;
 
+    public slots:
+        // Navigation - public so adapters can call them
+        void goToMainMenu();
+        void goToEmulatorSelect();
+        void goToGameSelect();
+        void goToSettings();
+
     private slots:
         void UpdateDisplay();
         void GameLoop();  // Deprecated, kept for compatibility
         void toggleDevPanel(bool enabled);
         
-        // Navigation Slots
-        void goToMainMenu();
-        void goToEmulatorSelect();
-        void goToGameSelect();
-        void goToSettings();
+        // Other slots
         void openStreaming();
         void launchStreamingApp(int app);
         void selectRomDirectory();
@@ -99,6 +105,9 @@ class MainWindow : public QMainWindow {
         void onUIAction(const AIO::GUI::UIActionFrame& frame);
 
         std::unique_ptr<AIO::GUI::MainMenuAdapter> mainMenuAdapter;
+        std::unique_ptr<AIO::GUI::EmulatorSelectAdapter> emulatorSelectAdapter;
+        std::unique_ptr<AIO::GUI::GameSelectAdapter> gameSelectAdapter;
+        std::unique_ptr<AIO::GUI::SettingsMenuAdapter> settingsMenuAdapter;
         AIO::GUI::NavigationController nav;
         AIO::GUI::UIActionMapper actionMapper;
         QTimer* navTimer = nullptr;

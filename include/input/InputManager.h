@@ -3,8 +3,12 @@
 #include <QObject>
 #include <QMap>
 #include <QKeyEvent>
+#include <QJsonObject>
 #include <QSettings>
 #include <SDL2/SDL.h>
+
+#include "input/InputTypes.h"
+#include "input/AppActions.h"
 
 namespace AIO {
 namespace Input {
@@ -34,6 +38,29 @@ enum GBAButton {
         // Polls SDL events and returns combined input state
         uint16_t update();
 
+        // Logical (emulator-agnostic) input state.
+        // 1 = released, 0 = pressed, same convention as GBA KEYINPUT.
+        uint32_t logicalButtonsDown() const { return logicalButtonsDown_; }
+
+        // Action-based queries (AppId/ActionId -> resolved LogicalButton).
+        bool pressed(AppId app, ActionId action) const;
+        bool edgePressed(AppId app, ActionId action) const;
+
+        // Configure how logical buttons map to GBA buttons (for the GBA core).
+        // This lets us keep controller mapping global, and swap the emulator mapping separately.
+        void setGBALogicalBinding(LogicalButton logical, GBAButton gbaButton);
+
+        // App-wide UI keyboard bindings (independent from emulator keybinds).
+        void setUIKeyBinding(LogicalButton logical, int qtKey);
+        int uiKeyBinding(LogicalButton logical) const;
+
+        // Returns a bitmask of non-emulation "system" buttons pressed this frame.
+        // These are used for global UI actions (e.g., Home).
+        uint32_t systemButtonsDown() const { return systemButtonsDown_; }
+
+        ControllerFamily activeControllerFamily() const { return activeFamily_; }
+        QString activeControllerName() const { return activeControllerName_; }
+
         // Map a Qt Key to a GBA Button
         void setMapping(int qtKey, GBAButton button);
         int getKeyForButton(GBAButton button) const;
@@ -52,6 +79,10 @@ enum GBAButton {
         InputManager();
         ~InputManager();
 
+        void loadControllerMappingRegistry();
+        void applyBestControllerLayoutForActivePad();
+        void setLogicalMapping(LogicalButton logical, int sdlButton);
+
         QMap<int, GBAButton> keyToButtonMap;
         QMap<GBAButton, int> buttonToKeyMap;
 
@@ -59,6 +90,29 @@ enum GBAButton {
         QMap<GBAButton, int> buttonToGamepadMap;
         
         QMap<int, SDL_GameController*> controllers;
+
+        // Logical mapping: SDL button -> LogicalButton
+        QMap<int, LogicalButton> sdlToLogical_;
+        // Emulator mapping: LogicalButton -> GBAButton
+        QMap<LogicalButton, GBAButton> logicalToGBA_;
+
+        // UI mapping: Qt::Key -> LogicalButton
+        QMap<int, LogicalButton> uiKeyToLogical_;
+        QMap<LogicalButton, int> uiLogicalToKey_;
+
+        // Current logical state (1 = released, 0 = pressed).
+        uint32_t logicalButtonsDown_ = 0xFFFFFFFFu;
+
+        // Previous logical state for edge detection.
+        uint32_t lastLogicalButtonsDown_ = 0xFFFFFFFFu;
+
+        ControllerFamily activeFamily_ = ControllerFamily::Unknown;
+        QString activeControllerName_;
+
+        // Loaded from assets/controller_mappings.json
+        QJsonObject controllerRegistryDoc_;
+
+        uint32_t systemButtonsDown_ = 0;
         
         uint16_t keyboardState = 0xFFFF; // 1 = Released
         uint16_t gamepadState = 0xFFFF;

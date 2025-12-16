@@ -15,6 +15,7 @@ enum class UIAction {
     Right,
     Select,
     Back,
+    Home,
 };
 
 // Input source tracking is used to hide/show cursor and resolve hover.
@@ -50,7 +51,7 @@ public:
     // Optional back action; return true if handled.
     virtual bool back() = 0;
     
-    // Set mouse hover override (visually shows hover, doesn't affect controller selection)
+    // Set mouse hover override (visually shows selection, doesn't affect controller selection)
     virtual void setMouseHoverIndex(int index) {}
     
     // Clear mouse hover and return to controller selection display

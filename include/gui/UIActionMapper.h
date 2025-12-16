@@ -25,6 +25,7 @@ private:
     bool edgePressed(uint16_t state, int bit) const;
 
     uint16_t lastState_ = 0x03FF;
+    uint32_t lastLogicalButtons_ = 0xFFFFFFFFu;
     QElapsedTimer timer_;
 
     // Simple repeat for directional input.

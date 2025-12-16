@@ -26,19 +26,39 @@ void UIActionMapper::notifyMouseActivity() {
 UIActionFrame UIActionMapper::update(uint16_t inputState) {
     const qint64 nowMs = timer_.elapsed();
 
+    auto logicalPressed = [&](AIO::Input::LogicalButton b) {
+        const uint32_t mask = 1u << static_cast<uint32_t>(b);
+        return (AIO::Input::InputManager::instance().logicalButtonsDown() & mask) == 0;
+    };
+
+    auto logicalEdge = [&](AIO::Input::LogicalButton b) {
+        const uint32_t mask = 1u << static_cast<uint32_t>(b);
+        const bool isDown = logicalPressed(b);
+        const bool wasDown = (lastLogicalButtons_ & mask) == 0;
+        return isDown && !wasDown;
+    };
+
     auto setSourceIfAnyDown = [&]() {
         // Any controller/keyboard activity will override mouse mode.
-        // We only have merged state, so treat any pressed bit as non-mouse.
-        if ((inputState & 0x03FF) != 0x03FF) {
+        // UI is driven by logical buttons (not emulator bindings).
+        if (logicalPressed(AIO::Input::LogicalButton::Up) || logicalPressed(AIO::Input::LogicalButton::Down) ||
+            logicalPressed(AIO::Input::LogicalButton::Left) || logicalPressed(AIO::Input::LogicalButton::Right) ||
+            logicalPressed(AIO::Input::LogicalButton::Confirm) || logicalPressed(AIO::Input::LogicalButton::Back)) {
             if (lastSource_ != UIInputSource::Controller) {
-                // In our mapping, controller and keyboard are merged; assume controller
-                // if a gamepad is present, otherwise keyboard. This is good enough for cursor hiding.
                 lastSource_ = UIInputSource::Controller;
             }
         }
     };
 
     setSourceIfAnyDown();
+
+    // System/Home button (Guide on Xbox, PS on PlayStation, Home on Switch controllers).
+    // This is not part of GBA KEYINPUT, so read it from InputManager.
+    if (logicalPressed(AIO::Input::LogicalButton::Home) || (AIO::Input::InputManager::instance().systemButtonsDown() & 0x1u) != 0) {
+        lastSource_ = UIInputSource::Controller;
+        lastState_ = inputState;
+        return {UIAction::Home, lastSource_};
+    }
 
     // Directional repeat.
     constexpr qint64 INITIAL_DELAY_MS = 400;  // Longer initial delay to prevent double inputs
@@ -56,27 +76,29 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
     auto bumpRepeat = [&]() { nextRepeatMs_ = nowMs + REPEAT_MS; };
 
     // Prefer edges first (snappy), then repeat.
-    struct DirMap { int bit; UIAction act; };
+    struct DirMap { AIO::Input::LogicalButton logical; int repeatKey; UIAction act; };
     const DirMap dirs[] = {
-        {AIO::Input::Button_Up, UIAction::Up},
-        {AIO::Input::Button_Down, UIAction::Down},
-        {AIO::Input::Button_Left, UIAction::Left},
-        {AIO::Input::Button_Right, UIAction::Right},
+        {AIO::Input::LogicalButton::Up, (int)AIO::Input::LogicalButton::Up, UIAction::Up},
+        {AIO::Input::LogicalButton::Down, (int)AIO::Input::LogicalButton::Down, UIAction::Down},
+        {AIO::Input::LogicalButton::Left, (int)AIO::Input::LogicalButton::Left, UIAction::Left},
+        {AIO::Input::LogicalButton::Right, (int)AIO::Input::LogicalButton::Right, UIAction::Right},
     };
 
     for (const auto& d : dirs) {
-        if (edgePressed(inputState, d.bit)) {
-            startRepeat(d.bit);
+        if (logicalEdge(d.logical)) {
+            startRepeat(d.repeatKey);
+            lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
             lastState_ = inputState;
             return {d.act, lastSource_};
         }
     }
 
     for (const auto& d : dirs) {
-        if (pressed(inputState, d.bit)) {
-            if (repeatBit_ != d.bit) startRepeat(d.bit);
-            if (repeatReady(d.bit)) {
+        if (logicalPressed(d.logical)) {
+            if (repeatBit_ != d.repeatKey) startRepeat(d.repeatKey);
+            if (repeatReady(d.repeatKey)) {
                 bumpRepeat();
+                lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
                 lastState_ = inputState;
                 return {d.act, lastSource_};
             }
@@ -84,21 +106,24 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
     }
 
     // Stop repeat when no directions held.
-    if (!pressed(inputState, AIO::Input::Button_Up) && !pressed(inputState, AIO::Input::Button_Down) &&
-        !pressed(inputState, AIO::Input::Button_Left) && !pressed(inputState, AIO::Input::Button_Right)) {
+    if (!logicalPressed(AIO::Input::LogicalButton::Up) && !logicalPressed(AIO::Input::LogicalButton::Down) &&
+        !logicalPressed(AIO::Input::LogicalButton::Left) && !logicalPressed(AIO::Input::LogicalButton::Right)) {
         repeatBit_ = -1;
     }
 
-    if (edgePressed(inputState, AIO::Input::Button_A)) {
+    if (logicalEdge(AIO::Input::LogicalButton::Confirm)) {
+        lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
         lastState_ = inputState;
         return {UIAction::Select, lastSource_};
     }
 
-    if (edgePressed(inputState, AIO::Input::Button_B)) {
+    if (logicalEdge(AIO::Input::LogicalButton::Back)) {
+        lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
         lastState_ = inputState;
         return {UIAction::Back, lastSource_};
     }
 
+    lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
     lastState_ = inputState;
     return {UIAction::None, lastSource_};
 }

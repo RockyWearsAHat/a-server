@@ -1,8 +1,9 @@
 #include "gui/NavigationController.h"
-#include "gui/MainMenuAdapter.h"
+#include "gui/ButtonListAdapter.h"
 
 #include <algorithm>
 #include <iostream>
+#include <typeinfo>
 
 namespace AIO::GUI {
 
@@ -59,14 +60,21 @@ void NavigationController::clampAndApplyHover() {
 
     hoveredIndex_ = std::clamp(hoveredIndex_, 0, n - 1);
     
-    // Check if adapter has the onControllerNavigation method
-    // This indicates user is actively navigating with controller
-    auto mainMenuAdapter = dynamic_cast<AIO::GUI::MainMenuAdapter*>(adapter_);
-    if (mainMenuAdapter) {
-        mainMenuAdapter->onControllerNavigation(hoveredIndex_);
-    } else {
-        adapter_->setHoveredIndex(hoveredIndex_);
+    // Prefer controller-navigation path only for true button-list pages.
+    // Some adapters (e.g., ROM list) may inherit ButtonListAdapter for shared styling,
+    // but they override setHoveredIndex/activateIndex to drive a QListWidget instead.
+    // In those cases, calling setHoveredIndex() is the correct behavior.
+    if (auto* buttonList = dynamic_cast<AIO::GUI::ButtonListAdapter*>(adapter_)) {
+        // If the adapter is exactly ButtonListAdapter, use its controller-aware path.
+        // If it's a subclass, call setHoveredIndex() so the subclass can map the index
+        // to its own model (e.g., QListWidget rows).
+        if (typeid(*buttonList) == typeid(AIO::GUI::ButtonListAdapter)) {
+            buttonList->onControllerNavigation(hoveredIndex_);
+            return;
+        }
     }
+
+    adapter_->setHoveredIndex(hoveredIndex_);
 }
 
 bool NavigationController::apply(const UIActionFrame& frame) {
@@ -107,6 +115,10 @@ bool NavigationController::apply(const UIActionFrame& frame) {
 
         case UIAction::Back:
             return adapter_->back();
+
+        case UIAction::Home:
+            // Let the owning window decide global routing; returning false allows upstream handling.
+            return false;
 
         case UIAction::None:
         default:

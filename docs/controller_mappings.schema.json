@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AIO Controller Mappings",
+  "type": "object",
+  "required": ["version", "controllers"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "controllers": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/controller" }
+    }
+  },
+  "definitions": {
+    "controller": {
+      "type": "object",
+      "required": ["id", "match", "layout"],
+      "properties": {
+        "id": { "type": "string" },
+        "priority": { "type": "integer", "default": 0 },
+        "match": {
+          "type": "object",
+          "properties": {
+            "nameContainsAny": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "nameRegex": { "type": "string" }
+          }
+        },
+        "layout": {
+          "type": "object",
+          "required": ["confirm", "back"],
+          "properties": {
+            "confirm": { "$ref": "#/definitions/button" },
+            "back": { "$ref": "#/definitions/button" },
+            "aux1": { "$ref": "#/definitions/button" },
+            "aux2": { "$ref": "#/definitions/button" },
+            "menu": { "$ref": "#/definitions/button" },
+            "select": { "$ref": "#/definitions/button" },
+            "start": { "$ref": "#/definitions/button" },
+            "l": { "$ref": "#/definitions/button" },
+            "r": { "$ref": "#/definitions/button" },
+            "dpadUp": { "$ref": "#/definitions/button" },
+            "dpadDown": { "$ref": "#/definitions/button" },
+            "dpadLeft": { "$ref": "#/definitions/button" },
+            "dpadRight": { "$ref": "#/definitions/button" },
+            "home": { "$ref": "#/definitions/button" }
+          }
+        }
+      }
+    },
+    "button": {
+      "type": "string",
+      "description": "SDL_GameControllerButton string name, e.g. 'a', 'b', 'x', 'y', 'back', 'start', 'guide', 'leftshoulder', 'rightshoulder', 'dpad_up'"
+    }
+  }
+}

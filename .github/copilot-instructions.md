@@ -124,3 +124,8 @@ make                          # Clean rebuild (delegates to cmake/Makefile)
 4. **Clean up**: Remove temp logs, run `./scripts/clean.sh`, update docs if behavior changed
 
 **Avoid**: Committing `.log`, `.bak`, `.sav`, ROMs, or anything under `build/`. Keep source tree (`src/`, `include/`, `tests/`) pristine.
+
+## AlWAYS
+
+Implement fully, if you have a reccomendation that directly solves the problem proposed, go, you do not need to ask permission, I am simply here to guide your implementation, if you think something is more solid and works better another way, if it is what was asked immediatly implement, if you have a better solution but it is not what was asked, please then let me know and I can then approve, deny or revise it for future development and a more completed and robust implementation.
+ 

@@ -42,12 +42,16 @@
 // Include all project headers BEFORE opening namespace
 #include "gui/MainWindow.h"
 #include "gui/LogViewerDialog.h"
-#include "gui/InputConfigDialog.h"
+#include "gui/ActionBindingsDialog.h"
 #include "gui/StreamingHubWidget.h"
 #include "gui/StreamingWebViewPage.h"
 #include "gui/YouTubeBrowsePage.h"
 #include "gui/YouTubePlayerPage.h"
 #include "gui/MainMenuAdapter.h"
+#include "gui/ButtonListAdapter.h"
+#include "gui/EmulatorSelectAdapter.h"
+#include "gui/GameSelectAdapter.h"
+#include "gui/SettingsMenuAdapter.h"
 #include "gui/NavigationController.h"
 #include "gui/UIActionMapper.h"
 #include "input/InputManager.h"
@@ -208,13 +212,15 @@ void MainWindow::setupNavigation() {
                 lastHoveredButton = nullptr; // Clear mouse hover tracking
                 
                 // Clear mouse hover visual overlay and restore controller selection
-                if (mainMenuAdapter) {
-                    nav.setHoverFromMouse(-1);  // Clears mouseHover_
-                    
-                    // Restore controller selection from saved position
-                    // This updates BOTH the adapter AND the NavigationController's internal state
-                    int resumeIndex = mainMenuAdapter->getLastResumeIndex();
-                    if (resumeIndex >= 0) {
+                nav.setHoverFromMouse(-1);
+
+                // Restore selection for the currently active button-list adapter (if any)
+                if (auto* buttonList = dynamic_cast<AIO::GUI::ButtonListAdapter*>(nav.adapter())) {
+                    // Only resume if we have an actual saved interaction.
+                    // getLastResumeIndex() defaults to 0, but that can interfere with the
+                    // first directional press selection logic and make it feel like we start at 1.
+                    const int resumeIndex = buttonList->getLastResumeIndex();
+                    if (resumeIndex > 0) {
                         nav.setControllerSelection(resumeIndex);
                         std::cout << "[STATE] Resumed controller from index " << resumeIndex << std::endl;
                     }
@@ -224,14 +230,20 @@ void MainWindow::setupNavigation() {
         }
         
         // Only poll mouse hover when in mouse mode
-        if (currentInputMode == InputMode::Mouse && 
-            stackedWidget && stackedWidget->currentWidget() == mainMenuPage && mainMenuAdapter) {
+        // Apply to any active ButtonListAdapter-based page (not just main menu).
+        if (currentInputMode == InputMode::Mouse && stackedWidget && nav.adapter()) {
+            auto* buttonList = dynamic_cast<AIO::GUI::ButtonListAdapter*>(nav.adapter());
+            QWidget* currentPage = stackedWidget->currentWidget();
+            if (!buttonList || !currentPage || buttonList->pageWidget() != currentPage) {
+                // If we're not on a button-list page, clear any stale mouse hover.
+                return;
+            }
             
             QPoint mousePos = QCursor::pos();
             QPushButton* currentlyUnderMouse = nullptr;
             
             // Find which button (if any) the mouse is currently over
-            for (const auto& btn : mainMenuAdapter->getButtons()) {
+            for (const auto& btn : buttonList->getButtons()) {
                 auto* btnPtr = btn.data();
                 if (btnPtr && btnPtr->isVisible()) {
                     QPoint localMousePos = btnPtr->mapFromGlobal(mousePos);
@@ -246,7 +258,7 @@ void MainWindow::setupNavigation() {
             if (currentlyUnderMouse != lastHoveredButton) {
                 if (currentlyUnderMouse) {
                     // Mouse entered a button - set hover (overrides controller selection visually)
-                    const int idx = mainMenuAdapter->indexOfButton(currentlyUnderMouse);
+                    const int idx = buttonList->indexOfButton(currentlyUnderMouse);
                     if (idx >= 0) {
                         nav.setHoverFromMouse(idx);
                         std::cout << "[MOUSE_HOVER] Button " << idx << " now hovered" << std::endl;
@@ -282,20 +294,41 @@ void MainWindow::onPageChanged() {
     QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
     if (!current) return;
 
+    // Reset navigation index when swapping pages to avoid carrying stale hover state.
+    nav.clearHover();
+
     if (current == mainMenuPage) {
         nav.setAdapter(mainMenuAdapter.get());
-
-        // Initialize styling - ensure buttons have aio_hovered property set properly
-        // This is called after nav.setAdapter so the adapter is ready
         if (mainMenuAdapter) {
             mainMenuAdapter->applyHovered();
         }
-
-        // No need to install event filters anymore; we poll mouse in nav timer.
         return;
     }
 
-    // TODO: add adapters for other pages.
+    if (current == emulatorSelectPage) {
+        nav.setAdapter(emulatorSelectAdapter.get());
+        if (emulatorSelectAdapter) {
+            emulatorSelectAdapter->applyHovered();
+        }
+        return;
+    }
+
+    if (current == gameSelectPage) {
+        nav.setAdapter(gameSelectAdapter.get());
+        if (gameSelectAdapter) {
+            gameSelectAdapter->applyHovered();
+        }
+        return;
+    }
+
+    if (current == settingsPage) {
+        nav.setAdapter(settingsMenuAdapter.get());
+        if (settingsMenuAdapter) {
+            settingsMenuAdapter->applyHovered();
+        }
+        return;
+    }
+
     nav.setAdapter(nullptr);
 }
 
@@ -335,6 +368,32 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::onUIAction(const AIO::GUI::UIActionFrame& frame) {
+    if (frame.primary == AIO::GUI::UIAction::Home) {
+        static QElapsedTimer homeTimer;
+        static qint64 lastHomeMs = -100000;
+        if (!homeTimer.isValid()) homeTimer.start();
+        const qint64 nowMs = homeTimer.elapsed();
+        const bool quickSecondPress = (nowMs - lastHomeMs) < 800;
+        lastHomeMs = nowMs;
+
+        QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+        if (current == emulatorPage) {
+            // From emulator: go back to ROM select.
+            stopGame();
+            return;
+        }
+        if (current == gameSelectPage) {
+            // From ROM select: second press goes back to main menu.
+            if (quickSecondPress) {
+                goToMainMenu();
+            }
+            return;
+        }
+        // Default: go to main menu.
+        goToMainMenu();
+        return;
+    }
+
     if (nav.adapter()) {
         nav.apply(frame);
         return;
@@ -597,6 +656,11 @@ void MainWindow::LoadROM(const std::string& path) {
 
             auto pressed = [&](int bit) { return (inputState & (1u << bit)) == 0; };
 
+            auto logicalPressed = [&](AIO::Input::LogicalButton b) {
+                const uint32_t mask = 1u << static_cast<uint32_t>(b);
+                return (AIO::Input::InputManager::instance().logicalButtonsDown() & mask) == 0;
+            };
+
             // Persistent UI controller state for repeat handling.
             struct RepeatState {
                 bool down = false;
@@ -611,15 +675,17 @@ void MainWindow::LoadROM(const std::string& path) {
             constexpr qint64 INITIAL_DELAY_MS = 220;
             constexpr qint64 REPEAT_MS = 70;
 
-            auto handleRepeat = [&](int bit, int qtKey, RepeatState& st) {
-                const bool isDown = pressed(bit);
-                const bool wasDown = (lastUiState & (1u << bit)) == 0;
+            auto handleRepeatLogical = [&](AIO::Input::LogicalButton logical, int qtKey, RepeatState& st, uint32_t& lastLogical) {
+                const uint32_t mask = 1u << static_cast<uint32_t>(logical);
+                const bool isDown = logicalPressed(logical);
+                const bool wasDown = (lastLogical & mask) == 0;
 
                 if (isDown && !wasDown) {
                     // Initial press
                     st.down = true;
                     st.nextMs = nowMs + INITIAL_DELAY_MS;
                     sendKey(qtKey);
+                    lastLogical &= ~mask;
                     return;
                 }
 
@@ -634,22 +700,25 @@ void MainWindow::LoadROM(const std::string& path) {
 
                 // Released
                 st.down = false;
+                lastLogical |= mask;
             };
 
-            handleRepeat(AIO::Input::Button_Left, Qt::Key_Left, repLeft);
-            handleRepeat(AIO::Input::Button_Right, Qt::Key_Right, repRight);
-            handleRepeat(AIO::Input::Button_Up, Qt::Key_Up, repUp);
-            handleRepeat(AIO::Input::Button_Down, Qt::Key_Down, repDown);
+            static uint32_t lastLogicalUi = 0xFFFFFFFFu;
+            handleRepeatLogical(AIO::Input::LogicalButton::Left, Qt::Key_Left, repLeft, lastLogicalUi);
+            handleRepeatLogical(AIO::Input::LogicalButton::Right, Qt::Key_Right, repRight, lastLogicalUi);
+            handleRepeatLogical(AIO::Input::LogicalButton::Up, Qt::Key_Up, repUp, lastLogicalUi);
+            handleRepeatLogical(AIO::Input::LogicalButton::Down, Qt::Key_Down, repDown, lastLogicalUi);
 
             // Buttons (edge-triggered)
-            auto edge = [&](int bit) {
-                const bool isDown = pressed(bit);
-                const bool wasDown = ((lastUiState & (1u << bit)) == 0);
+            auto edgeLogical = [&](AIO::Input::LogicalButton logical) {
+                const uint32_t mask = 1u << static_cast<uint32_t>(logical);
+                const bool isDown = logicalPressed(logical);
+                const bool wasDown = (lastLogicalUi & mask) == 0;
                 return isDown && !wasDown;
             };
 
-            if (edge(AIO::Input::Button_A)) sendKey(Qt::Key_Return);
-            if (edge(AIO::Input::Button_B)) sendKey(Qt::Key_Escape);
+            if (edgeLogical(AIO::Input::LogicalButton::Confirm)) sendKey(Qt::Key_Return);
+            if (edgeLogical(AIO::Input::LogicalButton::Back)) sendKey(Qt::Key_Escape);
 
             lastUiState = inputState;
         }
@@ -979,6 +1048,39 @@ void MainWindow::LoadROM(const std::string& path) {
 
         layout->addWidget(romGroup);
 
+        // Input bindings
+        QGroupBox* inputGroup = new QGroupBox("Controls", settingsPage);
+        QVBoxLayout* inputLayout = new QVBoxLayout(inputGroup);
+
+        QPushButton* navControlsBtn = new QPushButton("SYSTEM NAVIGATION CONTROLS...", inputGroup);
+        navControlsBtn->setCursor(Qt::PointingHandCursor);
+        navControlsBtn->setFocusPolicy(Qt::StrongFocus);
+        connect(navControlsBtn, &QPushButton::clicked, this, [this]() {
+            AIO::GUI::ActionBindingsDialog dlg(AIO::Input::AppId::System, this);
+            dlg.exec();
+        });
+        inputLayout->addWidget(navControlsBtn);
+
+        QPushButton* gbaControlsBtn = new QPushButton("GBA CONTROLS...", inputGroup);
+        gbaControlsBtn->setCursor(Qt::PointingHandCursor);
+        gbaControlsBtn->setFocusPolicy(Qt::StrongFocus);
+        connect(gbaControlsBtn, &QPushButton::clicked, this, [this]() {
+            AIO::GUI::ActionBindingsDialog dlg(AIO::Input::AppId::GBA, this);
+            dlg.exec();
+        });
+        inputLayout->addWidget(gbaControlsBtn);
+
+        QPushButton* ytControlsBtn = new QPushButton("YOUTUBE CONTROLS...", inputGroup);
+        ytControlsBtn->setCursor(Qt::PointingHandCursor);
+        ytControlsBtn->setFocusPolicy(Qt::StrongFocus);
+        connect(ytControlsBtn, &QPushButton::clicked, this, [this]() {
+            AIO::GUI::ActionBindingsDialog dlg(AIO::Input::AppId::YouTube, this);
+            dlg.exec();
+        });
+        inputLayout->addWidget(ytControlsBtn);
+
+        layout->addWidget(inputGroup);
+
         layout->addStretch();
 
         QPushButton *backBtn = new QPushButton("BACK TO MENU", settingsPage);
@@ -987,6 +1089,13 @@ void MainWindow::LoadROM(const std::string& path) {
         backBtn->setProperty("variant", "secondary");
         connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToMainMenu);
         layout->addWidget(backBtn);
+
+        // Create adapter for settings menu
+        settingsMenuAdapter = std::make_unique<SettingsMenuAdapter>(
+            settingsPage,
+            std::vector<QPushButton*>{browseBtn, navControlsBtn, gbaControlsBtn, ytControlsBtn, backBtn},
+            this
+        );
     }
 
     void MainWindow::setupEmulatorSelect() {
@@ -1028,6 +1137,13 @@ void MainWindow::LoadROM(const std::string& path) {
         backBtn->setProperty("variant", "secondary");
         connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToMainMenu);
         layout->addWidget(backBtn);
+
+        // Create adapter for emulator selection with all buttons including back
+        emulatorSelectAdapter = std::make_unique<EmulatorSelectAdapter>(
+            emulatorSelectPage,
+            std::vector<QPushButton*>{gbaBtn, switchBtn, backBtn},
+            this
+        );
     }
 
     void MainWindow::refreshGameList() {
@@ -1165,6 +1281,15 @@ void MainWindow::LoadROM(const std::string& path) {
         backBtn->setProperty("variant", "secondary");
         connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToEmulatorSelect);
         layout->addWidget(backBtn);
+
+        // Create adapter for game select; navigation operates on the ROM list,
+        // while back is handled by the adapter's back() override.
+        gameSelectAdapter = std::make_unique<GameSelectAdapter>(
+            gameSelectPage,
+            std::vector<QPushButton*>{backBtn},
+            this,
+            gameListWidget
+        );
     }
 
     void MainWindow::setupEmulatorView() {

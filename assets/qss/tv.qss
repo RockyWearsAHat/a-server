@@ -80,16 +80,33 @@ QPushButton {
   min-height: 56px;
 }
 
-/* Unified selection/hover outline (mouse/keyboard/controller all drive this property) */
-/* This should take precedence over pseudo-class selectors */
-QPushButton[aio_hovered="true"] {
-  border: 2px solid rgba(170, 179, 197, 0.75);
-  background-color: rgba(255, 255, 255, 0.06);
+/* Secondary buttons
+   Visual styling intentionally neutralized: all buttons share the same look.
+   (We keep the property in code for semantics, but don't style it.) */
+QPushButton[variant="secondary"],
+QPushButton[variant="secondary"]:hover {
+  background-color: #151a23;
+  border: 1px solid #2a3140;
+  color: #eef2ff;
 }
 
-/* Disable Qt's built-in hover styling when aio_hovered is active */
-QPushButton[aio_hovered="true"]:hover {
-  border: 2px solid rgba(170, 179, 197, 0.75);
+QPushButton[variant="danger"] {
+  background-color: rgba(80, 20, 28, 0.75);
+  border: 1px solid rgba(180, 60, 75, 0.7);
+}
+
+QPushButton[variant="danger"]:hover {
+  border: 1px solid rgba(255, 86, 110, 0.9);
+}
+
+/* Unified selection outline (mouse/keyboard/controller all drive this single property)
+  Keep this AFTER variant rules so it always wins visually. */
+QPushButton[aio_selected="true"],
+QPushButton[aio_selected="true"]:hover,
+QPushButton[variant][aio_selected="true"],
+QPushButton[variant][aio_selected="true"]:hover {
+  /* Unified selection/hover look (match the original subtle theme) */
+  border: 3px solid rgba(170, 179, 197, 0.95);
   background-color: rgba(255, 255, 255, 0.06);
 }
 
@@ -99,7 +116,7 @@ QPushButton[selected="true"] {
   background-color: rgba(36, 66, 92, 0.75);
 }
 
-/* Qt's built-in hover (when aio_hovered is NOT set) */
+/* Qt's built-in hover (when aio_selected is NOT set) */
 QPushButton:hover {
   background-color: #151a23;
   border: 1px solid #2a3140;
@@ -127,27 +144,6 @@ QLineEdit:focus {
 QToolButton:focus {
   outline: none;
   border: 3px solid #3ea6ff;
-}
-
-/* Secondary buttons */
-QPushButton[variant="secondary"] {
-  background-color: rgba(18, 21, 33, 0.85);
-  border: 1px solid rgba(60, 70, 95, 0.9);
-  color: #aab3c5;
-}
-
-QPushButton[variant="secondary"]:hover {
-  background-color: rgba(34, 40, 54, 0.95);
-  border: 1px solid rgba(110, 135, 200, 0.95);
-}
-
-QPushButton[variant="danger"] {
-  background-color: rgba(80, 20, 28, 0.75);
-  border: 1px solid rgba(180, 60, 75, 0.7);
-}
-
-QPushButton[variant="danger"]:hover {
-  border: 1px solid rgba(255, 86, 110, 0.9);
 }
 
 /* Lists / grids */

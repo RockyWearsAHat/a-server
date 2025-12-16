@@ -53,7 +53,15 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/NavigationController.cpp
     ${PROJECT_ROOT}/src/gui/UIActionMapper.cpp
     ${PROJECT_ROOT}/src/gui/MainMenuAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/ButtonListAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/EmulatorSelectAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/GameSelectAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/SettingsMenuAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/ActionBindingsDialog.cpp
+    ${PROJECT_ROOT}/src/gui/ControllerDiagramWidget.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
+    ${PROJECT_ROOT}/src/input/AppActions.cpp
+    ${PROJECT_ROOT}/src/input/ActionBindings.cpp
     ${PROJECT_ROOT}/src/streaming/StreamingManager.cpp
     ${PROJECT_ROOT}/src/streaming/YouTubeService.cpp
     ${PROJECT_ROOT}/src/streaming/NetflixService.cpp
@@ -70,6 +78,8 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/ThumbnailCache.h
     ${PROJECT_ROOT}/include/common/Dotenv.h
     ${PROJECT_ROOT}/include/input/InputManager.h
+    ${PROJECT_ROOT}/include/gui/ActionBindingsDialog.h
+    ${PROJECT_ROOT}/include/gui/ControllerDiagramWidget.h
     ${PROJECT_ROOT}/include/streaming/StreamingManager.h
     ${PROJECT_ROOT}/include/streaming/StreamingService.h
     ${PROJECT_ROOT}/include/streaming/YouTubeService.h
