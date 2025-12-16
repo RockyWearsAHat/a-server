@@ -372,6 +372,22 @@ namespace Input {
         // We'll merge controller-derived logical presses into this.
         uint32_t mergedLogical = logicalButtonsDown_;
 
+        // Controller-driven UI logical buttons must be recomputed every frame.
+        // If we carry them forward from the previous frame, they can "latch" stuck
+        // when a controller release isn't reflected (or when switching pages/modes).
+        //
+        // Keep keyboard state (handled by processKeyEvent), but default controller-backed
+        // logical buttons to Released (1) here before re-applying current controller state.
+        mergedLogical |= logicalMaskFor(LogicalButton::Confirm);
+        mergedLogical |= logicalMaskFor(LogicalButton::Back);
+        mergedLogical |= logicalMaskFor(LogicalButton::Aux1);
+        mergedLogical |= logicalMaskFor(LogicalButton::Aux2);
+        mergedLogical |= logicalMaskFor(LogicalButton::Select);
+        mergedLogical |= logicalMaskFor(LogicalButton::Start);
+        mergedLogical |= logicalMaskFor(LogicalButton::L);
+        mergedLogical |= logicalMaskFor(LogicalButton::R);
+        mergedLogical |= logicalMaskFor(LogicalButton::Home);
+
         // Direction comes from keyboard OR controller, but controller direction must be
         // recomputed every frame. Clear the UI direction bits here so they don't latch.
         mergedLogical |= logicalMaskFor(LogicalButton::Up);
@@ -572,7 +588,27 @@ namespace Input {
         }
 
         // Publish merged logical state for UI navigation.
+        // Also update previous-state tracking for edge detection consumers.
+        lastLogicalButtonsDown_ = logicalButtonsDown_;
         logicalButtonsDown_ = mergedLogical;
+
+        if (gAioInputDebug) {
+            static uint32_t lastLoggedLogical = 0xFFFFFFFFu;
+            if (logicalButtonsDown_ != lastLoggedLogical) {
+                auto bit = [&](LogicalButton b) {
+                    return (logicalButtonsDown_ & logicalMaskFor(b)) == 0;
+                };
+                qDebug() << "[INPUT] logical" << Qt::hex << (quint32)logicalButtonsDown_ << Qt::dec
+                         << "Confirm" << bit(LogicalButton::Confirm)
+                         << "Back" << bit(LogicalButton::Back)
+                         << "Home" << bit(LogicalButton::Home)
+                         << "Up" << bit(LogicalButton::Up)
+                         << "Down" << bit(LogicalButton::Down)
+                         << "Left" << bit(LogicalButton::Left)
+                         << "Right" << bit(LogicalButton::Right);
+                lastLoggedLogical = logicalButtonsDown_;
+            }
+        }
 
         uint16_t result = (keyboardState & gamepadState) & 0x03FF; // Only lower 10 bits are valid for KEYINPUT
         

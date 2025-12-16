@@ -91,8 +91,15 @@ ActionBindingsDialog::ActionBindingsDialog(AIO::Input::AppId app, QWidget* paren
     root->addLayout(buttons);
 
     connect(closeBtn_, &QPushButton::clicked, this, &QDialog::accept);
+    // Reset behavior differs by scope:
+    // - System: resets shared menu bindings.
+    // - App: clears per-app overrides (falls back to menu bindings / defaults).
     connect(resetBtn_, &QPushButton::clicked, this, [this]() {
-        AIO::Input::ActionBindings::clearAllForApp(app_);
+        if (app_ == AIO::Input::AppId::System) {
+            AIO::Input::ActionBindings::clearAllMenuBindings();
+        } else {
+            AIO::Input::ActionBindings::clearAllForApp(app_);
+        }
         rebuildList();
     });
 
@@ -213,7 +220,11 @@ void ActionBindingsDialog::finishCapture(AIO::Input::LogicalButton logical) {
     auto* item = list_->item(capturingRow_);
     const auto action = static_cast<AIO::Input::ActionId>(item->data(Qt::UserRole).toInt());
 
-    AIO::Input::ActionBindings::saveOverride(app_, action, logical);
+    if (app_ == AIO::Input::AppId::System) {
+        AIO::Input::ActionBindings::saveMenuBinding(action, logical);
+    } else {
+        AIO::Input::ActionBindings::saveOverride(app_, action, logical);
+    }
 
     capturing_ = false;
     capturingRow_ = -1;

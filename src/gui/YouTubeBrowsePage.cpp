@@ -343,58 +343,6 @@ void YouTubeBrowsePage::setSearchFocused(bool focused) {
     }
 }
 
-void YouTubeBrowsePage::onControllerInput(uint16_t keyInput) {
-    // Controller navigation puts us into nav mode.
-    setInputMode(InputMode::Nav);
-    clearHover();
-
-    // GBA KEYINPUT is active-low: 0=pressed.
-    auto pressedNow = [&](int bit) {
-        return (keyInput & (1u << bit)) == 0;
-    };
-    auto pressedEdge = [&](int bit) {
-        const bool now = pressedNow(bit);
-        const bool prev = ((lastControllerState_ & (1u << bit)) == 0);
-        return now && !prev;
-    };
-
-    // Directions (edge-triggered)
-    if (pressedEdge(AIO::Input::Button_Left)) { if (lastHoveredIndex_ >= 0) setFocusedIndex(lastHoveredIndex_, false); moveFocus(-1, 0); }
-    if (pressedEdge(AIO::Input::Button_Right)) { if (lastHoveredIndex_ >= 0) setFocusedIndex(lastHoveredIndex_, false); moveFocus(1, 0); }
-    if (pressedEdge(AIO::Input::Button_Up)) { if (lastHoveredIndex_ >= 0) setFocusedIndex(lastHoveredIndex_, false); moveFocus(0, -1); }
-    if (pressedEdge(AIO::Input::Button_Down)) { if (lastHoveredIndex_ >= 0) setFocusedIndex(lastHoveredIndex_, false); moveFocus(0, 1); }
-
-    // A = activate
-    if (pressedEdge(AIO::Input::Button_A)) {
-        if (searchEdit_ && searchEdit_->hasFocus()) {
-            runSearch();
-        } else {
-            activateFocused();
-        }
-    }
-
-    // B = back
-    if (pressedEdge(AIO::Input::Button_B)) {
-        if (searchEdit_ && searchEdit_->hasFocus()) {
-            setSearchFocused(false);
-        } else {
-            emit homeRequested();
-        }
-    }
-
-    // Start = focus search
-    if (pressedEdge(AIO::Input::Button_Start)) {
-        setSearchFocused(true);
-    }
-
-    // Select = clear search
-    if (pressedEdge(AIO::Input::Button_Select)) {
-        if (searchEdit_) searchEdit_->clear();
-    }
-
-    lastControllerState_ = keyInput;
-}
-
 void YouTubeBrowsePage::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     if (!scroll_) return;

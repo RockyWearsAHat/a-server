@@ -11,6 +11,10 @@ class UIActionMapper {
 public:
     UIActionMapper();
 
+    // Resets edge/repeat tracking.
+    // Call this when swapping UI contexts/pages so held buttons don't suppress edges.
+    void reset();
+
     // Update with current merged input state (active-low bits like KEYINPUT).
     // Returns at most one primary action per tick.
     UIActionFrame update(uint16_t inputState);

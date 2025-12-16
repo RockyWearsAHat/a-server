@@ -12,6 +12,14 @@ namespace AIO::Input {
 
 class ActionBindings {
 public:
+    // --- Menu (Our Application) bindings ---
+    // These are shared across all menu pages (main menu, emulator select, ROM select, settings).
+    // Stored separately from per-app overrides.
+    static std::optional<LogicalButton> loadMenuBinding(ActionId action);
+    static void saveMenuBinding(ActionId action, LogicalButton logical);
+    static void clearMenuBinding(ActionId action);
+    static void clearAllMenuBindings();
+
     // Per-app override storage. Keying is app/action; values are LogicalButton.
     static std::optional<LogicalButton> loadOverride(AppId app, ActionId action);
     static void saveOverride(AppId app, ActionId action, LogicalButton logical);
@@ -30,6 +38,8 @@ private:
     static QString actionKey(ActionId action);
 
     static QString settingsGroup();
+    static QString menuSettingsGroup();
+    static std::optional<ActionId> systemNavActionForAppAction(AppId app, ActionId action);
 };
 
 } // namespace AIO::Input

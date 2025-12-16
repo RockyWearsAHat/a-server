@@ -118,33 +118,5 @@ void YouTubePlayerPage::keyPressEvent(QKeyEvent* event) {
     QWidget::keyPressEvent(event);
 }
 
-void YouTubePlayerPage::onControllerInput(uint16_t keyInput) {
-    auto pressedNow = [&](int bit) {
-        return (keyInput & (1u << bit)) == 0;
-    };
-    auto pressedEdge = [&](int bit) {
-        const bool now = pressedNow(bit);
-        const bool prev = ((lastControllerState_ & (1u << bit)) == 0);
-        return now && !prev;
-    };
-
-    // B = back to browse
-    if (pressedEdge(AIO::Input::Button_B)) {
-        emit backRequested();
-    }
-
-    // Select = home
-    if (pressedEdge(AIO::Input::Button_Select)) {
-        emit homeRequested();
-    }
-
-    // Start toggles the top bar (useful during playback)
-    if (pressedEdge(AIO::Input::Button_Start)) {
-        topBar_->setVisible(!topBar_->isVisible());
-    }
-
-    lastControllerState_ = keyInput;
-}
-
 } // namespace GUI
 } // namespace AIO

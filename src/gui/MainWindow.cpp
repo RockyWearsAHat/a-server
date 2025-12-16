@@ -194,6 +194,26 @@ void MainWindow::setupNavigation() {
         const uint16_t inputState = AIO::Input::InputManager::instance().update();
         const auto frame = actionMapper.update(inputState);
 
+        static bool gUiNavDebug = (qEnvironmentVariableIntValue("AIO_UI_NAV_DEBUG") != 0);
+        if (gUiNavDebug && frame.primary != AIO::GUI::UIAction::None) {
+            auto actionName = [&](AIO::GUI::UIAction a) -> const char* {
+                switch (a) {
+                    case AIO::GUI::UIAction::Up: return "Up";
+                    case AIO::GUI::UIAction::Down: return "Down";
+                    case AIO::GUI::UIAction::Left: return "Left";
+                    case AIO::GUI::UIAction::Right: return "Right";
+                    case AIO::GUI::UIAction::Select: return "Select";
+                    case AIO::GUI::UIAction::Back: return "Back";
+                    case AIO::GUI::UIAction::Home: return "Home";
+                    default: return "None";
+                }
+            };
+            std::cout << "[UI_NAV] action=" << actionName(frame.primary)
+                      << " source=" << (int)frame.source
+                      << " page=" << (stackedWidget ? stackedWidget->currentIndex() : -1)
+                      << std::endl;
+        }
+
         // Detect if controller/keyboard input occurred
         bool hasControllerInput = (frame.source == AIO::GUI::UIInputSource::Controller || 
                                    frame.source == AIO::GUI::UIInputSource::Keyboard) &&
@@ -297,6 +317,10 @@ void MainWindow::onPageChanged() {
     // Reset navigation index when swapping pages to avoid carrying stale hover state.
     nav.clearHover();
 
+    // Reset action edge tracking on page transitions so Confirm/Back edges
+    // don't get suppressed by stale/held state from the previous page.
+    actionMapper.reset();
+
     if (current == mainMenuPage) {
         nav.setAdapter(mainMenuAdapter.get());
         if (mainMenuAdapter) {
@@ -354,10 +378,10 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             QApplication::restoreOverrideCursor();
             std::cout << "[CURSOR] Restored cursor globally" << std::endl;
             
-            // Save controller state and clear visual display
-            if (mainMenuAdapter) {
-                mainMenuAdapter->saveControllerIndexBeforeMouse();
-                mainMenuAdapter->setHoveredIndex(-1);
+            // Save controller state and clear visual display for the currently active adapter.
+            if (auto* buttonList = dynamic_cast<AIO::GUI::ButtonListAdapter*>(nav.adapter())) {
+                buttonList->saveControllerIndexBeforeMouse();
+                buttonList->setHoveredIndex(-1);
                 std::cout << "[STATE] Cleared visual state on mouse mode entry (global)" << std::endl;
             }
         }
@@ -631,18 +655,22 @@ void MainWindow::LoadROM(const std::string& path) {
         uint16_t inputState = AIO::Input::InputManager::instance().update();
 
         // Route input based on the active UI page.
-        // When the user is in streaming UI, do not feed the emulator.
         QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
-        const bool inStreamingUi = (current == streamingHubPage) || (current == streamingWebPage) ||
-                                  (current == youTubeBrowsePage) || (current == youTubePlayerPage);
 
-        // Feed controller navigation into UI pages.
-        // Pages that implement explicit controller handlers:
-        if (current == youTubeBrowsePage) {
-            if (auto* yt = qobject_cast<YouTubeBrowsePage*>(youTubeBrowsePage)) yt->onControllerInput(inputState);
-        } else if (current == youTubePlayerPage) {
-            if (auto* p = qobject_cast<YouTubePlayerPage*>(youTubePlayerPage)) p->onControllerInput(inputState);
-        } else {
+        // Two-layer input model:
+        // - Our Application (menus/booter): driven by navTimer + NavigationController/UIActionMapper.
+        // - Sub-applications (emulator runtime, streaming/web apps): may handle keys directly.
+        // Important: do NOT drive menu navigation here as well, or we'll double-dispatch actions.
+        const bool isSubAppPage = (current == emulatorPage) || (current == streamingHubPage) ||
+                                  (current == streamingWebPage) || (current == youTubeBrowsePage) ||
+                                  (current == youTubePlayerPage);
+
+        const bool inStreamingUi = (current == streamingHubPage) || (current == streamingWebPage) ||
+                                   (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+
+        // Sub-app layer: synthesize basic keys for pages that rely on keyPressEvent.
+        // Note: emulator runtime itself is fed via gba.UpdateInput below.
+        if (isSubAppPage && current != emulatorPage) {
             // Fallback: synthesize key presses so existing keyPressEvent handlers work.
             // Includes repeat for held directions to make controller navigation consistent.
             QWidget* target = QApplication::focusWidget();
@@ -654,8 +682,6 @@ void MainWindow::LoadROM(const std::string& path) {
                 QCoreApplication::sendEvent(target, &ev);
             };
 
-            auto pressed = [&](int bit) { return (inputState & (1u << bit)) == 0; };
-
             auto logicalPressed = [&](AIO::Input::LogicalButton b) {
                 const uint32_t mask = 1u << static_cast<uint32_t>(b);
                 return (AIO::Input::InputManager::instance().logicalButtonsDown() & mask) == 0;
@@ -666,7 +692,6 @@ void MainWindow::LoadROM(const std::string& path) {
                 bool down = false;
                 qint64 nextMs = 0;
             };
-            static uint16_t lastUiState = 0x03FF;
             static RepeatState repLeft, repRight, repUp, repDown;
             static QElapsedTimer uiRepeatTimer;
             if (!uiRepeatTimer.isValid()) uiRepeatTimer.start();
@@ -717,10 +742,21 @@ void MainWindow::LoadROM(const std::string& path) {
                 return isDown && !wasDown;
             };
 
-            if (edgeLogical(AIO::Input::LogicalButton::Confirm)) sendKey(Qt::Key_Return);
-            if (edgeLogical(AIO::Input::LogicalButton::Back)) sendKey(Qt::Key_Escape);
+            auto handleEdgeLogical = [&](AIO::Input::LogicalButton logical, int qtKey) {
+                const uint32_t mask = 1u << static_cast<uint32_t>(logical);
+                const bool isDown = logicalPressed(logical);
+                const bool wasDown = (lastLogicalUi & mask) == 0;
+                if (isDown && !wasDown) {
+                    sendKey(qtKey);
+                    lastLogicalUi &= ~mask;
+                } else if (!isDown && wasDown) {
+                    lastLogicalUi |= mask;
+                }
+            };
 
-            lastUiState = inputState;
+            handleEdgeLogical(AIO::Input::LogicalButton::Confirm, Qt::Key_Return);
+            handleEdgeLogical(AIO::Input::LogicalButton::Back, Qt::Key_Escape);
+
         }
         
         if (currentEmulator == EmulatorType::GBA) {

@@ -80,8 +80,34 @@ void NavigationController::clampAndApplyHover() {
 bool NavigationController::apply(const UIActionFrame& frame) {
     if (!adapter_) return false;
 
+    static bool gUiNavDebug = false;
+    static bool gUiNavDebugInit = false;
+    if (!gUiNavDebugInit) {
+        gUiNavDebug = (qEnvironmentVariableIntValue("AIO_UI_NAV_DEBUG") != 0);
+        gUiNavDebugInit = true;
+    }
+
     const int n = adapter_->itemCount();
     if (n <= 0) return false;
+
+    if (gUiNavDebug) {
+        auto actionName = [&](UIAction a) -> const char* {
+            switch (a) {
+                case UIAction::Up: return "Up";
+                case UIAction::Down: return "Down";
+                case UIAction::Left: return "Left";
+                case UIAction::Right: return "Right";
+                case UIAction::Select: return "Select";
+                case UIAction::Back: return "Back";
+                case UIAction::Home: return "Home";
+                default: return "None";
+            }
+        };
+        std::cout << "[UI_NAV] apply action=" << actionName(frame.primary)
+                  << " hovered=" << hoveredIndex_
+                  << " items=" << n
+                  << std::endl;
+    }
 
     // First, clear any mouse hover since controller input is being used
     adapter_->clearMouseHover();

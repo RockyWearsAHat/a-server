@@ -8,6 +8,15 @@ UIActionMapper::UIActionMapper() {
     timer_.start();
 }
 
+void UIActionMapper::reset() {
+    lastState_ = 0x03FF;
+    // Seed edge tracking from current state so we don't generate phantom edges
+    // on the first tick after a page transition.
+    lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+    repeatBit_ = -1;
+    nextRepeatMs_ = 0;
+}
+
 bool UIActionMapper::pressed(uint16_t state, int bit) const {
     return (state & (1u << bit)) == 0;
 }

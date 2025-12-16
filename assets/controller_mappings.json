@@ -28,8 +28,8 @@
         "nameContainsAny": ["nintendo", "switch", "pro controller", "joy-con"]
       },
       "layout": {
-        "confirm": "b",
-        "back": "a",
+        "confirm": "a",
+        "back": "b",
         "aux1": "y",
         "aux2": "x",
         "select": "back",

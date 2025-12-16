@@ -16,7 +16,6 @@ public:
     explicit YouTubePlayerPage(QWidget* parent = nullptr);
 
     void playVideoUrl(const QString& url);
-    void onControllerInput(uint16_t keyInput);
 
 signals:
     void homeRequested();
@@ -35,7 +34,7 @@ private:
     QToolButton* backButton_ = nullptr;
     QToolButton* homeButton_ = nullptr;
 
-    uint16_t lastControllerState_ = 0x03FF;
+    // Menu input is routed centrally by MainWindow via synthesized key events.
 };
 
 } // namespace GUI

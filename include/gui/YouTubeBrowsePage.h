@@ -31,7 +31,6 @@ signals:
 
 public slots:
     void loadTrending();
-    void onControllerInput(uint16_t keyInput);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -58,8 +57,6 @@ private:
     void ensureFocusedVisible();
     void moveFocus(int dx, int dy);
     void setSearchFocused(bool focused);
-
-    uint16_t lastControllerState_ = 0x03FF;
 
     InputMode inputMode_ = InputMode::Mouse;
     bool cursorHidden_ = false;
