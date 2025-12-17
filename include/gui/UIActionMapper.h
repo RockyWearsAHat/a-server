@@ -2,6 +2,8 @@
 
 #include "gui/NavigationAdapter.h"
 
+#include "input/InputTypes.h"
+
 #include <QElapsedTimer>
 
 namespace AIO::GUI {
@@ -13,11 +15,11 @@ public:
 
     // Resets edge/repeat tracking.
     // Call this when swapping UI contexts/pages so held buttons don't suppress edges.
-    void reset();
+    void reset(uint32_t logicalNow = 0xFFFFFFFFu);
 
     // Update with current merged input state (active-low bits like KEYINPUT).
     // Returns at most one primary action per tick.
-    UIActionFrame update(uint16_t inputState);
+    UIActionFrame update(const AIO::Input::InputSnapshot& snapshot);
 
     // Inform mapper that mouse moved/clicked so we can switch cursor mode.
     void notifyMouseActivity();

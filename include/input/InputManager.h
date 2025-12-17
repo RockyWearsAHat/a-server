@@ -38,6 +38,10 @@ enum GBAButton {
         // Polls SDL events and returns combined input state
         uint16_t update();
 
+        // Polls SDL and returns a full snapshot for this frame.
+        // Prefer this for UI code to avoid multiple global reads.
+        InputSnapshot updateSnapshot();
+
         // Logical (emulator-agnostic) input state.
         // 1 = released, 0 = pressed, same convention as GBA KEYINPUT.
         uint32_t logicalButtonsDown() const { return logicalButtonsDown_; }

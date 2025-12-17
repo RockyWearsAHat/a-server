@@ -42,6 +42,13 @@ set_target_properties(EEPROMTests PROPERTIES
 )
 target_link_libraries(EEPROMTests PRIVATE GTest::gtest_main GBAEmulator)
 
+add_executable(InputLogicTests ${PROJECT_ROOT}/tests/InputLogicTests.cpp)
+set_target_properties(InputLogicTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/InputLogicTests"
+)
+target_link_libraries(InputLogicTests PRIVATE GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(CPUTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -56,4 +63,10 @@ gtest_discover_tests(EEPROMTests
   DISCOVERY_MODE PRE_TEST
   TEST_INCLUDE_FILE ${CMAKE_TEST_GEN_DIR}/EEPROMTests_include.cmake
   TEST_LIST ${CMAKE_TEST_GEN_DIR}/EEPROMTests_tests.cmake
+)
+
+gtest_discover_tests(InputLogicTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
 )

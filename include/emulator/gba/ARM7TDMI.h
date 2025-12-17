@@ -53,6 +53,12 @@ namespace AIO::Emulator::GBA {
     private:
         GBAMemory& memory;
 
+        // Current instruction context (captured in Step())
+        uint32_t currentInstrAddr{0};
+        bool currentInstrThumb{false};
+        uint16_t currentOp16{0};
+        uint32_t currentOp32{0};
+
         // Registers
         // R0-R12: General Purpose
         // R13: SP (Stack Pointer)
@@ -76,7 +82,7 @@ namespace AIO::Emulator::GBA {
 
         void Fetch();
         void Decode(uint32_t instruction);
-        void DecodeThumb(uint16_t instruction);
+        void DecodeThumb(uint16_t instruction, uint32_t pcValue);
         void Execute();
 
         // Instruction Implementations

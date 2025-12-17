@@ -17,6 +17,25 @@ static uint32_t logicalMaskFor(AIO::Input::LogicalButton b) {
     return 1u << static_cast<uint32_t>(b);
 }
 
+// Logical buttons primarily driven by controller polling each frame.
+// These should not be allowed to latch from a previous frame.
+static constexpr uint32_t kControllerLogicalMask =
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Confirm)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Back)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Aux1)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Aux2)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Select)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Start)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::L)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::R)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Home));
+
+static constexpr uint32_t kDirectionLogicalMask =
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Up)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Down)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Left)) |
+    (1u << static_cast<uint32_t>(AIO::Input::LogicalButton::Right));
+
 static SDL_GameControllerButton sdlButtonFromName(const QString& name) {
     const QByteArray utf8 = name.toUtf8();
     return SDL_GameControllerGetButtonFromString(utf8.constData());
@@ -372,28 +391,13 @@ namespace Input {
         // We'll merge controller-derived logical presses into this.
         uint32_t mergedLogical = logicalButtonsDown_;
 
-        // Controller-driven UI logical buttons must be recomputed every frame.
-        // If we carry them forward from the previous frame, they can "latch" stuck
-        // when a controller release isn't reflected (or when switching pages/modes).
-        //
-        // Keep keyboard state (handled by processKeyEvent), but default controller-backed
-        // logical buttons to Released (1) here before re-applying current controller state.
-        mergedLogical |= logicalMaskFor(LogicalButton::Confirm);
-        mergedLogical |= logicalMaskFor(LogicalButton::Back);
-        mergedLogical |= logicalMaskFor(LogicalButton::Aux1);
-        mergedLogical |= logicalMaskFor(LogicalButton::Aux2);
-        mergedLogical |= logicalMaskFor(LogicalButton::Select);
-        mergedLogical |= logicalMaskFor(LogicalButton::Start);
-        mergedLogical |= logicalMaskFor(LogicalButton::L);
-        mergedLogical |= logicalMaskFor(LogicalButton::R);
-        mergedLogical |= logicalMaskFor(LogicalButton::Home);
+        // Default controller-backed logical buttons to Released (1) each frame before
+        // re-applying current controller state.
+        mergedLogical |= kControllerLogicalMask;
 
         // Direction comes from keyboard OR controller, but controller direction must be
-        // recomputed every frame. Clear the UI direction bits here so they don't latch.
-        mergedLogical |= logicalMaskFor(LogicalButton::Up);
-        mergedLogical |= logicalMaskFor(LogicalButton::Down);
-        mergedLogical |= logicalMaskFor(LogicalButton::Left);
-        mergedLogical |= logicalMaskFor(LogicalButton::Right);
+        // recomputed every frame.
+        mergedLogical |= kDirectionLogicalMask;
 
         // Reset gamepad state to Released (1)
         gamepadState = 0xFFFF;
@@ -613,6 +617,15 @@ namespace Input {
         uint16_t result = (keyboardState & gamepadState) & 0x03FF; // Only lower 10 bits are valid for KEYINPUT
         
         return result;
+    }
+
+    InputSnapshot InputManager::updateSnapshot() {
+        const uint16_t keyinput = update();
+        InputSnapshot s;
+        s.keyinput = keyinput;
+        s.logical = logicalButtonsDown_;
+        s.system = systemButtonsDown_;
+        return s;
     }
 
     bool InputManager::pressed(AppId app, ActionId action) const {

@@ -1,18 +1,16 @@
 #include "gui/UIActionMapper.h"
 
-#include "input/InputManager.h"
-
 namespace AIO::GUI {
 
 UIActionMapper::UIActionMapper() {
     timer_.start();
 }
 
-void UIActionMapper::reset() {
+void UIActionMapper::reset(uint32_t logicalNow) {
     lastState_ = 0x03FF;
-    // Seed edge tracking from current state so we don't generate phantom edges
+    // Seed edge tracking so we don't generate phantom edges
     // on the first tick after a page transition.
-    lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+    lastLogicalButtons_ = logicalNow;
     repeatBit_ = -1;
     nextRepeatMs_ = 0;
 }
@@ -32,12 +30,15 @@ void UIActionMapper::notifyMouseActivity() {
     lastMouseMs_ = timer_.elapsed();
 }
 
-UIActionFrame UIActionMapper::update(uint16_t inputState) {
+UIActionFrame UIActionMapper::update(const AIO::Input::InputSnapshot& snapshot) {
     const qint64 nowMs = timer_.elapsed();
+
+    const uint16_t inputState = snapshot.keyinput;
+    const uint32_t logicalNow = snapshot.logical;
 
     auto logicalPressed = [&](AIO::Input::LogicalButton b) {
         const uint32_t mask = 1u << static_cast<uint32_t>(b);
-        return (AIO::Input::InputManager::instance().logicalButtonsDown() & mask) == 0;
+        return (logicalNow & mask) == 0;
     };
 
     auto logicalEdge = [&](AIO::Input::LogicalButton b) {
@@ -63,7 +64,7 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
 
     // System/Home button (Guide on Xbox, PS on PlayStation, Home on Switch controllers).
     // This is not part of GBA KEYINPUT, so read it from InputManager.
-    if (logicalPressed(AIO::Input::LogicalButton::Home) || (AIO::Input::InputManager::instance().systemButtonsDown() & 0x1u) != 0) {
+    if (logicalPressed(AIO::Input::LogicalButton::Home) || (snapshot.system & 0x1u) != 0) {
         lastSource_ = UIInputSource::Controller;
         lastState_ = inputState;
         return {UIAction::Home, lastSource_};
@@ -96,7 +97,7 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
     for (const auto& d : dirs) {
         if (logicalEdge(d.logical)) {
             startRepeat(d.repeatKey);
-            lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+            lastLogicalButtons_ = logicalNow;
             lastState_ = inputState;
             return {d.act, lastSource_};
         }
@@ -107,7 +108,7 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
             if (repeatBit_ != d.repeatKey) startRepeat(d.repeatKey);
             if (repeatReady(d.repeatKey)) {
                 bumpRepeat();
-                lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+                lastLogicalButtons_ = logicalNow;
                 lastState_ = inputState;
                 return {d.act, lastSource_};
             }
@@ -121,18 +122,18 @@ UIActionFrame UIActionMapper::update(uint16_t inputState) {
     }
 
     if (logicalEdge(AIO::Input::LogicalButton::Confirm)) {
-        lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+        lastLogicalButtons_ = logicalNow;
         lastState_ = inputState;
         return {UIAction::Select, lastSource_};
     }
 
     if (logicalEdge(AIO::Input::LogicalButton::Back)) {
-        lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+        lastLogicalButtons_ = logicalNow;
         lastState_ = inputState;
         return {UIAction::Back, lastSource_};
     }
 
-    lastLogicalButtons_ = AIO::Input::InputManager::instance().logicalButtonsDown();
+    lastLogicalButtons_ = logicalNow;
     lastState_ = inputState;
     return {UIAction::None, lastSource_};
 }

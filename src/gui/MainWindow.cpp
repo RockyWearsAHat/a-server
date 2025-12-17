@@ -31,6 +31,7 @@
 #include <QEvent>
 #include <QCursor>
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_hints.h>
 #include <sys/select.h>
 #include <termios.h>
 #include <unistd.h>
@@ -89,6 +90,10 @@ static MainWindow* audioInstance = nullptr;
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), settings("AIOServer", "GBAEmulator")
 {
+    // Try to keep controller "Home/Guide" button handling inside the app.
+    // Note: some OS-level shortcuts on macOS may still be handled by the OS.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
+
     // Load unified 10-foot UI theme.
     QString styleSheet;
     QFile f(QCoreApplication::applicationDirPath() + "/../assets/qss/tv.qss");
@@ -191,10 +196,15 @@ MainWindow::MainWindow(QWidget *parent)
 void MainWindow::setupNavigation() {
     navTimer = new QTimer(this);
     connect(navTimer, &QTimer::timeout, this, [this]() {
-        const uint16_t inputState = AIO::Input::InputManager::instance().update();
-        const auto frame = actionMapper.update(inputState);
+        const auto snapshot = AIO::Input::InputManager::instance().updateSnapshot();
+        const auto frame = actionMapper.update(snapshot);
 
-        static bool gUiNavDebug = (qEnvironmentVariableIntValue("AIO_UI_NAV_DEBUG") != 0);
+        static bool gUiNavDebug = false;
+        static bool gUiNavDebugInit = false;
+        if (!gUiNavDebugInit) {
+            gUiNavDebug = (qEnvironmentVariableIntValue("AIO_UI_NAV_DEBUG") != 0);
+            gUiNavDebugInit = true;
+        }
         if (gUiNavDebug && frame.primary != AIO::GUI::UIAction::None) {
             auto actionName = [&](AIO::GUI::UIAction a) -> const char* {
                 switch (a) {
@@ -319,13 +329,15 @@ void MainWindow::onPageChanged() {
 
     // Reset action edge tracking on page transitions so Confirm/Back edges
     // don't get suppressed by stale/held state from the previous page.
-    actionMapper.reset();
+    actionMapper.reset(AIO::Input::InputManager::instance().logicalButtonsDown());
 
     if (current == mainMenuPage) {
         nav.setAdapter(mainMenuAdapter.get());
         if (mainMenuAdapter) {
             mainMenuAdapter->applyHovered();
         }
+        // When navigating with controller, default selection should be the first item.
+        nav.setControllerSelection(0);
         return;
     }
 
@@ -334,6 +346,7 @@ void MainWindow::onPageChanged() {
         if (emulatorSelectAdapter) {
             emulatorSelectAdapter->applyHovered();
         }
+        nav.setControllerSelection(0);
         return;
     }
 
@@ -342,6 +355,7 @@ void MainWindow::onPageChanged() {
         if (gameSelectAdapter) {
             gameSelectAdapter->applyHovered();
         }
+        nav.setControllerSelection(0);
         return;
     }
 
@@ -350,6 +364,7 @@ void MainWindow::onPageChanged() {
         if (settingsMenuAdapter) {
             settingsMenuAdapter->applyHovered();
         }
+        nav.setControllerSelection(0);
         return;
     }
 
@@ -434,6 +449,10 @@ void MainWindow::initAudio() {
         ::std::cerr << "SDL audio init failed: " << SDL_GetError() << ::std::endl;
         return;
     }
+
+    // Best-effort: disable SDL controller event forwarding outside focus.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
+
     SDL_AudioSpec want, have;
     SDL_memset(&want, 0, sizeof(want));
     want.freq = AUDIO_SAMPLE_RATE;

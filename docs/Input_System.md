@@ -10,14 +10,14 @@ This is the 10-foot UI “booter” experience: main menu, emulator-select, ROM-
 
 - All menu pages share one **global menu mapping**.
 - Menu navigation is handled centrally through:
-  - `AIO::Input::InputManager` → produces **logical buttons** (`LogicalButton::Confirm`, `Back`, `Up/Down/Left/Right`, `Home`).
-  - `AIO::GUI::UIActionMapper` → turns logical buttons into `UIActionFrame` (edge + repeat).
+  - `AIO::Input::InputManager` → polls once per tick and returns an `InputSnapshot` (global state).
+  - `AIO::GUI::UIActionMapper` → maps the snapshot's logical buttons into `UIActionFrame` (edge + repeat).
   - `AIO::GUI::NavigationController` → applies actions to the active menu adapter.
 - Menu pages should **not** implement their own controller button mapping.
 
 **Where it happens**
 
-- `MainWindow::UpdateDisplay()` routes menu pages through `UIActionMapper` + `NavigationController`.
+- `MainWindow::setupNavigation()` (nav timer) routes menu pages through `UIActionMapper` + `NavigationController`.
 
 ## 2) Sub-Applications (apps)
 
@@ -52,4 +52,5 @@ Sub-app (per app):
 ## Implementation Notes
 
 - The menu layer uses a unified routing path (no per-page controller handlers).
+- `InputSnapshot` is still **global input state**; it's just a cleaner "one poll, one frame" container so other modules don't re-read globals at different times.
 - Sub-app pages may rely on synthesized key events (Enter/Esc/Arrows) when appropriate, but emulator gameplay input is fed by the emulator’s own input pipeline.

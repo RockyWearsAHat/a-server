@@ -25,6 +25,12 @@ namespace AIO::Emulator::GBA {
         branchLog.push_back({from, to});
         if (branchLog.size() > 50) branchLog.pop_front();
 
+        // Treat jumps into the middle of the instruction encoding space as invalid.
+        // If `to` looks like an ARM opcode rather than an address, something wrote PC with a fetched instruction.
+        if ((to & 0xFF000000) == 0xE3000000) {
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "PC CORRUPTION (looks like opcode): 0x%08x -> 0x%08x", from, to);
+        }
+
         // Log branches beyond actual ROM size (4MB = 0x08000000 + 0x400000 = 0x08400000)
         if (to >= 0x08400000 && to < 0x0E000000) {
             uint32_t instr = 0;
@@ -53,6 +59,95 @@ namespace AIO::Emulator::GBA {
         }
     }
 
+    static void TracePCWrite(const char* source, uint32_t pcFrom, uint32_t pcTo, uint32_t instruction, uint32_t extra0 = 0, uint32_t extra1 = 0) {
+        // Keep this extremely focused; only print when the destination looks wrong.
+        const bool looksLikeOpcode = ((pcTo & 0xFF000000) == 0xE3000000) || ((pcTo & 0xFF000000) == 0xE2000000);
+        const bool looksInvalidAddr = !((pcTo < 0x00004000) || (pcTo >= 0x02000000 && pcTo < 0x02040000) || (pcTo >= 0x03000000 && pcTo < 0x03008000) || (pcTo >= 0x06000000 && pcTo < 0x06018000) || (pcTo >= 0x08000000 && pcTo < 0x10000000));
+        if (looksLikeOpcode || looksInvalidAddr) {
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "PC WRITE [%s] from=0x%08x to=0x%08x instr=0x%08x extra0=0x%08x extra1=0x%08x", source, pcFrom, pcTo, instruction, extra0, extra1);
+        }
+    }
+
+    // These traces rely on ARM7TDMI::Step() capturing a per-instruction context.
+    // Keep them as free functions, but allow Step() / decode to pass in the authoritative context.
+    static void TraceR8Write(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t oldVal, uint32_t newVal) {
+        if (oldVal == newVal) return;
+        // Always log when R8 is written to 0, regardless of old value, so we can pinpoint
+        // the exact instruction that zeros the block-transfer base.
+        if (newVal == 0 || (instrAddr >= 0x08001000 && instrAddr <= 0x08002000)) {
+            Logger::Instance().LogFmt(
+                LogLevel::Error,
+                "CPU",
+                "R8 WRITE fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+                instrAddr,
+                thumb ? 'T' : 'A',
+                instruction,
+                oldVal,
+                newVal);
+        }
+    }
+
+    static void TraceR11Write(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t oldVal, uint32_t newVal) {
+        if (oldVal == newVal) return;
+        if (newVal == 0 || (instrAddr >= 0x08001000 && instrAddr <= 0x08002000)) {
+            Logger::Instance().LogFmt(
+                LogLevel::Error,
+                "CPU",
+                "R11 WRITE fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+                instrAddr,
+                thumb ? 'T' : 'A',
+                instruction,
+                oldVal,
+                newVal);
+        }
+    }
+
+    struct R11WriteEvent {
+        uint32_t instrAddr;
+        bool thumb;
+        uint32_t instruction;
+        uint32_t oldVal;
+        uint32_t newVal;
+    };
+
+    static std::deque<R11WriteEvent> g_r11WriteHistory;
+    static bool g_reportedFirstR11Zero = false;
+    static uint32_t g_lastR11Observed = 0;
+    static bool g_reportedFirstR11NonZero = false;
+
+    static void RecordR11Write(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t oldVal, uint32_t newVal) {
+        if (oldVal == newVal) return;
+
+        g_r11WriteHistory.push_back({instrAddr, thumb, instruction, oldVal, newVal});
+        if (g_r11WriteHistory.size() > 32) g_r11WriteHistory.pop_front();
+
+        if (!g_reportedFirstR11Zero && oldVal != 0 && newVal == 0) {
+            g_reportedFirstR11Zero = true;
+            Logger::Instance().LogFmt(
+                LogLevel::Error,
+                "CPU",
+                "R11 FIRST->0 at fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+                instrAddr,
+                thumb ? 'T' : 'A',
+                instruction,
+                oldVal,
+                newVal);
+
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "R11 HISTORY (most recent last):");
+            for (const auto& e : g_r11WriteHistory) {
+                Logger::Instance().LogFmt(
+                    LogLevel::Error,
+                    "CPU",
+                    "  R11H fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+                    e.instrAddr,
+                    e.thumb ? 'T' : 'A',
+                    e.instruction,
+                    e.oldVal,
+                    e.newVal);
+            }
+        }
+    }
+
     ARM7TDMI::ARM7TDMI(GBAMemory& mem) : memory(mem) {
         Reset();
     }
@@ -76,11 +171,20 @@ namespace AIO::Emulator::GBA {
         r13_usr = 0x03007F00;
         r14_usr = 0;
 
+        // Note: LR in System/User mode is game-defined; do not force it.
+
         // DirectBoot mode: Skip BIOS and jump straight to ROM entry (0x08000000)
         // Hardware state is initialized by GBAMemory::Reset() to match what BIOS would set up
         registers[Register::PC] = 0x08000000; 
         registers[Register::SP] = r13_usr; // Initialize SP (User/System)
+
+        // Reset R11 tracking state for debugging.
+        g_lastR11Observed = registers[11];
+        g_reportedFirstR11Zero = false;
+        g_reportedFirstR11NonZero = false;
+        g_r11WriteHistory.clear();
     }
+
 
     void ARM7TDMI::SwitchMode(uint32_t newMode) {
         uint32_t oldMode = GetCPUMode(cpsr);
@@ -118,6 +222,8 @@ namespace AIO::Emulator::GBA {
             case CPUMode::USER: case CPUMode::SYSTEM: // User/System
                 registers[Register::SP] = r13_usr;
                 registers[Register::LR] = r14_usr;
+                // System/User modes do not have an SPSR.
+                spsr = 0;
                 break;
             case CPUMode::IRQ:
                 std::cerr << "[MODE SWITCH LOAD] Loading IRQ mode: r13_irq=0x" << std::hex << r13_irq 
@@ -219,9 +325,10 @@ namespace AIO::Emulator::GBA {
 
             // Calculate return address with correct pipeline offset based on
             // the execution state *before* switching to IRQ mode.
-            registers[Register::LR] = registers[15] + (wasThumb ? 2 : 4);
-            r14_irq = registers[Register::LR]; // CRITICAL: Update banked LR_irq!
-            std::cerr << "[IRQ SETUP] After LR assignment: LR=0x" << std::hex << registers[Register::LR] 
+            // In IRQ mode, LR_irq must be written (not the current mode's LR).
+            r14_irq = registers[15] + (wasThumb ? 2 : 4);
+            registers[Register::LR] = r14_irq;
+            std::cerr << "[IRQ SETUP] After LR assignment: LR=0x" << std::hex << registers[Register::LR]
                       << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
             
             // std::cout << "[IRQ EXIT] LR=0x" << std::hex << registers[Register::LR] 
@@ -241,6 +348,72 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::Step() {
+        // Capture instruction context once per Step() so traces can't accidentally
+        // attribute a register write to the wrong opcode.
+        currentInstrAddr = registers[15];
+        currentInstrThumb = thumbMode;
+        currentOp16 = 0;
+        currentOp32 = 0;
+
+        // If R11 changes (especially to zero) without going through our explicit
+        // decode/execute trace call sites, catch it here.
+        const uint32_t r11Now = registers[11];
+        if (!g_reportedFirstR11NonZero && r11Now != 0) {
+            g_reportedFirstR11NonZero = true;
+            Logger::Instance().LogFmt(
+                LogLevel::Error,
+                "CPU",
+                "R11 FIRST!=0 observed at PC=0x%08x mode=%c R11=0x%08x",
+                currentInstrAddr,
+                currentInstrThumb ? 'T' : 'A',
+                r11Now);
+        }
+
+        if (currentInstrAddr >= 0x08007310 && currentInstrAddr <= 0x08007340) {
+            Logger::Instance().LogFmt(
+                LogLevel::Error,
+                "CPU",
+                "SMA2 EARLY PC=0x%08x mode=%c R8=0x%08x R11=0x%08x SP=0x%08x LR=0x%08x",
+                currentInstrAddr,
+                currentInstrThumb ? 'T' : 'A',
+                registers[8],
+                registers[11],
+                registers[13],
+                registers[14]);
+        }
+        if (r11Now != g_lastR11Observed) {
+            const uint32_t instr = currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+            RecordR11Write(currentInstrAddr, currentInstrThumb, instr, g_lastR11Observed, r11Now);
+
+            if (!g_reportedFirstR11Zero && g_lastR11Observed != 0 && r11Now == 0) {
+                g_reportedFirstR11Zero = true;
+                Logger::Instance().LogFmt(
+                    LogLevel::Error,
+                    "CPU",
+                    "R11 FIRST->0 (detected in Step prologue) at fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+                    currentInstrAddr,
+                    currentInstrThumb ? 'T' : 'A',
+                    instr,
+                    g_lastR11Observed,
+                    r11Now);
+
+                Logger::Instance().LogFmt(LogLevel::Error, "CPU", "R11 HISTORY (most recent last):");
+                for (const auto& e : g_r11WriteHistory) {
+                    Logger::Instance().LogFmt(
+                        LogLevel::Error,
+                        "CPU",
+                        "  R11H fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+                        e.instrAddr,
+                        e.thumb ? 'T' : 'A',
+                        e.instruction,
+                        e.oldVal,
+                        e.newVal);
+                }
+            }
+
+            g_lastR11Observed = r11Now;
+        }
+
         // Record CPU state snapshot only when debugger features are active (breakpoints or single-step)
         static const size_t kMaxHistory = 1024;
         const bool recordHistory = singleStep || !breakpoints.empty();
@@ -488,7 +661,29 @@ namespace AIO::Emulator::GBA {
         if (thumbMode) {
             g_memoryForLog = &memory;
             g_thumbModeForLog = true;
-            uint16_t instruction = memory.ReadInstruction16(pc);
+
+            // Focused Thumb fetch trace for the PCs where we see 0x4698 clobber R8.
+            // This helps detect if we're reading the wrong halfword due to PC alignment/masking.
+            const uint32_t pcAligned = pc & ~1u;
+            if (pcAligned == 0x08007320 || pcAligned == 0x0800705A || pcAligned == 0x08007BBC) {
+                const uint16_t opAligned = memory.ReadInstruction16(pcAligned);
+                const uint16_t opFlipped = memory.ReadInstruction16(pcAligned ^ 1u);
+                Logger::Instance().LogFmt(LogLevel::Error, "CPU", "THUMB FETCH pc=0x%08x aligned=0x%08x opAligned=0x%04x opFlipped=0x%04x T=%d", pc, pcAligned, opAligned, opFlipped, thumbMode ? 1 : 0);
+            }
+
+            // In Thumb state, instruction fetch is halfword-aligned.
+            // Always fetch from aligned address so we don't accidentally read a swapped/invalid opcode.
+            const uint32_t instrAddr = pcAligned;
+            const uint16_t instruction = memory.ReadInstruction16(instrAddr);
+
+            // Capture authoritative instruction context for tracing.
+            currentInstrAddr = instrAddr;
+            currentInstrThumb = true;
+            currentOp16 = instruction;
+            currentOp32 = 0;
+            if (pcAligned == 0x08007320 || pcAligned == 0x0800705A || pcAligned == 0x08007BBC) {
+                Logger::Instance().LogFmt(LogLevel::Error, "CPU", "THUMB EXEC fetchAddr=0x%08x pc=0x%08x op=0x%04x", pcAligned, pc, instruction);
+            }
             
             // DEBUG: Trace instruction at PC near 0x80323c6 (disabled)
             // if (pc >= 0x80323c0 && pc <= 0x80323d0) {
@@ -496,13 +691,29 @@ namespace AIO::Emulator::GBA {
             //               << " instr=0x" << instruction << std::dec << std::endl;
             // }
             
-            registers[15] += 2;
-            DecodeThumb(instruction);
+            // Advance to next instruction. Keep the Thumb-visible PC semantics consistent by
+            // maintaining R15 as the current instruction address (not PC+4). When an instruction
+            // uses PC as an operand, compute it as instrAddr + 4.
+            // Compute Thumb-visible PC (used by instructions that read PC).
+            // In Thumb state, PC reads as current instruction address + 4.
+            const uint32_t pcValue = (instrAddr + 4u);
+
+            // Advance to next instruction.
+            registers[15] = instrAddr + 2u;
+            DecodeThumb(instruction, pcValue);
         } else {
             g_memoryForLog = &memory;
             g_thumbModeForLog = false;
-            uint32_t instruction = memory.ReadInstruction32(pc);
-            registers[15] += 4;
+            const uint32_t instrAddr = pc & ~3u;
+            const uint32_t instruction = memory.ReadInstruction32(instrAddr);
+
+            // Capture authoritative instruction context for tracing.
+            currentInstrAddr = instrAddr;
+            currentInstrThumb = false;
+            currentOp16 = 0;
+            currentOp32 = instruction;
+
+            registers[15] = instrAddr + 4u;
             Decode(instruction);
         }
     }
@@ -824,12 +1035,14 @@ namespace AIO::Emulator::GBA {
                 // DEBUG: Log PC writes during IRQ return
                 if (S && opcode == DPOpcode::SUB) {
                     uint32_t currentMode = GetCPUMode(cpsr);
-                    std::cerr << "[IRQ RETURN] Mode=0x" << std::hex << currentMode 
+                    std::cerr << "[IRQ RETURN] Mode=0x" << std::hex << currentMode
                               << " LR(r14)=0x" << registers[Register::LR]
                               << " LR_irq=0x" << r14_irq
                               << " result=0x" << result << std::dec << std::endl;
                 }
-                LogBranch(registers[15] - 4, result);
+                const uint32_t from = registers[15] - 4;
+                TracePCWrite("ALU", from, result, instruction, (uint32_t)opcode, (uint32_t)S);
+                LogBranch(from, result);
             }
             registers[rd] = result;
         }
@@ -837,50 +1050,13 @@ namespace AIO::Emulator::GBA {
         // Update Flags (CPSR) if S is set
         if (S) {
             if (rd == Register::PC) {
-                uint32_t oldMode = GetCPUMode(cpsr);  // Save old mode BEFORE modifying cpsr
-                if (oldMode == CPUMode::SYSTEM) {
-                    // System Mode - Hack for BIOS IRQ return
-                    // Assume we came from IRQ and use SPSR_irq
-                    cpsr = spsr_irq;
-                } else {
-                    cpsr = spsr;
-                }
-                uint32_t newMode = GetCPUMode(cpsr);
-                // Force proper mode switch by passing old mode
+                // ARM spec: data-processing with S and Rd==PC restores CPSR from current mode's SPSR.
+                // Do not special-case System mode here; System mode has no SPSR.
+                const uint32_t oldMode = GetCPUMode(cpsr);
+                cpsr = spsr;
+                const uint32_t newMode = GetCPUMode(cpsr);
                 if (oldMode != newMode) {
-                    // Manually do what SwitchMode does but with correct old mode
-                    switch (oldMode) {
-                        case CPUMode::USER: case CPUMode::SYSTEM:
-                            r13_usr = registers[Register::SP];
-                            r14_usr = registers[Register::LR];
-                            break;
-                        case CPUMode::IRQ:
-                            r13_irq = registers[Register::SP];
-                            r14_irq = registers[Register::LR];
-                            spsr_irq = spsr;
-                            break;
-                        case CPUMode::SUPERVISOR:
-                            r13_svc = registers[Register::SP];
-                            r14_svc = registers[Register::LR];
-                            spsr_svc = spsr;
-                            break;
-                    }
-                    switch (newMode) {
-                        case CPUMode::USER: case CPUMode::SYSTEM:
-                            registers[Register::SP] = r13_usr;
-                            registers[Register::LR] = r14_usr;
-                            break;
-                        case CPUMode::IRQ:
-                            registers[Register::SP] = r13_irq;
-                            registers[Register::LR] = r14_irq;
-                            spsr = spsr_irq;
-                            break;
-                        case CPUMode::SUPERVISOR:
-                            registers[Register::SP] = r13_svc;
-                            registers[Register::LR] = r14_svc;
-                            spsr = spsr_svc;
-                            break;
-                    }
+                    SwitchMode(newMode);
                 }
                 thumbMode = IsThumbMode(cpsr);
             } else {
@@ -923,13 +1099,30 @@ namespace AIO::Emulator::GBA {
         if (L) {
             // Load
             if (B) {
+                const uint32_t old = registers[rd];
                 registers[rd] = memory.Read8(targetAddr);
+                if (rd == 8) {
+                    TraceR8Write(currentInstrAddr, currentInstrThumb, currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, old, registers[rd]);
+                }
             } else {
                 uint32_t val = memory.Read32(targetAddr);
                 if (rd == Register::PC) {
-                    LogBranch(registers[Register::PC] - 4, val);
+                    const uint32_t from = registers[Register::PC] - 4;
+                    TracePCWrite("LDR", from, val, instruction, targetAddr, rn);
+                    LogBranch(from, val);
                 }
+                const uint32_t old = registers[rd];
                 registers[rd] = val;
+                if (rd == 8) {
+                    TraceR8Write(currentInstrAddr, currentInstrThumb, currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, old, registers[rd]);
+                }
+                if (rd == 11) {
+                    {
+                        const uint32_t tracedInstr = currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+                        TraceR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[rd]);
+                        RecordR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[rd]);
+                    }
+                }
             }
         } else {
             // Store
@@ -947,7 +1140,18 @@ namespace AIO::Emulator::GBA {
             uint32_t newBase = baseAddr;
             if (U) newBase += offset;
             else   newBase -= offset;
+            const uint32_t old = registers[rn];
             registers[rn] = newBase;
+            if (rn == 8) {
+                TraceR8Write(currentInstrAddr, currentInstrThumb, currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, old, registers[rn]);
+            }
+            if (rn == 11) {
+                {
+                    const uint32_t tracedInstr = currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+                    TraceR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[rn]);
+                    RecordR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[rn]);
+                }
+            }
         }
     }
 
@@ -960,6 +1164,14 @@ namespace AIO::Emulator::GBA {
         const uint32_t rn = ExtractRegisterField(instruction, 16);
         uint16_t regList = instruction & 0xFFFF;
 
+        // PC-relative logging: in ARM state, registers[15] is already PC+8 after prefetch increment.
+        const uint32_t instrAddr = registers[15] - 8;
+
+        // One-time pre-exec snapshot for the known failing instruction.
+        if (instrAddr == 0x08001774 && instruction == 0x8818DA2F) {
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "ABOUT TO EXEC LDMDA R8,...,PC at 0x%08x: R8=0x%08x SP=0x%08x CPSR=0x%08x", instrAddr, registers[8], registers[13], cpsr);
+        }
+
         // Debug: Log LDM/STM near crash location
         if (registers[15] >= 0x809e390 && registers[15] <= 0x809e3a0) {
             std::cerr << "[LDM/STM DEBUG] PC=0x" << std::hex << (registers[15] - 8)
@@ -971,8 +1183,8 @@ namespace AIO::Emulator::GBA {
                       << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
         }
 
-        uint32_t address = registers[rn];
-        uint32_t startAddress = address;
+        const uint32_t base = (rn == Register::PC) ? (registers[Register::PC] - 8 + 8) : registers[rn];
+        uint32_t startAddress = base;
         
         // Count set bits
         int numRegs = 0;
@@ -980,44 +1192,52 @@ namespace AIO::Emulator::GBA {
             if((regList >> i) & 1) numRegs++;
         }
 
-        // Calculate start address based on addressing mode
-        // P=0, U=1: Increment After (IA) - Start at Rn
-        // P=1, U=1: Increment Before (IB) - Start at Rn + 4
-        // P=0, U=0: Decrement After (DA) - Start at Rn - (n * 4) + 4
-        // P=1, U=0: Decrement Before (DB) - Start at Rn - (n * 4)
-
-        if (!U) {
-            // Decrement
-            address -= (numRegs * 4);
-            if (!P) address += 4; // DA
+        // Calculate start address based on addressing mode (ARM ARM).
+        // IA (P=0,U=1): start = Rn
+        // IB (P=1,U=1): start = Rn + 4
+        // DA (P=0,U=0): start = Rn - 4*(n-1)
+        // DB (P=1,U=0): start = Rn - 4*n
+        if (U) {
+            startAddress = base + (P ? 4u : 0u);
         } else {
-            // Increment
-            if (P) address += 4; // IB
+            startAddress = base - (P ? (uint32_t)numRegs * 4u : (uint32_t)(numRegs - 1) * 4u);
         }
 
-        uint32_t currentAddr = address;
+        uint32_t currentAddr = startAddress;
         bool writeBack = W;
 
-        // Handle S bit: In privileged modes, access user-mode register bank instead
-        // of current mode's banked registers (R8-R14). PC in list means restore CPSR.
-        bool userMode = S && GetCPUMode(cpsr) != CPUMode::USER && GetCPUMode(cpsr) != CPUMode::SYSTEM;
-        bool pcInList = (regList >> 15) & 1;
+        // If we're about to load PC and the computed address is clearly wrong, log it.
+        // This is focused on SMA2's early crash: LDMDA R8, {...,PC}.
+        if (L && ((regList >> 15) & 1)) {
+            Logger::Instance().LogFmt(LogLevel::Error, "CPU", "LDM setup: instr=0x%08x Rn=R%u base=0x%08x start=0x%08x P=%d U=%d W=%d S=%d regList=0x%04x", instruction, (unsigned)rn, base, startAddress, (int)P, (int)U, (int)W, (int)S, (unsigned)regList);
+        }
+
+        // Handle S bit:
+        // - If LDM with S=1 and PC not in list: access user-mode banked regs (R8-R14) without changing CPSR.
+        // - If LDM with S=1 and PC in list: restore CPSR from SPSR and then load regs as normal.
+        const uint32_t curMode = GetCPUMode(cpsr);
+        const bool pcInList = ((regList >> 15) & 1) != 0;
+        const bool userMode = S && !pcInList && curMode != CPUMode::USER && curMode != CPUMode::SYSTEM;
 
         for (int i = 0; i < 16; ++i) {
             if ((regList >> i) & 1) {
                 if (L) {
                     // Load (LDM)
                     uint32_t val = memory.Read32(currentAddr);
+
+                    // If we're loading into PC, canonicalize the address.
+                    // Some code relies on bit0 for Thumb state; memory fetch is always aligned.
                     if (i == 15) {
-                        LogBranch(registers[15] - 4, val);
-                        // S bit with PC: Restore CPSR from SPSR
-                        if (S) {
-                            cpsr = spsr;
-                            thumbMode = (cpsr & (1 << 5)) != 0;
-                            // Mode might have changed, reload banked registers
-                            SwitchMode(GetCPUMode(cpsr));
-                        }
+                        val &= ~1u;
                     }
+                    if (i == 15) {
+                        TracePCWrite("LDM", instrAddr, val, instruction, currentAddr, regList);
+                        LogBranch(instrAddr, val);
+                    }
+
+                    // Per ARM ARM: if S=1 and PC in list, restore CPSR from SPSR.
+                    // Do this *after* the load completes so the load itself uses the correct bank.
+                    // We'll apply it once at the end of the transfer.
                     
                     // Write to register: respect user-mode bank if S bit set
                     if (userMode && i >= 13 && i <= 14) {
@@ -1025,7 +1245,18 @@ namespace AIO::Emulator::GBA {
                         if (i == 13) r13_usr = val;
                         else if (i == 14) r14_usr = val;
                     } else {
+                        const uint32_t old = registers[i];
                         registers[i] = val;
+                        if (i == 8) {
+                            TraceR8Write(currentInstrAddr, currentInstrThumb, currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, old, registers[i]);
+                        }
+                        if (i == 11) {
+                            {
+                                const uint32_t tracedInstr = currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+                                TraceR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[i]);
+                                RecordR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[i]);
+                            }
+                        }
                     }
                     // std::cout << "LDM: R" << i << " <- [0x" << std::hex << currentAddr << "] (0x" << registers[i] << ")" << std::endl;
                 } else {
@@ -1057,14 +1288,36 @@ namespace AIO::Emulator::GBA {
             }
         }
 
+        // Apply CPSR restore for LDM^ with PC in list.
+        if (L && S && pcInList) {
+            const uint32_t oldMode = GetCPUMode(cpsr);
+            cpsr = spsr;
+            thumbMode = IsThumbMode(cpsr);
+            const uint32_t newMode = GetCPUMode(cpsr);
+            if (oldMode != newMode) {
+                SwitchMode(newMode);
+            }
+        }
+
         // Writeback
         // For LDM, if Rn is in the list, writeback is ignored (loaded value persists)
         // For STM, writeback always happens (base is updated)
         if (writeBack) {
-            bool rnInList = (regList >> rn) & 1;
+            const bool rnInList = ((regList >> rn) & 1) != 0;
             if (!L || !rnInList) {
-                if (U) registers[rn] = startAddress + (numRegs * 4);
-                else   registers[rn] = startAddress - (numRegs * 4);
+                // Final address after transfer is always base +/- 4*numRegs.
+                const uint32_t old = registers[rn];
+                registers[rn] = U ? (base + (uint32_t)numRegs * 4u) : (base - (uint32_t)numRegs * 4u);
+                if (rn == 8) {
+                    TraceR8Write(currentInstrAddr, currentInstrThumb, currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, old, registers[rn]);
+                }
+                if (rn == 11) {
+                    {
+                        const uint32_t tracedInstr = currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+                        TraceR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[rn]);
+                        RecordR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[rn]);
+                    }
+                }
             }
         }
     }
@@ -2027,7 +2280,7 @@ namespace AIO::Emulator::GBA {
         }
     }
 
-    void ARM7TDMI::DecodeThumb(uint16_t instruction) {
+    void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         // Thumb Instruction Decoding
         
         // DEBUG: Trace EEPROM validation loop at 0x809e1cc
@@ -2101,7 +2354,11 @@ namespace AIO::Emulator::GBA {
                 SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, op2, res));
             }
             
+            const uint32_t old = registers[rd];
             registers[rd] = res;
+            if (rd == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+            }
 
             if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
                  // std::cout << "ADD/SUB: Rd=R" << rd << " Val=0x" << std::hex << res << std::endl;
@@ -2140,7 +2397,11 @@ namespace AIO::Emulator::GBA {
             
             UpdateNZFlags(cpsr, res);
             SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
+            const uint32_t old = registers[rd];
             registers[rd] = res;
+            if (rd == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+            }
 
             if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
                  // std::cout << "Shift: Rd=R" << rd << " Val=0x" << std::hex << res << std::endl;
@@ -2154,7 +2415,11 @@ namespace AIO::Emulator::GBA {
             uint32_t imm = instruction & 0xFF;
             
             if (opcode == 0) { // MOV Rd, #Offset8
+                const uint32_t old = registers[rd];
                 registers[rd] = imm;
+                if (rd == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                }
                 UpdateNZFlags(cpsr, registers[rd]);
             } else if (opcode == 1) { // CMP Rd, #Offset8
                 uint32_t result = registers[rd] - imm;
@@ -2163,13 +2428,21 @@ namespace AIO::Emulator::GBA {
                 SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(registers[rd], imm, result));
             } else if (opcode == 2) { // ADD Rd, #Offset8
                 uint32_t val = registers[rd];
+                const uint32_t old = registers[rd];
                 registers[rd] = val + imm;
+                if (rd == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                }
                 UpdateNZFlags(cpsr, registers[rd]);
                 SetCPSRFlag(cpsr, CPSR::FLAG_C, DetectAddCarry(val, imm));
                 SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, imm, registers[rd]));
             } else if (opcode == 3) { // SUB Rd, #Offset8
                 uint32_t val = registers[rd];
+                const uint32_t old = registers[rd];
                 registers[rd] = val - imm;
+                if (rd == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                }
                 UpdateNZFlags(cpsr, registers[rd]);
                 SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, imm));
                 SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, imm, registers[rd]));
@@ -2190,12 +2463,20 @@ namespace AIO::Emulator::GBA {
                 case 0x0: // AND
                     res = val & op2;
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 case 0x1: // EOR
                     res = val ^ op2;
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 case 0x2: // LSL
                 {
@@ -2204,7 +2485,11 @@ namespace AIO::Emulator::GBA {
                     res = LogicalShiftLeft(val, shiftAmount, tempCPSR, true);
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 }
                 case 0x3: // LSR
@@ -2214,7 +2499,11 @@ namespace AIO::Emulator::GBA {
                     res = LogicalShiftRight(val, shiftAmount, tempCPSR, true);
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 }
                 case 0x4: // ASR
@@ -2224,7 +2513,11 @@ namespace AIO::Emulator::GBA {
                     res = ArithmeticShiftRight(val, shiftAmount, tempCPSR, true);
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 }
                 case 0x5: // ADC
@@ -2235,7 +2528,11 @@ namespace AIO::Emulator::GBA {
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, result64 > 0xFFFFFFFFULL);
                     SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, op2 + carryIn, res));
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 }
                 case 0x6: // SBC
@@ -2246,7 +2543,11 @@ namespace AIO::Emulator::GBA {
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, operand));
                     SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, operand, res));
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 }
                 case 0x7: // ROR
@@ -2256,7 +2557,11 @@ namespace AIO::Emulator::GBA {
                     res = RotateRight(val, shiftAmount, tempCPSR, true);
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 }
                 case 0x8: // TST
@@ -2266,7 +2571,11 @@ namespace AIO::Emulator::GBA {
                 case 0x9: // NEG (RSB Rd, Rs, #0)
                     res = 0 - op2;
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 case 0xA: // CMP
                     res = val - op2;
@@ -2283,28 +2592,47 @@ namespace AIO::Emulator::GBA {
                 case 0xC: // ORR
                     res = val | op2;
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 case 0xD: // MUL
                     res = val * op2;
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 case 0xE: // BIC
                     res = val & (~op2);
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
                 case 0xF: // MVN
                     res = ~op2;
                     UpdateNZFlags(cpsr, res);
-                    registers[rd] = res;
+                    {
+                        const uint32_t old = registers[rd];
+                        registers[rd] = res;
+                        if (rd == 8) TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[rd]);
+                    }
                     break;
             }
         }
         // Format 5: HiReg Operations / BX
         // 0100 01xx xxxx xxxx
         else if ((instruction & 0xFC00) == 0x4400) {
+            // Thumb HiReg operations / BX encoding (Format 5):
+            // 010001 op(2) H1 H2 Rs(3) Rd(3)
+            // op is bits 9-8.
             uint32_t opcode = (instruction >> 8) & 0x3;
             bool h1 = (instruction >> 7) & 1;
             bool h2 = (instruction >> 6) & 1;
@@ -2316,7 +2644,7 @@ namespace AIO::Emulator::GBA {
             
             if (opcode == 0) { // ADD Rd, Rm
                 // PC as source needs +2 adjustment in Thumb mode
-                uint32_t rmVal = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                uint32_t rmVal = (regM == 15) ? pcValue : registers[regM];
                 if (regD == 15) {
                      // For ADD PC, Rm: PC is destination, use current registers[15]
                      uint32_t newPC = registers[15] + rmVal;
@@ -2328,21 +2656,28 @@ namespace AIO::Emulator::GBA {
                      registers[15] = newPC & 0xFFFFFFFE;
                 } else {
                     // Normal ADD Rd, Rm where Rd is not PC
+                    const uint32_t old = registers[regD];
                     registers[regD] += rmVal;
+                    if (regD == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[regD]);
+                    }
                 }
                 // Format 5 ADD does NOT set flags
             } else if (opcode == 1) { // CMP Rd, Rm
                 // PC as source needs +2 adjustment in Thumb mode
-                uint32_t val = (regD == 15) ? (registers[15] + 2) : registers[regD];
-                uint32_t op2 = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                uint32_t val = (regD == 15) ? pcValue : registers[regD];
+                uint32_t op2 = (regM == 15) ? pcValue : registers[regM];
                 uint32_t res = val - op2;
                 UpdateNZFlags(cpsr, res);
                 SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, op2));
                 SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, op2, res));
             } else if (opcode == 2) { // MOV Rd, Rm
+                // Note: For HiReg operations, Rm is regM (includes h2).
+                // A common bug is to accidentally use the low-register `rm` only.
+                // Hi-reg MOV uses regM/regD (including h2/h1). Do not treat regM!=rm as suspicious.
                 if (regD == 15) {
                      // PC as source needs +2 adjustment in Thumb mode
-                     uint32_t val = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                     const uint32_t val = (regM == 15) ? pcValue : registers[regM];
                      if (val >= 0x08125C00 && val < 0x08127000) {
                          Logger::Instance().LogFmt(LogLevel::Error, "CPU", "MOV PC instruction: PC=0x%08x Rm=%d val=0x%08x", registers[15]-2, regM, val);
                      }
@@ -2351,8 +2686,24 @@ namespace AIO::Emulator::GBA {
                      registers[15] = val & 0xFFFFFFFE;
                 } else {
                     // PC as source needs +2 adjustment in Thumb mode
-                    uint32_t val = (regM == 15) ? (registers[15] + 2) : registers[regM];
+                    const uint32_t val = (regM == 15) ? pcValue : registers[regM];
+                    const uint32_t old = registers[regD];
                     registers[regD] = val;
+
+                    if ((instruction & 0xFF00) == 0x4600 && regD == 8) {
+                        Logger::Instance().LogFmt(LogLevel::Error, "CPU", "THUMB HiReg MOV into R8: fromPC=0x%08x instr=0x%04x h1=%u h2=%u rm=%u rd=%u regM=%u val=0x%08x (R11=0x%08x) old=0x%08x new=0x%08x", currentInstrAddr, instruction, (unsigned)h1, (unsigned)h2, (unsigned)rm, (unsigned)rd, (unsigned)regM, val, registers[11], old, registers[regD]);
+                    }
+
+                    if (regD == 8) {
+                        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16, old, registers[regD]);
+                    }
+                    if (regD == 11) {
+                        {
+                            const uint32_t tracedInstr = (uint32_t)currentOp16;
+                            TraceR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[regD]);
+                            RecordR11Write(currentInstrAddr, currentInstrThumb, tracedInstr, old, registers[regD]);
+                        }
+                    }
                 }
             } else if (opcode == 3) { // BX Rm
                 uint32_t target = registers[regM];
@@ -2384,7 +2735,7 @@ namespace AIO::Emulator::GBA {
         else if ((instruction & 0xF800) == 0x4800) {
             uint32_t rd = (instruction >> 8) & 0x7;
             uint32_t imm = instruction & 0xFF;
-            uint32_t addr = ((registers[15] + 2) & 0xFFFFFFFC) + (imm * 4); // PC is +4 in Thumb
+            uint32_t addr = (pcValue & 0xFFFFFFFC) + (imm * 4);
             registers[rd] = memory.Read32(addr);
             
             if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
@@ -2658,6 +3009,8 @@ namespace AIO::Emulator::GBA {
                 // }
                 
                 if (condSatisfied) {
+                    // registers[15] points at the next instruction (instrAddr+2).
+                    // Branch base should be PC+4 (instrAddr+4) which equals registers[15]+2.
                     uint32_t target = registers[15] + 2 + (offset * 2);
                     LogBranch(registers[15] - 2, target);
                     registers[15] = target;
@@ -2673,6 +3026,7 @@ namespace AIO::Emulator::GBA {
             int32_t offset = (instruction & 0x7FF);
             if (offset & 0x400) offset |= 0xFFFFF800; // Sign extend
             offset <<= 1;
+            // Branch base is PC+4 in Thumb, i.e. registers[15]+2.
             uint32_t target = registers[15] + 2 + offset;
             if (target >= 0x08125C00 && target < 0x08127000) {
                 Logger::Instance().LogFmt(LogLevel::Error, "CPU", "B (unconditional) instruction: PC=0x%08x instr=0x%04x offset=%d target=0x%08x", registers[15]-2, instruction, offset, target);
@@ -2689,7 +3043,8 @@ namespace AIO::Emulator::GBA {
             if (!H) { // First instruction (High)
                 offset = (offset << 12);
                 if (offset & 0x400000) offset |= 0xFF800000; // Sign extend
-                registers[14] = registers[15] + 2 + offset; // Store in LR (PC+4+offset)
+                // LR gets (PC+4+offset). With our PC model, that's registers[15] + 2 + offset.
+                registers[14] = registers[15] + 2 + offset;
             } else { // Second instruction (Low)
                 uint32_t nextPC = registers[15] - 2; // Instruction address + 2 (already incremented)
                 uint32_t target = registers[14] + (offset << 1);

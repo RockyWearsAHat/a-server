@@ -194,23 +194,13 @@ namespace AIO::Emulator::GBA {
         // EWRAM: Initialize to 0 (safer for audio buffers that may be read before written)
         std::fill(wram_board.begin(), wram_board.end(), 0);
         
-        // IWRAM: Initialize to 0 BUT preserve BIOS-managed regions
-        // Real GBA BIOS initializes IWRAM, then sets up IRQ stack and system structures
-        // We must preserve these regions during clear to match BIOS behavior
+        // IWRAM: Initialize to 0 BUT preserve BIOS-managed regions.
+        // For HLE stability, keep the IRQ stack region deterministic (0-filled).
         std::fill(wram_chip.begin(), wram_chip.end(), 0);
         
         // BIOS HLE: Initialize IRQ stack region (0x03007FA0-0x03007FDF = 64 bytes)
-        // Real BIOS reserves this for IRQ mode stack, must not be cleared by game
-        // We use a sentinel pattern so CPU can detect if game overwrites it
+        // Real BIOS reserves this for IRQ mode stack.
         if (wram_chip.size() >= 0x8000) {
-            // Fill IRQ stack region with 0xDEADBEEF pattern
-            // This makes stack corruption obvious in crash dumps
-            for (uint32_t offset = 0x7FA0; offset < 0x7FE0; offset += 4) {
-                wram_chip[offset] = 0xEF;
-                wram_chip[offset + 1] = 0xBE;
-                wram_chip[offset + 2] = 0xAD;
-                wram_chip[offset + 3] = 0xDE;
-            }
             
             // Initialize User Interrupt Handler to Dummy Handler in BIOS (0x00003FF0)
             // 0x03007FFC points to game's IRQ handler (real games set this)
