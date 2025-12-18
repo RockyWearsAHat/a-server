@@ -25,6 +25,7 @@ class MainMenuAdapter;
 class EmulatorSelectAdapter;
 class GameSelectAdapter;
 class SettingsMenuAdapter;
+class NASAdapter;
 }
 
 class QKeyEvent;
@@ -35,11 +36,26 @@ class QKeyEvent;
 namespace AIO {
 namespace GUI {
 
+/**
+ * @brief Primary Qt Widgets window for the 10-foot UI.
+ *
+ * Responsibilities:
+ * - Hosts the page stack (menus, emulator view, NAS page, optional streaming).
+ * - Owns SDL audio output for the emulator APU.
+ * - Orchestrates emulator start/stop and the UI refresh loop.
+ *
+ * Notes:
+ * - This class is split across multiple translation units under `src/gui/mainwindow/`
+ *   to keep each area focused (navigation, pages, emulation, input/audio).
+ */
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
     public:
+        /** @brief Construct the main window and initialize pages + input/audio. */
         MainWindow(QWidget *parent = nullptr);
+
+        /** @brief Stop emulation and release resources. */
         ~MainWindow();
 
         void LoadROM(const std::string& path);
@@ -59,12 +75,23 @@ class MainWindow : public QMainWindow {
 
     public slots:
         // Navigation - public so adapters can call them
+        /** @brief Navigate to the main menu page. */
         void goToMainMenu();
+
+        /** @brief Navigate to emulator selection. */
         void goToEmulatorSelect();
+
+        /** @brief Navigate to ROM/game selection. */
         void goToGameSelect();
+
+        /** @brief Navigate to settings. */
         void goToSettings();
 
+        /** @brief Navigate to the NAS page. */
+        void goToNAS();
+
     private slots:
+        /** @brief UI refresh tick for the emulator framebuffer/status. */
         void UpdateDisplay();
         void GameLoop();  // Deprecated, kept for compatibility
         void toggleDevPanel(bool enabled);
@@ -73,7 +100,11 @@ class MainWindow : public QMainWindow {
         void openStreaming();
         void launchStreamingApp(int app);
         void selectRomDirectory();
+
+        /** @brief Start emulation for the given ROM path. */
         void startGame(const QString& path);
+
+        /** @brief Stop emulation and return UI to a safe idle state. */
         void stopGame();
 
     private:
@@ -94,6 +125,7 @@ class MainWindow : public QMainWindow {
         void setupEmulatorView();
         void setupSettingsPage();
         void setupStreamingPages();
+        void setupNASPage();
         
         void loadSettings();
         void saveSettings();
@@ -108,6 +140,7 @@ class MainWindow : public QMainWindow {
         std::unique_ptr<AIO::GUI::EmulatorSelectAdapter> emulatorSelectAdapter;
         std::unique_ptr<AIO::GUI::GameSelectAdapter> gameSelectAdapter;
         std::unique_ptr<AIO::GUI::SettingsMenuAdapter> settingsMenuAdapter;
+        std::unique_ptr<AIO::GUI::NASAdapter> nasAdapter;
         AIO::GUI::NavigationController nav;
         AIO::GUI::UIActionMapper actionMapper;
         QTimer* navTimer = nullptr;
@@ -123,6 +156,7 @@ class MainWindow : public QMainWindow {
         QWidget *youTubeBrowsePage;
         QWidget *youTubePlayerPage;
         QWidget *streamingWebPage;
+        QWidget *nasPage;
         
         QListWidget *gameListWidget;
         QLabel *romPathLabel;
@@ -184,6 +218,9 @@ class MainWindow : public QMainWindow {
         
         // Mouse hover tracking (for sticky hover until mouse leaves)
         QPushButton* lastHoveredButton = nullptr;
+
+        // Cache this once at startup; used to avoid global event filter issues with QtWebEngine.
+        bool streamingEnabled_ = false;
 };
 
 } // namespace GUI

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>AIO NAS</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="title">AIO NAS</div>
+      <div class="spacer"></div>
+      <div class="status" id="status"></div>
+    </header>
+
+    <main class="main">
+      <section class="left">
+        <div class="toolbar">
+          <button id="btnUp" title="Up">Up</button>
+          <button id="btnNewFolder">New Folder</button>
+          <label class="filebtn">
+            Upload
+            <input id="fileInput" type="file" multiple />
+          </label>
+          <button id="btnRefresh">Refresh</button>
+        </div>
+
+        <div class="path" id="path"></div>
+
+        <table class="list">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th class="num">Size</th>
+              <th class="num">Modified</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </section>
+
+      <section class="right">
+        <div class="previewHeader">
+          <div class="previewTitle" id="previewTitle">Preview</div>
+          <div class="spacer"></div>
+          <a id="openLink" class="openLink" target="_blank" rel="noreferrer"
+            >Open</a
+          >
+        </div>
+        <div class="preview" id="preview"></div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

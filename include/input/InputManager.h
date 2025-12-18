@@ -13,6 +13,9 @@
 namespace AIO {
 namespace Input {
 
+/**
+ * @brief GBA button indices as used by the KEYINPUT register bit positions.
+ */
 enum GBAButton {
         Button_A = 0,
         Button_B = 1,
@@ -27,39 +30,74 @@ enum GBAButton {
         Button_Count = 10
     };
 
+    /**
+     * @brief Global input manager for keyboard + SDL game controllers.
+     *
+     * Design goals:
+     * - Provide a stable, emulator-agnostic "logical" input layer for the UI.
+     * - Provide a configurable mapping layer into emulator-specific inputs (e.g. GBA buttons).
+     * - Keep update() / updateSnapshot() deterministic per frame.
+     *
+     * Semantics:
+     * - Logical state uses the GBA convention: 1 = released, 0 = pressed.
+     * - edgePressed() is computed from the previous frame snapshot.
+     *
+     * Ownership:
+     * - This singleton initializes only SDL's GameController + Events subsystems.
+     *   It intentionally does NOT call SDL_Quit() globally (audio is owned elsewhere).
+     */
     class InputManager : public QObject {
         Q_OBJECT
     public:
+        /** @brief Singleton accessor. */
         static InputManager& instance();
 
-        // Returns true if the event was handled
+        /**
+         * @brief Process a Qt key event and update internal keyboard/logical state.
+         * @return true if the event was recognized and consumed.
+         */
         bool processKeyEvent(QKeyEvent* event);
         
-        // Polls SDL events and returns combined input state
+        /**
+         * @brief Poll SDL and return a combined emulator-facing KEYINPUT bitfield.
+         * @note Prefer updateSnapshot() for UI code.
+         */
         uint16_t update();
 
-        // Polls SDL and returns a full snapshot for this frame.
-        // Prefer this for UI code to avoid multiple global reads.
+        /**
+         * @brief Poll SDL and return a full snapshot for this frame.
+         * Prefer this for UI code to avoid multiple global reads.
+         */
         InputSnapshot updateSnapshot();
 
-        // Logical (emulator-agnostic) input state.
-        // 1 = released, 0 = pressed, same convention as GBA KEYINPUT.
+        /**
+         * @brief Current logical (emulator-agnostic) input state.
+         * 1 = released, 0 = pressed, same convention as GBA KEYINPUT.
+         */
         uint32_t logicalButtonsDown() const { return logicalButtonsDown_; }
 
-        // Action-based queries (AppId/ActionId -> resolved LogicalButton).
+        /** @brief True if a bound action is currently pressed this frame. */
         bool pressed(AppId app, ActionId action) const;
+
+        /** @brief True only on the transition from released -> pressed. */
         bool edgePressed(AppId app, ActionId action) const;
 
-        // Configure how logical buttons map to GBA buttons (for the GBA core).
-        // This lets us keep controller mapping global, and swap the emulator mapping separately.
+        /**
+         * @brief Configure how logical buttons map to GBA buttons (for the GBA core).
+         * This keeps controller mapping global while allowing emulator mapping to vary.
+         */
         void setGBALogicalBinding(LogicalButton logical, GBAButton gbaButton);
 
-        // App-wide UI keyboard bindings (independent from emulator keybinds).
+        /** @brief App-wide UI keyboard bindings (independent from emulator keybinds). */
         void setUIKeyBinding(LogicalButton logical, int qtKey);
+
+        /** @brief Get the Qt key currently bound to a logical UI button (or Qt::Key_unknown). */
         int uiKeyBinding(LogicalButton logical) const;
 
-        // Returns a bitmask of non-emulation "system" buttons pressed this frame.
-        // These are used for global UI actions (e.g., Home).
+        /**
+         * @brief Bitmask of non-emulation "system" buttons pressed this frame.
+         * Used for global UI actions (e.g. Home).
+         */
         uint32_t systemButtonsDown() const { return systemButtonsDown_; }
 
         ControllerFamily activeControllerFamily() const { return activeFamily_; }

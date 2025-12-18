@@ -6,10 +6,13 @@
 #include "gui/MainWindow.h"
 #include <QRegularExpression>
 #include <QTimer>
+#include <QDir>
+#include <QStandardPaths>
 #include <signal.h>
 #include <atomic>
 #include "emulator/common/Logger.h"
 #include "common/Dotenv.h"
+#include "nas/NASServer.h"
 
 // Async-signal-safe flag for graceful shutdown
 static volatile sig_atomic_t g_quitRequested = 0;
@@ -58,6 +61,33 @@ int main(int argc, char *argv[]) {
         "Run without GUI (requires --rom)");
     parser.addOption(headlessOption);
 
+    QCommandLineOption headlessMaxMsOption(QStringList() << "headless-max-ms",
+        "In --headless mode, automatically quit after N milliseconds (useful for deterministic log capture)",
+        "ms",
+        "0");
+    parser.addOption(headlessMaxMsOption);
+
+    // NAS options (NAS auto-starts by default)
+    QCommandLineOption nasOption(QStringList() << "nas",
+        "(Deprecated) NAS now auto-starts by default");
+    parser.addOption(nasOption);
+
+    QCommandLineOption nasRootOption(QStringList() << "nas-root",
+        "Root directory to serve via NAS (default: ~/AIO_NAS)",
+        "path");
+    parser.addOption(nasRootOption);
+
+    QCommandLineOption nasPortOption(QStringList() << "nas-port",
+        "NAS server port (default: 8080)",
+        "port",
+        "8080");
+    parser.addOption(nasPortOption);
+
+    QCommandLineOption nasTokenOption(QStringList() << "nas-token",
+        "Optional bearer token to require for all NAS requests",
+        "token");
+    parser.addOption(nasTokenOption);
+
     // Debugger options
     QCommandLineOption debugOption(QStringList() << "d" << "debug",
         "Enable interactive CPU debugger (terminal controls)");
@@ -77,6 +107,7 @@ int main(int argc, char *argv[]) {
     std::string logPath = parser.value(logOption).toStdString();
     bool exitOnCrash = parser.isSet(exitOnCrashOption);
     bool headless = parser.isSet(headlessOption);
+    const bool nasEnabled = true;
 
     AIO::Emulator::Common::Logger::Instance().SetLogFile(logPath);
     AIO::Emulator::Common::Logger::Instance().SetExitOnCrash(exitOnCrash);
@@ -102,7 +133,64 @@ int main(int argc, char *argv[]) {
         std::cout << "Exit-on-crash: ENABLED" << std::endl;
     }
 
+    // Start NAS server early so it works in headless mode.
+    std::unique_ptr<AIO::NAS::NASServer> nasServer;
+    if (nasEnabled) {
+        QString root = parser.value(nasRootOption);
+        if (root.isEmpty()) {
+            root = qEnvironmentVariable("AIO_NAS_ROOT");
+        }
+        if (root.isEmpty()) {
+            root = QDir(QDir::homePath()).absoluteFilePath("AIO_NAS");
+        }
+        // Ensure default root exists.
+        QDir().mkpath(root);
+
+        int portInt = 8080;
+        {
+            const QString portStr = parser.isSet(nasPortOption) ? parser.value(nasPortOption) : qEnvironmentVariable("AIO_NAS_PORT");
+            if (!portStr.isEmpty()) {
+                bool okPort = false;
+                const int parsed = portStr.toInt(&okPort);
+                if (okPort && parsed > 0 && parsed <= 65535) {
+                    portInt = parsed;
+                }
+            }
+        }
+
+        QString token = parser.value(nasTokenOption);
+        if (token.isEmpty()) {
+            token = qEnvironmentVariable("AIO_NAS_TOKEN");
+        }
+
+        AIO::NAS::NASServer::Options opt;
+        opt.rootPath = root;
+        opt.port = static_cast<quint16>(portInt);
+        opt.bearerToken = token;
+
+        nasServer = std::make_unique<AIO::NAS::NASServer>(opt);
+        if (!nasServer->Start()) {
+            std::cerr << "[main] Warning: failed to start NAS server (continuing without NAS)" << std::endl;
+        } else {
+            // Expose to GUI for embedded NAS viewer.
+            const QString url = QString("http://127.0.0.1:%1/").arg(nasServer->Port());
+            qputenv("AIO_NAS_URL", url.toUtf8());
+        }
+    }
+
     AIO::GUI::MainWindow window;
+
+    // In headless mode, optionally quit after a bounded duration.
+    if (headless) {
+        bool okMs = false;
+        const int maxMs = parser.value(headlessMaxMsOption).toInt(&okMs);
+        if (okMs && maxMs > 0) {
+            QTimer::singleShot(maxMs, [&]() {
+                std::cout << "[main] Headless max time reached (" << maxMs << "ms), exiting..." << std::endl;
+                QCoreApplication::quit();
+            });
+        }
+    }
     
     // Periodic check for quit request set by signal handler
     QTimer quitPoll;
@@ -166,10 +254,11 @@ int main(int argc, char *argv[]) {
     } else {
         std::cout << "[main] No ROM option set" << std::endl;
         if (headless) {
-            std::cerr << "Error: --headless requires --rom" << std::endl;
-            return 1;
+            // NAS-only headless mode is valid.
         }
-        window.show();
+        if (!headless) {
+            window.show();
+        }
     }
 
     return app.exec();

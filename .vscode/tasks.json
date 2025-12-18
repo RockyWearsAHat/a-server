@@ -14,7 +14,7 @@
       "type": "shell",
       "command": "ctest",
       "args": ["--output-on-failure"],
-      "options": { "cwd": "${workspaceFolder}/build" },
+      "options": { "cwd": "${workspaceFolder}/build/generated/cmake" },
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": ["$gcc"]
     },
@@ -49,6 +49,14 @@
       "options": { "cwd": "${workspaceFolder}" },
       "group": { "kind": "test" },
       "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Test Suite",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/test_suite.py",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "test" },
+      "problemMatcher": []
     }
   ]
 }

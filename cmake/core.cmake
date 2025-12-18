@@ -42,11 +42,22 @@ set_target_properties(SwitchEmulator PROPERTIES
 add_executable(AIOServer 
     ${PROJECT_ROOT}/src/main.cpp
     ${PROJECT_ROOT}/src/common/Dotenv.cpp
+    ${PROJECT_ROOT}/src/common/CssVars.cpp
+    ${PROJECT_ROOT}/src/common/AssetPaths.cpp
+    ${PROJECT_ROOT}/src/nas/NASServer.cpp
+    ${PROJECT_ROOT}/src/nas/server/NASServer_Http.cpp
+    ${PROJECT_ROOT}/src/nas/server/NASServer_Routing.cpp
     ${PROJECT_ROOT}/src/gui/MainWindow.cpp
+    ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_InputAudio.cpp
+    ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Emulation.cpp
+    ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Navigation.cpp
+    ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Pages.cpp
     ${PROJECT_ROOT}/src/gui/InputConfigDialog.cpp
     ${PROJECT_ROOT}/src/gui/LogViewerDialog.cpp
     ${PROJECT_ROOT}/src/gui/StreamingHubWidget.cpp
     ${PROJECT_ROOT}/src/gui/StreamingWebViewPage.cpp
+    ${PROJECT_ROOT}/src/gui/NASPage.cpp
+    ${PROJECT_ROOT}/src/gui/NASAdapter.cpp
     ${PROJECT_ROOT}/src/gui/YouTubeBrowsePage.cpp
     ${PROJECT_ROOT}/src/gui/YouTubePlayerPage.cpp
     ${PROJECT_ROOT}/src/gui/ThumbnailCache.cpp
@@ -60,6 +71,9 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/ActionBindingsDialog.cpp
     ${PROJECT_ROOT}/src/gui/ControllerDiagramWidget.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
+    ${PROJECT_ROOT}/src/input/manager/InputManager_Mappings.cpp
+    ${PROJECT_ROOT}/src/input/manager/InputManager_Config.cpp
+    ${PROJECT_ROOT}/src/input/manager/InputManager_SDL.cpp
     ${PROJECT_ROOT}/src/input/AppActions.cpp
     ${PROJECT_ROOT}/src/input/ActionBindings.cpp
     ${PROJECT_ROOT}/src/streaming/StreamingManager.cpp
@@ -69,14 +83,19 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/streaming/HuluService.cpp
     # Headers with Q_OBJECT for MOC processing
     ${PROJECT_ROOT}/include/gui/MainWindow.h
+    ${PROJECT_ROOT}/include/nas/NASServer.h
     ${PROJECT_ROOT}/include/gui/InputConfigDialog.h
     ${PROJECT_ROOT}/include/gui/LogViewerDialog.h
     ${PROJECT_ROOT}/include/gui/StreamingHubWidget.h
     ${PROJECT_ROOT}/include/gui/StreamingWebViewPage.h
+    ${PROJECT_ROOT}/include/gui/NASPage.h
+    ${PROJECT_ROOT}/include/gui/NASAdapter.h
     ${PROJECT_ROOT}/include/gui/YouTubeBrowsePage.h
     ${PROJECT_ROOT}/include/gui/YouTubePlayerPage.h
     ${PROJECT_ROOT}/include/gui/ThumbnailCache.h
     ${PROJECT_ROOT}/include/common/Dotenv.h
+    ${PROJECT_ROOT}/include/common/CssVars.h
+    ${PROJECT_ROOT}/include/common/AssetPaths.h
     ${PROJECT_ROOT}/include/input/InputManager.h
     ${PROJECT_ROOT}/include/gui/ActionBindingsDialog.h
     ${PROJECT_ROOT}/include/gui/ControllerDiagramWidget.h

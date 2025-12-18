@@ -62,7 +62,9 @@ namespace AIO::Emulator::GBA {
                     if (dispstat & 0x10) { // HBlank IRQ Enable (Bit 4)
                         uint16_t if_reg = memory.Read16(0x04000202);
                         if_reg |= 2; // HBlank IRQ bit (Bit 1)
-                        memory.Write16(0x04000202, if_reg);
+                        // IF is write-1-to-clear when written by the CPU.
+                        // When an interrupt occurs, hardware sets IF bits.
+                        memory.WriteIORegisterInternal(0x202, if_reg);
                     }
                     
                     // Update DISPSTAT HBlank Flag (Bit 1)

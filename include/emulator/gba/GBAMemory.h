@@ -86,6 +86,8 @@ namespace AIO::Emulator::GBA {
         int GetAccessCycles(uint32_t address, int accessSize) const;
 
     private:
+        void EvaluateKeypadIRQ();
+
         // EEPROM protocol constants (self-documenting, no magic numbers)
         struct EEPROMConsts {
             static constexpr uint8_t DUMMY_BITS = 4;            // Number of dummy bits before data phase

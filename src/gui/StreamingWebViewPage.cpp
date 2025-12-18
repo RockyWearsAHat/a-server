@@ -4,8 +4,10 @@
 
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QApplication>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QPalette>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -56,6 +58,9 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget* parent)
 
     view_ = new QWebEngineView(this);
     view_->setFocusPolicy(Qt::StrongFocus);
+
+    // Avoid bright white flash before page styles apply.
+    view_->page()->setBackgroundColor(QApplication::palette().color(QPalette::Window));
 
     root->addWidget(topBar_);
     root->addWidget(view_, 1);

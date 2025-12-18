@@ -5,6 +5,7 @@
 #include <emulator/gba/GameDB.h>
 #include <emulator/gba/IORegs.h>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -80,73 +81,39 @@ namespace AIO::Emulator::GBA {
         bios[0x1B] = 0xEA;
 
         // IRQ Trampoline at 0x180
-        // NOTE: The CPU core (CheckInterrupts) already:
-        //   1. Calculated triggered = IE & IF at IRQ entry
-        //   2. Updated BIOS_IF at 0x03007FF8
-        //   3. Saved triggered bits to 0x03007FF4
-        // This is necessary because PPU/Timer updates between IRQ entry
-        // and BIOS execution can change IF, breaking the interrupt logic.
+        // This trampoline is a minimal IRQ dispatcher suitable for DirectBoot.
         //
-        // This trampoline now reads the pre-saved triggered bits instead
-        // of recalculating IE & IF, matching real GBA atomic behavior.
-        // CRITICAL: User handler is responsible for clearing IF register.
-        // BIOS does NOT clear IF automatically - that's the game's job.
+        // Key behaviors:
+        // - Calls the user handler pointer stored at 0x03007FFC
+        //   (accessed via mirror address 0x03FFFFFC).
+        // - Runs the user handler in IRQ mode.
+        // - Acknowledges/clears REG_IF *after* the user handler returns, using
+        //   the triggered mask stored at 0x03007FF4 by the CPU IRQ entry path.
+        //
+        // Rationale: Many handlers read REG_IF to determine the IRQ source.
+        // Clearing IF before the call can hide the source; clearing after the
+        // call avoids IRQ storms if the handler forgets to ack.
         
         uint32_t base = 0x180;
         const uint32_t trampoline[] = {
-            // 0x180: Save context on IRQ stack
-            0xE92D500F, // STMDB SP!, {R0-R3, R12, LR}
-            
-            // 0x184: Load pre-saved triggered bits from 0x03007FF4
-            // PC+8 = 0x18c, pool at 0x1dc, offset = 0x1dc - 0x18c = 0x50 = 80
-            0xE59F3050, // LDR R3, [PC, #80] -> Load 0x03007FF4 address from pool
-            // 0x188:
-            0xE1D310B0, // LDRH R1, [R3] (triggered bits saved by CPU)
-            
-            // BIOS_IF already updated by CPU, so skip those steps
-            // (0x18c - 0x1a4 are now NOPs)
-            0xE1A00000, // 0x18c: NOP
-            0xE1A00000, // 0x190: NOP
-            0xE1A00000, // 0x194: NOP
-            0xE1A00000, // 0x198: NOP
-            0xE1A00000, // 0x19c: NOP
-            0xE1A00000, // 0x1a0: NOP
-            0xE1A00000, // 0x1a4: NOP
-            
-            // 0x1a8: Switch to System mode with IRQs DISABLED (0x9F)
-            0xE321F09F, // MSR CPSR_c, #0x9F
-            
-            // 0x1ac: Push LR to System stack
-            0xE92D4000, // STMDB SP!, {LR}
-            
-            // 0x1b0: Load user handler
-            // PC+8 = 0x1b8, pool at 0x1d8, offset = 0x1d8 - 0x1b8 = 0x20 = 32
-            0xE59F3020, // LDR R3, [PC, #32] -> Load 0x03007FF8 address
-            // 0x1b4:
-            0xE5933004, // LDR R3, [R3, #4] (User Handler at 0x03007FFC)
-            // 0x1b8: Set LR for return (ADR LR, PC+8 = 0x1c0)
-            0xE28FE000, // ADD LR, PC, #0
-            // 0x1bc: Jump to user handler
-            0xE12FFF13, // BX R3
-            
-            // 0x1c0: User handler returned. Pop LR from System stack
-            0xE8BD4000, // LDMIA SP!, {LR}
-            
-            // 0x1c4: Switch back to IRQ mode with IRQs disabled (0x92)
-            0xE321F092, // MSR CPSR_c, #0x92
-            
-            // 0x1c8: Restore context and return
-            0xE8BD500F, // LDMIA SP!, {R0-R3, R12, LR}
-            // 0x1cc:
-            0xE25EF004, // SUBS PC, LR, #4
-            
-            // 0x1d0: Padding
-            0xE1A00000, // NOP
-            0xE1A00000, // 0x1d4: NOP
-            
-            // 0x1d8: Pool
-            0x03007FF8, // BIOS_IF Address (0x03007FFC = User Handler = +4)
-            0x03007FF4  // Pre-saved triggered bits address (0x1dc)
+            // 00000128  stmfd  r13!,r0-r3,r12,r14  ;save regs to SP_irq
+            // 0000012C  mov    r0,4000000h         ;ptr+4 to 03FFFFFC (mirror of 03007FFC)
+            // 00000130  add    r14,r15,0h          ;retadr for USER handler $+8
+            // 00000134  ldr    r15,[r0,-4h]        ;jump to [03FFFFFC] USER handler
+            // 00000138  ...                         ;post-handler ack (HLE)
+            // 0000013C  ldmfd  r13!,r0-r3,r12,r14  ;restore regs
+            // 00000140  subs   r15,r14,4h          ;return from IRQ (PC=LR-4, CPSR=SPSR)
+
+            0xE92D500F, // 0x180: STMDB SP!, {R0-R3, R12, LR}
+            0xE3A00404, // 0x184: MOV   R0, #0x04000000
+            0xE28FE000, // 0x188: ADD   LR, PC, #0
+            0xE510F004, // 0x18c: LDR   PC, [R0, #-4]
+            0xE59F1008, // 0x190: LDR   R1, [PC, #8]      ; &0x03007FF4 (literal)
+            0xE1D110B0, // 0x194: LDRH  R1, [R1]          ; triggered mask
+            0xE1C012B2, // 0x198: STRH  R1, [R0, #0x202]  ; REG_IF (write-1-to-clear)
+            0xE8BD500F, // 0x19c: LDMIA SP!, {R0-R3, R12, LR}
+            0xE25EF004, // 0x1a0: SUBS  PC, LR, #4
+            0x03007FF4  // 0x1a4: literal
         };
 
         for (size_t i = 0; i < sizeof(trampoline)/sizeof(uint32_t); ++i) {
@@ -181,7 +148,7 @@ namespace AIO::Emulator::GBA {
             bios[0x3FF3] = 0xE1;
         }
         
-        // NOTE: IRQ trampoline at 0x180-0x1DC must NOT be overwritten!
+        // NOTE: IRQ trampoline at 0x180 must NOT be overwritten!
         // All BIOS functions should be called via SWI, handled by ExecuteSWI().
         // Direct BIOS function calls are not supported in HLE mode.
     }
@@ -724,10 +691,84 @@ namespace AIO::Emulator::GBA {
         }
     }
 
+    void GBAMemory::EvaluateKeypadIRQ() {
+        static int keypadIrqDebug = -1;
+        if (keypadIrqDebug < 0) {
+            keypadIrqDebug = (std::getenv("AIO_KEYPAD_IRQ_DEBUG") != nullptr) ? 1 : 0;
+        }
+
+        if (io_regs.size() <= IORegs::KEYCNT + 1 || io_regs.size() <= IORegs::KEYINPUT + 1 || io_regs.size() <= IORegs::IF + 1) {
+            return;
+        }
+
+        // GBATEK: KEYCNT (0x04000132)
+        // - Bits 0-9: key mask
+        // - Bit 14: IRQ enable
+        // - Bit 15: condition (0=OR, 1=AND)
+        const uint16_t keycnt = io_regs[IORegs::KEYCNT] | (io_regs[IORegs::KEYCNT + 1] << 8);
+        const bool irqEnable = (keycnt & 0x4000) != 0;
+        if (!irqEnable) {
+            return;
+        }
+
+        const uint16_t mask = keycnt & 0x03FF;
+        if (mask == 0) {
+            return;
+        }
+
+        const bool andMode = (keycnt & 0x8000) != 0;
+
+        // KEYINPUT is active-low: 0=pressed
+        const uint16_t keyinput = io_regs[IORegs::KEYINPUT] | (io_regs[IORegs::KEYINPUT + 1] << 8);
+        const uint16_t pressed = static_cast<uint16_t>((~keyinput) & 0x03FF);
+
+        const bool conditionMet = andMode ? ((pressed & mask) == mask) : ((pressed & mask) != 0);
+        if (!conditionMet) {
+            return;
+        }
+
+        if (keypadIrqDebug) {
+            static int logCount = 0;
+            if (logCount < 200) {
+                std::cerr << "[KEYPAD IRQ] KEYCNT=0x" << std::hex << std::setw(4) << std::setfill('0') << keycnt
+                          << " KEYINPUT=0x" << std::setw(4) << keyinput
+                          << " pressed=0x" << std::setw(4) << pressed
+                          << " mask=0x" << std::setw(4) << mask
+                          << " mode=" << (andMode ? "AND" : "OR")
+                          << std::dec << std::endl;
+                logCount++;
+            }
+        }
+
+        // Hardware requests keypad interrupt by setting IF bit 12.
+        uint16_t if_reg = io_regs[IORegs::IF] | (io_regs[IORegs::IF + 1] << 8);
+        if_reg |= InterruptFlags::KEYPAD;
+        io_regs[IORegs::IF] = if_reg & 0xFF;
+        io_regs[IORegs::IF + 1] = (if_reg >> 8) & 0xFF;
+    }
+
     void GBAMemory::SetKeyInput(uint16_t value) {
         if (io_regs.size() > IORegs::KEYINPUT + 1) {
+            const uint16_t old = io_regs[IORegs::KEYINPUT] | (io_regs[IORegs::KEYINPUT + 1] << 8);
             io_regs[IORegs::KEYINPUT] = value & 0xFF;
             io_regs[IORegs::KEYINPUT + 1] = (value >> 8) & 0xFF;
+
+            // If the game is using keypad interrupts to wake from HALT or to detect prompt input,
+            // request the KEYPAD interrupt when KEYCNT conditions are met.
+            EvaluateKeypadIRQ();
+
+            // Targeted input trace for SMA2: helps confirm that A/B/Start etc are reaching the core
+            // when stuck at "saved data is corrupt".
+            if ((gameCode == "AMQE" || gameCode == "AMQP" || gameCode == "AMQJ" || gameCode == "AA2E") && old != value) {
+                static int keyLogCount = 0;
+                if (keyLogCount < 80) {
+                    std::cerr << "[KEYINPUT] game=" << gameCode
+                              << " old=0x" << std::hex << std::setw(4) << std::setfill('0') << old
+                              << " new=0x" << std::setw(4) << value
+                              << std::dec << std::endl;
+                    keyLogCount++;
+                }
+            }
         }
     }
 
@@ -973,33 +1014,6 @@ namespace AIO::Emulator::GBA {
             case 0x03: // WRAM (Chip) (GBATEK: 0x03000000-0x03007FFF)
             {
                 uint32_t offset = address & MemoryMap::WRAM_CHIP_MASK;
-                
-                // BIOS HLE: Log writes to system-ready flag to see who clears it
-                static int writeLogCount = 0;
-                if ((offset == 0x2b64 || offset == 0x2b65) && writeLogCount < 20) {
-                    std::cout << "[BIOS HLE] WRITE to 0x3002b6" << ((offset == 0x2b64) ? "4" : "5") 
-                              << " = 0x" << std::hex << (int)value << " PC=0x" << (cpu ? cpu->GetRegister(15) : 0) 
-                              << std::dec << " (write #" << writeLogCount << ")" << std::endl;
-                    writeLogCount++;
-                }
-                
-                // BIOS HLE: Protect system-ready flag from game's own init clearing it
-                // Real BIOS runs background tasks that continuously set this flag
-                // Without BIOS, prevent game from clearing it so boot can proceed
-                static int writeCount = 0;
-                static int protectCount = 0;
-                if (offset == 0x2b64 || offset == 0x2b65) {
-                    writeCount++;
-                    if (value == 0 && writeCount < 100) {
-                        protectCount++;
-                        if (protectCount < 10) {
-                            std::cout << "[BIOS HLE] Blocked write to system flag 0x3002b64+offset=" << (offset-0x2b64) 
-                                      << " value=0 (protection #" << protectCount << ")" << std::endl;
-                        }
-                        return; // Ignore first 100 writes that try to clear the flag
-                    }
-                }
-                
                 wram_chip[offset] = value;
                 break;
             }
@@ -1095,12 +1109,6 @@ namespace AIO::Emulator::GBA {
             {
                 uint32_t offset = address & 0x7FFF;
                 
-                // BIOS HLE: Permanently protect system-ready flag from being cleared
-                // Real BIOS sets this after initialization; games poll it to detect boot complete
-                if ((offset == 0x2b64 || offset == 0x2b65) && value == 0) {
-                    return; // Block all zero-writes permanently
-                }
-                
                 wram_chip[offset] = value;
                 break;
             }
@@ -1145,6 +1153,12 @@ namespace AIO::Emulator::GBA {
 
                     if (offset < io_regs.size()) {
                         io_regs[offset] = value;
+                    }
+
+                    // KEYCNT changes can make the keypad IRQ condition become true without any
+                    // immediate KEYINPUT transition, so re-evaluate after writes.
+                    if (offset == IORegs::KEYCNT || offset == IORegs::KEYCNT + 1) {
+                        EvaluateKeypadIRQ();
                     }
                     
                     // Handle DMA latch after io_regs is updated
@@ -1791,8 +1805,8 @@ namespace AIO::Emulator::GBA {
         //               << " count>=68=" << (count >= 68) << std::endl;
         // }
         
-        // DEBUG: Always log when we check fast-path condition
-        if (srcIsEEPROM || dstIsEEPROM) {
+        // DEBUG (guarded): Log when we check fast-path condition
+        if (verboseLogs && (srcIsEEPROM || dstIsEEPROM)) {
             std::ofstream debugFile("/tmp/eeprom_debug.txt", std::ios::app);
             debugFile << "[DMA CHECK] srcEEP=" << srcIsEEPROM << " dstEEP=" << dstIsEEPROM << " count=" << count << " >= 68? " << (count >= 68) << std::endl;
             debugFile.close();
@@ -1810,15 +1824,16 @@ namespace AIO::Emulator::GBA {
             if (verboseLogs) {
                 std::cout << "[EEPROM FAST-PATH] Activating for count=" << count << " src=0x" << std::hex << currentSrc << std::dec << std::endl;
             }
+
+            const EEPROMState startState = eepromState;
+            const int startBitCounter = eepromBitCounter;
             
             // Save initial destination for logging
             uint32_t initialDst = currentDst;
             
-            // Force completion of read sequence
-            if (!startingAtDataPhase) {
-                eepromState = EEPROMState::ReadDummy;
-                eepromBitCounter = 0;
-            }
+            // Preserve current read-phase progress.
+            // Some games consume some dummy/data bits via CPU reads before switching to DMA;
+            // resetting here would shift the stream and corrupt the reconstructed payload.
             
             // Return all bits - each 16-bit word contains a single bit (0 or 1)
             // Game accumulates these into bytes/words in its own code
@@ -1879,21 +1894,44 @@ namespace AIO::Emulator::GBA {
             if (verboseLogs && eepromAddress == 2) { // Only log block 2 (the header block)
                 std::cout << "[EEPROM FAST-PATH] Block 2 read: debugBits=0x" << std::hex << debugBits << std::dec << std::endl;
             }
+
+            // Targeted correctness check for SMA2 save validation.
+            // Confirms that the 64 data bits the game receives via DMA match the EEPROM buffer we prepared.
+            if (gameCode == "AMQE" || gameCode == "AMQP" || gameCode == "AMQJ" || gameCode == "AA2E") {
+                if (eepromAddress == 2 || eepromAddress == 4 || eepromAddress == 32) {
+                    static int sma2FastChecksLogged = 0;
+                    if (sma2FastChecksLogged < 40) {
+                        std::cerr << "[EEPROM FASTCHK] game=" << gameCode
+                                  << " block=" << eepromAddress
+                                  << " count=" << count
+                                  << " startState=" << (int)startState
+                                  << " startBit=" << startBitCounter
+                                  << " bufValid=" << (eepromBufferValid ? 1 : 0)
+                                  << " buffer=0x" << std::hex << std::setw(16) << std::setfill('0') << eepromBuffer
+                                  << " dataBits=0x" << std::setw(16) << debugBits
+                                  << std::dec
+                                  << std::endl;
+                        sma2FastChecksLogged++;
+                    }
+                }
+            }
             
 
             
-            // ALWAYS log fast-path completion for debugging
-            std::ofstream debugFile("/tmp/eeprom_debug.txt", std::ios::app);
-            debugFile << "[FAST-PATH] Block=" << eepromAddress << " Count=" << count << " Buffer=0x" << std::hex << eepromBuffer << std::dec << std::endl;
-            debugFile << "  Dst=0x" << std::hex << initialDst << " First 16 words:";
-            uint32_t dumpOffset = initialDst - 0x03000000;
-            for (int i = 0; i < 16 && i < (int)count && dumpOffset + i*2 + 1 < wram_chip.size(); ++i) {
-                uint16_t word = wram_chip[dumpOffset + i*2] | (wram_chip[dumpOffset + i*2 + 1] << 8);
-                if (i % 8 == 0) debugFile << std::endl << "    ";
-                debugFile << std::setw(4) << std::setfill('0') << word << " ";
+            // DEBUG (guarded): Log fast-path completion
+            if (verboseLogs) {
+                std::ofstream debugFile("/tmp/eeprom_debug.txt", std::ios::app);
+                debugFile << "[FAST-PATH] Block=" << eepromAddress << " Count=" << count << " Buffer=0x" << std::hex << eepromBuffer << std::dec << std::endl;
+                debugFile << "  Dst=0x" << std::hex << initialDst << " First 16 words:";
+                uint32_t dumpOffset = initialDst - 0x03000000;
+                for (int i = 0; i < 16 && i < (int)count && dumpOffset + i * 2 + 1 < wram_chip.size(); ++i) {
+                    uint16_t word = wram_chip[dumpOffset + i * 2] | (wram_chip[dumpOffset + i * 2 + 1] << 8);
+                    if (i % 8 == 0) debugFile << std::endl << "    ";
+                    debugFile << std::setw(4) << std::setfill('0') << word << " ";
+                }
+                debugFile << std::dec << std::endl;
+                debugFile.close();
             }
-            debugFile << std::dec << std::endl;
-            debugFile.close();
             
             if (verboseLogs) {
                 std::cout << "[EEPROM FAST-PATH] Complete - returned to Idle state" << std::endl;
@@ -1956,19 +1994,24 @@ namespace AIO::Emulator::GBA {
                         Write16(currentDst, val);
                         totalCycles += 2;
                     }
+
+                    // Advance source each unit (GBATEK: 0=inc, 1=dec, 2=fixed, 3=prohibited)
+                    if (srcCtrl == 0 || srcCtrl == 3) {
+                        currentSrc += step;
+                    } else if (srcCtrl == 1) {
+                        currentSrc -= step;
+                    }
+
+                    // Advance destination each unit unless FIFO/special timing fixes it
+                    if (timing != 3) {
+                        if (destCtrl == 0 || destCtrl == 3) {
+                            currentDst += step;
+                        } else if (destCtrl == 1) {
+                            currentDst -= step;
+                        }
+                        // Fixed (2) -> No change
+                    }
                 }
-                
-                // Update Source Address (after loop)
-                if (srcCtrl == 0) currentSrc += step;
-                else if (srcCtrl == 1) currentSrc -= step;
-                
-                // Update Dest Address (for sound DMA, dest is fixed - FIFO register)
-                if (timing != 3) {
-                    if (destCtrl == 0 || destCtrl == 3) currentDst += step;
-                    else if (destCtrl == 1) currentDst -= step;
-                    // Fixed (2) -> No change
-                }
-                // For sound DMA (timing 3), destination is always fixed to FIFO
             }
         }
 
@@ -2201,29 +2244,30 @@ namespace AIO::Emulator::GBA {
                 }
             }
         }
-        
-            if (eepromState == EEPROMState::ReadDummy) {
-                ret = EEPROMConsts::BUSY_LOW;
-                eepromBitCounter++;
-                if (eepromBitCounter >= EEPROMConsts::DUMMY_BITS) { // Standard 4 dummy bits
-                    eepromState = EEPROMState::ReadData;
-                    eepromBitCounter = 0;
-                }
-            } else if (eepromState == EEPROMState::ReadData) {
-                // Per GBATEK: "data (conventionally MSB first)"
-                int bitIndex = (EEPROMConsts::DATA_BITS - 1) - eepromBitCounter;
-                ret = (eepromBuffer >> bitIndex) & 1;
-                
-                eepromBitCounter++;
-                if (eepromBitCounter >= EEPROMConsts::DATA_BITS) {
-                    eepromState = EEPROMState::Idle;
-                    eepromBitCounter = 0;
-                }
-            } else {
-                // Active but not outputting data (e.g. receiving address) or Idle
-                // The GBA data bus is pulled up (High-Z) when not driven by the EEPROM
-                ret = EEPROMConsts::READY_HIGH;
-            }        return ret;
+        if (eepromState == EEPROMState::ReadDummy) {
+            ret = EEPROMConsts::BUSY_LOW;
+            eepromBitCounter++;
+            if (eepromBitCounter >= EEPROMConsts::DUMMY_BITS) { // Standard 4 dummy bits
+                eepromState = EEPROMState::ReadData;
+                eepromBitCounter = 0;
+            }
+        } else if (eepromState == EEPROMState::ReadData) {
+            // Per GBATEK: "data (conventionally MSB first)"
+            int bitIndex = (EEPROMConsts::DATA_BITS - 1) - eepromBitCounter;
+            ret = (eepromBuffer >> bitIndex) & 1;
+
+            eepromBitCounter++;
+            if (eepromBitCounter >= EEPROMConsts::DATA_BITS) {
+                eepromState = EEPROMState::Idle;
+                eepromBitCounter = 0;
+                eepromBufferValid = false;
+            }
+        } else {
+            // Active but not outputting data (e.g. receiving address) or Idle
+            // The GBA data bus is pulled up (High-Z) when not driven by the EEPROM
+            ret = EEPROMConsts::READY_HIGH;
+        }
+        return ret;
     }
 
     void GBAMemory::WriteEEPROM(uint16_t value) {
@@ -2354,9 +2398,12 @@ namespace AIO::Emulator::GBA {
                 
             case EEPROMState::WriteTermination:
                 // Expecting a '0' bit to terminate the write command
-                
-                if (bit == 0) {
-                    // Valid Stop Bit - Commit Write
+
+                // Some titles (notably SMA2) appear to violate the documented termination bit.
+                // Accept either 0 or 1 here so the write still commits, otherwise the game can
+                // get stuck repeatedly re-validating "corrupt" save data.
+                if (bit == 0 || bit == 1) {
+                    // Commit Write
                     uint32_t offset = eepromAddress * EEPROMConsts::BYTES_PER_BLOCK;
                     
                     // Check if game is writing back what it read
@@ -2384,19 +2431,53 @@ namespace AIO::Emulator::GBA {
                             eepromData[offset + i] = byteVal;
                         }
                     }
+
+                    // Targeted trace for SMA2 save validation/repair loops.
+                    // Helps confirm whether the game is attempting to rewrite key blocks and whether
+                    // writes are being committed at all.
+                    if (gameCode == "AMQE" || gameCode == "AMQP" || gameCode == "AMQJ" || gameCode == "AA2E") {
+                        static int sma2WriteCommitsLogged = 0;
+                        if (sma2WriteCommitsLogged < 80) {
+                            std::cerr << "[EEPROM COMMIT] game=" << gameCode
+                                      << " termBit=" << (int)bit
+                                      << " block=" << eepromAddress
+                                      << " data=0x" << std::hex << std::setw(16) << std::setfill('0') << eepromBuffer
+                                      << std::dec << std::endl;
+                            sma2WriteCommitsLogged++;
+                        }
+                    }
+
                     FlushSave();
                     // Stable timing that prevents crashes
                     eepromWriteDelay = 1000;
-                } else {
                 }
-                
-                eepromState = EEPROMState::Idle;
+
+                // If the termination bit is 1, treat it as an implicit start bit for a
+                // potential back-to-back transaction.
+                eepromState = (bit == 1) ? EEPROMState::ReadCommand : EEPROMState::Idle;
                 break;
                 
             case EEPROMState::ReadDummy:
-            case EEPROMState::ReadData:
-                // During read phases, writes are for DMA clocking - ignored
+            case EEPROMState::ReadData: {
+                // Protocol variant support: some titles emit an extra "dummy write" (or otherwise clock via writes)
+                // during the read phase. On real hardware, each access clocks the serial interface; ignoring
+                // these writes shifts the read stream and can cause save validation to fail.
+                if (eepromState == EEPROMState::ReadDummy) {
+                    eepromBitCounter++;
+                    if (eepromBitCounter >= EEPROMConsts::DUMMY_BITS) {
+                        eepromState = EEPROMState::ReadData;
+                        eepromBitCounter = 0;
+                    }
+                } else { // ReadData
+                    eepromBitCounter++;
+                    if (eepromBitCounter >= EEPROMConsts::DATA_BITS) {
+                        eepromState = EEPROMState::Idle;
+                        eepromBitCounter = 0;
+                        eepromBufferValid = false;
+                    }
+                }
                 break;
+            }
                 
             default:
                 eepromState = EEPROMState::Idle;
