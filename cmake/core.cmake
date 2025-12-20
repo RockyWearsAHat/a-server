@@ -42,6 +42,7 @@ set_target_properties(SwitchEmulator PROPERTIES
 add_executable(AIOServer 
     ${PROJECT_ROOT}/src/main.cpp
     ${PROJECT_ROOT}/src/common/Dotenv.cpp
+    ${PROJECT_ROOT}/src/common/Logging.cpp
     ${PROJECT_ROOT}/src/common/CssVars.cpp
     ${PROJECT_ROOT}/src/common/AssetPaths.cpp
     ${PROJECT_ROOT}/src/nas/NASServer.cpp
@@ -52,7 +53,6 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Emulation.cpp
     ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Navigation.cpp
     ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Pages.cpp
-    ${PROJECT_ROOT}/src/gui/InputConfigDialog.cpp
     ${PROJECT_ROOT}/src/gui/LogViewerDialog.cpp
     ${PROJECT_ROOT}/src/gui/StreamingHubWidget.cpp
     ${PROJECT_ROOT}/src/gui/StreamingWebViewPage.cpp
@@ -68,14 +68,9 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/EmulatorSelectAdapter.cpp
     ${PROJECT_ROOT}/src/gui/GameSelectAdapter.cpp
     ${PROJECT_ROOT}/src/gui/SettingsMenuAdapter.cpp
-    ${PROJECT_ROOT}/src/gui/ActionBindingsDialog.cpp
-    ${PROJECT_ROOT}/src/gui/ControllerDiagramWidget.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
-    ${PROJECT_ROOT}/src/input/manager/InputManager_Mappings.cpp
-    ${PROJECT_ROOT}/src/input/manager/InputManager_Config.cpp
     ${PROJECT_ROOT}/src/input/manager/InputManager_SDL.cpp
-    ${PROJECT_ROOT}/src/input/AppActions.cpp
-    ${PROJECT_ROOT}/src/input/ActionBindings.cpp
+    ${PROJECT_ROOT}/src/input/InputBindings_Default.cpp
     ${PROJECT_ROOT}/src/streaming/StreamingManager.cpp
     ${PROJECT_ROOT}/src/streaming/YouTubeService.cpp
     ${PROJECT_ROOT}/src/streaming/NetflixService.cpp
@@ -84,7 +79,6 @@ add_executable(AIOServer
     # Headers with Q_OBJECT for MOC processing
     ${PROJECT_ROOT}/include/gui/MainWindow.h
     ${PROJECT_ROOT}/include/nas/NASServer.h
-    ${PROJECT_ROOT}/include/gui/InputConfigDialog.h
     ${PROJECT_ROOT}/include/gui/LogViewerDialog.h
     ${PROJECT_ROOT}/include/gui/StreamingHubWidget.h
     ${PROJECT_ROOT}/include/gui/StreamingWebViewPage.h
@@ -94,11 +88,10 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/YouTubePlayerPage.h
     ${PROJECT_ROOT}/include/gui/ThumbnailCache.h
     ${PROJECT_ROOT}/include/common/Dotenv.h
+    ${PROJECT_ROOT}/include/common/Logging.h
     ${PROJECT_ROOT}/include/common/CssVars.h
     ${PROJECT_ROOT}/include/common/AssetPaths.h
     ${PROJECT_ROOT}/include/input/InputManager.h
-    ${PROJECT_ROOT}/include/gui/ActionBindingsDialog.h
-    ${PROJECT_ROOT}/include/gui/ControllerDiagramWidget.h
     ${PROJECT_ROOT}/include/streaming/StreamingManager.h
     ${PROJECT_ROOT}/include/streaming/StreamingService.h
     ${PROJECT_ROOT}/include/streaming/YouTubeService.h

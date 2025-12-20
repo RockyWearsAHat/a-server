@@ -1,6 +1,7 @@
 #pragma once
 
-namespace AIO::Input {
+#include <cstdint>
+namespace AIO { namespace Input {
 
 // Shared input types that are safe to include everywhere without pulling in
 // the full InputManager definition.
@@ -44,4 +45,4 @@ struct InputSnapshot {
     uint32_t system = 0;
 };
 
-} // namespace AIO::Input
+} } // namespace AIO::Input

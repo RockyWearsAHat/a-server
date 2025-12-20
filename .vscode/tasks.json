@@ -4,17 +4,19 @@
     {
       "label": "Build",
       "type": "shell",
-      "command": "make",
-      "options": { "cwd": "${workspaceFolder}" },
+      "command": "zsh",
+      "args": ["-lc", "cd \"${workspaceFolder}\" && make build"],
       "group": { "kind": "build", "isDefault": true },
       "problemMatcher": ["$gcc"]
     },
     {
       "label": "CTest",
       "type": "shell",
-      "command": "ctest",
-      "args": ["--output-on-failure"],
-      "options": { "cwd": "${workspaceFolder}/build/generated/cmake" },
+      "command": "zsh",
+      "args": [
+        "-lc",
+        "cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure"
+      ],
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": ["$gcc"]
     },
@@ -29,32 +31,30 @@
     {
       "label": "Clean Workspace",
       "type": "shell",
-      "command": "${workspaceFolder}/scripts/clean.sh",
-      "options": { "cwd": "${workspaceFolder}" },
+      "command": "zsh",
+      "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/clean.sh"],
       "group": { "kind": "build" },
       "problemMatcher": []
     },
     {
       "label": "CPUTests",
-      "type": "shell",
+      "type": "process",
       "command": "${workspaceFolder}/build/bin/CPUTests",
-      "options": { "cwd": "${workspaceFolder}" },
       "group": { "kind": "test" },
       "problemMatcher": ["$gcc"]
     },
     {
       "label": "EEPROMTests",
-      "type": "shell",
+      "type": "process",
       "command": "${workspaceFolder}/build/bin/EEPROMTests",
-      "options": { "cwd": "${workspaceFolder}" },
       "group": { "kind": "test" },
       "problemMatcher": ["$gcc"]
     },
     {
       "label": "Test Suite",
       "type": "shell",
-      "command": "${workspaceFolder}/scripts/test_suite.py",
-      "options": { "cwd": "${workspaceFolder}" },
+      "command": "zsh",
+      "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/test_suite.py"],
       "group": { "kind": "test" },
       "problemMatcher": []
     }

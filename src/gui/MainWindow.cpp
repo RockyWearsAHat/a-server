@@ -15,6 +15,8 @@
 
 #include <iostream>
 
+#include "emulator/gba/ARM7TDMI.h"
+
 #include "common/AssetPaths.h"
 #include "gui/EmulatorSelectAdapter.h"
 #include "gui/GameSelectAdapter.h"
@@ -52,6 +54,9 @@ namespace GUI {
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), settings("AIOServer", "GBAEmulator")
 {
+    // Register crash callback for GUI mode.
+    AIO::Emulator::GBA::CrashPopupCallback = &ShowCrashPopup;
+
     // Try to keep controller "Home/Guide" button handling inside the app.
     // Note: some OS-level shortcuts on macOS may still be handled by the OS.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");

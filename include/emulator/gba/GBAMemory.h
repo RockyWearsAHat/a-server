@@ -94,8 +94,12 @@ namespace AIO::Emulator::GBA {
             static constexpr uint8_t DATA_BITS = 64;            // 64-bit data payload per transaction
             static constexpr uint8_t ADDR_BITS_4K = 6;          // 4Kbit EEPROM uses 6-bit address
             static constexpr uint8_t ADDR_BITS_64K = 14;        // 64Kbit EEPROM uses 14-bit address
-            static constexpr uint16_t READY_HIGH = 1;           // Line pulled high when idle/ready
-            static constexpr uint16_t BUSY_LOW = 0;             // Line driven low when busy/outputting
+            // EEPROM serial reads drive only D0; the rest of the data lines are pulled-up.
+            // Common practice (and what many titles implicitly rely on) is:
+            // - bit=0 -> 0xFFFE
+            // - bit=1 -> 0xFFFF
+            static constexpr uint16_t READY_HIGH = 0xFFFF;      // D0=1 (pulled-up bus)
+            static constexpr uint16_t BUSY_LOW = 0xFFFE;        // D0=0 (pulled-up bus)
             static constexpr uint16_t BIT_MASK = 0x0001;        // Single-bit mask for input writes
             static constexpr uint32_t BLOCKS_4K = 64;           // Number of 8-byte blocks in 4Kbit
             static constexpr uint32_t BLOCKS_64K = 1024;        // Number of 8-byte blocks in 64Kbit
@@ -177,6 +181,11 @@ namespace AIO::Emulator::GBA {
         APU* apu = nullptr;   // APU pointer for sound callbacks
         PPU* ppu = nullptr;   // PPU pointer for DMA updates
         ARM7TDMI* cpu = nullptr; // CPU pointer for debug
+
+        // Track last Game Pak access to approximate sequential waitstate timing (WAITCNT).
+        // This is intentionally lightweight (no full bus prefetch emulation).
+        mutable uint32_t lastGamePakAccessAddr = 0xFFFFFFFFu;
+        mutable uint8_t lastGamePakAccessRegionGroup = 0xFFu;
 
         bool verboseLogs = false; // Guard for heavy std::cout traces
     };

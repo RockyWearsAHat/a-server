@@ -22,6 +22,10 @@ protected:
         memory.Write16(0x0D000000, bit & 1);
     }
 
+    void WriteBit8(uint8_t bit) {
+        memory.Write8(0x0D000000, bit & 1);
+    }
+
     // Helper to read a bit from EEPROM
     uint8_t ReadBit() {
         // Reading from 0x0Dxxxxxx
@@ -85,6 +89,38 @@ TEST_F(EEPROMTest, WriteAndRead_64Kbit) {
     }
     
     // Verify data read matches data written via serial protocol
+    uint64_t readValue = ReadData64();
+    EXPECT_EQ(readValue, writeValue);
+}
+
+TEST_F(EEPROMTest, WriteAndRead_64Kbit_ByteWrites) {
+    uint32_t address = 0x10;
+    uint64_t writeValue = 0xDEADBEEFCAFEBABE;
+
+    // WRITE (byte writes): Send data via EEPROM protocol
+    WriteBit8(1); // Start
+    WriteBit8(0); // Write command
+    for (int i = 13; i >= 0; --i) {
+        WriteBit8((address >> i) & 1);
+    }
+    for (int i = 63; i >= 0; --i) {
+        WriteBit8((writeValue >> i) & 1);
+    }
+    WriteBit8(0); // Termination
+
+    // Wait for write to complete
+    memory.UpdateTimers(170000);
+
+    // READ (16-bit reads): Retrieve data via EEPROM protocol
+    WriteBit(1); // Start
+    WriteBit(1); // Read command
+    SendAddress(address, 14);
+    WriteBit(0); // Stop Bit
+
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(ReadBit(), 0) << "Dummy bit " << i << " should be 0";
+    }
+
     uint64_t readValue = ReadData64();
     EXPECT_EQ(readValue, writeValue);
 }
@@ -169,8 +205,9 @@ TEST_F(EEPROMTest, DMA_Read_Simulation) {
     uint64_t reconstructed = 0;
     for (int i = 0; i < 64; ++i) {
         uint16_t bit = memory.Read16(0x02000000 + i * 2);
-        EXPECT_TRUE(bit == 0 || bit == 1) << "DMA should transfer individual bits";
-        if (bit) {
+        // EEPROM reads return a single bit on D0; we treat the halfword as a literal 0/1.
+        const uint16_t d0 = bit & 1;
+        if (d0) {
             reconstructed |= (1ULL << (63 - i));
         }
     }
@@ -312,17 +349,19 @@ TEST_F(EEPROMTest, DMA_Read_Count68_IncludesDummyBits) {
     memory.Write16(0x40000DC, 68);         // Count
     memory.Write16(0x40000DE, 0x8100);     // Enable | Immediate | 16bit
 
-    // First 4 words are dummy zeros.
+    // First 4 words are dummy bits (busy/low).
     for (int i = 0; i < 4; ++i) {
-        EXPECT_EQ(memory.Read16(dstBase + i * 2), 0);
+        const uint16_t w = memory.Read16(dstBase + i * 2);
+        EXPECT_EQ(w, 0xFFFE) << "Dummy word " << i << " should be BUSY_LOW (0xFFFE)";
     }
 
     // Remaining 64 words are the data bits.
     uint64_t reconstructed = 0;
     for (int i = 0; i < 64; ++i) {
-        uint16_t bit = memory.Read16(dstBase + (4 + i) * 2);
-        EXPECT_TRUE(bit == 0 || bit == 1);
-        reconstructed = (reconstructed << 1) | (bit ? 1ULL : 0ULL);
+        const uint16_t w = memory.Read16(dstBase + (4 + i) * 2);
+        EXPECT_TRUE(w == 0xFFFE || w == 0xFFFF)
+            << "Data word " << i << " should be 0xFFFE/0xFFFF, got 0x" << std::hex << w;
+        reconstructed = (reconstructed << 1) | (uint64_t)(w & 1);
     }
     EXPECT_EQ(reconstructed, writeValue);
 }
@@ -347,14 +386,16 @@ TEST_F(EEPROMTest, DMA_Read_PartialDummyConsumedThenDMA) {
     memory.Write16(0x40000DC, 66);
     memory.Write16(0x40000DE, 0x8100);
 
-    EXPECT_EQ(memory.Read16(dstBase + 0), 0);
-    EXPECT_EQ(memory.Read16(dstBase + 2), 0);
+    // With pulled-up semantics, remaining dummy bits are 0xFFFE.
+    EXPECT_EQ(memory.Read16(dstBase + 0), 0xFFFE);
+    EXPECT_EQ(memory.Read16(dstBase + 2), 0xFFFE);
 
     uint64_t reconstructed = 0;
     for (int i = 0; i < 64; ++i) {
-        uint16_t bit = memory.Read16(dstBase + (2 + i) * 2);
-        EXPECT_TRUE(bit == 0 || bit == 1);
-        reconstructed = (reconstructed << 1) | (bit ? 1ULL : 0ULL);
+        const uint16_t w = memory.Read16(dstBase + (2 + i) * 2);
+        EXPECT_TRUE(w == 0xFFFE || w == 0xFFFF)
+            << "Data word " << i << " should be 0xFFFE/0xFFFF, got 0x" << std::hex << w;
+        reconstructed = (reconstructed << 1) | (uint64_t)(w & 1);
     }
     EXPECT_EQ(reconstructed, writeValue);
 }

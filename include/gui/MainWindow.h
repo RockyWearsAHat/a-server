@@ -93,7 +93,6 @@ class MainWindow : public QMainWindow {
     private slots:
         /** @brief UI refresh tick for the emulator framebuffer/status. */
         void UpdateDisplay();
-        void GameLoop();  // Deprecated, kept for compatibility
         void toggleDevPanel(bool enabled);
         
         // Other slots

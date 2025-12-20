@@ -1,13 +1,18 @@
 # Convenience Makefile wrapper for CMake build
 # All actual build logic is in cmake/
 
+
 .PHONY: all clean configure build test help
 
-all: clean build
+all:
+	@$(MAKE) clean
+	@$(MAKE) build
 
 configure:
 	@mkdir -p ../build/generated/cmake
-	@cd ../build/generated/cmake && cmake ../../../cmake
+	@cd ../build/generated/cmake && cmake ../../../cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+	@# Help clangd: place compile_commands.json where VS Code clangd expects it
+	@cd ../build/generated/cmake && test -f compile_commands.json && cp -f compile_commands.json ../compile_commands.json || true
 
 build: configure
 	@cd ../build/generated/cmake && $(MAKE) -j8

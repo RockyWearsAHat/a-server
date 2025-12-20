@@ -20,6 +20,12 @@ namespace AIO::Emulator::GBA {
 
         void Reset();
         void Step();
+
+        // HLE timing: some BIOS SWIs (and other high-level emulation helpers)
+        // advance peripheral time without executing individual CPU instructions.
+        // We accumulate those cycles here so the outer emulation loop can account
+        // for them in its cycle budget.
+        int ConsumeHLECycles();
         // Poll interrupts explicitly (for synchronizing after peripherals run)
         void PollInterrupts();
         void StepBack();
@@ -38,7 +44,10 @@ namespace AIO::Emulator::GBA {
         uint32_t GetRegister(int index) const { return registers[index]; }
         void SetRegister(int index, uint32_t value) { registers[index] = value; }
         uint32_t GetCPSR() const { return cpsr; }
-        void SetThumbMode(bool thumb) { thumbMode = thumb; }
+        void SetThumbMode(bool thumb) {
+            thumbMode = thumb;
+            SetCPSRFlag(cpsr, CPSR::FLAG_T, thumb);
+        }
         bool IsHalted() const { return halted; }
         bool IsThumbModeFlag() const { return thumbMode; }
         struct CpuSnapshot {
@@ -96,6 +105,10 @@ namespace AIO::Emulator::GBA {
         void ExecuteBlockDataTransfer(uint32_t instruction);
         void ExecuteBIOSFunction(uint32_t biosPC);
         void ExecuteSWI(uint32_t comment);
+
+        void AdvanceHLECycles(int cycles);
+
+        int hleCyclesThisStep = 0;
         void ExecuteMRS(uint32_t instruction);
         void ExecuteMSR(uint32_t instruction);
 

@@ -128,11 +128,6 @@ void MainWindow::SetEmulatorType(int type) {
     }
 }
 
-void MainWindow::GameLoop() {
-    // DEPRECATED: This function is now replaced by threading model
-    // Kept for compatibility, but UpdateDisplay() handles UI now
-}
-
 void MainWindow::StartEmulatorThread() {
     if (emulatorRunning.exchange(true)) {
         return; // Already running
@@ -151,7 +146,8 @@ void MainWindow::EmulatorThreadMain() {
     // Emulator loop runs on background thread
     // Executes CPU cycles independent of Qt event processing
     auto frameStartTime = std::chrono::high_resolution_clock::now();
-    const int FRAME_TIME_MS = 16;  // ~60 FPS target
+    static constexpr int kFrameTimeMs = 16;   // ~60 FPS target
+    static constexpr int kTargetCyclesPerFrame = 280000; // ~16.7ms @ 16.78 MHz
 
     while (emulatorRunning) {
         if (emulatorPaused) {
@@ -162,11 +158,9 @@ void MainWindow::EmulatorThreadMain() {
         frameStartTime = std::chrono::high_resolution_clock::now();
 
         if (currentEmulator == EmulatorType::GBA) {
-            // Run one frame's worth of cycles (280k @ 16.78 MHz = ~16.7ms)
             int totalCycles = 0;
-            const int TARGET_CYCLES = 280000;
 
-            while (totalCycles < TARGET_CYCLES && emulatorRunning) {
+            while (totalCycles < kTargetCyclesPerFrame && emulatorRunning) {
                 totalCycles += gba.Step();
             }
 
@@ -184,7 +178,7 @@ void MainWindow::EmulatorThreadMain() {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::high_resolution_clock::now() - frameStartTime
         ).count();
-        int sleepMs = FRAME_TIME_MS - (int)elapsed;
+        int sleepMs = kFrameTimeMs - (int)elapsed;
         if (sleepMs > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
         }
@@ -196,10 +190,19 @@ void MainWindow::UpdateDisplay() {
     // Runs on main Qt thread at 60 Hz
 
     // Update Input
-    uint16_t inputState = AIO::Input::InputManager::instance().update();
+    // Polling is owned by the navigation timer; UI/emulator consume the latest snapshot.
+    auto& input = AIO::Input::InputManager::instance();
+    auto snapshot = input.snapshot();
+    if (snapshot.logical == 0xFFFFFFFFu && snapshot.keyinput == 0x03FF && snapshot.system == 0) {
+        snapshot = input.updateSnapshot();
+    }
+
+    const uint16_t inputState = snapshot.keyinput;
+
+    QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
 
     // Route input based on the active UI page.
-    QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+    // current already computed above.
 
     // Two-layer input model:
     // - Our Application (menus/booter): driven by navTimer + NavigationController/UIActionMapper.
@@ -228,7 +231,7 @@ void MainWindow::UpdateDisplay() {
 
         auto logicalPressed = [&](AIO::Input::LogicalButton b) {
             const uint32_t mask = 1u << static_cast<uint32_t>(b);
-            return (AIO::Input::InputManager::instance().logicalButtonsDown() & mask) == 0;
+            return (snapshot.logical & mask) == 0;
         };
 
         // Persistent UI controller state for repeat handling.

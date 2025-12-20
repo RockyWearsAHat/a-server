@@ -133,6 +133,50 @@ TEST_F(CPUTest, Branch_BL) {
     EXPECT_EQ(cpu.GetRegister(14), startPC + 4); // LR should be instruction after BL
 }
 
+TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_ARM) {
+    // Arrange: fixed fill value 0x01010101 written from src, count=1 (32 bytes = 8 words)
+    const uint32_t src = 0x02000100;
+    const uint32_t dst = 0x02000200;
+    memory.Write32(src, 0x01010101);
+    for (int i = 0; i < 8; ++i) {
+        memory.Write32(dst + (uint32_t)i * 4, 0x00000000);
+    }
+
+    cpu.SetRegister(0, src);
+    cpu.SetRegister(1, dst);
+    cpu.SetRegister(2, (8u /*word count (must be multiple of 8)*/ & 0x1FFFFF) | (1u << 24)); // fixed source
+
+    // ARM SWI 0x0C: 0xEF00000C
+    RunInstr(0xEF00000C);
+
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(memory.Read32(dst + (uint32_t)i * 4), 0x01010101u);
+    }
+}
+
+TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_Thumb) {
+    // Same as above, but invoke via Thumb SWI 0x0C (0xDF0C)
+    cpu.SetThumbMode(true);
+    cpu.SetRegister(15, 0x08000000);
+
+    const uint32_t src = 0x02000300;
+    const uint32_t dst = 0x02000400;
+    memory.Write32(src, 0x01010101);
+    for (int i = 0; i < 8; ++i) {
+        memory.Write32(dst + (uint32_t)i * 4, 0x00000000);
+    }
+
+    cpu.SetRegister(0, src);
+    cpu.SetRegister(1, dst);
+    cpu.SetRegister(2, (8u /*word count*/ & 0x1FFFFF) | (1u << 24));
+
+    RunThumbInstr(0xDF0C);
+
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(memory.Read32(dst + (uint32_t)i * 4), 0x01010101u);
+    }
+}
+
 TEST_F(CPUTest, Memory_STM_LDM) {
     // MOV R0, #0x02000000 (Base)
     RunInstr(0xE3A00402);

@@ -1,6 +1,5 @@
 #include "input/InputManager.h"
 
-#include "input/ActionBindings.h"
 #include "input/manager/InputManager_Internal.h"
 
 #include <QDebug>
@@ -24,35 +23,10 @@ InputManager::InputManager() {
     // Enable with: export AIO_INPUT_DEBUG=1
     detail::gAioInputDebug = (qEnvironmentVariableIntValue("AIO_INPUT_DEBUG") != 0);
 
-    loadControllerMappingRegistry();
-
-    // Default logical -> GBA bindings (can be changed per emulator later).
-    setGBALogicalBinding(LogicalButton::Confirm, Button_A);
-    setGBALogicalBinding(LogicalButton::Back, Button_B);
-    setGBALogicalBinding(LogicalButton::Select, Button_Select);
-    setGBALogicalBinding(LogicalButton::Start, Button_Start);
-    setGBALogicalBinding(LogicalButton::L, Button_L);
-    setGBALogicalBinding(LogicalButton::R, Button_R);
-    setGBALogicalBinding(LogicalButton::Up, Button_Up);
-    setGBALogicalBinding(LogicalButton::Down, Button_Down);
-    setGBALogicalBinding(LogicalButton::Left, Button_Left);
-    setGBALogicalBinding(LogicalButton::Right, Button_Right);
-
-    // App-wide UI keyboard defaults (10-foot UI expectations).
-    setUIKeyBinding(LogicalButton::Confirm, Qt::Key_Return);
-    setUIKeyBinding(LogicalButton::Back, Qt::Key_Escape);
-    setUIKeyBinding(LogicalButton::Up, Qt::Key_Up);
-    setUIKeyBinding(LogicalButton::Down, Qt::Key_Down);
-    setUIKeyBinding(LogicalButton::Left, Qt::Key_Left);
-    setUIKeyBinding(LogicalButton::Right, Qt::Key_Right);
-    setUIKeyBinding(LogicalButton::Home, Qt::Key_Home);
-
-    loadConfig();
+    bindings_ = DefaultInputBindings();
 }
 
 InputManager::~InputManager() {
-    saveConfig();
-
     for (auto c : controllers) {
         SDL_GameControllerClose(c);
     }
@@ -64,80 +38,80 @@ InputManager::~InputManager() {
 bool InputManager::processKeyEvent(QKeyEvent* event) {
     const int key = event->key();
 
-    // First: app-wide UI logical bindings.
-    if (uiKeyToLogical_.contains(key)) {
-        const LogicalButton logical = uiKeyToLogical_.value(key);
-        const uint32_t mask = 1u << static_cast<uint32_t>(logical);
-
-        if (event->type() == QEvent::KeyPress) {
-            logicalButtonsDown_ &= ~mask; // pressed
-        } else if (event->type() == QEvent::KeyRelease) {
-            if (!event->isAutoRepeat()) {
-                logicalButtonsDown_ |= mask; // released
-            }
-        }
-        return true;
-    }
-
-    // Emulator-facing keyboard mapping (GBA buttons -> KEYINPUT)
-    if (!keyToButtonMap.contains(key)) {
-        return false;
-    }
-
-    const GBAButton btn = keyToButtonMap[key];
-    const int bit = static_cast<int>(btn);
+    if (!bindings_.keyboard.contains(key)) return false;
+    const LogicalButton logical = bindings_.keyboard.value(key);
+    const uint32_t mask = 1u << static_cast<uint32_t>(logical);
 
     if (event->type() == QEvent::KeyPress) {
-        // 0 = Pressed
-        keyboardState &= ~(1 << bit);
+        keyboardLogicalButtonsDown_ &= ~mask; // pressed
     } else if (event->type() == QEvent::KeyRelease) {
-        // 1 = Released
         if (!event->isAutoRepeat()) {
-            keyboardState |= (1 << bit);
+            keyboardLogicalButtonsDown_ |= mask; // released
         }
     }
 
     return true;
 }
 
-void InputManager::setUIKeyBinding(LogicalButton logical, int qtKey) {
-    if (uiLogicalToKey_.contains(logical)) {
-        const int oldKey = uiLogicalToKey_.value(logical);
-        uiKeyToLogical_.remove(oldKey);
-    }
-    if (uiKeyToLogical_.contains(qtKey)) {
-        const LogicalButton oldLogical = uiKeyToLogical_.value(qtKey);
-        uiLogicalToKey_.remove(oldLogical);
-    }
-    uiKeyToLogical_[qtKey] = logical;
-    uiLogicalToKey_[logical] = qtKey;
-}
-
-int InputManager::uiKeyBinding(LogicalButton logical) const {
-    return uiLogicalToKey_.value(logical, Qt::Key_unknown);
-}
-
 InputSnapshot InputManager::updateSnapshot() {
-    const uint16_t keyinput = update();
+    pollSdl();
     InputSnapshot snapshot;
+
+    // Provide a legacy GBA KEYINPUT view (active-low), derived from logical.
+    // Bit layout: 0=A,1=B,2=Select,3=Start,4=Right,5=Left,6=Up,7=Down,8=R,9=L
+    uint16_t keyinput = 0x03FF;
+    auto apply = [&](LogicalButton logical, int bit) {
+        const uint32_t mask = 1u << static_cast<uint32_t>(logical);
+        if ((logicalButtonsDown_ & mask) == 0) {
+            keyinput = static_cast<uint16_t>(keyinput & ~(1u << bit));
+        }
+    };
+
+    // Default mapping: UI-style Confirm/Back become GBA A/B.
+    apply(LogicalButton::Confirm, 0);
+    apply(LogicalButton::Back, 1);
+    apply(LogicalButton::Select, 2);
+    apply(LogicalButton::Start, 3);
+    apply(LogicalButton::Right, 4);
+    apply(LogicalButton::Left, 5);
+    apply(LogicalButton::Up, 6);
+    apply(LogicalButton::Down, 7);
+    apply(LogicalButton::R, 8);
+    apply(LogicalButton::L, 9);
+
     snapshot.keyinput = keyinput;
     snapshot.logical = logicalButtonsDown_;
     snapshot.system = systemButtonsDown_;
+    lastSnapshot_ = snapshot;
     return snapshot;
 }
 
-bool InputManager::pressed(AppId app, ActionId action) const {
-    const LogicalButton logical = ActionBindings::resolve(app, action);
+bool InputManager::pressed(LogicalButton logical) const {
     const uint32_t mask = 1u << static_cast<uint32_t>(logical);
     return (logicalButtonsDown_ & mask) == 0;
 }
 
-bool InputManager::edgePressed(AppId app, ActionId action) const {
-    const LogicalButton logical = ActionBindings::resolve(app, action);
+bool InputManager::edgePressed(LogicalButton logical) const {
     const uint32_t mask = 1u << static_cast<uint32_t>(logical);
     const bool nowDown = (logicalButtonsDown_ & mask) == 0;
     const bool prevDown = (lastLogicalButtonsDown_ & mask) == 0;
     return nowDown && !prevDown;
+}
+
+int InputManager::canonicalQtKey(LogicalButton logical) const {
+    return bindings_.canonicalQtKeys.value(logical, Qt::Key_unknown);
+}
+
+void InputManager::onPressed(LogicalButton logical, Handler handler) {
+    pressHandlers_[logical] = std::move(handler);
+}
+
+void InputManager::dispatchPressedEdges() {
+    for (auto it = pressHandlers_.begin(); it != pressHandlers_.end(); ++it) {
+        const LogicalButton logical = it.key();
+        if (!edgePressed(logical)) continue;
+        if (it.value()) it.value()();
+    }
 }
 
 } // namespace AIO::Input

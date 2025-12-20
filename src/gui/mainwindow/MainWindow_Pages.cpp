@@ -14,7 +14,6 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 
-#include "gui/ActionBindingsDialog.h"
 #include "gui/EmulatorSelectAdapter.h"
 #include "gui/GameSelectAdapter.h"
 #include "gui/MainMenuAdapter.h"
@@ -186,39 +185,6 @@ void MainWindow::setupSettingsPage() {
 
     layout->addWidget(romGroup);
 
-    // Input bindings
-    QGroupBox* inputGroup = new QGroupBox("Controls", settingsPage);
-    QVBoxLayout* inputLayout = new QVBoxLayout(inputGroup);
-
-    QPushButton* navControlsBtn = new QPushButton("SYSTEM NAVIGATION CONTROLS...", inputGroup);
-    navControlsBtn->setCursor(Qt::PointingHandCursor);
-    navControlsBtn->setFocusPolicy(Qt::StrongFocus);
-    connect(navControlsBtn, &QPushButton::clicked, this, [this]() {
-        AIO::GUI::ActionBindingsDialog dlg(AIO::Input::AppId::System, this);
-        dlg.exec();
-    });
-    inputLayout->addWidget(navControlsBtn);
-
-    QPushButton* gbaControlsBtn = new QPushButton("GBA CONTROLS...", inputGroup);
-    gbaControlsBtn->setCursor(Qt::PointingHandCursor);
-    gbaControlsBtn->setFocusPolicy(Qt::StrongFocus);
-    connect(gbaControlsBtn, &QPushButton::clicked, this, [this]() {
-        AIO::GUI::ActionBindingsDialog dlg(AIO::Input::AppId::GBA, this);
-        dlg.exec();
-    });
-    inputLayout->addWidget(gbaControlsBtn);
-
-    QPushButton* ytControlsBtn = new QPushButton("YOUTUBE CONTROLS...", inputGroup);
-    ytControlsBtn->setCursor(Qt::PointingHandCursor);
-    ytControlsBtn->setFocusPolicy(Qt::StrongFocus);
-    connect(ytControlsBtn, &QPushButton::clicked, this, [this]() {
-        AIO::GUI::ActionBindingsDialog dlg(AIO::Input::AppId::YouTube, this);
-        dlg.exec();
-    });
-    inputLayout->addWidget(ytControlsBtn);
-
-    layout->addWidget(inputGroup);
-
     layout->addStretch();
 
     QPushButton *backBtn = new QPushButton("BACK TO MENU", settingsPage);
@@ -231,7 +197,7 @@ void MainWindow::setupSettingsPage() {
     // Create adapter for settings menu
     settingsMenuAdapter = std::make_unique<SettingsMenuAdapter>(
         settingsPage,
-        std::vector<QPushButton*>{browseBtn, navControlsBtn, gbaControlsBtn, ytControlsBtn, backBtn},
+        std::vector<QPushButton*>{browseBtn, backBtn},
         this
     );
 }

@@ -346,6 +346,10 @@ namespace AIO::Emulator::GBA {
         // Step CPU by one instruction
         uint32_t pcBefore = cpu->GetRegister(15);
         cpu->Step();
+
+        // Some HLE paths (notably BIOS SWIs) may advance peripheral time in bulk.
+        // Account those cycles in the frame budget so we don't overrun CPU work.
+        const int hleCycles = cpu->ConsumeHLECycles();
         
         // Calculate actual instruction cycles with memory wait states:
         // 1. Base instruction execution (Thumb=1, ARM=1 for most operations)
@@ -371,10 +375,13 @@ namespace AIO::Emulator::GBA {
         // DMA cycles were already applied to APU/PPU/Timers inside PerformDMA
         // When CPU is halted, simulate fast-forward through time until an interrupt might fire
         // A scanline takes ~1232 cycles, so advance by that much when halted
-        int totalCycles = cpuCycles + dmaCycles;
+        int totalCycles = cpuCycles + dmaCycles + hleCycles;
+        int cyclesToAdvance = cpuCycles;
         if (cpu->IsHalted()) {
-            // Fast-forward halted cycles
+            // Fast-forward halted cycles so PPU/timers can reach VBlank/IRQs.
+            // A scanline is ~1232 cycles, which is a reasonable coarse step.
             totalCycles = 1232;
+            cyclesToAdvance = totalCycles;
         }
 
         uint32_t currPc = cpu->GetRegister(15);
@@ -394,9 +401,9 @@ namespace AIO::Emulator::GBA {
             stallCrashTriggered = false;
         }
 
-        ppu->Update(cpuCycles);
-        memory->UpdateTimers(cpuCycles);
-        apu->Update(cpuCycles);
+        ppu->Update(cyclesToAdvance);
+        memory->UpdateTimers(cyclesToAdvance);
+        apu->Update(cyclesToAdvance);
 
         // Service interrupts immediately after peripherals advance to minimize
         // latency in tight polling loops (e.g., SMA2 save validation).

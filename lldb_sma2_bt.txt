@@ -1,0 +1,153 @@
+(lldb) target create "./build/bin/AIOServer"
+Current executable set to '/Users/alexwaldmann/Desktop/AIO Server/build/bin/AIOServer' (arm64).
+(lldb) settings set stop-disassembly-count 0
+(lldb) target stop-hook add -o 'thread backtrace all' -o 'register read' -o 'quit'
+Stop hook #1 added.
+(lldb) run --headless --headless-max-ms 6000 -r SMA2.gba --log-file debug_sma2_crash.log
+2025-12-19 15:08:40.095239-0800 AIOServer[35334:107492954] [plugin] AddInstanceForFactory: No factory registered for id <CFUUID 0x15a30aea0> F8BB1C28-BAE8-11D6-9C31-00039315CD46
+2025-12-19 15:08:40.403917-0800 AIOServer[35334:107493028] [AMCP]  82439          HALC_ProxyIOContext.cpp:1622  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload
+2025-12-19 15:08:40.414539-0800 AIOServer[35334:107493028] [AMCP]  82439          HALC_ProxyIOContext.cpp:1630  HALC_ProxyIOContext::IOWorkLoop: context 220470 received an out of order message (got 14 want: 1)
+* thread #1, queue = 'com.apple.main-thread'
+  * frame #0: 0x0000000188bf8c34 libsystem_kernel.dylib`mach_msg2_trap + 8
+    frame #1: 0x0000000188c0b3a0 libsystem_kernel.dylib`mach_msg2_internal + 76
+    frame #2: 0x0000000188c01764 libsystem_kernel.dylib`mach_msg_overwrite + 484
+    frame #3: 0x0000000188bf8fa8 libsystem_kernel.dylib`mach_msg + 24
+    frame #4: 0x0000000188d25e7c CoreFoundation`__CFRunLoopServiceMachPort + 160
+    frame #5: 0x0000000188d24798 CoreFoundation`__CFRunLoopRun + 1208
+    frame #6: 0x0000000188d23c58 CoreFoundation`CFRunLoopRunSpecific + 572
+    frame #7: 0x00000001947b827c HIToolbox`RunCurrentEventLoopInMode + 324
+    frame #8: 0x00000001947bb4e8 HIToolbox`ReceiveNextEventCommon + 676
+    frame #9: 0x0000000194946484 HIToolbox`_BlockUntilNextEventMatchingListInModeWithFilter + 76
+    frame #10: 0x000000018cc4bab4 AppKit`_DPSNextEvent + 684
+    frame #11: 0x000000018d5ea5b0 AppKit`-[NSApplication(NSEventRouting) _nextEventMatchingEventMask:untilDate:inMode:dequeue:] + 688
+    frame #12: 0x000000018cc3ec64 AppKit`-[NSApplication run] + 480
+    frame #13: 0x00000001043e93a0 libqcocoa.dylib`QCocoaEventDispatcher::processEvents(QFlags<QEventLoop::ProcessEventsFlag>) + 2152
+    frame #14: 0x00000001034eb97c QtCore`QEventLoop::exec(QFlags<QEventLoop::ProcessEventsFlag>) + 588
+    frame #15: 0x00000001034e2aa0 QtCore`QCoreApplication::exec() + 228
+    frame #16: 0x000000010000fbb0 AIOServer`main + 9812
+    frame #17: 0x000000018889ab98 dyld`start + 6076
+  thread #3
+    frame #0: 0x0000000188bfa8b0 libsystem_kernel.dylib`__workq_kernreturn + 8
+  thread #4
+    frame #0: 0x0000000188bfa8b0 libsystem_kernel.dylib`__workq_kernreturn + 8
+  thread #5, name = 'com.apple.CFSocket.private'
+    frame #0: 0x0000000188c03c2c libsystem_kernel.dylib`__select + 8
+    frame #1: 0x0000000188d4bcf4 CoreFoundation`__CFSocketManager + 704
+    frame #2: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #6, name = 'QNetworkAccessManager thread'
+    frame #0: 0x0000000188c01498 libsystem_kernel.dylib`poll + 8
+    frame #1: 0x00000001036692d4 QtCore`qt_safe_poll(pollfd*, unsigned int, QDeadlineTimer) + 184
+    frame #2: 0x000000010366d1cc QtCore`QEventDispatcherUNIX::processEvents(QFlags<QEventLoop::ProcessEventsFlag>) + 880
+    frame #3: 0x00000001034eb97c QtCore`QEventLoop::exec(QFlags<QEventLoop::ProcessEventsFlag>) + 588
+    frame #4: 0x00000001035d8790 QtCore`QThread::exec() + 336
+    frame #5: 0x000000010366ad00 QtCore`QThreadPrivate::start(void*) + 364
+    frame #6: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #7, name = 'caulk.messenger.shared:17'
+    frame #0: 0x0000000188bf8bb0 libsystem_kernel.dylib`semaphore_wait_trap + 8
+    frame #1: 0x000000019429fcc8 caulk`caulk::semaphore::timed_wait(double) + 224
+    frame #2: 0x000000019429fb70 caulk`caulk::concurrent::details::worker_thread::run() + 32
+    frame #3: 0x000000019429f844 caulk`void* caulk::thread_proxy<std::__1::tuple<caulk::thread::attributes, void (caulk::concurrent::details::worker_thread::*)(), std::__1::tuple<caulk::concurrent::details::worker_thread*>>>(void*) + 96
+    frame #4: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #8, name = 'caulk.messenger.shared:high'
+    frame #0: 0x0000000188bf8bb0 libsystem_kernel.dylib`semaphore_wait_trap + 8
+    frame #1: 0x000000019429fcc8 caulk`caulk::semaphore::timed_wait(double) + 224
+    frame #2: 0x000000019429fb70 caulk`caulk::concurrent::details::worker_thread::run() + 32
+    frame #3: 0x000000019429f844 caulk`void* caulk::thread_proxy<std::__1::tuple<caulk::thread::attributes, void (caulk::concurrent::details::worker_thread::*)(), std::__1::tuple<caulk::concurrent::details::worker_thread*>>>(void*) + 96
+    frame #4: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #9, name = 'AudioQueue thread'
+    frame #0: 0x0000000188bf8c34 libsystem_kernel.dylib`mach_msg2_trap + 8
+    frame #1: 0x0000000188c0b3a0 libsystem_kernel.dylib`mach_msg2_internal + 76
+    frame #2: 0x0000000188c01764 libsystem_kernel.dylib`mach_msg_overwrite + 484
+    frame #3: 0x0000000188bf8fa8 libsystem_kernel.dylib`mach_msg + 24
+    frame #4: 0x0000000188d25e7c CoreFoundation`__CFRunLoopServiceMachPort + 160
+    frame #5: 0x0000000188d24798 CoreFoundation`__CFRunLoopRun + 1208
+    frame #6: 0x0000000188d23c58 CoreFoundation`CFRunLoopRunSpecific + 572
+    frame #7: 0x00000001006321a4 libSDL2-2.0.0.dylib`audioqueue_thread + 1160
+    frame #8: 0x00000001005cf708 libSDL2-2.0.0.dylib`SDL_RunThread + 48
+    frame #9: 0x000000010061d914 libSDL2-2.0.0.dylib`RunThread + 12
+    frame #10: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #10, name = 'caulk::deferred_logger'
+    frame #0: 0x0000000188bf8bb0 libsystem_kernel.dylib`semaphore_wait_trap + 8
+    frame #1: 0x000000019429fcc8 caulk`caulk::semaphore::timed_wait(double) + 224
+    frame #2: 0x000000019429fb70 caulk`caulk::concurrent::details::worker_thread::run() + 32
+    frame #3: 0x000000019429f844 caulk`void* caulk::thread_proxy<std::__1::tuple<caulk::thread::attributes, void (caulk::concurrent::details::worker_thread::*)(), std::__1::tuple<caulk::concurrent::details::worker_thread*>>>(void*) + 96
+    frame #4: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #11, name = 'AQConverterThread'
+    frame #0: 0x0000000188bfc3cc libsystem_kernel.dylib`__psynch_cvwait + 8
+    frame #1: 0x0000000188c3b0e0 libsystem_pthread.dylib`_pthread_cond_wait + 984
+    frame #2: 0x00000001993fd974 libAudioToolboxUtility.dylib`CADeprecated::CAGuard::Wait() + 76
+    frame #3: 0x000000019aa4d4b0 AudioToolbox`AQConverterManager::AQConverterThread::ConverterThreadEntry(void*) + 644
+    frame #4: 0x00000001993dd600 libAudioToolboxUtility.dylib`CADeprecated::CAPThread::Entry(void*) + 96
+    frame #5: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #12, name = 'com.apple.audio.IOThread.client'
+    frame #0: 0x0000000188bf8bbc libsystem_kernel.dylib`semaphore_wait_signal_trap + 8
+    frame #1: 0x00000001942bc2f8 caulk`caulk::mach::semaphore::wait_signal_or_error(caulk::mach::semaphore&) + 36
+    frame #2: 0x000000018bb2af58 CoreAudio`HALC_ProxyIOContext::IOWorkLoop() + 5276
+    frame #3: 0x000000018bb293a8 CoreAudio`invocation function for block in HALC_ProxyIOContext::HALC_ProxyIOContext(unsigned int, unsigned int) + 172
+    frame #4: 0x000000018bcd337c CoreAudio`HALC_IOThread::Entry(void*) + 88
+    frame #5: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #13, stop reason = EXC_BAD_ACCESS (code=1, address=0x0)
+    frame #0: 0x0000000000000000
+    frame #1: 0x0000000188b6f1e0 libc++.1.dylib`std::__1::basic_ostream<char, std::__1::char_traits<char>>::flush() + 156
+    frame #2: 0x0000000188b80844 libc++.1.dylib`std::__1::DoIOSInit::~DoIOSInit() + 32
+    frame #3: 0x0000000188af2944 libsystem_c.dylib`__cxa_finalize_ranges + 480
+    frame #4: 0x0000000188af2704 libsystem_c.dylib`exit + 44
+    frame #5: 0x00000001000be2c8 AIOServer`AIO::Emulator::GBA::ARM7TDMI::Step() + 2416
+    frame #6: 0x00000001000a6798 AIOServer`AIO::Emulator::GBA::GBA::Step() + 1088
+    frame #7: 0x0000000100037bb8 AIOServer`AIO::GUI::MainWindow::EmulatorThreadMain() + 232
+    frame #8: 0x000000010003a804 AIOServer`decltype(*std::declval<AIO::GUI::MainWindow*>().*std::declval<void (AIO::GUI::MainWindow::*)()>()()) std::__1::__invoke[abi:ne190102]<void (AIO::GUI::MainWindow::*)(), AIO::GUI::MainWindow*, void>(void (AIO::GUI::MainWindow::*&&)(), AIO::GUI::MainWindow*&&) + 124
+    frame #9: 0x000000010003a73c AIOServer`void std::__1::__thread_execute[abi:ne190102]<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct>>, void (AIO::GUI::MainWindow::*)(), AIO::GUI::MainWindow*, 2ul>(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct>>, void (AIO::GUI::MainWindow::*)(), AIO::GUI::MainWindow*>&, std::__1::__tuple_indices<2ul>) + 48
+    frame #10: 0x000000010003a038 AIOServer`void* std::__1::__thread_proxy[abi:ne190102]<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct>>, void (AIO::GUI::MainWindow::*)(), AIO::GUI::MainWindow*>>(void*) + 84
+    frame #11: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+  thread #14
+    frame #0: 0x0000000188bfa8b0 libsystem_kernel.dylib`__workq_kernreturn + 8
+  thread #15, name = 'com.apple.NSEventThread'
+    frame #0: 0x0000000188bf8c34 libsystem_kernel.dylib`mach_msg2_trap + 8
+    frame #1: 0x0000000188c0b3a0 libsystem_kernel.dylib`mach_msg2_internal + 76
+    frame #2: 0x0000000188c01764 libsystem_kernel.dylib`mach_msg_overwrite + 484
+    frame #3: 0x0000000188bf8fa8 libsystem_kernel.dylib`mach_msg + 24
+    frame #4: 0x0000000188d25e7c CoreFoundation`__CFRunLoopServiceMachPort + 160
+    frame #5: 0x0000000188d24798 CoreFoundation`__CFRunLoopRun + 1208
+    frame #6: 0x0000000188d23c58 CoreFoundation`CFRunLoopRunSpecific + 572
+    frame #7: 0x000000018cd6f7fc AppKit`_NSEventThread + 140
+    frame #8: 0x0000000188c3ac0c libsystem_pthread.dylib`_pthread_start + 136
+General Purpose Registers:
+        x0 = 0x0000000158e7e500
+        x1 = 0x0000000000000000
+        x2 = 0x0000000000008000
+        x3 = 0x0000000000013c07
+        x4 = 0x000000012cc0ea40
+        x5 = 0x0000000000000004
+        x6 = 0x0000000000000002
+        x7 = 0x0000000000000026
+        x8 = 0x0000000000000000
+        x9 = 0x0000000158e2e370
+       x10 = 0x0000000000000000
+       x11 = 0x0000000000000002
+       x12 = 0x0000000000000000
+       x13 = 0x0000000000000000
+       x14 = 0x000000012cc04080
+       x15 = 0x0000000000007b10
+       x16 = 0x0000000158e2e370
+       x17 = 0x13a9000158e2e370
+       x18 = 0x0000000000000000
+       x19 = 0x00000001f6d53e60  libc++.1.dylib`std::__1::cout
+       x20 = 0x00000001f6d51868  atexit_mutex
+       x21 = 0x00000001002c8060
+       x22 = 0x00000001002c8030
+       x23 = 0x0000000000000000
+       x24 = 0x0000000000000002
+       x25 = 0x00000001f6d53000  libsystem_c.dylib`usual + 2176
+       x26 = 0x0000000000000002
+       x27 = 0x00000001002c8040
+       x28 = 0x0000000000000001
+        fp = 0x0000000178e5a730
+        lr = 0x0000000188b6f1e0  libc++.1.dylib`std::__1::basic_ostream<char, std::__1::char_traits<char>>::flush() + 156
+        sp = 0x0000000178e5a710
+        pc = 0x0000000000000000
+      cpsr = 0x60001800
+Process 35334 launched: '/Users/alexwaldmann/Desktop/AIO Server/build/bin/AIOServer' (arm64)
+Process 35334 stopped
+* thread #13, stop reason = EXC_BAD_ACCESS (code=1, address=0x0)
+    frame #0: 0x0000000000000000
+Target 0: (AIOServer) stopped.

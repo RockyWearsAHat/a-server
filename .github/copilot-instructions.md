@@ -25,6 +25,8 @@
 
 ### Build & Test (macOS/zsh)
 
+**IMPORTANT**: Test files _should_ be written **before** development of a certain process begins; tests should directly mirror the documentation. The test cases are meant to ensure that the implementation is correct and working as intended, having tests tailored to the current state means nothing. The actual correctness of the tests is vital. Please always ensure that tests are written **first** and that they are correct and valid before implementing <u>any</u> code for a system.
+
 ```sh
 make                          # Clean rebuild (delegates to cmake/Makefile)
 ./build/bin/CPUTests          # Unit tests for ARM7TDMI instructions
@@ -36,8 +38,30 @@ make                          # Clean rebuild (delegates to cmake/Makefile)
 
 ### Debugging & Logging
 
-- **Runtime logs**: `debug.log` at project root (auto-flushed, rotate between runs with `./scripts/clean.sh`)
-- **GBA crash detection**: Stall detector in `GBA::Step()` triggers after 10s at same PC → logs crash state to `debug.log`
+- **Single source of truth**: All logs (Qt `qDebug/qWarning`, `std::cout/std::cerr`, and emulator `Logger`) are routed into one file.
+- **Default log file**: `debug.log` at project root (auto-flushed; rotate between runs with `./scripts/clean.sh`).
+- **Crash logs**: Fatal errors write a “crash log” section plus the last ~1000 log entries to the same file (controlled by `--log-file`).
+
+**CLI logging flags (AIOServer)**:
+
+```sh
+./build/bin/AIOServer \
+	--log-file debug.log \
+	--exit-on-crash \
+	--headless --headless-max-ms 8000 \
+	-r SMA2.gba
+```
+
+- `-l, --log-file <path>`: Log output path (default: `debug.log`).
+- `-e, --exit-on-crash`: Exit immediately when the emulator logs a fatal crash.
+- `--headless`: Run without showing the GUI (requires `--rom`).
+- `--headless-max-ms <ms>`: Auto-quit after N ms (useful for deterministic log capture).
+
+**Environment toggles**:
+
+- `AIO_LOG_MIRROR=1`: Mirror logs to the original stdout/stderr while still logging to file.
+- `AIO_LOG_APPEND=1`: Append to the log file instead of truncating on startup.
+- `AIO_LOG_LEVEL=debug|info|warn|error|fatal`: Minimum log level.
 
 ### VS Code Tasks
 
@@ -72,7 +96,7 @@ make                          # Clean rebuild (delegates to cmake/Makefile)
 
 - **Namespaces**: All code in `AIO::*` (never `using namespace`)
 - **Forward declarations**: Minimize circular includes (see `GBAMemory.h` forward-declares `APU`, `PPU`, `ARM7TDMI`)
-- **Logging**: `std::cout << "[COMPONENT] message"` for temp instrumentation, remove after validation
+- **Logging**: Prefer the centralized logger (`AIO::Emulator::Common::Logger`) so output is consistent and captured in the log file. Use `std::cout` only for short-lived local instrumentation and remove it after validation.
 - **Comments**: Reference GBATEK sections (e.g., `// GBATEK: EEPROM uses MSB-first, 6/14-bit address`)
 
 ---
@@ -81,7 +105,8 @@ make                          # Clean rebuild (delegates to cmake/Makefile)
 
 ### Qt6 + SDL2 Audio
 
-- **GUI loop**: `MainWindow::GameLoop()` (QTimer-driven) → `gba.Step()` → `displayImage` updated from PPU framebuffer
+- **Emulation thread**: `MainWindow::EmulatorThreadMain()` drives `gba.Step()` in the background.
+- **UI refresh**: `MainWindow::UpdateDisplay()` copies framebuffer + routes input at ~60 Hz.
 - **Audio thread**: SDL callback runs async, pulls samples from `APU::GetSamples()` ring buffer
 - **Input**: `MainWindow::keyPressEvent()` → `gba.UpdateInput(keyState)` → writes to `GBAMemory` KEYINPUT register (0x04000130)
 
@@ -128,4 +153,3 @@ make                          # Clean rebuild (delegates to cmake/Makefile)
 ## AlWAYS
 
 Implement fully, if you have a reccomendation that directly solves the problem proposed, go, you do not need to ask permission, I am simply here to guide your implementation, if you think something is more solid and works better another way, if it is what was asked immediatly implement, if you have a better solution but it is not what was asked, please then let me know and I can then approve, deny or revise it for future development and a more completed and robust implementation.
- 

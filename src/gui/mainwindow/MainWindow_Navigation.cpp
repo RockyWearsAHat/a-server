@@ -159,7 +159,9 @@ void MainWindow::onPageChanged() {
 
     // Reset action edge tracking on page transitions so Confirm/Back edges
     // don't get suppressed by stale/held state from the previous page.
-    actionMapper.reset(AIO::Input::InputManager::instance().logicalButtonsDown());
+    // Ensure we have a fresh snapshot when seeding edge tracking.
+    const auto snapshot = AIO::Input::InputManager::instance().updateSnapshot();
+    actionMapper.reset(snapshot.logical);
 
     if (current == mainMenuPage) {
         nav.setAdapter(mainMenuAdapter.get());

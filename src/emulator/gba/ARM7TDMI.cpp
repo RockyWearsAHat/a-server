@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 #include <deque>
 
 namespace AIO::Emulator::GBA {
@@ -20,6 +21,13 @@ namespace AIO::Emulator::GBA {
     
     static GBAMemory* g_memoryForLog = nullptr;
     static bool g_thumbModeForLog = false;
+
+    namespace {
+        // NOTE: These traces were added for deep bring-up debugging (IRQ/LR/SMA2).
+        // They are extremely noisy and can drastically slow wall-clock-limited runs.
+        // Keep them compiled but disabled by default.
+        constexpr bool kEnableHeavyCpuTraces = false;
+    }
     
     static void LogBranch([[maybe_unused]] uint32_t from, [[maybe_unused]] uint32_t to) {
         branchLog.push_back({from, to});
@@ -71,6 +79,7 @@ namespace AIO::Emulator::GBA {
     // These traces rely on ARM7TDMI::Step() capturing a per-instruction context.
     // Keep them as free functions, but allow Step() / decode to pass in the authoritative context.
     static void TraceR8Write(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t oldVal, uint32_t newVal) {
+        if (!kEnableHeavyCpuTraces) return;
         if (oldVal == newVal) return;
         // Always log when R8 is written to 0, regardless of old value, so we can pinpoint
         // the exact instruction that zeros the block-transfer base.
@@ -88,6 +97,7 @@ namespace AIO::Emulator::GBA {
     }
 
     static void TraceR11Write(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t oldVal, uint32_t newVal) {
+        if (!kEnableHeavyCpuTraces) return;
         if (oldVal == newVal) return;
         if (newVal == 0 || (instrAddr >= 0x08001000 && instrAddr <= 0x08002000)) {
             Logger::Instance().LogFmt(
@@ -149,6 +159,7 @@ namespace AIO::Emulator::GBA {
     }
 
     static void TraceWatchWrite32(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t addr, uint32_t value, uint32_t sp) {
+        if (!kEnableHeavyCpuTraces) return;
         // Watch the exact stack slots later popped into r3/r4 before MOV r8,r3.
         // From logs: POP {r3,r4} at 0x08007320 uses SP=0x03007D7C.
         const bool watchSma2PopSlots = (addr == 0x03007D7C || addr == 0x03007D80);
@@ -179,6 +190,7 @@ namespace AIO::Emulator::GBA {
     }
 
     static void TraceWatchRead32(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t addr, uint32_t value, uint32_t sp) {
+        if (!kEnableHeavyCpuTraces) return;
         const bool watchIrqFrame = (addr >= 0x03007F68 && addr <= 0x03007F9C);
         const bool watchThumbReturnSlots = (addr == 0x03007DDC || addr == 0x03007DE0);
 
@@ -248,14 +260,16 @@ namespace AIO::Emulator::GBA {
                 r13_irq = registers[Register::SP];
                 r14_irq = registers[Register::LR];
                 spsr_irq = spsr;
-                
-                // Debug: Track IRQ stack changes with detailed context
-                static uint32_t last_r13_irq = 0x03007FA0;
-                if (r13_irq != last_r13_irq) {
-                    std::cerr << "[MODE SWITCH SAVE] IRQ SP changed: 0x" << std::hex << last_r13_irq 
-                              << " -> 0x" << r13_irq << " (from registers[13]=0x" << registers[Register::SP]
-                              << ") PC=0x" << registers[15] << std::dec << std::endl;
-                    last_r13_irq = r13_irq;
+
+                if (kEnableHeavyCpuTraces) {
+                    // Debug: Track IRQ stack changes with detailed context
+                    static uint32_t last_r13_irq = 0x03007FA0;
+                    if (r13_irq != last_r13_irq) {
+                        std::cerr << "[MODE SWITCH SAVE] IRQ SP changed: 0x" << std::hex << last_r13_irq
+                                  << " -> 0x" << r13_irq << " (from registers[13]=0x" << registers[Register::SP]
+                                  << ") PC=0x" << registers[15] << std::dec << std::endl;
+                        last_r13_irq = r13_irq;
+                    }
                 }
                 break;
             case CPUMode::SUPERVISOR:
@@ -274,28 +288,37 @@ namespace AIO::Emulator::GBA {
                 spsr = 0;
                 break;
             case CPUMode::IRQ:
-                std::cerr << "[MODE SWITCH LOAD] Loading IRQ mode: r13_irq=0x" << std::hex << r13_irq 
-                          << " r14_irq=0x" << r14_irq << " PC=0x" << registers[15] << std::dec << std::endl;
+                if (kEnableHeavyCpuTraces) {
+                    std::cerr << "[MODE SWITCH LOAD] Loading IRQ mode: r13_irq=0x" << std::hex << r13_irq
+                              << " r14_irq=0x" << r14_irq << " PC=0x" << registers[15] << std::dec << std::endl;
+                }
                 registers[Register::SP] = r13_irq;
-                std::cerr << "[MODE SWITCH LOAD] After assignment: registers[13]=0x" << std::hex << registers[Register::SP] << std::dec << std::endl;
+                if (kEnableHeavyCpuTraces) {
+                    std::cerr << "[MODE SWITCH LOAD] After assignment: registers[13]=0x" << std::hex
+                              << registers[Register::SP] << std::dec << std::endl;
+                }
                 registers[Register::LR] = r14_irq;
                 spsr = spsr_irq;
                 
                 // Safety check: IRQ stack should never be 0
                 if (registers[Register::SP] == 0) {
-                    std::cerr << "[FATAL] IRQ stack corrupted! r13_irq=0x" << std::hex << r13_irq 
-                              << " Re-initializing to 0x03007FA0 PC=0x" << registers[15] 
-                              << std::dec << std::endl;
+                    if (kEnableHeavyCpuTraces) {
+                        std::cerr << "[FATAL] IRQ stack corrupted! r13_irq=0x" << std::hex << r13_irq
+                                  << " Re-initializing to 0x03007FA0 PC=0x" << registers[15]
+                                  << std::dec << std::endl;
+                    }
                     r13_irq = 0x03007FA0;
                     registers[Register::SP] = r13_irq;
                 }
-                
-                // Debug: Log IRQ mode entry
-                static int irq_entry_count = 0;
-                if (irq_entry_count++ < 10) {
-                    std::cerr << "[MODE SWITCH] Entering IRQ mode, SP=0x" << std::hex 
-                              << registers[Register::SP] << " PC=0x" << registers[15] 
-                              << std::dec << std::endl;
+
+                if (kEnableHeavyCpuTraces) {
+                    // Debug: Log IRQ mode entry
+                    static int irq_entry_count = 0;
+                    if (irq_entry_count++ < 10) {
+                        std::cerr << "[MODE SWITCH] Entering IRQ mode, SP=0x" << std::hex
+                                  << registers[Register::SP] << " PC=0x" << registers[15]
+                                  << std::dec << std::endl;
+                    }
                 }
                 break;
             case CPUMode::SUPERVISOR:
@@ -310,7 +333,7 @@ namespace AIO::Emulator::GBA {
 
     void ARM7TDMI::CheckInterrupts() {
         // Log if we're about to check interrupts during BIOS execution
-        if (registers[15] >= 0x180 && registers[15] < 0x1d0) {
+        if (kEnableHeavyCpuTraces && registers[15] >= 0x180 && registers[15] < 0x1d0) {
             uint16_t ie = memory.Read16(IORegs::REG_IE);
             uint16_t if_reg = memory.Read16(IORegs::REG_IF);
             uint16_t ime = memory.Read16(IORegs::REG_IME);
@@ -343,6 +366,11 @@ namespace AIO::Emulator::GBA {
             // Calculate triggered interrupts NOW before PPU/Timers run
             // On real GBA, BIOS reads IE & IF atomically at IRQ entry
             uint16_t triggered = ie & if_reg;
+
+            const bool traceIrqEntry = (std::getenv("AIO_TRACE_IRQ_ENTRY") != nullptr);
+            const uint32_t spBeforeIrq = registers[Register::SP];
+            const uint32_t pcBeforeIrq = registers[Register::PC];
+            const uint32_t cpsrBeforeIrq = cpsr;
             
             // Update BIOS_IF immediately (before PPU can change IF)
             // GBATEK: BIOS_IF is a 16-bit value at 0x03007FF8 (do NOT do 32-bit accesses here).
@@ -365,21 +393,40 @@ namespace AIO::Emulator::GBA {
             uint32_t oldCpsr = cpsr;
             SetCPSRFlag(oldCpsr, CPSR::FLAG_T, wasThumb);
 
-            static int irqEntryLogCount = 0;
-            if (irqEntryLogCount++ < 20) {
-                std::cerr << "[IRQ ENTRY] PC=0x" << std::hex << registers[15]
-                          << " thumbMode=" << (thumbMode ? 1 : 0)
-                          << " CPSR=0x" << cpsr
-                          << " cpsrThumb=" << (cpsrThumb ? 1 : 0)
-                          << " wasThumb=" << (wasThumb ? 1 : 0)
-                          << " savedSPSR=0x" << oldCpsr
-                          << std::dec << std::endl;
+            if (kEnableHeavyCpuTraces) {
+                static int irqEntryLogCount = 0;
+                if (irqEntryLogCount++ < 20) {
+                    std::cerr << "[IRQ ENTRY] PC=0x" << std::hex << registers[15]
+                              << " thumbMode=" << (thumbMode ? 1 : 0)
+                              << " CPSR=0x" << cpsr
+                              << " cpsrThumb=" << (cpsrThumb ? 1 : 0)
+                              << " wasThumb=" << (wasThumb ? 1 : 0)
+                              << " savedSPSR=0x" << oldCpsr
+                              << std::dec << std::endl;
+                }
             }
             
             // Switch to IRQ Mode
             SwitchMode(CPUMode::IRQ);
             spsr = oldCpsr;
             spsr_irq = oldCpsr; // Also save to banked SPSR for System Mode return
+
+            if (traceIrqEntry) {
+                const uint32_t handlerPtr = memory.Read32(0x03007FFCu);
+                Logger::Instance().LogFmt(
+                    LogLevel::Error,
+                    "CPU",
+                    "IRQ ENTRY: trig=0x%04x PC=0x%08x SP(before)=0x%08x CPSR(before)=0x%08x -> mode=0x%02x SP(after)=0x%08x CPSR(mid)=0x%08x SPSR(saved)=0x%08x handler[0x03007FFC]=0x%08x",
+                    (unsigned)triggered,
+                    pcBeforeIrq,
+                    spBeforeIrq,
+                    cpsrBeforeIrq,
+                    (unsigned)GetCPUMode(cpsr),
+                    registers[Register::SP],
+                    cpsr,
+                    oldCpsr,
+                    handlerPtr);
+            }
             
             // Disable Thumb, enable IRQ mask
             thumbMode = false;
@@ -392,16 +439,20 @@ namespace AIO::Emulator::GBA {
             // For IRQ, LR_irq should be (address of the next instruction) + 4.
             r14_irq = registers[15] + 4;
             registers[Register::LR] = r14_irq;
-            std::cerr << "[IRQ SETUP] After LR assignment: LR=0x" << std::hex << registers[Register::LR]
-                      << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
+            if (kEnableHeavyCpuTraces) {
+                std::cerr << "[IRQ SETUP] After LR assignment: LR=0x" << std::hex << registers[Register::LR]
+                          << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
+            }
             
             // std::cout << "[IRQ EXIT] LR=0x" << std::hex << registers[Register::LR] 
             //           << " Jumping to BIOS IRQ=0x" << ExceptionVector::IRQ << std::dec << std::endl;
             
             // Jump to BIOS IRQ Trampoline at ExceptionVector::IRQ
             registers[Register::PC] = ExceptionVector::IRQ;
-            std::cerr << "[IRQ SETUP] After PC assignment: PC=0x" << std::hex << registers[Register::PC] 
-                      << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
+            if (kEnableHeavyCpuTraces) {
+                std::cerr << "[IRQ SETUP] After PC assignment: PC=0x" << std::hex << registers[Register::PC]
+                          << " SP=0x" << registers[Register::SP] << std::dec << std::endl;
+            }
         }
     }
 
@@ -412,8 +463,20 @@ namespace AIO::Emulator::GBA {
     }
 
     void ARM7TDMI::Step() {
+        // Reset per-instruction HLE cycle accumulator.
+        // BIOS SWIs may advance peripheral time in bulk; we expose that to the outer
+        // loop via ConsumeHLECycles().
+        hleCyclesThisStep = 0;
+
+        // Keep the boolean decode mode in sync with CPSR.T.
+        // A Thumb/ARM divergence here can cause us to decode Thumb bytes as ARM and
+        // trigger cascading state corruption.
+        thumbMode = IsThumbMode(cpsr);
         const uint32_t lrBefore = registers[14];
         const bool thumbBefore = thumbMode;
+        const uint32_t r0BeforeStep = registers[0];
+        const uint32_t r2BeforeStep = registers[2];
+        const uint32_t spBeforeStep = registers[13];
 
         // Capture instruction context once per Step() so traces can't accidentally
         // attribute a register write to the wrong opcode.
@@ -436,7 +499,7 @@ namespace AIO::Emulator::GBA {
                 r11Now);
         }
 
-        if (currentInstrAddr >= 0x08007310 && currentInstrAddr <= 0x08007340) {
+        if (kEnableHeavyCpuTraces && currentInstrAddr >= 0x08007310 && currentInstrAddr <= 0x08007340) {
             Logger::Instance().LogFmt(
                 LogLevel::Error,
                 "CPU",
@@ -534,11 +597,37 @@ namespace AIO::Emulator::GBA {
              }
              
              std::cerr << "\n** SP CORRUPTION DETECTED - IRQ stack has been overwritten. **\n" << std::endl;
-             exit(1);
+
+             // Write crash info to a log file (same pattern as invalid-PC handler).
+             halted = true;
+             FILE* logFile = fopen("crash_log.txt", "a");
+             if (logFile) {
+                 fprintf(logFile, "==== Emulator Crash (SP==0) ====\n");
+                 fprintf(logFile, "LastPC: 0x%08X\n", lastPC);
+                 fprintf(logFile, "PC:     0x%08X\n", registers[15]);
+                 fprintf(logFile, "SP:     0x%08X\n", registers[13]);
+                 fprintf(logFile, "LR:     0x%08X\n", registers[14]);
+                 fprintf(logFile, "CPSR:   0x%08X\n", cpsr);
+                 fprintf(logFile, "Mode:   0x%02X\n", (unsigned)(cpsr & 0x1F));
+                 fprintf(logFile, "Thumb:  %d\n", thumbMode ? 1 : 0);
+                 fprintf(logFile, "r13_irq: 0x%08X\n", r13_irq);
+                 fprintf(logFile, "r13_usr: 0x%08X\n", r13_usr);
+                 for (int i = 0; i < 16; ++i) {
+                     fprintf(logFile, "R%d: 0x%08X\n", i, registers[i]);
+                 }
+                 fprintf(logFile, "IRQ stack base dump (0x03007FA0..0x03007FBC):\n");
+                 for (uint32_t addr = 0x03007FA0; addr < 0x03007FC0; addr += 4) {
+                     fprintf(logFile, "  0x%08X: 0x%08X\n", addr, memory.Read32(addr));
+                 }
+                 fclose(logFile);
+             }
+
+             if (CrashPopupCallback) CrashPopupCallback("crash_log.txt");
+             return;
         }
         
         // Log BIOS IRQ return path (0x1c0-0x1d0) with LR value
-        if (registers[15] >= 0x1c0 && registers[15] <= 0x1d0) {
+        if (kEnableHeavyCpuTraces && registers[15] >= 0x1c0 && registers[15] <= 0x1d0) {
             std::cerr << "[BIOS IRQ RETURN] PC=0x" << std::hex << registers[15] 
                       << " SP=0x" << registers[13] 
                       << " LR_irq=0x" << r14_irq 
@@ -546,7 +635,7 @@ namespace AIO::Emulator::GBA {
         }
         
         // Log ALL BIOS trampoline execution (0x180-0x1d0)
-        if (registers[15] >= 0x180 && registers[15] < 0x1d0) {
+        if (kEnableHeavyCpuTraces && registers[15] >= 0x180 && registers[15] < 0x1d0) {
             uint32_t nextInstr = memory.ReadInstruction32(registers[15]);
             std::cerr << "[BIOS TRAMPOLINE] PC=0x" << std::hex << registers[15]
                       << " Instr=0x" << nextInstr
@@ -565,7 +654,7 @@ namespace AIO::Emulator::GBA {
         }
         
         // Log jumps near the crash location (0x809e390-0x809e3a0)
-        if (registers[15] >= 0x809e390 && registers[15] <= 0x809e3a0) {
+        if (kEnableHeavyCpuTraces && registers[15] >= 0x809e390 && registers[15] <= 0x809e3a0) {
             uint32_t instr = memory.ReadInstruction32(registers[15]);
             std::cerr << "[NEAR CRASH LOCATION] PC=0x" << std::hex << registers[15]
                       << " SP=0x" << registers[13]
@@ -716,14 +805,12 @@ namespace AIO::Emulator::GBA {
 
         lastPC = pc;
 
-        // BIOS HLE: Direct BIOS calls are problematic because games may call
-        // intermediate BIOS addresses that we don't handle correctly.
-        // For now, disable direct BIOS intercept - games should use SWI instead.
-        // TODO: Implement full BIOS ROM or more complete HLE
-        // if (pc < 0x4000) {
-        //     ExecuteBIOSFunction(pc);
-        //     return;
-        // }
+        // BIOS HLE: We do not ship a real BIOS ROM. Execute common BIOS routines
+        // via HLE so games don't run into partial/garbage BIOS stubs.
+        if (pc < 0x4000) {
+            ExecuteBIOSFunction(pc);
+            return;
+        }
 
         if (thumbMode) {
             g_memoryForLog = &memory;
@@ -732,7 +819,7 @@ namespace AIO::Emulator::GBA {
             // Focused Thumb fetch trace for the PCs where we see 0x4698 clobber R8.
             // This helps detect if we're reading the wrong halfword due to PC alignment/masking.
             const uint32_t pcAligned = pc & ~1u;
-            if (pcAligned == 0x08007320 || pcAligned == 0x0800705A || pcAligned == 0x08007BBC) {
+            if (kEnableHeavyCpuTraces && (pcAligned == 0x08007320 || pcAligned == 0x0800705A || pcAligned == 0x08007BBC)) {
                 const uint16_t opAligned = memory.ReadInstruction16(pcAligned);
                 const uint16_t opFlipped = memory.ReadInstruction16(pcAligned ^ 1u);
                 Logger::Instance().LogFmt(LogLevel::Error, "CPU", "THUMB FETCH pc=0x%08x aligned=0x%08x opAligned=0x%04x opFlipped=0x%04x T=%d", pc, pcAligned, opAligned, opFlipped, thumbMode ? 1 : 0);
@@ -744,8 +831,9 @@ namespace AIO::Emulator::GBA {
             const uint16_t instruction = memory.ReadInstruction16(instrAddr);
 
             // Focused trace: the early IRQ/dispatch window where LR becomes even and BX drops into ARM.
-            if ((instrAddr >= 0x080014B0 && instrAddr <= 0x080014C0) ||
-                (instrAddr >= 0x080016A0 && instrAddr <= 0x080016D0)) {
+            if (kEnableHeavyCpuTraces &&
+                ((instrAddr >= 0x080014B0 && instrAddr <= 0x080014C0) ||
+                 (instrAddr >= 0x080016A0 && instrAddr <= 0x080016D0))) {
                 static int windowTraceCount = 0;
                 if (windowTraceCount++ < 400) {
                     Logger::Instance().LogFmt(
@@ -768,7 +856,102 @@ namespace AIO::Emulator::GBA {
             currentInstrThumb = true;
             currentOp16 = instruction;
             currentOp32 = 0;
-            if (pcAligned == 0x08007320 || pcAligned == 0x0800705A || pcAligned == 0x08007BBC) {
+
+            // SMA2 investigation: trace the save/repair decision window.
+            // Enable with: AIO_TRACE_SMA2_SAVE_WINDOW=1
+            // This range includes the validation/branching that decides whether to preserve
+            // the existing header or to zero/init fields (leading to FEBC checksum).
+            const bool traceSaveWin = (std::getenv("AIO_TRACE_SMA2_SAVE_WINDOW") != nullptr);
+            // SMA2 investigation: dump the exact EWRAM bytes the checksum routine validates.
+            // Enable with: AIO_TRACE_SMA2_SAVE_DUMP=1
+            const bool traceSaveDump = (std::getenv("AIO_TRACE_SMA2_SAVE_DUMP") != nullptr);
+            const bool inSaveWinRange = (instrAddr >= 0x08007300 && instrAddr <= 0x08007520);
+
+            // SMA2 investigation: trace status propagation from the EEPROM read/validate routine.
+            // Enable with: AIO_TRACE_SMA2_EEPCALL=1
+            const bool traceEepCall = (std::getenv("AIO_TRACE_SMA2_EEPCALL") != nullptr);
+            const bool inEepFuncRange = (instrAddr >= 0x0809E000 && instrAddr <= 0x0809E360);
+            const bool inEepMiniRange = (instrAddr >= 0x0809E020 && instrAddr <= 0x0809E090);
+
+            if (traceEepCall && inEepMiniRange) {
+                static int eepMiniLogs = 0;
+                if (eepMiniLogs < 120) {
+                    Logger::Instance().LogFmt(
+                        LogLevel::Info,
+                        "CPU",
+                        "SMA2 EEPCALL mini pre PC=0x%08x op=0x%04x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+                        instrAddr,
+                        instruction,
+                        registers[0],
+                        registers[1],
+                        registers[2],
+                        registers[3],
+                        registers[13],
+                        registers[14],
+                        cpsr);
+                    eepMiniLogs++;
+                }
+            }
+            if (traceSaveWin && inSaveWinRange) {
+                static int saveWinLogs = 0;
+                if (saveWinLogs < 1400) {
+                    Logger::Instance().LogFmt(
+                        LogLevel::Info,
+                        "CPU",
+                        "SMA2 SAVEWIN pre PC=0x%08x op=0x%04x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x R4=0x%08x R5=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+                        instrAddr,
+                        instruction,
+                        registers[0],
+                        registers[1],
+                        registers[2],
+                        registers[3],
+                        registers[4],
+                        registers[5],
+                        registers[13],
+                        registers[14],
+                        cpsr);
+                    saveWinLogs++;
+                }
+            }
+
+            // SMA2 investigation: the checksum/validate branch that selects the repair path.
+            // We dump the exact bytes at the pointers the routine uses (R5 base and R2 cursor).
+            if (traceSaveDump && (instrAddr == 0x0800741C || instrAddr == 0x08007438 || instrAddr == 0x0800743A)) {
+                static int dumpLogs = 0;
+                if (dumpLogs < 60) {
+                    auto DumpBytes = [&](uint32_t addr, int count) {
+                        std::ostringstream oss;
+                        oss << std::hex << std::setfill('0');
+                        for (int i = 0; i < count; i++) {
+                            const uint8_t b = memory.Read8(addr + static_cast<uint32_t>(i));
+                            if (i) oss << ' ';
+                            oss << std::setw(2) << static_cast<int>(b);
+                        }
+                        return oss.str();
+                    };
+
+                    const uint32_t base = registers[5];
+                    const uint32_t cursor = registers[2];
+
+                    // Use small, readable windows: base[0..15] and cursor[-4..+11].
+                    const uint32_t cursorStart = (cursor >= 4) ? (cursor - 4) : 0;
+                    Logger::Instance().LogFmt(
+                        LogLevel::Info,
+                        "CPU",
+                        "SMA2 SAVEDUMP PC=0x%08x base(R5)=0x%08x cursor(R2)=0x%08x R0=0x%08x R1=0x%08x R4=0x%08x CPSR=0x%08x | base[0..15]=%s | cur[-4..+11]=%s",
+                        instrAddr,
+                        base,
+                        cursor,
+                        registers[0],
+                        registers[1],
+                        registers[4],
+                        cpsr,
+                        DumpBytes(base, 16).c_str(),
+                        DumpBytes(cursorStart, 16).c_str());
+                    dumpLogs++;
+                }
+            }
+            if (kEnableHeavyCpuTraces && (pcAligned == 0x08007320 || pcAligned == 0x0800705A || pcAligned == 0x08007BBC)) {
                 Logger::Instance().LogFmt(LogLevel::Error, "CPU", "THUMB EXEC fetchAddr=0x%08x pc=0x%08x op=0x%04x", pcAligned, pc, instruction);
             }
             
@@ -789,8 +972,106 @@ namespace AIO::Emulator::GBA {
             registers[15] = instrAddr + 2u;
             DecodeThumb(instruction, pcValue);
 
+            // SMA2 investigation: trace R0 changes and the callsite return value.
+            if (traceEepCall) {
+                if (inEepFuncRange && registers[0] != r0BeforeStep) {
+                    static int eepR0Logs = 0;
+                    if (eepR0Logs < 600) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Info,
+                            "CPU",
+                            "SMA2 EEPCALL R0WRITE PC=0x%08x op=0x%04x oldR0=0x%08x newR0=0x%08x SP=0x%08x->0x%08x LR=0x%08x CPSR=0x%08x",
+                            instrAddr,
+                            instruction,
+                            r0BeforeStep,
+                            registers[0],
+                            spBeforeStep,
+                            registers[13],
+                            registers[14],
+                            cpsr);
+                        eepR0Logs++;
+                    }
+                }
+
+                if (inEepFuncRange && registers[2] != r2BeforeStep) {
+                    static int eepR2Logs = 0;
+                    if (eepR2Logs < 600) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Info,
+                            "CPU",
+                            "SMA2 EEPCALL R2WRITE PC=0x%08x op=0x%04x oldR2=0x%08x newR2=0x%08x R0=0x%08x SP=0x%08x->0x%08x LR=0x%08x CPSR=0x%08x",
+                            instrAddr,
+                            instruction,
+                            r2BeforeStep,
+                            registers[2],
+                            registers[0],
+                            spBeforeStep,
+                            registers[13],
+                            registers[14],
+                            cpsr);
+                        eepR2Logs++;
+                    }
+                }
+
+                // Log the callsite return value that drives the BEQ at 0x080073D4.
+                if (instrAddr == 0x080073D0) {
+                    static int eepRetLogs = 0;
+                    if (eepRetLogs < 80) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Info,
+                            "CPU",
+                            "SMA2 EEPCALL RET PC=0x%08x R0=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+                            instrAddr,
+                            registers[0],
+                            registers[13],
+                            registers[14],
+                            cpsr);
+                        eepRetLogs++;
+                    }
+                }
+            }
+
+            // SMA2 investigation: log taken branches/jumps within the save window.
+            // This helps pinpoint the exact conditional decision that selects the repair path.
+            if (traceSaveWin && inSaveWinRange) {
+                const uint32_t expectedNext = instrAddr + 2u;
+                const uint32_t actualNext = registers[15];
+                if (actualNext != expectedNext) {
+                    static int saveWinBranchLogs = 0;
+                    if (saveWinBranchLogs < 400) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Info,
+                            "CPU",
+                            "SMA2 SAVEWIN flow PC=0x%08x op=0x%04x next=0x%08x (expected=0x%08x) T=%d CPSR=0x%08x",
+                            instrAddr,
+                            instruction,
+                            actualNext,
+                            expectedNext,
+                            thumbMode ? 1 : 0,
+                            cpsr);
+                        saveWinBranchLogs++;
+                    }
+                }
+            }
+
+            // Post-exec: for the CMP that gates the checksum loop, validate NZCV results.
+            if (traceSaveWin && instrAddr == 0x080074D0) {
+                static int cmpPostLogs = 0;
+                if (cmpPostLogs < 80) {
+                    Logger::Instance().LogFmt(
+                        LogLevel::Info,
+                        "CPU",
+                        "SMA2 SAVEWIN post CMP PC=0x%08x op=0x%04x CPSR=0x%08x (R3=0x%08x)",
+                        instrAddr,
+                        instruction,
+                        cpsr,
+                        registers[3]);
+                    cmpPostLogs++;
+                }
+            }
+
             // Post-exec: trace LR changes (especially LR becoming even in Thumb, which breaks interworking returns).
-            if (registers[14] != lrBefore) {
+            if (kEnableHeavyCpuTraces && registers[14] != lrBefore) {
                 static int lrLogCount = 0;
                 if (lrLogCount++ < 200) {
                     Logger::Instance().LogFmt(
@@ -821,7 +1102,7 @@ namespace AIO::Emulator::GBA {
             Decode(instruction);
 
             // Post-exec: trace LR changes.
-            if (registers[14] != lrBefore) {
+            if (kEnableHeavyCpuTraces && registers[14] != lrBefore) {
                 static int lrLogCountA = 0;
                 if (lrLogCountA++ < 200) {
                     Logger::Instance().LogFmt(
@@ -960,7 +1241,8 @@ namespace AIO::Emulator::GBA {
         }
         // Software Interrupt: xxxx 1111 xxxx xxxx xxxx xxxx xxxx xxxx
         else if ((instruction & ARMInstructionFormat::SWI_MASK) == ARMInstructionFormat::SWI_PATTERN) {
-            ExecuteSWI((instruction >> 16) & 0xFF);
+            // ARM SWI has a 24-bit immediate; GBA BIOS uses the low 8 bits as the function number.
+            ExecuteSWI(instruction & 0xFF);
         }
         else {
             std::cout << "Unknown Instruction: 0x" << std::hex << instruction << " at PC=" << (registers[15]-4) << " Mode=" << (thumbMode ? "Thumb" : "ARM") << std::endl;
@@ -1156,14 +1438,16 @@ namespace AIO::Emulator::GBA {
                 // DEBUG: Log PC writes during IRQ return
                 if (S && opcode == DPOpcode::SUB) {
                     uint32_t currentMode = GetCPUMode(cpsr);
-                    std::cerr << "[IRQ RETURN] Mode=0x" << std::hex << currentMode
-                              << " LR(r14)=0x" << registers[Register::LR]
-                              << " LR_irq=0x" << r14_irq
-                              << " result=0x" << result
-                              << " CPSR(before)=0x" << cpsr
-                              << " SPSR=0x" << spsr
-                              << " thumbMode(before)=" << (thumbMode ? 1 : 0)
-                              << std::dec << std::endl;
+                    if (kEnableHeavyCpuTraces) {
+                        std::cerr << "[IRQ RETURN] Mode=0x" << std::hex << currentMode
+                                  << " LR(r14)=0x" << registers[Register::LR]
+                                  << " LR_irq=0x" << r14_irq
+                                  << " result=0x" << result
+                                  << " CPSR(before)=0x" << cpsr
+                                  << " SPSR=0x" << spsr
+                                  << " thumbMode(before)=" << (thumbMode ? 1 : 0)
+                                  << std::dec << std::endl;
+                    }
                 }
                 const uint32_t from = registers[15] - 4;
                 TracePCWrite("ALU", from, result, instruction, (uint32_t)opcode, (uint32_t)S);
@@ -1177,9 +1461,44 @@ namespace AIO::Emulator::GBA {
             if (rd == Register::PC) {
                 // ARM spec: data-processing with S and Rd==PC restores CPSR from current mode's SPSR.
                 // Do not special-case System mode here; System mode has no SPSR.
-                const uint32_t spsrCopy = spsr;
+                uint32_t spsrCopy = spsr;
                 const uint32_t oldMode = GetCPUMode(cpsr);
+
+                // BIOS IRQ trampoline may temporarily switch to System mode to run the user handler,
+                // then return via `SUBS PC, LR, #4`. In that case System/User has no SPSR, but the
+                // return state is still held in the IRQ banked SPSR.
+                if ((oldMode == CPUMode::USER || oldMode == CPUMode::SYSTEM) &&
+                    (currentInstrAddr >= 0x180 && currentInstrAddr < 0x1d0)) {
+                    const uint32_t modeFromSpsr = GetCPUMode(spsrCopy);
+                    if (modeFromSpsr != CPUMode::USER && modeFromSpsr != CPUMode::SYSTEM &&
+                        modeFromSpsr != CPUMode::IRQ && modeFromSpsr != CPUMode::SUPERVISOR) {
+                        spsrCopy = spsr_irq;
+                    }
+                }
+
                 const uint32_t newMode = GetCPUMode(spsrCopy);
+                // Defensive: an invalid SPSR (mode==0) will corrupt CPSR/Thumb state and cascade.
+                if (newMode != CPUMode::USER && newMode != CPUMode::SYSTEM &&
+                    newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR) {
+                    halted = true;
+                    FILE* logFile = fopen("crash_log.txt", "a");
+                    if (logFile) {
+                        fprintf(logFile, "==== Emulator Crash (Invalid SPSR on CPSR restore) ====\n");
+                        fprintf(logFile, "Reason: DP S+Rd==PC restoring CPSR from invalid SPSR\n");
+                        fprintf(logFile, "PC: 0x%08X\n", registers[15]);
+                        fprintf(logFile, "InstrAddr: 0x%08X\n", currentInstrAddr);
+                        fprintf(logFile, "InstrThumb: %d\n", currentInstrThumb ? 1 : 0);
+                        fprintf(logFile, "Op16: 0x%04X\n", (unsigned)currentOp16);
+                        fprintf(logFile, "Op32: 0x%08X\n", currentOp32);
+                        fprintf(logFile, "CPSR(before): 0x%08X (mode=0x%02X)\n", cpsr, (unsigned)oldMode);
+                        fprintf(logFile, "SPSR(value):  0x%08X (mode=0x%02X)\n", spsrCopy, (unsigned)newMode);
+                        fprintf(logFile, "SPSR.irq:    0x%08X (mode=0x%02X)\n", spsr_irq, (unsigned)GetCPUMode(spsr_irq));
+                        fprintf(logFile, "LR: 0x%08X SP: 0x%08X\n", registers[14], registers[13]);
+                        fclose(logFile);
+                    }
+                    if (CrashPopupCallback) CrashPopupCallback("crash_log.txt");
+                    return;
+                }
                 // IMPORTANT: SwitchMode() keys off current CPSR mode to decide which bank to save.
                 // Switch banks *before* overwriting CPSR, otherwise the bank swap is skipped.
                 if (oldMode != newMode) {
@@ -1191,7 +1510,7 @@ namespace AIO::Emulator::GBA {
                 // Debug: confirm CPSR restore actually re-enters Thumb when expected.
                 if (oldMode == CPUMode::IRQ) {
                     static int irqReturnPostLogCount = 0;
-                    if (irqReturnPostLogCount++ < 30) {
+                    if (kEnableHeavyCpuTraces && irqReturnPostLogCount++ < 30) {
                         std::cerr << "[IRQ RETURN POST] PC=0x" << std::hex << registers[Register::PC]
                                   << " CPSR(after)=0x" << cpsr
                                   << " thumbMode(after)=" << (thumbMode ? 1 : 0)
@@ -1435,6 +1754,24 @@ namespace AIO::Emulator::GBA {
             const uint32_t spsrCopy = spsr;
             const uint32_t oldMode = GetCPUMode(cpsr);
             const uint32_t newMode = GetCPUMode(spsrCopy);
+            if (newMode != CPUMode::USER && newMode != CPUMode::SYSTEM &&
+                newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR) {
+                halted = true;
+                FILE* logFile = fopen("crash_log.txt", "a");
+                if (logFile) {
+                    fprintf(logFile, "==== Emulator Crash (Invalid SPSR on LDM^ CPSR restore) ====\n");
+                    fprintf(logFile, "PC: 0x%08X\n", registers[15]);
+                    fprintf(logFile, "InstrAddr: 0x%08X\n", currentInstrAddr);
+                    fprintf(logFile, "InstrThumb: %d\n", currentInstrThumb ? 1 : 0);
+                    fprintf(logFile, "Op16: 0x%04X\n", (unsigned)currentOp16);
+                    fprintf(logFile, "Op32: 0x%08X\n", currentOp32);
+                    fprintf(logFile, "CPSR(before): 0x%08X (mode=0x%02X)\n", cpsr, (unsigned)oldMode);
+                    fprintf(logFile, "SPSR(value):  0x%08X (mode=0x%02X)\n", spsrCopy, (unsigned)newMode);
+                    fclose(logFile);
+                }
+                if (CrashPopupCallback) CrashPopupCallback("crash_log.txt");
+                return;
+            }
             // See note above: bank switch must occur before CPSR overwrite.
             if (oldMode != newMode) {
                 SwitchMode(newMode);
@@ -1562,6 +1899,86 @@ namespace AIO::Emulator::GBA {
         // Identify BIOS function by entry point
         // For unknown entry points, just return (no-op)
         switch (biosPC) {
+            case 0x018: // IRQ vector entry (HLE)
+            {
+                // Minimal BIOS IRQ trampoline:
+                // - Call user handler at [0x03007FFC]
+                // - Return via a BIOS-return stub at 0x01A0
+                // Note: The real BIOS does more bookkeeping; this is the smallest
+                // faithful behavior needed for games to progress.
+
+                const uint32_t handler = memory.Read32(0x03007FFCu);
+                if (handler == 0) {
+                    // No handler installed; just return.
+                    break;
+                }
+
+                IrqContext ctx{};
+                ctx.r0 = registers[0];
+                ctx.r1 = registers[1];
+                ctx.r2 = registers[2];
+                ctx.r3 = registers[3];
+                ctx.r12 = registers[12];
+                ctx.lr = registers[14];
+                ctx.pc = registers[15];
+                ctx.cpsr = cpsr;
+                ctx.thumbMode = thumbMode;
+                irqStack.push_back(ctx);
+
+                // Return point after handler completes.
+                registers[14] = 0x000001A0;
+
+                // Branch to user handler (BX semantics).
+                if (handler & 1u) {
+                    thumbMode = true;
+                    SetCPSRFlag(cpsr, CPSR::FLAG_T, true);
+                    registers[15] = handler & ~1u;
+                } else {
+                    thumbMode = false;
+                    SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
+                    registers[15] = handler & ~3u;
+                }
+                return;
+            }
+
+            case 0x1A0: // IRQ return stub (HLE)
+            {
+                if (!irqStack.empty()) {
+                    const IrqContext ctx = irqStack.back();
+                    irqStack.pop_back();
+
+                    // Clear BIOS_IF and IF bits (best-effort).
+                    memory.Write16(0x03007FF8, 0);
+                    memory.Write16(IORegs::REG_IF, 0xFFFF);
+
+                    const uint32_t oldMode = GetCPUMode(cpsr);
+                    const uint32_t newMode = GetCPUMode(ctx.cpsr);
+                    if (oldMode != newMode) {
+                        SwitchMode(newMode);
+                    }
+                    cpsr = ctx.cpsr;
+                    thumbMode = IsThumbMode(cpsr);
+
+                    registers[0] = ctx.r0;
+                    registers[1] = ctx.r1;
+                    registers[2] = ctx.r2;
+                    registers[3] = ctx.r3;
+                    registers[12] = ctx.r12;
+                    registers[14] = ctx.lr;
+
+                    // Resume at the interrupted PC (keep alignment consistent with CPSR.T).
+                    registers[15] = ctx.pc;
+                    if (thumbMode) {
+                        registers[15] &= ~1u;
+                    } else {
+                        registers[15] &= ~3u;
+                    }
+                    return;
+                }
+                // No saved context; fall through and just return.
+                break;
+            }
+
             case 0x188: // VBlankIntrWait
             {
                 // Enable VBlank IRQ in DISPSTAT (Bit 3). Many games assume BIOS does this.
@@ -1633,6 +2050,7 @@ namespace AIO::Emulator::GBA {
             case 0x000: // Reset
                 registers[15] = 0x08000000;
                 thumbMode = false;
+                SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
                 return;
                 
             default:
@@ -1645,19 +2063,27 @@ namespace AIO::Emulator::GBA {
         // Return to caller by jumping to LR
         if (returnAddr & 1) {
             thumbMode = true;
+            SetCPSRFlag(cpsr, CPSR::FLAG_T, true);
             registers[15] = returnAddr & 0xFFFFFFFE;
         } else {
             thumbMode = false;
+            SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
             registers[15] = returnAddr & 0xFFFFFFFC;
         }
     }
 
     void ARM7TDMI::ExecuteSWI(uint32_t comment) {
+        // A reasonable baseline for SWI entry/exit + minimal BIOS wrapper work.
+        // When we HLE a BIOS routine, we skip the real instruction stream, so we
+        // must charge some time explicitly.
+        constexpr int kSwiOverheadCycles = 32;
+
         switch (comment) {
             case 0x00: // SoftReset
                 registers[15] = 0x08000000;
                 registers[13] = 0x03007F00; // Reset SP
                 thumbMode = false;
+                SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
                 break;
             case 0x01: // RegisterRamReset - Clear/Initialize RAM and registers
             {
@@ -1911,7 +2337,7 @@ namespace AIO::Emulator::GBA {
                         
                         // Periodically advance PPU/timers to allow VBlank/HBlank
                         if ((i + 1) % batchSize == 0) {
-                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                            AdvanceHLECycles(perUnitCycles * (int)batchSize);
                         }
                     }
                 } else {
@@ -1924,7 +2350,7 @@ namespace AIO::Emulator::GBA {
                         
                         // Periodically advance PPU/timers to allow VBlank/HBlank
                         if ((i + 1) % batchSize == 0) {
-                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                            AdvanceHLECycles(perUnitCycles * (int)batchSize);
                         }
                     }
                 }
@@ -1932,19 +2358,20 @@ namespace AIO::Emulator::GBA {
                 // Advance remaining cycles for any partial batch
                 uint32_t remaining = len % batchSize;
                 if (remaining > 0) {
-                    memory.AdvanceCycles(perUnitCycles * remaining);
+                    AdvanceHLECycles(perUnitCycles * (int)remaining);
                 }
                 // Advance SWI overhead
-                memory.AdvanceCycles(2);
+                AdvanceHLECycles(kSwiOverheadCycles);
                 break;
             }
             case 0x0C: // CpuFastSet (R0=Src, R1=Dst, R2=Cnt/Ctrl)
             {
                 uint32_t src = registers[0];
                 uint32_t dst = registers[1];
-                uint32_t len = registers[2] & 0x1FFFFF;
-                
-                // len is the word count (must be multiple of 8)
+                // GBA BIOS convention (GBATEK): low 21 bits are the number of 32-byte blocks.
+                // Total transfer size is: blockCount * 32 bytes == blockCount * 8 words.
+                uint32_t blockCount = registers[2] & 0x1FFFFF;
+
                 bool fixedSrc = (registers[2] >> 24) & 1;
                 
                 // Debug: trace CpuFastSet to VRAM
@@ -1955,10 +2382,15 @@ namespace AIO::Emulator::GBA {
                 //               << " fixed=" << fixedSrc << std::endl;
                 // }
                 
-                // Always 32-bit; CpuFastSet requires length multiple of 8
-                uint32_t units = (len / 8) * 8;
+                // Always 32-bit; CpuFastSet transfers blockCount*8 32-bit words.
+                uint32_t units = blockCount * 8u;
                 const uint32_t batchSize = 64;  // Update PPU every 64 units
                 const int perUnitCycles = 4;
+
+                if (units == 0) {
+                    AdvanceHLECycles(kSwiOverheadCycles);
+                    break;
+                }
                 
                 if (fixedSrc) {
                     uint32_t fixedVal = memory.Read32(src);
@@ -1969,7 +2401,7 @@ namespace AIO::Emulator::GBA {
                         
                         // Periodically advance PPU/timers to allow VBlank/HBlank
                         if ((i + 1) % batchSize == 0) {
-                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                            AdvanceHLECycles(perUnitCycles * (int)batchSize);
                         }
                     }
                 } else {
@@ -1982,7 +2414,7 @@ namespace AIO::Emulator::GBA {
                         
                         // Periodically advance PPU/timers to allow VBlank/HBlank
                         if ((i + 1) % batchSize == 0) {
-                            memory.AdvanceCycles(perUnitCycles * batchSize);
+                            AdvanceHLECycles(perUnitCycles * (int)batchSize);
                         }
                     }
                 }
@@ -1990,10 +2422,10 @@ namespace AIO::Emulator::GBA {
                 // Advance remaining cycles for any partial batch
                 uint32_t remaining = units % batchSize;
                 if (remaining > 0) {
-                    memory.AdvanceCycles(perUnitCycles * remaining);
+                    AdvanceHLECycles(perUnitCycles * (int)remaining);
                 }
                 // Advance SWI overhead
-                memory.AdvanceCycles(2);
+                AdvanceHLECycles(kSwiOverheadCycles);
                 break;
             }
             case 0x0E: // BgAffineSet
@@ -2445,6 +2877,18 @@ namespace AIO::Emulator::GBA {
         }
     }
 
+    void ARM7TDMI::AdvanceHLECycles(int cycles) {
+        if (cycles <= 0) return;
+        hleCyclesThisStep += cycles;
+        memory.AdvanceCycles(cycles);
+    }
+
+    int ARM7TDMI::ConsumeHLECycles() {
+        const int cycles = hleCyclesThisStep;
+        hleCyclesThisStep = 0;
+        return cycles;
+    }
+
     void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         // Thumb Instruction Decoding
         
@@ -2855,7 +3299,7 @@ namespace AIO::Emulator::GBA {
                     const uint32_t old = registers[regD];
                     registers[regD] = val;
 
-                    if ((instruction & 0xFF00) == 0x4600 && regD == 8) {
+                    if (kEnableHeavyCpuTraces && (instruction & 0xFF00) == 0x4600 && regD == 8) {
                         Logger::Instance().LogFmt(LogLevel::Error, "CPU", "THUMB HiReg MOV into R8: fromPC=0x%08x instr=0x%04x h1=%u h2=%u rm=%u rd=%u regM=%u val=0x%08x (R11=0x%08x) old=0x%08x new=0x%08x", currentInstrAddr, instruction, (unsigned)h1, (unsigned)h2, (unsigned)rm, (unsigned)rd, (unsigned)regM, val, registers[11], old, registers[regD]);
                     }
 
@@ -2873,10 +3317,32 @@ namespace AIO::Emulator::GBA {
             } else if (opcode == 3) { // BX Rm
                 uint32_t target = registers[regM];
 
+                const bool traceEarlyBx = (std::getenv("AIO_TRACE_EARLY_BX") != nullptr);
+                if (traceEarlyBx) {
+                    const uint32_t fromPC = currentInstrAddr;
+                    const uint32_t masked = target & 0xFFFFFFFEu;
+                    const bool entersArm = ((target & 1u) == 0u);
+                    if (entersArm && fromPC >= 0x08001000u && fromPC <= 0x08002000u) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Error,
+                            "CPU",
+                            "EARLY THUMB BX->ARM fromPC=0x%08x instr=0x%04x Rm=%u target=0x%08x masked=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x",
+                            fromPC,
+                            instruction,
+                            (unsigned)regM,
+                            target,
+                            masked,
+                            registers[14],
+                            registers[13],
+                            cpsr);
+                    }
+                }
+
                 // Focused debug: detect unexpected interworking near the early SMA2 crash region.
-                if ((currentInstrAddr >= 0x08001600 && currentInstrAddr <= 0x08001820) ||
-                    ((target & 0xFFFFFFFEu) >= 0x08001600 && (target & 0xFFFFFFFEu) <= 0x08001820) ||
-                    ((target & 0xFFFFFFFEu) == 0x08001774)) {
+                if (kEnableHeavyCpuTraces &&
+                    ((currentInstrAddr >= 0x08001600 && currentInstrAddr <= 0x08001820) ||
+                     ((target & 0xFFFFFFFEu) >= 0x08001600 && (target & 0xFFFFFFFEu) <= 0x08001820) ||
+                     ((target & 0xFFFFFFFEu) == 0x08001774))) {
                     Logger::Instance().LogFmt(
                         LogLevel::Error,
                         "CPU",
@@ -3135,7 +3601,7 @@ namespace AIO::Emulator::GBA {
                 uint32_t currentAddr = sp;
                 registers[13] = sp;
 
-                if (currentInstrAddr == 0x08007320 || (rList == 0x18 && !R)) {
+                if (kEnableHeavyCpuTraces && (currentInstrAddr == 0x08007320 || (rList == 0x18 && !R))) {
                     Logger::Instance().LogFmt(
                         LogLevel::Error,
                         "CPU",
@@ -3168,7 +3634,7 @@ namespace AIO::Emulator::GBA {
                 uint32_t sp = registers[13];
                 uint32_t currentAddr = sp;
 
-                if (currentInstrAddr == 0x08007320 || (rList == 0x18 && !R)) {
+                if (kEnableHeavyCpuTraces && (currentInstrAddr == 0x08007320 || (rList == 0x18 && !R))) {
                     const uint32_t w0 = memory.Read32(sp);
                     const uint32_t w1 = memory.Read32(sp + 4);
                     Logger::Instance().LogFmt(
@@ -3194,7 +3660,7 @@ namespace AIO::Emulator::GBA {
                 if (R) {
                     uint32_t pc = memory.Read32(currentAddr);
                     TraceWatchRead32(currentInstrAddr, true, (uint32_t)currentOp16, currentAddr, pc, registers[13]);
-                    if (pc >= 0x08125C00 && pc < 0x08127000) {
+                    if (kEnableHeavyCpuTraces && pc >= 0x08125C00 && pc < 0x08127000) {
                         Logger::Instance().LogFmt(LogLevel::Error, "CPU", "POP {PC} instruction: PC=0x%08x SP=0x%08x popped_pc=0x%08x", registers[15]-2, currentAddr, pc);
                     }
                     LogBranch(registers[15] - 2, pc);
@@ -3205,7 +3671,7 @@ namespace AIO::Emulator::GBA {
                 
                 registers[13] = currentAddr;
 
-                if (currentInstrAddr == 0x08007320 || (rList == 0x18 && !R)) {
+                if (kEnableHeavyCpuTraces && (currentInstrAddr == 0x08007320 || (rList == 0x18 && !R))) {
                     Logger::Instance().LogFmt(
                         LogLevel::Error,
                         "CPU",
@@ -3217,7 +3683,7 @@ namespace AIO::Emulator::GBA {
                 }
             }
             
-            if (registers[13] < 0x02000000 || registers[13] >= 0x04000000) {
+            if (kEnableHeavyCpuTraces && (registers[13] < 0x02000000 || registers[13] >= 0x04000000)) {
                 Logger::Instance().LogFmt(
                     LogLevel::Error,
                     "CPU",

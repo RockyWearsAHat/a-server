@@ -4,7 +4,7 @@
 
 #include <QDebug>
 #include <QElapsedTimer>
-#include <QSettings>
+#include <QString>
 
 #include <algorithm>
 #include <cmath>
@@ -18,7 +18,6 @@ bool gAioInputDebug = false;
 namespace {
 
 enum class Dir { None, Up, Down, Left, Right };
-
 enum class DirSource { None, Dpad, Stick };
 
 Dir collapseToSingle(bool up, bool down, bool left, bool right) {
@@ -61,9 +60,10 @@ const char* sourceName(DirSource s) {
         default: return "None";
     }
 }
+
 } // namespace
 
-uint16_t InputManager::update() {
+void InputManager::pollSdl() {
     // Capture previous logical state for edge detection.
     lastLogicalButtonsDown_ = logicalButtonsDown_;
 
@@ -76,7 +76,7 @@ uint16_t InputManager::update() {
     SDL_GameControllerUpdate();
 
     // Check for controller hotplug.
-    static int lastNumJoysticks = 0;
+    static int lastNumJoysticks = -1;
     const int numJoysticks = SDL_NumJoysticks();
     if (numJoysticks != lastNumJoysticks) {
         for (auto c : controllers) {
@@ -93,13 +93,6 @@ uint16_t InputManager::update() {
             controllers.insert(i, pad);
             const QString name = QString::fromUtf8(SDL_GameControllerName(pad));
             qDebug() << "Opened Gamepad:" << name;
-
-            // Pick an "active" controller for mapping decisions (first one opened).
-            if (activeControllerName_.isEmpty()) {
-                activeControllerName_ = name;
-                activeFamily_ = detail::detectFamilyFromName(name);
-                applyBestControllerLayoutForActivePad();
-            }
         }
 
         lastNumJoysticks = numJoysticks;
@@ -108,15 +101,8 @@ uint16_t InputManager::update() {
     // System buttons (Guide/Home/PS) are tracked separately from emulation input.
     systemButtonsDown_ = 0;
 
-    // Start from keyboard-driven logical state (maintained in processKeyEvent).
-    uint32_t mergedLogical = logicalButtonsDown_;
-
-    // Default controller-backed logical buttons to Released (1) each frame.
-    mergedLogical |= kControllerLogicalMask;
-    mergedLogical |= kDirectionLogicalMask;
-
-    // Reset gamepad state to Released (1)
-    gamepadState = 0xFFFF;
+    // Controller-derived logical state is recomputed every frame (no latching).
+    uint32_t controllerLogical = 0xFFFFFFFFu;
 
     // Unified direction provider state.
     static DirSource lastSource = DirSource::None;
@@ -141,20 +127,19 @@ uint16_t InputManager::update() {
             const int rx = static_cast<int>(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX));
             const int ry = static_cast<int>(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY));
 
-            qDebug() << "[INPUT] dpad" << du << dd << dl << dr << "axes" << lx << ly << rx << ry
-                     << "name" << activeControllerName_;
+            qDebug() << "[INPUT] dpad" << du << dd << dl << dr << "axes" << lx << ly << rx << ry;
         }
 
         if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_GUIDE)) {
             systemButtonsDown_ |= 0x1u; // Home/Guide
         }
 
-        // Logical buttons (global mapping)
-        for (auto it = sdlToLogical_.begin(); it != sdlToLogical_.end(); ++it) {
+        // Non-direction logical buttons from mapping.
+        for (auto it = bindings_.controllerButtons.begin(); it != bindings_.controllerButtons.end(); ++it) {
             const int sdlBtn = it.key();
             const LogicalButton logical = it.value();
             if (SDL_GameControllerGetButton(pad, static_cast<SDL_GameControllerButton>(sdlBtn))) {
-                mergedLogical &= ~logicalMaskFor(logical);
+                controllerLogical &= ~logicalMaskFor(logical);
             }
         }
 
@@ -166,11 +151,8 @@ uint16_t InputManager::update() {
         const Dir dpadDir = collapseToSingle(dpadUp, dpadDown, dpadLeft, dpadRight);
 
         // Direction intent: sticks
-        QSettings uiSettings("AIO", "Server");
-        uiSettings.beginGroup("Input/UI");
-        const int pressDeadzone = uiSettings.value("UIStickPressDeadzone", 20000).toInt();
-        const int releaseDeadzone = uiSettings.value("UIStickReleaseDeadzone", 16000).toInt();
-        uiSettings.endGroup();
+        const int pressDeadzone = bindings_.sticks.pressDeadzone;
+        const int releaseDeadzone = bindings_.sticks.releaseDeadzone;
 
         const int lx = static_cast<int>(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX));
         const int ly = static_cast<int>(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY));
@@ -203,8 +185,15 @@ uint16_t InputManager::update() {
         };
 
         const Dir stickDir = [&]() {
-            const Dir l = axisToDir(lx, ly);
-            const Dir r = axisToDir(rx, ry);
+            Dir l = Dir::None;
+            Dir r = Dir::None;
+            if (bindings_.sticks.enableLeftStick) {
+                l = axisToDir(lx, ly);
+            }
+            if (bindings_.sticks.enableRightStick) {
+                r = axisToDir(rx, ry);
+            }
+
             if (l == Dir::None) return r;
             if (r == Dir::None) return l;
 
@@ -246,49 +235,14 @@ uint16_t InputManager::update() {
             lastLoggedSource = lastSource;
         }
 
-        if (chosen == Dir::Up) mergedLogical &= ~logicalMaskFor(LogicalButton::Up);
-        if (chosen == Dir::Down) mergedLogical &= ~logicalMaskFor(LogicalButton::Down);
-        if (chosen == Dir::Left) mergedLogical &= ~logicalMaskFor(LogicalButton::Left);
-        if (chosen == Dir::Right) mergedLogical &= ~logicalMaskFor(LogicalButton::Right);
-
-        for (auto it = gamepadToButtonMap.begin(); it != gamepadToButtonMap.end(); ++it) {
-            const int sdlBtn = it.key();
-            const GBAButton gbaBtn = it.value();
-            if (SDL_GameControllerGetButton(pad, static_cast<SDL_GameControllerButton>(sdlBtn))) {
-                gamepadState &= ~(1 << gbaBtn); // Pressed (0)
-            }
-        }
+        if (chosen == Dir::Up) controllerLogical &= ~logicalMaskFor(LogicalButton::Up);
+        if (chosen == Dir::Down) controllerLogical &= ~logicalMaskFor(LogicalButton::Down);
+        if (chosen == Dir::Left) controllerLogical &= ~logicalMaskFor(LogicalButton::Left);
+        if (chosen == Dir::Right) controllerLogical &= ~logicalMaskFor(LogicalButton::Right);
     }
 
-    // Bridge logical->GBA for the GBA core.
-    for (auto it = logicalToGBA_.begin(); it != logicalToGBA_.end(); ++it) {
-        const LogicalButton logical = it.key();
-        const GBAButton gbaBtn = it.value();
-        if ((mergedLogical & logicalMaskFor(logical)) == 0) {
-            gamepadState &= ~(1 << gbaBtn);
-        }
-    }
-
-    // Publish merged logical state for UI navigation.
-    lastLogicalButtonsDown_ = logicalButtonsDown_;
-    logicalButtonsDown_ = mergedLogical;
-
-    if (detail::gAioInputDebug) {
-        static uint32_t lastLoggedLogical = 0xFFFFFFFFu;
-        if (logicalButtonsDown_ != lastLoggedLogical) {
-            auto bit = [&](LogicalButton b) { return (logicalButtonsDown_ & logicalMaskFor(b)) == 0; };
-
-            qDebug() << "[INPUT] logical" << Qt::hex << static_cast<quint32>(logicalButtonsDown_) << Qt::dec
-                     << "Confirm" << bit(LogicalButton::Confirm) << "Back" << bit(LogicalButton::Back)
-                     << "Home" << bit(LogicalButton::Home) << "Up" << bit(LogicalButton::Up)
-                     << "Down" << bit(LogicalButton::Down) << "Left" << bit(LogicalButton::Left)
-                     << "Right" << bit(LogicalButton::Right);
-            lastLoggedLogical = logicalButtonsDown_;
-        }
-    }
-
-    const uint16_t result = (keyboardState & gamepadState) & 0x03FF; // KEYINPUT lower 10 bits
-    return result;
+    // Merge keyboard (latched by key events) with controller (polled every frame).
+    logicalButtonsDown_ = keyboardLogicalButtonsDown_ & controllerLogical;
 }
 
 } // namespace AIO::Input
