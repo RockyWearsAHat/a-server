@@ -35,6 +35,13 @@ namespace Input {
         static InputManager& instance();
 
         /**
+         * @brief Select which binding context is active.
+         * UI and Emulator can use different default mappings.
+         */
+        void setActiveContext(InputContext ctx);
+        InputContext activeContext() const { return activeContext_; }
+
+        /**
          * @brief Process a Qt key event and update internal keyboard/logical state.
          * @return true if the event was recognized and consumed.
          */
@@ -88,6 +95,8 @@ namespace Input {
         QMap<int, SDL_GameController*> controllers;
 
         InputBindings bindings_;
+
+        InputContext activeContext_ = InputContext::UI;
 
         QMap<LogicalButton, Handler> pressHandlers_;
 

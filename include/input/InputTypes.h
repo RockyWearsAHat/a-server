@@ -30,6 +30,11 @@ enum class ControllerFamily {
     Generic,
 };
 
+enum class InputContext {
+    UI,
+    Emulator,
+};
+
 // A single polled input frame for the whole program.
 // This is global state (not per-app). Different systems (UI vs emulation)
 // can consume different fields from the same snapshot.

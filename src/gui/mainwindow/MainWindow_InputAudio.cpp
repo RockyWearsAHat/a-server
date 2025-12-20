@@ -76,34 +76,49 @@ void MainWindow::audioCallback(void* userdata, Uint8* stream, int len) {
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {
-    // Always keep keyboard mapping updated for emulator core.
-    const bool mapped = Input::InputManager::instance().processKeyEvent(event);
+    const bool inEmu = (stackedWidget && stackedWidget->currentWidget() == emulatorPage && emulatorRunning);
+
+    // Select correct keymap for this sub-application.
+    auto& input = Input::InputManager::instance();
+    input.setActiveContext(inEmu ? Input::InputContext::Emulator : Input::InputContext::UI);
+
+    // Debugger controls via GUI should work even if a key is mapped.
+    if (inEmu && debuggerEnabled) {
+        if (event->key() == Qt::Key_Down || event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            gba.SetSingleStep(true);
+            gba.Step();
+            return;
+        }
+        if (event->key() == Qt::Key_Up) {
+            gba.StepBack();
+            return;
+        }
+        if (event->key() == Qt::Key_C) {
+            debuggerContinue = true;
+            return;
+        }
+    }
+
+    // Keep keyboard mapping updated for the active context.
+    const bool mapped = input.processKeyEvent(event);
 
     // If we're not in an active emulator run, treat arrows/enter/esc as UI navigation.
-    const bool inEmu = (stackedWidget && stackedWidget->currentWidget() == emulatorPage && emulatorRunning);
     if (!inEmu) {
         QMainWindow::keyPressEvent(event);
         return;
     }
 
     if (!mapped) {
-        // Debugger controls via GUI
-        if (debuggerEnabled) {
-            if (event->key() == Qt::Key_Down || event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-                gba.SetSingleStep(true);
-                gba.Step();
-            } else if (event->key() == Qt::Key_Up) {
-                gba.StepBack();
-            } else if (event->key() == Qt::Key_C) {
-                debuggerContinue = true;
-            }
-        }
         QMainWindow::keyPressEvent(event);
     }
 }
 
 void MainWindow::keyReleaseEvent(QKeyEvent *event) {
-    if (Input::InputManager::instance().processKeyEvent(event)) {
+    const bool inEmu = (stackedWidget && stackedWidget->currentWidget() == emulatorPage && emulatorRunning);
+    auto& input = Input::InputManager::instance();
+    input.setActiveContext(inEmu ? Input::InputContext::Emulator : Input::InputContext::UI);
+
+    if (input.processKeyEvent(event)) {
         // Input handled
     } else {
         QMainWindow::keyReleaseEvent(event);

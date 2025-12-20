@@ -1,7 +1,7 @@
 {
   "cmake.ctestEnabled": true,
   "cmake.buildDirectory": "${workspaceFolder}/build",
-  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.sourceDirectory": "/Users/alexwaldmann/Desktop/AIO Server/cmake",
   "cmake.generator": "Unix Makefiles",
   "cmake.configureOnOpen": true,
   "C_Cpp.intelliSenseEngine": "disabled",

@@ -16,11 +16,19 @@ namespace AIO::Input {
 // Convention:
 // - LogicalButton state is active-low (0 = pressed, 1 = released), matching GBA KEYINPUT.
 struct InputBindings {
-    // Qt::Key -> LogicalButton
-    QMap<int, LogicalButton> keyboard;
+    struct ContextBindings {
+        // Qt::Key -> LogicalButton
+        QMap<int, LogicalButton> keyboard;
 
-    // SDL_CONTROLLER_BUTTON_* (stored as int) -> LogicalButton
-    QMap<int, LogicalButton> controllerButtons;
+        // SDL_CONTROLLER_BUTTON_* (stored as int) -> LogicalButton
+        QMap<int, LogicalButton> controllerButtons;
+    };
+
+    // Defaults for UI/navigation contexts.
+    ContextBindings ui;
+
+    // Defaults for emulator runtime contexts.
+    ContextBindings emulator;
 
     struct StickConfig {
         // Matches existing behavior: press threshold higher than release threshold.

@@ -192,14 +192,17 @@ void MainWindow::UpdateDisplay() {
     // Update Input
     // Polling is owned by the navigation timer; UI/emulator consume the latest snapshot.
     auto& input = AIO::Input::InputManager::instance();
+
+    QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+    const bool inEmu = (current == emulatorPage) && emulatorRunning;
+    input.setActiveContext(inEmu ? AIO::Input::InputContext::Emulator : AIO::Input::InputContext::UI);
+
     auto snapshot = input.snapshot();
     if (snapshot.logical == 0xFFFFFFFFu && snapshot.keyinput == 0x03FF && snapshot.system == 0) {
         snapshot = input.updateSnapshot();
     }
 
     const uint16_t inputState = snapshot.keyinput;
-
-    QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
 
     // Route input based on the active UI page.
     // current already computed above.

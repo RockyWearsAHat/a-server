@@ -135,7 +135,11 @@ void InputManager::pollSdl() {
         }
 
         // Non-direction logical buttons from mapping.
-        for (auto it = bindings_.controllerButtons.begin(); it != bindings_.controllerButtons.end(); ++it) {
+        const auto& buttonMap = (activeContext_ == InputContext::Emulator)
+            ? bindings_.emulator.controllerButtons
+            : bindings_.ui.controllerButtons;
+
+        for (auto it = buttonMap.begin(); it != buttonMap.end(); ++it) {
             const int sdlBtn = it.key();
             const LogicalButton logical = it.value();
             if (SDL_GameControllerGetButton(pad, static_cast<SDL_GameControllerButton>(sdlBtn))) {

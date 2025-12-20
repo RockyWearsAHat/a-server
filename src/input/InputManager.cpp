@@ -35,11 +35,28 @@ InputManager::~InputManager() {
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
 }
 
+void InputManager::setActiveContext(InputContext ctx) {
+    if (activeContext_ == ctx) return;
+    activeContext_ = ctx;
+
+    // Clear latched keyboard state so keys don't get "stuck" when switching
+    // between UI and emulator contexts.
+    keyboardLogicalButtonsDown_ = 0xFFFFFFFFu;
+    logicalButtonsDown_ = 0xFFFFFFFFu;
+    lastLogicalButtonsDown_ = 0xFFFFFFFFu;
+    systemButtonsDown_ = 0;
+    lastSnapshot_ = InputSnapshot{};
+}
+
 bool InputManager::processKeyEvent(QKeyEvent* event) {
     const int key = event->key();
 
-    if (!bindings_.keyboard.contains(key)) return false;
-    const LogicalButton logical = bindings_.keyboard.value(key);
+    const auto& keymap = (activeContext_ == InputContext::Emulator)
+        ? bindings_.emulator.keyboard
+        : bindings_.ui.keyboard;
+
+    if (!keymap.contains(key)) return false;
+    const LogicalButton logical = keymap.value(key);
     const uint32_t mask = 1u << static_cast<uint32_t>(logical);
 
     if (event->type() == QEvent::KeyPress) {

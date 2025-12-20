@@ -22,6 +22,11 @@ namespace GUI {
 void MainWindow::setupNavigation() {
     navTimer = new QTimer(this);
     connect(navTimer, &QTimer::timeout, this, [this]() {
+        QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
+        const bool inEmu = (current == emulatorPage) && emulatorRunning;
+        AIO::Input::InputManager::instance().setActiveContext(
+            inEmu ? AIO::Input::InputContext::Emulator : AIO::Input::InputContext::UI);
+
         const auto snapshot = AIO::Input::InputManager::instance().updateSnapshot();
         const auto frame = actionMapper.update(snapshot);
 
@@ -153,6 +158,10 @@ void MainWindow::setupNavigation() {
 void MainWindow::onPageChanged() {
     QWidget* current = stackedWidget ? stackedWidget->currentWidget() : nullptr;
     if (!current) return;
+
+    const bool inEmu = (current == emulatorPage) && emulatorRunning;
+    AIO::Input::InputManager::instance().setActiveContext(
+        inEmu ? AIO::Input::InputContext::Emulator : AIO::Input::InputContext::UI);
 
     // Reset navigation index when swapping pages to avoid carrying stale hover state.
     nav.clearHover();
