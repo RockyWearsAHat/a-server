@@ -1,0 +1,11 @@
+# SMA2Harness input script
+# Format per line: <time_ms> <KEY> <DOWN|UP>
+# Keys: A B SELECT START RIGHT LEFT UP DOWN R L
+# Lines starting with # are comments.
+
+1500 START DOWN
+1600 START UP
+2500 START DOWN
+2600 START UP
+5000 A DOWN
+5100 A UP

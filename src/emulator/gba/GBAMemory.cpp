@@ -29,6 +29,112 @@ namespace AIO::Emulator::GBA {
         bool TraceGbaSpam() {
             return EnvFlagCached("AIO_TRACE_GBA_SPAM");
         }
+
+        inline bool IsPpuIoOffset(uint32_t offAligned) {
+            switch (offAligned) {
+                case 0x000: // DISPCNT
+                case 0x008: // BG0CNT
+                case 0x00A: // BG1CNT
+                case 0x00C: // BG2CNT
+                case 0x00E: // BG3CNT
+                case 0x010: // BG0HOFS
+                case 0x012: // BG0VOFS
+                case 0x014: // BG1HOFS
+                case 0x016: // BG1VOFS
+                case 0x018: // BG2HOFS
+                case 0x01A: // BG2VOFS
+                case 0x01C: // BG3HOFS
+                case 0x01E: // BG3VOFS
+                case 0x040: // WIN0H
+                case 0x042: // WIN1H
+                case 0x044: // WIN0V
+                case 0x046: // WIN1V
+                case 0x048: // WININ
+                case 0x04A: // WINOUT
+                case 0x04C: // MOSAIC
+                case 0x050: // BLDCNT
+                case 0x052: // BLDALPHA
+                case 0x054: // BLDY
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        inline void TracePpuIoWrite8(uint32_t address, uint8_t value, uint32_t pc) {
+            if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES")) return;
+            if ((address & 0xFF000000u) != 0x04000000u) return;
+            const uint32_t off = address & 0x3FFu;
+            const uint32_t offAligned = off & ~1u;
+            if (!IsPpuIoOffset(offAligned)) return;
+
+            static uint8_t last8[0x400] = {};
+            static bool seen8[0x400] = {};
+            if (seen8[off] && last8[off] == value) return;
+            seen8[off] = true;
+            last8[off] = value;
+
+            static int logs = 0;
+            if (logs++ >= 50000) return;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info,
+                "PPU_IO",
+                "W8 off=0x%03x addr=0x%08x val=0x%02x PC=0x%08x",
+                (unsigned)off,
+                (unsigned)address,
+                (unsigned)value,
+                (unsigned)pc);
+        }
+
+        inline void TracePpuIoWrite16(uint32_t address, uint16_t value, uint32_t pc) {
+            if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES")) return;
+            if ((address & 0xFF000000u) != 0x04000000u) return;
+            const uint32_t offAligned = (address & 0x3FFu) & ~1u;
+            if (!IsPpuIoOffset(offAligned)) return;
+
+            static uint16_t last16[0x400 / 2] = {};
+            static bool seen16[0x400 / 2] = {};
+            const uint32_t idx = offAligned >> 1;
+            if (seen16[idx] && last16[idx] == value) return;
+            seen16[idx] = true;
+            last16[idx] = value;
+
+            static int logs = 0;
+            if (logs++ >= 50000) return;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info,
+                "PPU_IO",
+                "W16 off=0x%03x addr=0x%08x val=0x%04x PC=0x%08x",
+                (unsigned)offAligned,
+                (unsigned)address,
+                (unsigned)value,
+                (unsigned)pc);
+        }
+
+        inline void TracePpuIoWrite32(uint32_t address, uint32_t value, uint32_t pc) {
+            if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES")) return;
+            if ((address & 0xFF000000u) != 0x04000000u) return;
+            const uint32_t offAligned = (address & 0x3FFu) & ~3u;
+            if (!IsPpuIoOffset(offAligned & ~1u) && !IsPpuIoOffset((offAligned + 2u) & ~1u)) return;
+
+            static uint32_t last32[0x400 / 4] = {};
+            static bool seen32[0x400 / 4] = {};
+            const uint32_t idx = offAligned >> 2;
+            if (seen32[idx] && last32[idx] == value) return;
+            seen32[idx] = true;
+            last32[idx] = value;
+
+            static int logs = 0;
+            if (logs++ >= 50000) return;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info,
+                "PPU_IO",
+                "W32 off=0x%03x addr=0x%08x val=0x%08x PC=0x%08x",
+                (unsigned)offAligned,
+                (unsigned)address,
+                (unsigned)value,
+                (unsigned)pc);
+        }
     }
 
     GBAMemory::GBAMemory() {
@@ -1023,9 +1129,12 @@ namespace AIO::Emulator::GBA {
             }
             case 0x06: // VRAM (GBATEK: 0x06000000-0x06017FFF)
             {
-                // VRAM is 96KB (0x18000 bytes) which is NOT a power of 2
-                uint32_t rawOffset = address & 0xFFFFFF;
-                uint32_t offset = rawOffset % MemoryMap::VRAM_ACTUAL_SIZE;
+                // VRAM address space is 0x06000000-0x0601FFFF (128KB), with 96KB of real memory.
+                // The upper 32KB (0x06018000-0x0601FFFF) mirrors the OBJ region (0x06010000-0x06017FFF).
+                uint32_t offset = address & 0x1FFFFu; // mirror within 128KB window
+                if (offset >= MemoryMap::VRAM_ACTUAL_SIZE) {
+                    offset -= 0x8000u;
+                }
                 if (offset < vram.size()) return vram[offset];
                 break;
             }
@@ -1093,6 +1202,30 @@ namespace AIO::Emulator::GBA {
            if (region == 0x0D) {
                return ReadEEPROM();
            }
+
+        // Diagnostics: detect unaligned IO halfword reads.
+        // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy AIO_TRACE_IO_ODD_HALFWORD=1)
+        const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") || EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
+        if (traceIoUnaligned && region == 0x04 && (address & 1u)) {
+            static int unalignedIoRead16Logs = 0;
+            if (unalignedIoRead16Logs < 400) {
+                const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "IO",
+                    "UNALIGNED Read16 addr=0x%08x PC=0x%08x",
+                    (unsigned)address,
+                    (unsigned)pc);
+                unalignedIoRead16Logs++;
+            }
+        }
+
+        // GBA IO registers are fundamentally 16-bit; halfword accesses are aligned.
+        // Some titles issue unaligned halfword loads/stores into IO space; on hardware
+        // these behave like aligned accesses.
+        if (region == 0x04 && (address & 1u)) {
+            address &= ~1u;
+        }
 
         // SMA2 investigation: trace reads of the save/validator object pointer.
         // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
@@ -1173,6 +1306,28 @@ namespace AIO::Emulator::GBA {
             uint16_t low = ReadEEPROM();
             uint16_t high = ReadEEPROM();
             return low | (high << 16);
+        }
+
+        // Diagnostics: detect unaligned IO word reads.
+        // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy AIO_TRACE_IO_ODD_HALFWORD=1)
+        const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") || EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
+        if (traceIoUnaligned && region == 0x04 && (address & 3u)) {
+            static int unalignedIoRead32Logs = 0;
+            if (unalignedIoRead32Logs < 400) {
+                const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "IO",
+                    "UNALIGNED Read32 addr=0x%08x PC=0x%08x",
+                    (unsigned)address,
+                    (unsigned)pc);
+                unalignedIoRead32Logs++;
+            }
+        }
+
+        // IO space word accesses are aligned on hardware.
+        if (region == 0x04 && (address & 3u)) {
+            address &= ~3u;
         }
 
         // SMA2 investigation: trace reads of the save/validator object pointer.
@@ -1289,8 +1444,10 @@ namespace AIO::Emulator::GBA {
             }
             case 0x06: // VRAM (GBATEK: 0x06000000-0x06017FFF)
             {
-                uint32_t rawOffset = address & 0xFFFFFF;
-                uint32_t offset = rawOffset % MemoryMap::VRAM_ACTUAL_SIZE;
+                uint32_t offset = address & 0x1FFFFu;
+                if (offset >= MemoryMap::VRAM_ACTUAL_SIZE) {
+                    offset -= 0x8000u;
+                }
                 
                 // DEBUG: Trace writes to BG character area 0 (first 16KB: 0x0000-0x3FFF)
                 if (TraceGbaSpam()) {
@@ -1329,6 +1486,8 @@ namespace AIO::Emulator::GBA {
     }
 
     void GBAMemory::Write8(uint32_t address, uint8_t value) {
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        TracePpuIoWrite8(address, value, pc);
         const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
         const bool isIwram = ((address >> 24) == 0x03);
         const uint32_t iwramOff = address & 0x7FFFu;
@@ -1597,13 +1756,11 @@ namespace AIO::Emulator::GBA {
                 }
                 break;
             }
-            case 0x06: // VRAM - 8-bit writes to BG VRAM duplicate, OBJ VRAM ignored
+            case 0x06: // VRAM - 8-bit writes duplicate on the 16-bit bus
             {
-                uint32_t rawOffset = address & 0xFFFFFF;
-                uint32_t offset = rawOffset % 0x18000;
-                
-                if (offset >= 0x10000) {
-                    break; // OBJ VRAM: 8-bit writes ignored
+                uint32_t offset = address & 0x1FFFFu;
+                if (offset >= 0x18000u) {
+                    offset -= 0x8000u;
                 }
                 
                 uint32_t alignedOffset = offset & ~1;
@@ -1759,6 +1916,34 @@ namespace AIO::Emulator::GBA {
             WriteEEPROM(value);
             return;
         }
+
+        // Diagnostics: detect unaligned IO halfword writes.
+        // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy AIO_TRACE_IO_ODD_HALFWORD=1)
+        const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") || EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
+        if (traceIoUnaligned && region == 0x04 && (address & 1u)) {
+            static int unalignedIoWrite16Logs = 0;
+            if (unalignedIoWrite16Logs < 400) {
+                const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "IO",
+                    "UNALIGNED Write16 addr=0x%08x val=0x%04x PC=0x%08x",
+                    (unsigned)address,
+                    (unsigned)value,
+                    (unsigned)pc);
+                unalignedIoWrite16Logs++;
+            }
+        }
+
+        // GBA IO registers are fundamentally 16-bit; halfword accesses are aligned.
+        // Some titles issue unaligned halfword stores into IO space; on hardware these
+        // behave like aligned accesses.
+        if (region == 0x04 && (address & 1u)) {
+            address &= ~1u;
+        }
+
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        TracePpuIoWrite16(address, value, pc);
 
         // SMA2 investigation: trace non-zero writes into the header staging buffer in EWRAM.
         // Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
@@ -1942,8 +2127,13 @@ namespace AIO::Emulator::GBA {
             }
         }
 
-        // For video memory, bypass 8-bit quirks
-        // uint8_t region = (address >> 24) & 0xFF; // Already defined above
+        // For video memory, bypass 8-bit quirks.
+        // Also optionally align unaligned halfword stores to match HW behavior
+        // (video memory is fundamentally 16-bit addressed).
+        if (region == 0x05 || region == 0x06 || region == 0x07) {
+            address &= ~1u;
+        }
+
         if (region == 0x05 || region == 0x06 || region == 0x07) {
             Write8Internal(address, value & 0xFF);
             Write8Internal(address + 1, (value >> 8) & 0xFF);
@@ -2065,6 +2255,32 @@ namespace AIO::Emulator::GBA {
         const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
         const bool isIrqHandPtrWord = ((address >> 24) == 0x03) && ((address & 0x7FFFu) == 0x7FFCu);
         const uint32_t oldIrqHandWord = (traceIrqHandWrites && isIrqHandPtrWord) ? Read32(0x03007FFCu) : 0u;
+
+        // Diagnostics: detect unaligned IO word writes.
+        // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy AIO_TRACE_IO_ODD_HALFWORD=1)
+        const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") || EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
+        if (traceIoUnaligned && ((address >> 24) == 0x04) && (address & 3u)) {
+            static int unalignedIoWrite32Logs = 0;
+            if (unalignedIoWrite32Logs < 400) {
+                const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "IO",
+                    "UNALIGNED Write32 addr=0x%08x val=0x%08x PC=0x%08x",
+                    (unsigned)address,
+                    (unsigned)value,
+                    (unsigned)pc);
+                unalignedIoWrite32Logs++;
+            }
+        }
+
+        // IO space word accesses are aligned on hardware.
+        if (((address >> 24) == 0x04) && (address & 3u)) {
+            address &= ~3u;
+        }
+
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        TracePpuIoWrite32(address, value, pc);
 
         // Instrument IE/IME writes done via 32-bit access
         if ((address & 0xFF000000) == 0x04000000) {
@@ -2192,8 +2408,12 @@ namespace AIO::Emulator::GBA {
             return;
         }
 
-        // For VRAM, Palette, OAM - write directly without 8-bit quirk
-        // uint8_t region = (address >> 24) & 0xFF; // Already defined above
+        // For VRAM, Palette, OAM - write directly without 8-bit quirk.
+        // Optionally align unaligned word stores to match HW behavior.
+        if (region == 0x05 || region == 0x06 || region == 0x07) {
+            address &= ~3u;
+        }
+
         if (region == 0x05 || region == 0x06 || region == 0x07) {
             Write8Internal(address, value & 0xFF);
             Write8Internal(address + 1, (value >> 8) & 0xFF);
@@ -2270,6 +2490,9 @@ namespace AIO::Emulator::GBA {
     }
 
     void GBAMemory::CheckDMA(int timing) {
+        if (dmaInProgress) {
+            return;
+        }
         for (int i = 0; i < 4; ++i) {
             uint32_t baseOffset = IORegs::DMA0SAD + (i * IORegs::DMA_CHANNEL_SIZE);
             uint16_t control = io_regs[baseOffset + 10] | (io_regs[baseOffset + 11] << 8);
@@ -2287,6 +2510,15 @@ namespace AIO::Emulator::GBA {
         static int dmaSeq = 0;
         static bool inImmediateDMA = false;  // Only guard immediate DMAs
         dmaSeq++;
+
+        if (dmaInProgress) {
+            return;
+        }
+        dmaInProgress = true;
+        struct DMAGuard {
+            bool& flag;
+            ~DMAGuard() { flag = false; }
+        } guard{dmaInProgress};
         
         // DEBUG: Log first 10 DMA calls unconditionally
         static int dmaDebugCount = 0;
@@ -2305,8 +2537,8 @@ namespace AIO::Emulator::GBA {
         // Decode timing first
         int timing = (control & DMAControl::START_TIMING_MASK) >> 12;
         
-        // Only guard immediate timing (timing=0) DMAs from recursion
-        // Sound DMAs (timing=3) must be allowed to happen for audio to work
+        // Only guard immediate timing (timing=0) DMAs from recursion.
+        // Note: dmaInProgress already prevents nested DMAs across all timings.
         if (timing == 0 && inImmediateDMA) {
             return;
         }
@@ -2427,6 +2659,20 @@ namespace AIO::Emulator::GBA {
         
         if (count == 0) {
             count = (channel == 3) ? 0x10000 : 0x4000;
+        }
+
+        // GBA DMA aligns addresses to transfer width:
+        // - 16-bit DMA ignores bit0 (halfword aligned)
+        // - 32-bit DMA ignores bit0-1 (word aligned)
+        // If we don't do this, games that program odd DMA addresses can end up with
+        // scrambled tile/font data (common symptom: corrupted glyphs).
+        {
+            const uint32_t mask = is32Bit ? ~3u : ~1u;
+            currentSrc &= mask;
+            currentDst &= mask;
+            // Keep these in sync for any later debug/hack checks that compare the initial dst.
+            src &= mask;
+            dst &= mask;
         }
         
         // DEBUG: Post-mask trace for DMA to 0x3001500
@@ -2895,6 +3141,16 @@ namespace AIO::Emulator::GBA {
         } else {
             dmaInternalDst[channel] = currentDst;
         }
+
+        // DMA completion behavior (GBATEK):
+        // - Immediate DMA runs once and then clears the enable bit.
+        // - VBlank/HBlank/Special timing DMAs clear enable if repeat=0; otherwise they stay armed.
+        if (timing == 0 || !repeat) {
+            uint16_t ctrlNow = io_regs[baseOffset + 10] | (io_regs[baseOffset + 11] << 8);
+            ctrlNow &= ~DMAControl::ENABLE;
+            io_regs[baseOffset + 10] = (uint8_t)(ctrlNow & 0xFF);
+            io_regs[baseOffset + 11] = (uint8_t)((ctrlNow >> 8) & 0xFF);
+        }
         
         // DEBUG: Check jump table after DMA#1 (channel 3, dst starts at 0x3000000)
         if (channel == 3 && dst == 0x3000000 && gameCode == "A5NE") {
@@ -3084,8 +3340,19 @@ namespace AIO::Emulator::GBA {
                                         
                                         bool isFifoA = (dmaDest == 0x040000A0);
                                         bool isFifoB = (dmaDest == 0x040000A4);
-                                        
-                                        if ((isFifoA && fifoATimer == i) || (isFifoB && fifoBTimer == i)) {
+
+                                        // Real hardware requests sound FIFO DMA when the FIFO level is low
+                                        // (roughly <= 16 samples remain), not on every timer overflow.
+                                        bool shouldRequest = false;
+                                        if (apu) {
+                                            if (isFifoA && fifoATimer == i) {
+                                                shouldRequest = (apu->GetFifoACount() <= 16);
+                                            } else if (isFifoB && fifoBTimer == i) {
+                                                shouldRequest = (apu->GetFifoBCount() <= 16);
+                                            }
+                                        }
+
+                                        if (shouldRequest && !dmaInProgress) {
                                             PerformDMA(dma);
                                         }
                                     }

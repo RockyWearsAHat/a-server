@@ -9,8 +9,10 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace AIO::Emulator::GBA;
@@ -223,6 +225,123 @@ static void DumpSMA2SaveHeaderStaging(GBA& gba) {
     DumpMemHex(gba, 0x02000380, 0x100, "EWRAM[0x02000380..]");
 }
 
+static uint16_t KeyMaskFromName(const std::string& name) {
+    // KEYINPUT bits (0 = pressed):
+    // 0:A 1:B 2:Select 3:Start 4:Right 5:Left 6:Up 7:Down 8:R 9:L
+    static const std::unordered_map<std::string, uint16_t> k = {
+        {"A", 1u << 0},
+        {"B", 1u << 1},
+        {"SELECT", 1u << 2},
+        {"START", 1u << 3},
+        {"RIGHT", 1u << 4},
+        {"LEFT", 1u << 5},
+        {"UP", 1u << 6},
+        {"DOWN", 1u << 7},
+        {"R", 1u << 8},
+        {"L", 1u << 9},
+    };
+    auto it = k.find(name);
+    return (it == k.end()) ? 0 : it->second;
+}
+
+struct InputEvent {
+    int64_t cycle = 0;
+    uint16_t mask = 0;
+    bool down = false; // down = pressed (bit cleared)
+};
+
+static std::optional<std::vector<InputEvent>> LoadInputScript(const std::filesystem::path& path, int64_t cyclesPerSecond) {
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        return std::nullopt;
+    }
+
+    std::vector<InputEvent> events;
+    std::string line;
+    int lineNo = 0;
+    while (std::getline(f, line)) {
+        lineNo++;
+        // Strip comments
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line = line.substr(0, hash);
+
+        std::istringstream iss(line);
+        double ms = 0.0;
+        std::string key;
+        std::string action;
+        if (!(iss >> ms >> key >> action)) {
+            continue;
+        }
+
+        // Normalize
+        for (char& c : key) c = (char)std::toupper((unsigned char)c);
+        for (char& c : action) c = (char)std::toupper((unsigned char)c);
+
+        const uint16_t mask = KeyMaskFromName(key);
+        if (mask == 0) {
+            std::cerr << "[HARNESS] Input script: unknown key '" << key << "' at line " << lineNo << "\n";
+            continue;
+        }
+
+        const bool down = (action == "DOWN" || action == "PRESS" || action == "PRESSED");
+        const bool up = (action == "UP" || action == "RELEASE" || action == "RELEASED");
+        if (!down && !up) {
+            std::cerr << "[HARNESS] Input script: unknown action '" << action << "' at line " << lineNo << "\n";
+            continue;
+        }
+
+        const int64_t cycle = (int64_t)((ms / 1000.0) * (double)cyclesPerSecond);
+        events.push_back(InputEvent{cycle, mask, down});
+    }
+
+    std::sort(events.begin(), events.end(), [](const InputEvent& a, const InputEvent& b) {
+        if (a.cycle != b.cycle) return a.cycle < b.cycle;
+        return (int)a.down > (int)b.down;
+    });
+    return events;
+}
+
+static void DumpEnabledBgTilemaps(GBA& gba) {
+    const uint16_t dispcnt = gba.ReadMem16(0x04000000);
+    const bool bgEnable[4] = {
+        ((dispcnt >> 8) & 1) != 0,
+        ((dispcnt >> 9) & 1) != 0,
+        ((dispcnt >> 10) & 1) != 0,
+        ((dispcnt >> 11) & 1) != 0,
+    };
+
+    for (int bg = 0; bg < 4; ++bg) {
+        if (!bgEnable[bg]) continue;
+        const uint16_t bgcnt = gba.ReadMem16(0x04000008u + (uint32_t)bg * 2u);
+        const uint32_t screenBase = (bgcnt >> 8) & 0x1Fu;
+        const uint32_t baseAddr = 0x06000000u + screenBase * 2048u;
+
+        uint32_t xorHash = 0;
+        uint32_t nonZero = 0;
+        for (uint32_t i = 0; i < 1024; ++i) {
+            const uint16_t entry = gba.ReadMem16(baseAddr + i * 2u);
+            xorHash ^= ((uint32_t)entry << (i & 15));
+            if (entry != 0) nonZero++;
+        }
+
+        std::cout << "[BGMAP] BG" << bg
+                  << " BGCNT=0x" << std::hex << bgcnt << std::dec
+                  << " screenBase=" << screenBase
+                  << " base=0x" << std::hex << baseAddr << std::dec
+                  << " nonZeroEntries=" << nonZero
+                  << " xor=0x" << std::hex << xorHash << std::dec
+                  << "\n";
+
+        // Print a small prefix to make it easier to visually compare runs.
+        std::cout << "[BGMAP] BG" << bg << " first64:";
+        for (uint32_t i = 0; i < 64; ++i) {
+            const uint16_t entry = gba.ReadMem16(baseAddr + i * 2u);
+            std::cout << " 0x" << std::hex << std::setw(4) << std::setfill('0') << entry << std::dec;
+        }
+        std::cout << "\n";
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         const std::filesystem::path workspace = std::filesystem::current_path();
@@ -232,6 +351,7 @@ int main(int argc, char** argv) {
             ? std::filesystem::path(argv[2])
             : (workspace / "SMA2.sav.mgba_reference");
         const int seconds = (argc >= 4) ? std::stoi(argv[3]) : 10;
+        const std::filesystem::path scriptPath = (argc >= 5) ? std::filesystem::path(argv[4]) : std::filesystem::path();
 
         if (!std::filesystem::exists(romPath)) {
             std::cerr << "ROM not found: " << romPath << "\n";
@@ -283,6 +403,19 @@ int main(int argc, char** argv) {
         const int64_t targetCycles = (int64_t)seconds * CYCLES_PER_SECOND;
         int64_t cycles = 0;
 
+        uint16_t keyState = 0x03FFu; // all released
+        std::vector<InputEvent> inputEvents;
+        size_t nextInputEvent = 0;
+        if (!scriptPath.empty()) {
+            auto loaded = LoadInputScript(scriptPath, CYCLES_PER_SECOND);
+            if (!loaded) {
+                std::cerr << "[HARNESS] Failed to open input script: " << scriptPath << "\n";
+                return 5;
+            }
+            inputEvents = std::move(*loaded);
+            std::cerr << "[HARNESS] Loaded input script: " << scriptPath << " (" << inputEvents.size() << " events)\n";
+        }
+
         // Optional PC sampling to spot tight loops / stalls.
         // Tunables:
         // - AIO_PC_SAMPLE_CYCLES: sample period in cycles (default 200000)
@@ -297,6 +430,17 @@ int main(int argc, char** argv) {
         std::map<uint32_t, int> pcHistogram;
 
         while (cycles < targetCycles && !gba.IsCPUHalted() && !gba.IsHalted()) {
+            while (nextInputEvent < inputEvents.size() && cycles >= inputEvents[nextInputEvent].cycle) {
+                const auto& ev = inputEvents[nextInputEvent];
+                if (ev.down) {
+                    keyState = (uint16_t)(keyState & ~ev.mask);
+                } else {
+                    keyState = (uint16_t)(keyState | ev.mask);
+                }
+                gba.UpdateInput(keyState);
+                nextInputEvent++;
+            }
+
             const int stepCycles = gba.Step();
             cycles += stepCycles;
 
@@ -382,6 +526,10 @@ int main(int argc, char** argv) {
         const auto outSav = ReadFile(stagedSav);
 
         DumpVideoSummary(gba);
+
+        if (std::getenv("AIO_DUMP_BG_MAPS") != nullptr) {
+            DumpEnabledBgTilemaps(gba);
+        }
 
         const size_t block2 = 2 * 8;
         const size_t block4 = 4 * 8;

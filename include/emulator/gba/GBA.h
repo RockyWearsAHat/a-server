@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <atomic>
 #include <vector>
 #include <memory>
 #include "PPU.h"
@@ -40,6 +41,9 @@ namespace AIO::Emulator::GBA {
         uint32_t GetCPSR() const; // Debug helper
         void PatchROM(uint32_t addr, uint32_t val);
 
+        // Total cycles executed since last Reset(); useful for deterministic tooling.
+        uint64_t GetTotalCycles() const { return totalCyclesExecuted.load(std::memory_order_relaxed); }
+
         // Debugger controls (forwarded to ARM7TDMI)
         void AddBreakpoint(uint32_t addr);
         void ClearBreakpoints();
@@ -76,6 +80,8 @@ namespace AIO::Emulator::GBA {
         // every single CPU instruction.
         int pendingPeripheralCycles = 0;
         static constexpr int PERIPHERAL_BATCH_CYCLES = 64;
+
+        std::atomic<uint64_t> totalCyclesExecuted{0};
     };
 
 }

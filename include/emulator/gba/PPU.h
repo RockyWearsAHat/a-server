@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <mutex>
+#include <array>
 
 namespace AIO::Emulator::GBA {
 
@@ -30,6 +31,8 @@ namespace AIO::Emulator::GBA {
         void RenderOBJ();
         void RenderBackground(int bgIndex);
         void RenderAffineBackground(int bgIndex);
+
+        void BuildObjWindowMaskForScanline();
         
         // Window helpers
         uint8_t GetWindowMaskForPixel(int x, int y);
@@ -52,6 +55,16 @@ namespace AIO::Emulator::GBA {
         
         // Priority buffer: stores priority (0-3) for each pixel, 4 = backdrop (lowest)
         std::vector<uint8_t> priorityBuffer;
+
+        // Top visible layer id per pixel: 0-3=BG0-3, 4=OBJ, 5=backdrop.
+        std::vector<uint8_t> layerBuffer;
+
+        // Underlying pixel state (what was there before the topmost overwrote it).
+        std::vector<uint32_t> underColorBuffer;
+        std::vector<uint8_t> underLayerBuffer;
+
+        // Marks top pixel as coming from a semi-transparent OBJ.
+        std::vector<uint8_t> objSemiTransparentBuffer;
         int cycleCounter;
         int scanline;
         int frameCount;
@@ -64,6 +77,9 @@ namespace AIO::Emulator::GBA {
         int32_t bg2y_internal = 0;
         int32_t bg3x_internal = 0;
         int32_t bg3y_internal = 0;
+
+        // Per-scanline OBJ window coverage. 1=inside OBJ window.
+        std::array<uint8_t, SCREEN_WIDTH> objWindowMaskLine{};
     };
 
 }

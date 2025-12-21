@@ -33,6 +33,18 @@ namespace AIO::Emulator::GBA {
         // Check if sound is enabled
         bool IsSoundEnabled() const;
 
+        // FIFO fill levels (for sound DMA request logic)
+        int GetFifoACount() const { return fifoA_Count; }
+        int GetFifoBCount() const { return fifoB_Count; }
+
+        // Debug/telemetry (optional logging controlled by env vars)
+        struct AudioStats {
+            std::atomic<uint64_t> ringUnderrunSamples{0};
+            std::atomic<uint64_t> ringOverrunDrops{0};
+            std::atomic<uint64_t> fifoAUnderflows{0};
+            std::atomic<uint64_t> fifoBUnderflows{0};
+        } stats;
+
     private:
         GBAMemory& memory;
         

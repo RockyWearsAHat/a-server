@@ -16,12 +16,99 @@
 
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
+#include <unordered_map>
 
 namespace AIO {
 namespace GUI {
+
+static uint16_t ScriptKeyMaskFromName(const std::string& name) {
+    // GBA KEYINPUT bits (0 = pressed): 0:A 1:B 2:Select 3:Start 4:Right 5:Left 6:Up 7:Down 8:R 9:L
+    static const std::unordered_map<std::string, uint16_t> k = {
+        {"A", 1u << 0},
+        {"B", 1u << 1},
+        {"SELECT", 1u << 2},
+        {"START", 1u << 3},
+        {"RIGHT", 1u << 4},
+        {"LEFT", 1u << 5},
+        {"UP", 1u << 6},
+        {"DOWN", 1u << 7},
+        {"R", 1u << 8},
+        {"L", 1u << 9},
+    };
+    auto it = k.find(name);
+    return (it == k.end()) ? 0 : it->second;
+}
+
+static const char* ScriptNameFromMask(uint16_t mask) {
+    switch (mask) {
+        case (1u << 0): return "A";
+        case (1u << 1): return "B";
+        case (1u << 2): return "SELECT";
+        case (1u << 3): return "START";
+        case (1u << 4): return "RIGHT";
+        case (1u << 5): return "LEFT";
+        case (1u << 6): return "UP";
+        case (1u << 7): return "DOWN";
+        case (1u << 8): return "R";
+        case (1u << 9): return "L";
+        default: return "?";
+    }
+}
+
+static std::optional<std::vector<MainWindow::ScriptEvent>> LoadInputScriptMs(const QString& path) {
+    std::ifstream f(path.toStdString());
+    if (!f.is_open()) {
+        return std::nullopt;
+    }
+
+    std::vector<MainWindow::ScriptEvent> events;
+    std::string line;
+    int lineNo = 0;
+    while (std::getline(f, line)) {
+        lineNo++;
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line = line.substr(0, hash);
+
+        std::istringstream iss(line);
+        double ms = 0.0;
+        std::string key;
+        std::string action;
+        if (!(iss >> ms >> key >> action)) {
+            continue;
+        }
+
+        for (char& c : key) c = (char)std::toupper((unsigned char)c);
+        for (char& c : action) c = (char)std::toupper((unsigned char)c);
+
+        const uint16_t mask = ScriptKeyMaskFromName(key);
+        if (mask == 0) {
+            std::cout << "[SCRIPT] unknown key '" << key << "' at line " << lineNo << std::endl;
+            continue;
+        }
+
+        const bool down = (action == "DOWN" || action == "PRESS" || action == "PRESSED");
+        const bool up = (action == "UP" || action == "RELEASE" || action == "RELEASED");
+        if (!down && !up) {
+            std::cout << "[SCRIPT] unknown action '" << action << "' at line " << lineNo << std::endl;
+            continue;
+        }
+
+        events.push_back(MainWindow::ScriptEvent{(int64_t)ms, mask, down});
+    }
+
+    std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) {
+        if (a.ms != b.ms) return a.ms < b.ms;
+        // Apply DOWN before UP when timestamps collide.
+        return (int)a.down > (int)b.down;
+    });
+
+    return events;
+}
 
 void MainWindow::toggleDevPanel(bool enabled) {
     devPanelLabel->setVisible(enabled);
@@ -103,6 +190,25 @@ void MainWindow::LoadROM(const std::string& path) {
     if (success) {
         statusLabel->setText("ROM Loaded: " + QString::fromStdString(path));
 
+        // Optional scripted input playback (debugging aid).
+        inputScript_.clear();
+        nextScriptEvent_ = 0;
+        scriptKeyState_ = 0x03FF;
+        scriptEnabled_ = false;
+
+        if (!inputScriptPath_.isEmpty()) {
+            auto loaded = LoadInputScriptMs(inputScriptPath_);
+            if (loaded) {
+                inputScript_ = std::move(*loaded);
+                scriptEnabled_ = !inputScript_.empty();
+                scriptTimer_.restart();
+                std::cout << "[SCRIPT] loaded " << inputScript_.size() << " events from "
+                          << inputScriptPath_.toStdString() << std::endl;
+            } else {
+                std::cout << "[SCRIPT] failed to open script: " << inputScriptPath_.toStdString() << std::endl;
+            }
+        }
+
         // Start emulator thread and display update timer
         StartEmulatorThread();
         displayTimer->start(16);  // ~60 Hz display updates
@@ -116,6 +222,10 @@ void MainWindow::LoadROM(const std::string& path) {
     } else {
         statusLabel->setText("Failed to load ROM");
     }
+}
+
+void MainWindow::SetInputScriptPath(const std::string& path) {
+    inputScriptPath_ = QString::fromStdString(path);
 }
 
 void MainWindow::SetEmulatorType(int type) {
@@ -202,7 +312,7 @@ void MainWindow::UpdateDisplay() {
         snapshot = input.updateSnapshot();
     }
 
-    const uint16_t inputState = snapshot.keyinput;
+    uint16_t inputState = snapshot.keyinput;
 
     // Route input based on the active UI page.
     // current already computed above.
@@ -310,6 +420,50 @@ void MainWindow::UpdateDisplay() {
     }
 
     if (currentEmulator == EmulatorType::GBA) {
+        if (inEmu && scriptEnabled_ && scriptTimer_.isValid()) {
+            int64_t nowMs = 0;
+            const QString timebase = qEnvironmentVariable("AIO_INPUT_SCRIPT_TIMEBASE").trimmed().toUpper();
+            if (timebase == "EMU") {
+                constexpr uint64_t CYCLES_PER_SECOND = 16780000ULL;
+                nowMs = (int64_t)((gba.GetTotalCycles() * 1000ULL) / CYCLES_PER_SECOND);
+            } else {
+                nowMs = (int64_t)scriptTimer_.elapsed();
+            }
+            while (nextScriptEvent_ < inputScript_.size() && inputScript_[nextScriptEvent_].ms <= nowMs) {
+                const auto& ev = inputScript_[nextScriptEvent_];
+                if (ev.down) {
+                    scriptKeyState_ = (uint16_t)(scriptKeyState_ & ~ev.mask);
+                } else {
+                    scriptKeyState_ = (uint16_t)(scriptKeyState_ | ev.mask);
+                }
+
+                const uint16_t dispcnt = gba.ReadMem16(0x04000000);
+                const uint16_t winin = gba.ReadMem16(0x04000048);
+                const uint16_t winout = gba.ReadMem16(0x0400004A);
+                const uint16_t bldcnt = gba.ReadMem16(0x04000050);
+                const uint16_t bldalpha = gba.ReadMem16(0x04000052);
+                const uint16_t win0h = gba.ReadMem16(0x04000040);
+                const uint16_t win0v = gba.ReadMem16(0x04000044);
+                std::cout << "[SCRIPT] t_ms=" << nowMs
+                          << " event_ms=" << ev.ms
+                          << " key=" << ScriptNameFromMask(ev.mask)
+                          << " action=" << (ev.down ? "DOWN" : "UP")
+                          << " keyState=0x" << std::hex << scriptKeyState_ << std::dec
+                          << " pc=0x" << std::hex << gba.GetPC() << std::dec
+                          << " DISPCNT=0x" << std::hex << dispcnt
+                          << " WININ=0x" << winin
+                          << " WINOUT=0x" << winout
+                          << " WIN0H=0x" << win0h
+                          << " WIN0V=0x" << win0v
+                          << " BLDCNT=0x" << bldcnt
+                          << " BLDALPHA=0x" << bldalpha
+                          << std::dec
+                          << std::endl;
+                nextScriptEvent_++;
+            }
+            inputState = scriptKeyState_;
+        }
+
         if (!inStreamingUi) {
             gba.UpdateInput(inputState);
         } else {

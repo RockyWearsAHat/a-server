@@ -42,6 +42,13 @@ set_target_properties(EEPROMTests PROPERTIES
 )
 target_link_libraries(EEPROMTests PRIVATE GTest::gtest_main GBAEmulator)
 
+add_executable(DMATests ${PROJECT_ROOT}/tests/DMATests.cpp)
+set_target_properties(DMATests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DMATests"
+)
+target_link_libraries(DMATests PRIVATE GTest::gtest_main GBAEmulator)
+
 add_executable(BIOSTests ${PROJECT_ROOT}/tests/BIOSTests.cpp)
 set_target_properties(BIOSTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
@@ -62,6 +69,13 @@ set_target_properties(InputLogicTests PROPERTIES
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/InputLogicTests"
 )
 target_link_libraries(InputLogicTests PRIVATE GTest::gtest_main)
+
+add_executable(PPUTests ${PROJECT_ROOT}/tests/PPUTests.cpp)
+set_target_properties(PPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PPUTests"
+)
+target_link_libraries(PPUTests PRIVATE GTest::gtest_main GBAEmulator)
 
 
 # Headless SMA2 investigation harness (not a unit test).
@@ -88,6 +102,12 @@ gtest_discover_tests(EEPROMTests
   TEST_LIST ${CMAKE_TEST_GEN_DIR}/EEPROMTests_tests.cmake
 )
 
+gtest_discover_tests(DMATests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
 gtest_discover_tests(BIOSTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   TEST_DISCOVERY_TIMEOUT 60
@@ -101,6 +121,12 @@ gtest_discover_tests(ROMMetadataTests
 )
 
 gtest_discover_tests(InputLogicTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(PPUTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST

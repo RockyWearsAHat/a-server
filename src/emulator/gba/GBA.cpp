@@ -315,6 +315,8 @@ namespace AIO::Emulator::GBA {
         lastPcForStall = cpu->GetRegister(15);
         stallCycleAccumulator = 0;
         stallCrashTriggered = false;
+        pendingPeripheralCycles = 0;
+        totalCyclesExecuted.store(0, std::memory_order_relaxed);
     }
 
     int GBA::Step() {
@@ -426,6 +428,7 @@ namespace AIO::Emulator::GBA {
             cpu->PollInterrupts();
         }
 
+        totalCyclesExecuted.fetch_add((uint64_t)totalCycles, std::memory_order_relaxed);
         return totalCycles;
     }
 

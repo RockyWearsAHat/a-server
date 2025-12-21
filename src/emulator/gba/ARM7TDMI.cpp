@@ -831,16 +831,18 @@ namespace AIO::Emulator::GBA {
         */
         
         // DEBUG: Trace near crash point 0x300330c
-        static bool crashTraceEnabled = false;
+        // Enable with: AIO_TRACE_CPU_CRASH=1
+        static const bool crashTraceRequested = (std::getenv("AIO_TRACE_CPU_CRASH") != nullptr);
+        static bool crashTraceEnabled = crashTraceRequested;
         static int crashTraceCount = 0;
-        
+
         // Trace caller at ROM before BX R0
-        if (pc >= 0x8032400 && pc <= 0x8032420 && !crashTraceEnabled) {
+        if (crashTraceEnabled && pc >= 0x8032400 && pc <= 0x8032420) {
             uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
-            std::cout << "[CallerTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
+            std::cout << "[CallerTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr
                       << " R0=0x" << registers[0] << " R1=0x" << registers[1]
                       << " R11=0x" << registers[11] << " LR=0x" << registers[14]
-                      << " Mode=" << (thumbMode?"T":"A") << std::dec << std::endl;
+                      << " Mode=" << (thumbMode ? "T" : "A") << std::dec << std::endl;
         }
         
         // Trace early ROM startup (first 100 instructions from 0x08000000)
@@ -869,7 +871,7 @@ namespace AIO::Emulator::GBA {
             // }
         
         // Trace the entry point 0x30032b0 to 0x3003400 (expanded to cover branch targets)
-        if (pc >= 0x30032b0 && pc <= 0x3003400 && !crashTraceEnabled) {
+        if (crashTraceRequested && crashTraceEnabled && pc >= 0x30032b0 && pc <= 0x3003400) {
             uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
             std::cout << "[EntryTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 
                       << " R0=0x" << registers[0] << " R1=0x" << registers[1]
@@ -885,10 +887,10 @@ namespace AIO::Emulator::GBA {
                           << " R12=0x" << registers[12] << std::dec << std::endl;
             }
         }
-        if (pc >= 0x3003300 && pc <= 0x3003320) {
+        if (crashTraceRequested && pc >= 0x3003300 && pc <= 0x3003320) {
             crashTraceEnabled = true;
         }
-        if (crashTraceEnabled && crashTraceCount < 200) {
+        if (crashTraceRequested && crashTraceEnabled && crashTraceCount < 200) {
             crashTraceCount++;
             uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc) : memory.ReadInstruction32(pc);
             std::cout << "[CrashTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr 

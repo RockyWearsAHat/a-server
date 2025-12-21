@@ -16,6 +16,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 #include "gui/NavigationController.h"
 #include "gui/UIActionMapper.h"
@@ -63,6 +64,17 @@ class MainWindow : public QMainWindow {
         // Debugger controls via GUI/CLI
         void EnableDebugger(bool enabled);
         void AddBreakpoint(uint32_t addr);
+
+        // Optional: deterministic playback of input events for debugging.
+        // Script format: <time_ms> <KEY> <DOWN|UP>
+        // Example line: 1500 A DOWN
+        void SetInputScriptPath(const std::string& path);
+
+        struct ScriptEvent {
+            int64_t ms = 0;
+            uint16_t mask = 0;
+            bool down = false;
+        };
 
     protected:
         void keyPressEvent(QKeyEvent *event) override;
@@ -197,7 +209,7 @@ class MainWindow : public QMainWindow {
         // SDL Audio
         SDL_AudioDeviceID audioDevice = 0;
         static constexpr int AUDIO_SAMPLE_RATE = 32768;
-        static constexpr int AUDIO_BUFFER_SIZE = 1024;
+        static constexpr int AUDIO_BUFFER_SIZE = 2048;
         
         // Emulator thread
         std::thread emulatorThread;
@@ -220,6 +232,12 @@ class MainWindow : public QMainWindow {
 
         // Cache this once at startup; used to avoid global event filter issues with QtWebEngine.
         bool streamingEnabled_ = false;
+        std::vector<ScriptEvent> inputScript_;
+        size_t nextScriptEvent_ = 0;
+        uint16_t scriptKeyState_ = 0x03FF;
+        QElapsedTimer scriptTimer_;
+        bool scriptEnabled_ = false;
+        QString inputScriptPath_;
 };
 
 } // namespace GUI

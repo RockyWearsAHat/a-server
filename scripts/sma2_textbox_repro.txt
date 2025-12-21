@@ -1,0 +1,23 @@
+# SMA2 intro textbox repro (fresh save)
+# Format per line: <time_ms> <KEY> <DOWN|UP>
+# Keys: A B SELECT START RIGHT LEFT UP DOWN R L
+#
+# Requirements:
+# - 3 second delay BEFORE the first press
+# - 3 seconds between each of 4 A presses
+# - single taps (not held)
+
+3000 A DOWN
+3050 A UP
+
+6000 A DOWN
+6050 A UP
+
+9000 A DOWN
+9050 A UP
+
+12000 A DOWN
+12050 A UP
+
+13000 A DOWN
+13050 A UP

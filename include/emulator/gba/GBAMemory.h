@@ -125,6 +125,7 @@ namespace AIO::Emulator::GBA {
         // Internal DMA address registers (shadow registers for repeat DMAs)
         uint32_t dmaInternalSrc[4] = {0};
         uint32_t dmaInternalDst[4] = {0};
+        bool dmaInProgress = false;
 
         // Flash State
         int flashState = 0; // 0=Idle, 1=Cmd1(AA), 2=Cmd2(55), 3=ID Mode

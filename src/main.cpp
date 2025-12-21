@@ -90,6 +90,11 @@ int main(int argc, char *argv[]) {
         "0");
     parser.addOption(headlessMaxMsOption);
 
+    QCommandLineOption inputScriptOption(QStringList() << "input-script",
+        "Optional input playback script (applies during emulator runtime). Format per line: <time_ms> <KEY> <DOWN|UP>",
+        "path");
+    parser.addOption(inputScriptOption);
+
     QCommandLineOption nasRootOption(QStringList() << "nas-root",
         "Root directory to serve via NAS (default: ~/AIO_NAS)",
         "path");
@@ -126,6 +131,14 @@ int main(int argc, char *argv[]) {
     bool exitOnCrash = parser.isSet(exitOnCrashOption);
     bool headless = parser.isSet(headlessOption);
     const bool nasEnabled = true;
+
+    // Determinism: input scripts should run against emulated time in headless mode,
+    // so logging/perf changes don't shift when events land in-game.
+    if (headless) {
+        if (qEnvironmentVariable("AIO_INPUT_SCRIPT_TIMEBASE").isEmpty()) {
+            qputenv("AIO_INPUT_SCRIPT_TIMEBASE", "EMU");
+        }
+    }
 
     AIO::Emulator::Common::Logger::Instance().SetLogFile(logPath);
     AIO::Emulator::Common::Logger::Instance().SetExitOnCrash(exitOnCrash);
@@ -244,6 +257,26 @@ int main(int argc, char *argv[]) {
 
             if (!headless) {
                 window.show();
+            }
+
+            if (parser.isSet(inputScriptOption)) {
+                const QString scriptPath = parser.value(inputScriptOption);
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "main",
+                    "Input script option set: %s",
+                    scriptPath.toStdString().c_str());
+                window.SetInputScriptPath(scriptPath.toStdString());
+            } else {
+                const QString scriptPath = qEnvironmentVariable("AIO_INPUT_SCRIPT");
+                if (!scriptPath.isEmpty()) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "main",
+                        "Input script set via AIO_INPUT_SCRIPT: %s",
+                        scriptPath.toStdString().c_str());
+                    window.SetInputScriptPath(scriptPath.toStdString());
+                }
             }
 
             AIO::Emulator::Common::Logger::Instance().Log(AIO::Emulator::Common::LogLevel::Info, "main", "Calling window.LoadROM()");

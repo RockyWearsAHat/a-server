@@ -56,6 +56,8 @@ namespace AIO::Emulator::GBA {
             // Check if buffer is full (leave one slot empty)
             if (nextWp == rp) {
                 // Buffer full, drop sample
+                stats.ringOverrunDrops.fetch_add(1, std::memory_order_relaxed);
+                // Avoid spinning if we're far behind; drop accumulated output for this input sample.
                 sampleAccumulator = 0.0f;
                 return;
             }
@@ -87,9 +89,16 @@ namespace AIO::Emulator::GBA {
         int fifoATimer = (scntH >> 10) & 1;
         // FIFO B uses timer specified in bit 14 (0=Timer0, 1=Timer1)
         int fifoBTimer = (scntH >> 14) & 1;
+
+        // Only generate output samples on the timer(s) that actually clock FIFO A/B.
+        // Timer0/1 are commonly used for non-audio purposes; pushing samples on those
+        // overflows creates audible crackle/jitter.
+        if (timer != fifoATimer && timer != fifoBTimer) {
+            return;
+        }
         
         // Read Timer 0 registers (or Timer 1 depending on which is used for audio)
-        int audioTimer = fifoATimer; // Use FIFO A's timer for rate calculation
+        int audioTimer = timer;
         uint16_t tmReload = memory.Read16(IORegs::BASE + IORegs::TM0CNT_L + audioTimer * IORegs::TIMER_CHANNEL_SIZE);
         uint16_t tmControl = memory.Read16(IORegs::BASE + IORegs::TM0CNT_H + audioTimer * IORegs::TIMER_CHANNEL_SIZE);
         
@@ -121,6 +130,10 @@ namespace AIO::Emulator::GBA {
             fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
             fifoA_Count--;
             consumedA = true;
+        } else if (timer == fifoATimer) {
+            // FIFO underflow: output silence.
+            currentSampleA = 0;
+            stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
         }
         
         if (timer == fifoBTimer && fifoB_Count > 0) {
@@ -128,6 +141,10 @@ namespace AIO::Emulator::GBA {
             fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
             fifoB_Count--;
             consumedB = true;
+        } else if (timer == fifoBTimer) {
+            // FIFO underflow: output silence.
+            currentSampleB = 0;
+            stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
         }
         
         // Check if master sound is enabled
@@ -137,8 +154,8 @@ namespace AIO::Emulator::GBA {
             return;
         }
         
-        int16_t left = 0;
-        int16_t right = 0;
+        int32_t left = 0;
+        int32_t right = 0;
         
         // FIFO A volume (bit 2: 0=50%, 1=100%)
         int volA = (scntH & 0x04) ? 2 : 1;
@@ -146,14 +163,20 @@ namespace AIO::Emulator::GBA {
         int volB = (scntH & 0x08) ? 2 : 1;
         
         // FIFO A enable left/right (bits 9, 8)
-        if (scntH & 0x200) left += currentSampleA * volA * 64;
-        if (scntH & 0x100) right += currentSampleA * volA * 64;
+        if (scntH & 0x200) left += (int32_t)currentSampleA * volA * 64;
+        if (scntH & 0x100) right += (int32_t)currentSampleA * volA * 64;
         
         // FIFO B enable left/right (bits 13, 12)
-        if (scntH & 0x2000) left += currentSampleB * volB * 64;
-        if (scntH & 0x1000) right += currentSampleB * volB * 64;
-        
-        PushSample(left, right);
+        if (scntH & 0x2000) left += (int32_t)currentSampleB * volB * 64;
+        if (scntH & 0x1000) right += (int32_t)currentSampleB * volB * 64;
+
+        // Clamp to signed 16-bit to avoid wraparound distortion.
+        if (left < -32768) left = -32768;
+        if (left > 32767) left = 32767;
+        if (right < -32768) right = -32768;
+        if (right > 32767) right = 32767;
+
+        PushSample((int16_t)left, (int16_t)right);
     }
 
     void APU::WriteFIFO_A(uint32_t value) {
@@ -196,6 +219,11 @@ namespace AIO::Emulator::GBA {
 
     int APU::GetSamples(int16_t* buffer, int numSamples) {
         int samplesWritten = 0;
+
+        // Optional: periodic diagnostics from the audio callback thread.
+        const bool traceAudioStats = (std::getenv("AIO_TRACE_AUDIO_STATS") != nullptr);
+        static uint32_t samplesSinceLastLog = 0;
+        uint32_t localUnderruns = 0;
         
         for (int i = 0; i < numSamples; i++) {
             int rp = readPos.load(std::memory_order_relaxed);
@@ -205,6 +233,7 @@ namespace AIO::Emulator::GBA {
                 // Buffer empty - fill rest with silence
                 buffer[i * 2] = 0;
                 buffer[i * 2 + 1] = 0;
+                localUnderruns++;
             } else {
                 buffer[i * 2] = ringBuffer[rp];
                 buffer[i * 2 + 1] = ringBuffer[rp + 1];
@@ -212,6 +241,37 @@ namespace AIO::Emulator::GBA {
                 int nextRp = (rp + 2) % (RING_BUFFER_SIZE * 2);
                 readPos.store(nextRp, std::memory_order_release);
                 samplesWritten++;
+            }
+        }
+
+        if (localUnderruns != 0) {
+            stats.ringUnderrunSamples.fetch_add(localUnderruns, std::memory_order_relaxed);
+        }
+
+        if (traceAudioStats) {
+            samplesSinceLastLog += (uint32_t)numSamples;
+            if (samplesSinceLastLog >= (uint32_t)OUTPUT_SAMPLE_RATE) {
+                samplesSinceLastLog = 0;
+                const uint64_t underruns = stats.ringUnderrunSamples.exchange(0, std::memory_order_relaxed);
+                const uint64_t drops = stats.ringOverrunDrops.exchange(0, std::memory_order_relaxed);
+                const uint64_t ufa = stats.fifoAUnderflows.exchange(0, std::memory_order_relaxed);
+                const uint64_t ufb = stats.fifoBUnderflows.exchange(0, std::memory_order_relaxed);
+
+                const int rp = readPos.load(std::memory_order_relaxed);
+                const int wp = writePos.load(std::memory_order_relaxed);
+                int fillSamples = wp - rp;
+                if (fillSamples < 0) fillSamples += (RING_BUFFER_SIZE * 2);
+                fillSamples /= 2;
+
+                std::cout << "[AUDIO] underrunSamples/s=" << underruns
+                          << " ringDrops/s=" << drops
+                          << " fifoAUnderflow/s=" << ufa
+                          << " fifoBUnderflow/s=" << ufb
+                          << " ringFill=" << fillSamples << "/" << RING_BUFFER_SIZE
+                          << " upsample=" << currentUpsampleRatio
+                          << " fifoA=" << fifoA_Count
+                          << " fifoB=" << fifoB_Count
+                          << std::endl;
             }
         }
         
