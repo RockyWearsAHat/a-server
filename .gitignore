@@ -1,47 +1,30 @@
 # Build artifacts
 build/
-build/**
 generated/
 
-# VS Code and editor junk (optional; keep if not used)
+# VS Code and editor junk
 .vscode/
 *.code-workspace
 
 # Logs and transient outputs
 debug.log
 *.log
+*log*.txt
+*log*.md
 
 # Local environment secrets
 .env
 
 # Emulator runtime files
 *.sav
+*.sav.*
 *.state
-
-# OS files
-.DS_Store.DS_Store
-
-# Build directory structure:
-# build/bin/           - All executables (AIOServer, tests)
-# build/lib/           - All libraries
-# build/generated/     - Qt autogen and test discovery files
-# build/cmake_meta/    - CMake internal files (isolated from outputs)
-build/
-
-*log*.txt
-*log*.log
-*log*.md
-
-# Qt generated files (now in build/generated/autogen/)
-moc_*.cpp
-ui_*.h
-qrc_*.cpp
-
-# Save files
-*.sav
 *.srm
 
-# ROM files - do not commit (copyright protected)
+# ROM files - do not commit
 *.gba
 *.gb
 *.gbc
+
+# macOS
+.DS_Store

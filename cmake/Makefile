@@ -2,6 +2,8 @@
 # All actual build logic is in cmake/
 
 
+BUILD_TYPE ?= Release
+
 .PHONY: all clean configure build test help
 
 all:
@@ -10,7 +12,7 @@ all:
 
 configure:
 	@mkdir -p ../build/generated/cmake
-	@cd ../build/generated/cmake && cmake ../../../cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+	@cd ../build/generated/cmake && cmake ../../../cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 	@# Help clangd: place compile_commands.json where VS Code clangd expects it
 	@cd ../build/generated/cmake && test -f compile_commands.json && cp -f compile_commands.json ../compile_commands.json || true
 
@@ -42,6 +44,9 @@ help:
 	@echo "  clean         - Remove build directory"
 	@echo "  test          - Run all tests"
 	@echo "  help          - Show this help message"
+	@echo ""
+	@echo "Variables:"
+	@echo "  BUILD_TYPE=<Release|Debug|RelWithDebInfo|MinSizeRel> (default: Release)"
 	@echo ""
 	@echo "Note: All CMake configuration is in this directory (cmake/)"
 	@echo "      'make' or 'make all' always does a full clean rebuild"

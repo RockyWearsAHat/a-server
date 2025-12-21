@@ -1,7 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <cstdlib>
-
 #include "emulator/gba/GBAMemory.h"
 #include "emulator/gba/PPU.h"
 
@@ -139,11 +137,7 @@ TEST(PPUTest, UnalignedIoWrite16AlignsToEvenAddress) {
     EXPECT_EQ(mem.Read16(0x04000040u), 0xFFFEu);
 }
 
-TEST(PPUTest, UnalignedVramWritesAlignWhenFixEnabled) {
-    if (std::getenv("AIO_FIX_VIDMEM_ALIGNED_WRITES") == nullptr) {
-        GTEST_SKIP();
-    }
-
+TEST(PPUTest, UnalignedVramWritesAlign) {
     GBAMemory mem;
     mem.Reset();
 

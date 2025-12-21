@@ -255,22 +255,37 @@ void MainWindow::StopEmulatorThread() {
 void MainWindow::EmulatorThreadMain() {
     // Emulator loop runs on background thread
     // Executes CPU cycles independent of Qt event processing
-    auto frameStartTime = std::chrono::high_resolution_clock::now();
-    static constexpr int kFrameTimeMs = 16;   // ~60 FPS target
-    static constexpr int kTargetCyclesPerFrame = 280000; // ~16.7ms @ 16.78 MHz
+    using Clock = std::chrono::steady_clock;
+
+    // GBA timing: 228 scanlines per frame * 1232 cycles/scanline.
+    static constexpr int kGbaCyclesPerFrame = 1232 * 228; // 280,896
+    static constexpr double kGbaCpuHz = 16777216.0;       // 16.777216 MHz
+    const double nativeFps = kGbaCpuHz / (double)kGbaCyclesPerFrame;
+
+    double targetFps = nativeFps;
+    if (const char* v = std::getenv("AIO_GBA_TARGET_FPS")) {
+        const double parsed = std::atof(v);
+        if (parsed >= 1.0 && parsed <= 240.0) {
+            targetFps = parsed;
+        }
+    }
+
+    const auto gbaFrameDuration = std::chrono::duration<double>(1.0 / targetFps);
+
+    // Use a deadline-based scheduler so occasional sleep overshoot doesn't permanently slow emulation.
+    Clock::time_point nextFrame = Clock::now();
 
     while (emulatorRunning) {
         if (emulatorPaused) {
+            nextFrame = Clock::now();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
-        frameStartTime = std::chrono::high_resolution_clock::now();
-
         if (currentEmulator == EmulatorType::GBA) {
             int totalCycles = 0;
 
-            while (totalCycles < kTargetCyclesPerFrame && emulatorRunning) {
+            while (totalCycles < kGbaCyclesPerFrame && emulatorRunning) {
                 totalCycles += gba.Step();
             }
 
@@ -284,13 +299,22 @@ void MainWindow::EmulatorThreadMain() {
             switchEmulator.RunFrame();
         }
 
-        // Sync to ~60 FPS: sleep for remaining frame time
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::high_resolution_clock::now() - frameStartTime
-        ).count();
-        int sleepMs = kFrameTimeMs - (int)elapsed;
-        if (sleepMs > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        // Advance deadline (pick duration based on active emulator).
+        const auto frameDur = (currentEmulator == EmulatorType::GBA)
+            ? std::chrono::duration_cast<Clock::duration>(gbaFrameDuration)
+            : std::chrono::milliseconds(16);
+
+        // Maintain an absolute "next frame" deadline so we self-correct after oversleep.
+        nextFrame += frameDur;
+
+        // If we're far behind (e.g., breakpoint / scheduling hiccup), drop accumulated lag.
+        const auto now = Clock::now();
+        if (now > nextFrame + frameDur * 4) {
+            nextFrame = now;
+        }
+
+        if (now < nextFrame) {
+            std::this_thread::sleep_until(nextFrame);
         }
     }
 }
