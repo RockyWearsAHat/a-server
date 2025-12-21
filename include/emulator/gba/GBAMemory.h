@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 #include <cstdio>
 #include "GameDB.h"
@@ -84,6 +85,16 @@ namespace AIO::Emulator::GBA {
         
         // Cycle-accurate memory access timing
         int GetAccessCycles(uint32_t address, int accessSize) const;
+
+        // Fast-path helpers for the renderer (PPU).
+        // These bypass bus side-effects and are meant ONLY for reading the backing
+        // storage for VRAM/Palette/OAM.
+        const uint8_t* GetVRAMData() const { return vram.data(); }
+        size_t GetVRAMSize() const { return vram.size(); }
+        const uint8_t* GetPaletteData() const { return palette_ram.data(); }
+        size_t GetPaletteSize() const { return palette_ram.size(); }
+        const uint8_t* GetOAMData() const { return oam.data(); }
+        size_t GetOAMSize() const { return oam.size(); }
 
     private:
         void EvaluateKeypadIRQ();

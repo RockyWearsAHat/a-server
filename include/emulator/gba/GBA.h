@@ -71,6 +71,11 @@ namespace AIO::Emulator::GBA {
         uint64_t stallCycleAccumulator = 0;
         bool stallCrashTriggered = false;
         static constexpr uint64_t STALL_CYCLE_THRESHOLD = 167800000ULL; // ~10s @16.78MHz
+
+        // Performance: batch peripheral updates instead of updating PPU/APU/Timers
+        // every single CPU instruction.
+        int pendingPeripheralCycles = 0;
+        static constexpr int PERIPHERAL_BATCH_CYCLES = 64;
     };
 
 }

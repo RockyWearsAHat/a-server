@@ -4,6 +4,7 @@
 #include <emulator/gba/APU.h>
 #include <emulator/gba/ROMMetadataAnalyzer.h>
 #include <emulator/common/Logger.h>
+#include <cstdlib>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -11,6 +12,22 @@
 #include <filesystem>
 
 namespace AIO::Emulator::GBA {
+
+    namespace {
+        inline bool EnvTruthy(const char* v) {
+            return v != nullptr && v[0] != '\0' && v[0] != '0';
+        }
+
+        template <size_t N>
+        inline bool EnvFlagCached(const char (&name)[N]) {
+            static const bool enabled = EnvTruthy(std::getenv(name));
+            return enabled;
+        }
+
+        bool TraceGbaSpam() {
+            return EnvFlagCached("AIO_TRACE_GBA_SPAM");
+        }
+    }
 
     void GBA::WriteMem16(uint32_t addr, uint16_t val) {
         if (memory) memory->Write16(addr, val);
@@ -184,8 +201,7 @@ namespace AIO::Emulator::GBA {
 
 
             // Optional verbose EEPROM logging via env var
-            const char* verboseEnv = std::getenv("AIO_VERBOSE_EEPROM");
-            if (verboseEnv && std::string(verboseEnv) == "1") {
+            if (EnvFlagCached("AIO_VERBOSE_EEPROM")) {
                 std::cout << "[LoadROM] Enabling verbose EEPROM logs" << std::endl;
                 memory->SetVerboseLogs(true);
             }
@@ -312,22 +328,22 @@ namespace AIO::Emulator::GBA {
         static int totalSteps = 0;
         totalSteps++;
         
-        // Verbose boot trace: log first 100 instructions to identify hang point
-        if (totalSteps <= 100) {
+        // Verbose boot trace: useful for bring-up, but extremely expensive when stdout is redirected to disk.
+        if (TraceGbaSpam() && totalSteps <= 100) {
             if (totalSteps % 10 == 0 || totalSteps <= 10) {
                 uint32_t pc = cpu->GetRegister(15);
                 uint16_t ime = memory->Read16(0x04000208);
                 uint16_t ie = memory->Read16(0x04000200);
                 uint16_t if_reg = memory->Read16(0x04000202);
-                std::cout << "[Step " << totalSteps << "] PC=0x" << std::hex << pc 
-                          << " IME=" << std::dec << ime << " IE=0x" << std::hex << ie 
+                std::cout << "[Step " << totalSteps << "] PC=0x" << std::hex << pc
+                          << " IME=" << std::dec << ime << " IE=0x" << std::hex << ie
                           << " IF=0x" << if_reg << " Halted=" << std::dec << cpu->IsHalted() << std::endl;
             }
         }
         
         if (prevPc == lastPC) {
             pcRepeatCount++;
-            if (pcRepeatCount == 10000) {
+            if (pcRepeatCount == 10000 && TraceGbaSpam()) {
                 std::cout << "[LOOP DETECTED] PC=0x" << std::hex << prevPc 
                           << " stuck for 10k steps. Total steps: " << std::dec << totalSteps << std::endl;
                 std::cout << "  R0=0x" << std::hex << cpu->GetRegister(0)
@@ -372,16 +388,15 @@ namespace AIO::Emulator::GBA {
         
         int dmaCycles = memory->GetLastDMACycles();
 
-        // DMA cycles were already applied to APU/PPU/Timers inside PerformDMA
-        // When CPU is halted, simulate fast-forward through time until an interrupt might fire
-        // A scanline takes ~1232 cycles, so advance by that much when halted
+        // DMA cycles were already applied to timers/PPU/APU inside PerformDMA().
+        // HLE cycles must be applied by the outer loop (us).
+        // When CPU is halted, fast-forward time so PPU/timers can reach VBlank/IRQs.
         int totalCycles = cpuCycles + dmaCycles + hleCycles;
-        int cyclesToAdvance = cpuCycles;
+
+        int peripheralCycles = cpuCycles + hleCycles;
         if (cpu->IsHalted()) {
-            // Fast-forward halted cycles so PPU/timers can reach VBlank/IRQs.
-            // A scanline is ~1232 cycles, which is a reasonable coarse step.
             totalCycles = 1232;
-            cyclesToAdvance = totalCycles;
+            peripheralCycles = totalCycles;
         }
 
         uint32_t currPc = cpu->GetRegister(15);
@@ -401,13 +416,15 @@ namespace AIO::Emulator::GBA {
             stallCrashTriggered = false;
         }
 
-        ppu->Update(cyclesToAdvance);
-        memory->UpdateTimers(cyclesToAdvance);
-        apu->Update(cyclesToAdvance);
-
-        // Service interrupts immediately after peripherals advance to minimize
-        // latency in tight polling loops (e.g., SMA2 save validation).
-        cpu->PollInterrupts();
+        // Batch peripheral time advancement to avoid doing 3 updates + IRQ polling
+        // on every instruction. This is a major speed win and still preserves
+        // ordering (peripherals advance after each instruction, just grouped).
+        pendingPeripheralCycles += peripheralCycles;
+        if (pendingPeripheralCycles >= PERIPHERAL_BATCH_CYCLES || cpu->IsHalted()) {
+            memory->AdvanceCycles(pendingPeripheralCycles);
+            pendingPeripheralCycles = 0;
+            cpu->PollInterrupts();
+        }
 
         return totalCycles;
     }

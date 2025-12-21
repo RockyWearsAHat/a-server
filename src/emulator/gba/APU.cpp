@@ -1,10 +1,18 @@
 #include <emulator/gba/APU.h>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/IORegs.h>
+#include <cstdlib>
 #include <iostream>
 #include <cstring>
 
 namespace AIO::Emulator::GBA {
+
+    namespace {
+        bool TraceGbaSpam() {
+            static const bool enabled = (std::getenv("AIO_TRACE_GBA_SPAM") != nullptr);
+            return enabled;
+        }
+    }
 
     APU::APU(GBAMemory& mem) : memory(mem) {
         Reset();
@@ -97,7 +105,7 @@ namespace AIO::Emulator::GBA {
         float inputSampleRate = GBA_CPU_FREQ / cyclesPerSample;
         currentUpsampleRatio = OUTPUT_SAMPLE_RATE / inputSampleRate;
         
-        if (overflowCount <= 3 || overflowCount % 100000 == 0) {
+        if (TraceGbaSpam() && (overflowCount <= 3 || overflowCount % 100000 == 0)) {
             std::cout << "[APU] Timer " << timer << " overflow #" << overflowCount 
                       << " FIFO_A count=" << fifoA_Count << " FIFO_B count=" << fifoB_Count 
                       << " inputRate=" << (int)inputSampleRate 

@@ -1,11 +1,32 @@
 #include <emulator/gba/PPU.h>
 #include <emulator/gba/GBAMemory.h>
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
 
 namespace AIO::Emulator::GBA {
+
+    namespace {
+        bool TraceGbaSpam() {
+            static const bool enabled = (std::getenv("AIO_TRACE_GBA_SPAM") != nullptr);
+            return enabled;
+        }
+
+        inline uint16_t ReadLE16(const uint8_t* data, size_t size, uint32_t offset) {
+            if (!data || size == 0) return 0;
+            offset %= static_cast<uint32_t>(size);
+            const uint32_t o1 = (offset + 1) % static_cast<uint32_t>(size);
+            return (uint16_t)(data[offset] | (data[o1] << 8));
+        }
+
+        inline uint8_t Read8Wrap(const uint8_t* data, size_t size, uint32_t offset) {
+            if (!data || size == 0) return 0;
+            offset %= static_cast<uint32_t>(size);
+            return data[offset];
+        }
+    }
 
     PPU::PPU(GBAMemory& mem) : memory(mem), cycleCounter(0), scanline(0), frameCount(0) {
         // Initialize double buffers with black
@@ -24,16 +45,18 @@ namespace AIO::Emulator::GBA {
         // 308 * 4 = 1232 cycles per line
         // 160 lines + 68 VBlank = 228 lines total
         
-        static int updateCallCount = 0;
-        static int totalCyclesReceived = 0;
-        if (updateCallCount < 10) {
-            updateCallCount++;
-            totalCyclesReceived += cycles;
-            std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
-            dbg << "[PPU::Update #" << updateCallCount << "] cycles=" << cycles 
-                << " total=" << totalCyclesReceived << " cycleCounter=" << cycleCounter 
-                << " scanline=" << scanline << std::endl;
-            dbg.close();
+        if (TraceGbaSpam()) {
+            static int updateCallCount = 0;
+            static int totalCyclesReceived = 0;
+            if (updateCallCount < 10) {
+                updateCallCount++;
+                totalCyclesReceived += cycles;
+                std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
+                dbg << "[PPU::Update #" << updateCallCount << "] cycles=" << cycles
+                    << " total=" << totalCyclesReceived << " cycleCounter=" << cycleCounter
+                    << " scanline=" << scanline << std::endl;
+                dbg.close();
+            }
         }
         
         while (cycles > 0) {
@@ -94,13 +117,15 @@ namespace AIO::Emulator::GBA {
                     // Swap buffers after frame completion for thread-safe display
                     SwapBuffers();
                     
-                    // Log every frame completion
-                    static int frameLogCount = 0;
-                    if (frameLogCount < 100) {  // Log first 100 frames
-                        frameLogCount++;
-                        std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
-                        dbg << "[PPU FRAME #" << frameCount << "] Completed at cycles" << std::endl;
-                        dbg.close();
+                    if (TraceGbaSpam()) {
+                        // Log every frame completion
+                        static int frameLogCount = 0;
+                        if (frameLogCount < 100) {  // Log first 100 frames
+                            frameLogCount++;
+                            std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
+                            dbg << "[PPU FRAME #" << frameCount << "] Completed at cycles" << std::endl;
+                            dbg.close();
+                        }
                     }
                 }
                 
@@ -153,9 +178,11 @@ namespace AIO::Emulator::GBA {
                             uint16_t biosIF = memory.Read16(0x03007FF8) | 1;
                             memory.Write16(0x03007FF8, biosIF);
                             
-                            static int vblankCount = 0;
-                            if (++vblankCount % 60 == 0) { // Log every 60 frames = 1 second
-                                std::cout << "[PPU] VBlank #" << vblankCount << " Frame=" << frameCount << std::endl;
+                            if (TraceGbaSpam()) {
+                                static int vblankCount = 0;
+                                if (++vblankCount % 60 == 0) { // Log every 60 frames = 1 second
+                                    std::cout << "[PPU] VBlank #" << vblankCount << " Frame=" << frameCount << std::endl;
+                                }
                             }
                         }
                     }
@@ -194,34 +221,38 @@ namespace AIO::Emulator::GBA {
         uint8_t b = ((backdropColor >> 10) & 0x1F) << 3;
         uint32_t backdropARGB = 0xFF000000 | (r << 16) | (g << 8) | b;
 
-        static int backdropLogCount = 0;
-        if (backdropLogCount < 5 && scanline == 0) {
-            backdropLogCount++;
-            std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
-            dbg << "[PPU DrawScanline] scanline=0 backdropColor=0x" << std::hex << backdropColor 
-                << " RGB=(" << std::dec << (int)r << "," << (int)g << "," << (int)b << ")"
-                << " ARGB=0x" << std::hex << backdropARGB << std::endl;
-            // Sample first few pixels of the buffer after drawing
-            if (!backBuffer.empty()) {
-                dbg << "  Buffer[0]=0x" << std::hex << backBuffer[0] 
-                    << " Buffer[100]=0x" << backBuffer[100] 
-                    << " Buffer[1000]=0x" << backBuffer[1000] << std::endl;
+        if (TraceGbaSpam()) {
+            static int backdropLogCount = 0;
+            if (backdropLogCount < 5 && scanline == 0) {
+                backdropLogCount++;
+                std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
+                dbg << "[PPU DrawScanline] scanline=0 backdropColor=0x" << std::hex << backdropColor
+                    << " RGB=(" << std::dec << (int)r << "," << (int)g << "," << (int)b << ")"
+                    << " ARGB=0x" << std::hex << backdropARGB << std::endl;
+                // Sample first few pixels of the buffer after drawing
+                if (!backBuffer.empty()) {
+                    dbg << "  Buffer[0]=0x" << std::hex << backBuffer[0]
+                        << " Buffer[100]=0x" << backBuffer[100]
+                        << " Buffer[1000]=0x" << backBuffer[1000] << std::endl;
+                }
+                dbg.close();
             }
-            dbg.close();
+
+            static int drawScanlineCount = 0;
+            if (drawScanlineCount < 5 && scanline < 5) {
+                drawScanlineCount++;
+                // Also dump palette from 0x05000000 directly
+                uint16_t pal0 = memory.Read16(0x05000000);
+                uint16_t pal1 = memory.Read16(0x05000002);
+                uint16_t pal2 = memory.Read16(0x05000004);
+                uint16_t pal3 = memory.Read16(0x05000006);
+                std::cout << "[PPU DrawScanline] scanline=" << scanline << " backdrop=0x" << std::hex << backdropColor
+                          << " pal[0-3]=0x" << pal0 << "/0x" << pal1 << "/0x" << pal2 << "/0x" << pal3
+                          << " ARGB=0x" << backdropARGB << " mode=" << std::dec << mode << std::endl;
+            }
         }
 
-                static int drawScanlineCount = 0;
-                if (drawScanlineCount < 5 && scanline < 5) {
-                    drawScanlineCount++;
-                    // Also dump palette from 0x05000000 directly
-                    uint16_t pal0 = memory.Read16(0x05000000);
-                    uint16_t pal1 = memory.Read16(0x05000002);
-                    uint16_t pal2 = memory.Read16(0x05000004);
-                    uint16_t pal3 = memory.Read16(0x05000006);
-                    std::cout << "[PPU DrawScanline] scanline=" << scanline << " backdrop=0x" << std::hex << backdropColor
-                              << " pal[0-3]=0x" << pal0 << "/0x" << pal1 << "/0x" << pal2 << "/0x" << pal3
-                              << " ARGB=0x" << backdropARGB << " mode=" << std::dec << mode << std::endl;
-                }        // Clear line with backdrop color
+        // Clear line with backdrop color
         std::fill(backBuffer.begin() + scanline * SCREEN_WIDTH, 
                   backBuffer.begin() + (scanline + 1) * SCREEN_WIDTH, 
                   backdropARGB);
@@ -262,9 +293,13 @@ namespace AIO::Emulator::GBA {
         // Iterate backwards for priority (127 first, then 0 on top)
         for (int i = 127; i >= 0; --i) {
             uint32_t oamAddr = 0x07000000 + (i * 8);
-            uint16_t attr0 = memory.Read16(oamAddr);
-            uint16_t attr1 = memory.Read16(oamAddr + 2);
-            uint16_t attr2 = memory.Read16(oamAddr + 4);
+
+            const uint8_t* oamData = memory.GetOAMData();
+            const size_t oamSize = memory.GetOAMSize();
+            const uint32_t oamOff = (oamAddr - 0x07000000u);
+            uint16_t attr0 = ReadLE16(oamData, oamSize, oamOff);
+            uint16_t attr1 = ReadLE16(oamData, oamSize, oamOff + 2);
+            uint16_t attr2 = ReadLE16(oamData, oamSize, oamOff + 4);
             
             // Check Y Coordinate
             int y = attr0 & 0xFF;
@@ -384,11 +419,15 @@ namespace AIO::Emulator::GBA {
                         int inTileY = spriteY % 8;
                         
                         if (is8bpp) {
+                            const uint8_t* vramData = memory.GetVRAMData();
+                            const size_t vramSize = memory.GetVRAMSize();
                             uint32_t addr = tileBase + tileNum * 32 + inTileY * 8 + inTileX;
-                            colorIndex = memory.Read8(addr);
+                            colorIndex = Read8Wrap(vramData, vramSize, addr - 0x06000000u);
                         } else {
+                            const uint8_t* vramData = memory.GetVRAMData();
+                            const size_t vramSize = memory.GetVRAMSize();
                             uint32_t addr = tileBase + tileNum * 32 + inTileY * 4 + (inTileX / 2);
-                            uint8_t byte = memory.Read8(addr);
+                            uint8_t byte = Read8Wrap(vramData, vramSize, addr - 0x06000000u);
                             if (inTileX & 1) colorIndex = (byte >> 4) & 0xF;
                             else colorIndex = byte & 0xF;
                         }
@@ -408,11 +447,15 @@ namespace AIO::Emulator::GBA {
                         int inTileY = spriteY % 8;
                         
                         if (is8bpp) {
+                            const uint8_t* vramData = memory.GetVRAMData();
+                            const size_t vramSize = memory.GetVRAMSize();
                             uint32_t addr = tileBase + tileNum * 32 + inTileY * 8 + inTileX;
-                            colorIndex = memory.Read8(addr);
+                            colorIndex = Read8Wrap(vramData, vramSize, addr - 0x06000000u);
                         } else {
+                            const uint8_t* vramData = memory.GetVRAMData();
+                            const size_t vramSize = memory.GetVRAMSize();
                             uint32_t addr = tileBase + tileNum * 32 + inTileY * 4 + (inTileX / 2);
-                            uint8_t byte = memory.Read8(addr);
+                            uint8_t byte = Read8Wrap(vramData, vramSize, addr - 0x06000000u);
                             if (inTileX & 1) colorIndex = (byte >> 4) & 0xF;
                             else colorIndex = byte & 0xF;
                         }
@@ -439,8 +482,10 @@ namespace AIO::Emulator::GBA {
                             } else {
                                 paletteAddr += (paletteBank * 32) + (colorIndex * 2);
                             }
-                            
-                            uint16_t color = memory.Read16(paletteAddr);
+
+                            const uint8_t* palData = memory.GetPaletteData();
+                            const size_t palSize = memory.GetPaletteSize();
+                            uint16_t color = ReadLE16(palData, palSize, paletteAddr - 0x05000000u);
 
                             uint8_t r = (color & 0x1F) << 3;
                             uint8_t g = ((color >> 5) & 0x1F) << 3;
@@ -724,11 +769,13 @@ namespace AIO::Emulator::GBA {
         // Mode 0: Tiled, BG0-BG3
         uint16_t dispcnt = ReadRegister(0x00);
         
-        static int renderMode0Count = 0;
-        if (renderMode0Count < 5) {
-            renderMode0Count++;
-            std::cout << "[PPU RenderMode0] DISPCNT=0x" << std::hex << dispcnt << " BG enables: 0x" 
-                      << ((dispcnt >> 8) & 0xF) << " scanline=" << std::dec << scanline << std::endl;
+        if (TraceGbaSpam()) {
+            static int renderMode0Count = 0;
+            if (renderMode0Count < 5) {
+                renderMode0Count++;
+                std::cout << "[PPU RenderMode0] DISPCNT=0x" << std::hex << dispcnt << " BG enables: 0x"
+                          << ((dispcnt >> 8) & 0xF) << " scanline=" << std::dec << scanline << std::endl;
+            }
         }
         
         // Render backgrounds from lowest priority to highest
@@ -799,6 +846,11 @@ namespace AIO::Emulator::GBA {
         uint32_t mapBase = vramBase + (screenBaseBlock * 2048);
         uint32_t tileBase = vramBase + (charBaseBlock * 16384);
 
+        const uint8_t* vramData = memory.GetVRAMData();
+        const size_t vramSize = memory.GetVRAMSize();
+        const uint8_t* palData = memory.GetPaletteData();
+        const size_t palSize = memory.GetPaletteSize();
+
         for (int x = 0; x < SCREEN_WIDTH; ++x) {
             int scrolledX = (x + bghofs) & 0x1FF; // 512 pixel wrap
             int scrolledY = (scanline + bgvofs) & 0x1FF;
@@ -839,7 +891,7 @@ namespace AIO::Emulator::GBA {
             // Fetch Tile Map Entry
             // Each screen block is 32x32 entries (2KB = 2048 bytes)
             uint32_t mapAddr = mapBase + blockOffset + (ty * 32 + tx) * 2;
-            uint16_t tileEntry = memory.Read16(mapAddr);
+            uint16_t tileEntry = ReadLE16(vramData, vramSize, mapAddr - 0x06000000u);
 
             int tileIndex = tileEntry & 0x3FF;
             bool hFlip = (tileEntry >> 10) & 1;
@@ -858,7 +910,7 @@ namespace AIO::Emulator::GBA {
                 // 4bpp (16 colors)
                 // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
                 uint32_t tileAddr = tileBase + (tileIndex * 32) + (inTileY * 4) + (inTileX / 2);
-                uint8_t byte = memory.Read8(tileAddr);
+                uint8_t byte = Read8Wrap(vramData, vramSize, tileAddr - 0x06000000u);
                 
                 if (inTileX & 1) {
                     colorIndex = (byte >> 4) & 0xF;
@@ -869,7 +921,7 @@ namespace AIO::Emulator::GBA {
                 // 8bpp (256 colors)
                 // 64 bytes per tile
                 uint32_t tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
-                colorIndex = memory.Read8(tileAddr);
+                colorIndex = Read8Wrap(vramData, vramSize, tileAddr - 0x06000000u);
             }
 
             if (colorIndex != 0) { // Index 0 is transparent
@@ -891,7 +943,7 @@ namespace AIO::Emulator::GBA {
                         paletteAddr += (colorIndex * 2);
 
                     }
-                    uint16_t color = memory.Read16(paletteAddr);
+                    uint16_t color = ReadLE16(palData, palSize, paletteAddr - 0x05000000u);
                     
                     // Convert 15-bit BGR to 32-bit ARGB
                     // GBA: xBBBBBGGGGGRRRRR

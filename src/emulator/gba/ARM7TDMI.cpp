@@ -3,6 +3,7 @@
 #include <emulator/gba/IORegs.h>
 #include <emulator/common/Logger.h>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <iostream>
 #include <iomanip>
@@ -27,6 +28,16 @@ namespace AIO::Emulator::GBA {
         // They are extremely noisy and can drastically slow wall-clock-limited runs.
         // Keep them compiled but disabled by default.
         constexpr bool kEnableHeavyCpuTraces = false;
+
+        inline bool EnvTruthy(const char* v) {
+            return v != nullptr && v[0] != '\0' && v[0] != '0';
+        }
+
+        template <size_t N>
+        inline bool EnvFlagCached(const char (&name)[N]) {
+            static const bool enabled = EnvTruthy(std::getenv(name));
+            return enabled;
+        }
     }
     
     static void LogBranch([[maybe_unused]] uint32_t from, [[maybe_unused]] uint32_t to) {
@@ -35,7 +46,7 @@ namespace AIO::Emulator::GBA {
 
         // SMA2 investigation: detect when the game branches to the save/validator object entry.
         // Enable with: AIO_TRACE_SMA2_SAVEOBJ_CALL=1
-        if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_CALL") != nullptr) {
+        if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_CALL")) {
             const uint32_t masked = to & ~1u;
             if (masked >= 0x08177900u && masked <= 0x08177A50u) {
                 uint32_t instr = 0;
@@ -391,7 +402,7 @@ namespace AIO::Emulator::GBA {
             // On real GBA, BIOS reads IE & IF atomically at IRQ entry
             uint16_t triggered = ie & if_reg;
 
-            const bool traceIrqEntry = (std::getenv("AIO_TRACE_IRQ_ENTRY") != nullptr);
+            const bool traceIrqEntry = EnvFlagCached("AIO_TRACE_IRQ_ENTRY");
             const uint32_t spBeforeIrq = registers[Register::SP];
             const uint32_t pcBeforeIrq = registers[Register::PC];
             const uint32_t cpsrBeforeIrq = cpsr;
@@ -541,7 +552,7 @@ namespace AIO::Emulator::GBA {
         // then rewrites the EEPROM header. This one-shot dump captures the validator return
         // and the in-RAM buffer it validated.
         // Enable with: AIO_TRACE_SMA2_SAVEVALID=1
-        if (std::getenv("AIO_TRACE_SMA2_SAVEVALID") != nullptr) {
+        if (EnvFlagCached("AIO_TRACE_SMA2_SAVEVALID")) {
             static bool dumped = false;
             if (!dumped && currentInstrThumb && currentInstrAddr == 0x080073D0u) {
                 dumped = true;
@@ -958,22 +969,22 @@ namespace AIO::Emulator::GBA {
             // Enable with: AIO_TRACE_SMA2_SAVE_WINDOW=1
             // This range includes the validation/branching that decides whether to preserve
             // the existing header or to zero/init fields (leading to FEBC checksum).
-            const bool traceSaveWin = (std::getenv("AIO_TRACE_SMA2_SAVE_WINDOW") != nullptr);
+            const bool traceSaveWin = EnvFlagCached("AIO_TRACE_SMA2_SAVE_WINDOW");
             // SMA2 investigation: dump the exact EWRAM bytes the checksum routine validates.
             // Enable with: AIO_TRACE_SMA2_SAVE_DUMP=1
-            const bool traceSaveDump = (std::getenv("AIO_TRACE_SMA2_SAVE_DUMP") != nullptr);
+            const bool traceSaveDump = EnvFlagCached("AIO_TRACE_SMA2_SAVE_DUMP");
             const bool inSaveWinRange = (instrAddr >= 0x08007300 && instrAddr <= 0x08007520);
 
             // SMA2 investigation: trace status propagation from the EEPROM read/validate routine.
             // Enable with: AIO_TRACE_SMA2_EEPCALL=1
-            const bool traceEepCall = (std::getenv("AIO_TRACE_SMA2_EEPCALL") != nullptr);
+            const bool traceEepCall = EnvFlagCached("AIO_TRACE_SMA2_EEPCALL");
             const bool inEepFuncRange = (instrAddr >= 0x0809E000 && instrAddr <= 0x0809E360);
             const bool inEepMiniRange = (instrAddr >= 0x0809E020 && instrAddr <= 0x0809E090);
 
             // SMA2 investigation: trace the EEPROM init/dispatch prologue just before the
             // DMA-driven EEPROM routines (where the validator object at 0x03007BC8 is set up).
             // Enable with: AIO_TRACE_SMA2_EEP_INIT=1
-            const bool traceEepInit = (std::getenv("AIO_TRACE_SMA2_EEP_INIT") != nullptr);
+            const bool traceEepInit = EnvFlagCached("AIO_TRACE_SMA2_EEP_INIT");
             const bool inEepInitRange = (instrAddr >= 0x0809DF80 && instrAddr <= 0x0809E120);
 
             if (traceEepInit && inEepInitRange) {
@@ -1119,7 +1130,7 @@ namespace AIO::Emulator::GBA {
 
             // SMA2 investigation: trace control flow and key PC-relative loads in the EEPROM helper window.
             // Enable with: AIO_TRACE_SMA2_EEPWIN_CPU=1
-            if (std::getenv("AIO_TRACE_SMA2_EEPWIN_CPU") != nullptr) {
+            if (EnvFlagCached("AIO_TRACE_SMA2_EEPWIN_CPU")) {
                 const uint32_t winLo = 0x0809E1B0u;
                 const uint32_t winHi = 0x0809E330u;
                 if (instrAddr >= winLo && instrAddr <= winHi) {
@@ -1240,7 +1251,7 @@ namespace AIO::Emulator::GBA {
             // SMA2 investigation: trace any control-flow transition into the save-object routine area.
             // This catches indirect calls that won't show up as a normal branch trace (e.g. POP {pc}, LDR pc, [..]).
             // Enable with: AIO_TRACE_SMA2_SAVEOBJ_TRANS=1
-            if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_TRANS") != nullptr) {
+            if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_TRANS")) {
                 const uint32_t pcAfter = registers[15];
                 if (pcAfter >= 0x08177900u && pcAfter <= 0x08177A50u) {
                     static int transLogsT = 0;
@@ -1395,7 +1406,7 @@ namespace AIO::Emulator::GBA {
 
             // SMA2 investigation: trace any control-flow transition into the save-object routine area.
             // Enable with: AIO_TRACE_SMA2_SAVEOBJ_TRANS=1
-            if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_TRANS") != nullptr) {
+            if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_TRANS")) {
                 const uint32_t pcAfter = registers[15];
                 if (pcAfter >= 0x08177900u && pcAfter <= 0x08177A50u) {
                     static int transLogsA = 0;
@@ -3680,7 +3691,7 @@ namespace AIO::Emulator::GBA {
             } else if (opcode == 3) { // BX Rm
                 uint32_t target = registers[regM];
 
-                const bool traceEarlyBx = (std::getenv("AIO_TRACE_EARLY_BX") != nullptr);
+                const bool traceEarlyBx = EnvFlagCached("AIO_TRACE_EARLY_BX");
                 if (traceEarlyBx) {
                     const uint32_t fromPC = currentInstrAddr;
                     const uint32_t masked = target & 0xFFFFFFFEu;
