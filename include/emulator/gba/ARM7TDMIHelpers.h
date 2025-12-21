@@ -198,15 +198,25 @@ namespace AIO::Emulator::GBA::ARM7TDMIHelpers {
      * @return The shifted value
      */
     inline uint32_t LogicalShiftLeft(uint32_t value, uint32_t amount, uint32_t& cpsr, bool updateCarry = false) {
+        // ARM7TDMI semantics (register shifts):
+        // - amount==0: result=value, carry unchanged
+        // - 1..31: carry = bit(32-amount)
+        // - 32: result=0, carry = bit0
+        // - >32: result=0, carry = 0
         if (amount == 0) return value;
-        
-        if (updateCarry && amount <= 32) {
+
+        if (updateCarry) {
             if (amount < 32) {
-                bool carryOut = (value & (1U << (32 - amount))) != 0;
+                const bool carryOut = (value & (1U << (32 - amount))) != 0;
                 SetCPSRFlag(cpsr, CPSR::FLAG_C, carryOut);
+            } else if (amount == 32) {
+                const bool carryOut = (value & 1U) != 0;
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, carryOut);
+            } else {
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, false);
             }
         }
-        
+
         if (amount >= 32) return 0;
         return value << amount;
     }
@@ -215,15 +225,25 @@ namespace AIO::Emulator::GBA::ARM7TDMIHelpers {
      * Perform logical shift right, optionally updating carry flag
      */
     inline uint32_t LogicalShiftRight(uint32_t value, uint32_t amount, uint32_t& cpsr, bool updateCarry = false) {
+        // ARM7TDMI semantics (register shifts):
+        // - amount==0: result=value, carry unchanged
+        // - 1..31: carry = bit(amount-1)
+        // - 32: result=0, carry = bit31
+        // - >32: result=0, carry = 0
         if (amount == 0) return value;
-        
-        if (updateCarry && amount <= 32) {
-            if (amount <= 32) {
-                bool carryOut = (value & (1U << (amount - 1))) != 0;
+
+        if (updateCarry) {
+            if (amount < 32) {
+                const bool carryOut = (value & (1U << (amount - 1))) != 0;
                 SetCPSRFlag(cpsr, CPSR::FLAG_C, carryOut);
+            } else if (amount == 32) {
+                const bool carryOut = (value & 0x80000000U) != 0;
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, carryOut);
+            } else {
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, false);
             }
         }
-        
+
         if (amount >= 32) return 0;
         return value >> amount;
     }
@@ -232,17 +252,24 @@ namespace AIO::Emulator::GBA::ARM7TDMIHelpers {
      * Perform arithmetic shift right, optionally updating carry flag
      */
     inline uint32_t ArithmeticShiftRight(uint32_t value, uint32_t amount, uint32_t& cpsr, bool updateCarry = false) {
+        // ARM7TDMI semantics (register shifts):
+        // - amount==0: result=value, carry unchanged
+        // - 1..31: carry = bit(amount-1)
+        // - >=32: result fills with sign bit; carry = bit31
         if (amount == 0) return value;
-        
-        if (updateCarry && amount <= 32) {
-            if (amount <= 32) {
-                bool carryOut = ((int32_t)value >> (amount - 1)) & 1;
+
+        if (updateCarry) {
+            if (amount < 32) {
+                const bool carryOut = (((int32_t)value >> (amount - 1)) & 1) != 0;
+                SetCPSRFlag(cpsr, CPSR::FLAG_C, carryOut);
+            } else {
+                const bool carryOut = (value & 0x80000000U) != 0;
                 SetCPSRFlag(cpsr, CPSR::FLAG_C, carryOut);
             }
         }
-        
+
         if (amount >= 32) {
-            return ((int32_t)value < 0) ? 0xFFFFFFFF : 0;
+            return ((int32_t)value < 0) ? 0xFFFFFFFFU : 0U;
         }
         return (uint32_t)((int32_t)value >> amount);
     }
@@ -301,6 +328,14 @@ namespace AIO::Emulator::GBA::ARM7TDMIHelpers {
                 if (shiftAmount == 0) {
                     // ROR #0 is actually RRX (rotate right extended)
                     return RotateRightExtended(value, cpsr);
+                }
+                // Register-specified ROR: if amount != 0 and (amount & 31) == 0, the value is unchanged
+                // but carry-out becomes bit31 when flags are updated.
+                if ((shiftAmount & 0x1F) == 0) {
+                    if (updateCarry) {
+                        SetCPSRFlag(cpsr, CPSR::FLAG_C, (value & 0x80000000U) != 0);
+                    }
+                    return value;
                 }
                 return RotateRight(value, shiftAmount, cpsr, updateCarry);
             case Shift::RRX:

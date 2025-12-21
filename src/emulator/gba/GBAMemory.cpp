@@ -158,10 +158,10 @@ namespace AIO::Emulator::GBA {
         // Initialize WRAM to match real GBA hardware state after BIOS boot
         // Real hardware: BIOS does NOT clear all WRAM, leaving undefined values
         // Testing shows simple incremental pattern matches observed behavior
-        
+
         // EWRAM: Initialize to 0 (safer for audio buffers that may be read before written)
         std::fill(wram_board.begin(), wram_board.end(), 0);
-        
+
         // IWRAM: Initialize to 0 BUT preserve BIOS-managed regions.
         // For HLE stability, keep the IRQ stack region deterministic (0-filled).
         std::fill(wram_chip.begin(), wram_chip.end(), 0);
@@ -288,9 +288,10 @@ namespace AIO::Emulator::GBA {
         // Strategy: Set multiple known init flags to bypass common wait loops
         if (wram_chip.size() >= 0x8000) {
             // 0x3002b64: System init flag (SMA2, Pokemon, others)
-            // Set to 0xABCD as a distinctive non-zero marker that games unlikely to explicitly set
-            wram_chip[0x2b64] = 0xCD;
-            wram_chip[0x2b65] = 0xAB;
+            // Keep this minimally non-zero to unblock init loops without injecting a
+            // distinctive magic value that game logic might treat as meaningful.
+            wram_chip[0x2b64] = 0x01;
+            wram_chip[0x2b65] = 0x00;
             
             // 0x3007FF8: BIOS_IF (interrupt acknowledge from BIOS)
             wram_chip[0x7FF8] = 0x00;
@@ -943,7 +944,30 @@ namespace AIO::Emulator::GBA {
                 }
                 break;
             case 0x02: // WRAM (Board) (GBATEK: 0x02000000-0x0203FFFF)
-                return wram_board[address & MemoryMap::WRAM_BOARD_MASK];
+            {
+                const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+                const uint8_t v = wram_board[off];
+                // SMA2 investigation: trace reads of the 8-byte header staging area.
+                // Enable with: AIO_TRACE_SMA2_HEADER_READS=1
+                if ((std::getenv("AIO_TRACE_SMA2_HEADER_READS") != nullptr) && cpu) {
+                    if (off >= 0x03C0u && off < 0x03C8u) {
+                        static int hdrReads = 0;
+                        if (hdrReads < 400) {
+                            const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+                            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                                AIO::Emulator::Common::LogLevel::Info,
+                                "SMA2",
+                                "HDR_READ addr=0x%08x off=0x%04x val=0x%02x PC=0x%08x",
+                                (unsigned)address,
+                                (unsigned)off,
+                                (unsigned)v,
+                                (unsigned)pc);
+                            hdrReads++;
+                        }
+                    }
+                }
+                return v;
+            }
             case 0x03: // WRAM (Chip) (GBATEK: 0x03000000-0x03007FFF)
                 return wram_chip[address & MemoryMap::WRAM_CHIP_MASK];
             case 0x04: // IO Registers (GBATEK: 0x04000000-0x040003FF)
@@ -1054,7 +1078,47 @@ namespace AIO::Emulator::GBA {
                return ReadEEPROM();
            }
 
+        // SMA2 investigation: trace reads of the save/validator object pointer.
+        // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
+        if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ") != nullptr) {
+            if ((address & 0xFFFFFFFCu) == 0x03007BC8u) {
+                static int readLogs16 = 0;
+                if (readLogs16 < 400) {
+                    const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "SAVEOBJ Read16 addr=0x%08x val=0x%04x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)(Read8(address) | (Read8(address + 1) << 8)),
+                        (unsigned)pc);
+                    readLogs16++;
+                }
+            }
+        }
+
         uint16_t val = Read8(address) | (Read8(address + 1) << 8);
+
+        // SMA2 investigation: trace reads from the EEPROM DMA destination buffers in IWRAM.
+        // Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1
+        // This helps confirm whether the game is actually consuming the expected 0xFFFE/0xFFFF
+        // bitstream halfwords after DMA completes.
+        if ((std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS") != nullptr) && cpu) {
+            if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
+                static int eepBufR16 = 0;
+                if (eepBufR16 < 1200) {
+                    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "EEPDMA R16 addr=0x%08x val=0x%04x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)val,
+                        (unsigned)pc);
+                    eepBufR16++;
+                }
+            }
+        }
 
         // Timer Counters (Read from internal state)
         if ((address & 0xFF000000) == IORegs::BASE) {
@@ -1095,8 +1159,48 @@ namespace AIO::Emulator::GBA {
             return low | (high << 16);
         }
 
+        // SMA2 investigation: trace reads of the save/validator object pointer.
+        // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
+        if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ") != nullptr) {
+            if (address == 0x03007BC8u) {
+                static int readLogs32 = 0;
+                if (readLogs32 < 400) {
+                    const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                    const uint32_t v = Read8(address) | (Read8(address + 1) << 8) |
+                                       (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "SAVEOBJ Read32 addr=0x%08x val=0x%08x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)v,
+                        (unsigned)pc);
+                    readLogs32++;
+                }
+            }
+        }
+
         uint32_t val = Read8(address) | (Read8(address + 1) << 8) | 
                        (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
+
+        // SMA2 investigation: trace 32-bit reads from the EEPROM DMA destination buffers in IWRAM.
+        // Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1
+        if ((std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS") != nullptr) && cpu) {
+            if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
+                static int eepBufR32 = 0;
+                if (eepBufR32 < 800) {
+                    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "EEPDMA R32 addr=0x%08x val=0x%08x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)val,
+                        (unsigned)pc);
+                    eepBufR32++;
+                }
+            }
+        }
         
         // Debug: trace Read32 from jump table area
         if ((address >> 24) == 0x03 && (address & 0x7FFF) == 0x3378) {
@@ -1205,6 +1309,11 @@ namespace AIO::Emulator::GBA {
     }
 
     void GBAMemory::Write8(uint32_t address, uint8_t value) {
+        const bool traceIrqHandWrites = (std::getenv("AIO_TRACE_IRQHAND_WRITES") != nullptr);
+        const bool isIwram = ((address >> 24) == 0x03);
+        const uint32_t iwramOff = address & 0x7FFFu;
+        const bool isIrqHandPtrByte = isIwram && (iwramOff >= 0x7FFCu) && (iwramOff <= 0x7FFFu);
+        const uint32_t oldIrqHandWord = (traceIrqHandWrites && isIrqHandPtrByte) ? Read32(0x03007FFCu) : 0u;
         // DEBUG: Trace writes to IWRAM literal pool area 0x3003460-0x3003480 (disabled)
         // if (address >= 0x03003460 && address < 0x03003480) {
         //     std::cout << "[POOL WRITE] 0x" << std::hex << address 
@@ -1225,6 +1334,40 @@ namespace AIO::Emulator::GBA {
         //     std::cout << std::dec << std::endl;
         // }
         
+        if ((std::getenv("AIO_TRACE_SMA2_SAVEVALID_WRITES") != nullptr) && cpu) {
+            if (address >= 0x03007B80u && address < 0x03007C80u) {
+                static int wlogs8 = 0;
+                if (wlogs8 < 400) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "SAVEVALID W8 addr=0x%08x val=0x%02x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        cpu ? (unsigned)cpu->GetRegister(15) : 0u);
+                    wlogs8++;
+                }
+            }
+        }
+
+        // SMA2 investigation: trace non-zero writes into the header staging buffer in EWRAM.
+        // Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
+        if ((std::getenv("AIO_TRACE_SMA2_STAGE_WRITES") != nullptr) && cpu) {
+            if (address >= 0x020003C0u && address < 0x02000440u && value != 0) {
+                static int stage8 = 0;
+                if (stage8 < 500) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "STAGE W8 addr=0x%08x val=0x%02x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        (unsigned)cpu->GetRegister(15));
+                    stage8++;
+                }
+            }
+        }
+
         switch (address >> 24) {
             case 0x02: // WRAM (Board)
             {
@@ -1553,9 +1696,41 @@ namespace AIO::Emulator::GBA {
                 WriteEEPROM(value);
                 break;
         }
+
+        if (traceIrqHandWrites && isIrqHandPtrByte) {
+            const uint32_t newIrqHandWord = Read32(0x03007FFCu);
+            if (newIrqHandWord != oldIrqHandWord) {
+                static int logs = 0;
+                if (logs++ < 300) {
+                    const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                    const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+                    const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
+                    const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
+                    const uint32_t byteIndex = iwramOff - 0x7FFCu;
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "IRQHAND",
+                        "IRQHAND_WRITE8 addr=0x%08x byte=%u val=0x%02x old=0x%08x new=0x%08x PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x",
+                        (unsigned)address,
+                        (unsigned)byteIndex,
+                        (unsigned)value,
+                        (unsigned)oldIrqHandWord,
+                        (unsigned)newIrqHandWord,
+                        (unsigned)pc,
+                        (unsigned)lr,
+                        (unsigned)sp,
+                        (unsigned)cpsr);
+                }
+            }
+        }
     }
 
     void GBAMemory::Write16(uint32_t address, uint16_t value) {
+        const bool traceIrqHandWrites = (std::getenv("AIO_TRACE_IRQHAND_WRITES") != nullptr);
+        const bool isIwram = ((address >> 24) == 0x03);
+        const uint32_t iwramOff = address & 0x7FFFu;
+        const bool isIrqHandPtrHalf = isIwram && ((iwramOff & ~1u) == 0x7FFCu);
+        const uint32_t oldIrqHandWord = (traceIrqHandWrites && isIrqHandPtrHalf) ? Read32(0x03007FFCu) : 0u;
         // EEPROM Handling - Restrict writes to 0x0D (Wait State 2) to avoid conflicts with ROM
         // Most games use 0x0D for EEPROM. Some might use 0x0C.
         uint8_t region = (address >> 24);
@@ -1563,6 +1738,40 @@ namespace AIO::Emulator::GBA {
         if (region == 0x0D) {
             WriteEEPROM(value);
             return;
+        }
+
+        // SMA2 investigation: trace non-zero writes into the header staging buffer in EWRAM.
+        // Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
+        if ((std::getenv("AIO_TRACE_SMA2_STAGE_WRITES") != nullptr) && cpu) {
+            if (address >= 0x020003C0u && address < 0x02000440u && value != 0) {
+                static int stage16 = 0;
+                if (stage16 < 500) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "STAGE W16 addr=0x%08x val=0x%04x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        (unsigned)cpu->GetRegister(15));
+                    stage16++;
+                }
+            }
+        }
+
+        if ((std::getenv("AIO_TRACE_SMA2_SAVEVALID_WRITES") != nullptr) && cpu) {
+            if (address >= 0x03007B80u && address < 0x03007C80u) {
+                static int wlogs16 = 0;
+                if (wlogs16 < 400) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "SAVEVALID W16 addr=0x%08x val=0x%04x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        cpu ? (unsigned)cpu->GetRegister(15) : 0u);
+                    wlogs16++;
+                }
+            }
         }
 
         const bool traceSMA2DMABuf = (std::getenv("AIO_TRACE_SMA2_DMABUF") != nullptr);
@@ -1804,9 +2013,38 @@ namespace AIO::Emulator::GBA {
                 }
             }
         }
+
+        if (traceIrqHandWrites && isIrqHandPtrHalf) {
+            const uint32_t newIrqHandWord = Read32(0x03007FFCu);
+            if (newIrqHandWord != oldIrqHandWord) {
+                static int logs = 0;
+                if (logs++ < 300) {
+                    const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                    const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+                    const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
+                    const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "IRQHAND",
+                        "IRQHAND_WRITE16 addr=0x%08x val=0x%04x old=0x%08x new=0x%08x PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        (unsigned)oldIrqHandWord,
+                        (unsigned)newIrqHandWord,
+                        (unsigned)pc,
+                        (unsigned)lr,
+                        (unsigned)sp,
+                        (unsigned)cpsr);
+                }
+            }
+        }
     }
 
     void GBAMemory::Write32(uint32_t address, uint32_t value) {
+        const bool traceIrqHandWrites = (std::getenv("AIO_TRACE_IRQHAND_WRITES") != nullptr);
+        const bool isIrqHandPtrWord = ((address >> 24) == 0x03) && ((address & 0x7FFFu) == 0x7FFCu);
+        const uint32_t oldIrqHandWord = (traceIrqHandWrites && isIrqHandPtrWord) ? Read32(0x03007FFCu) : 0u;
+
         // Instrument IE/IME writes done via 32-bit access
         if ((address & 0xFF000000) == 0x04000000) {
             uint32_t offset = address & 0x3FF;
@@ -1846,6 +2084,40 @@ namespace AIO::Emulator::GBA {
             WriteEEPROM(value & 0xFFFF);
             WriteEEPROM(value >> 16);
             return;
+        }
+
+        // SMA2 investigation: trace non-zero writes into the header staging buffer in EWRAM.
+        // Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
+        if ((std::getenv("AIO_TRACE_SMA2_STAGE_WRITES") != nullptr) && cpu) {
+            if (address >= 0x020003C0u && address < 0x02000440u && value != 0) {
+                static int stage32 = 0;
+                if (stage32 < 500) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "STAGE W32 addr=0x%08x val=0x%08x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        (unsigned)cpu->GetRegister(15));
+                    stage32++;
+                }
+            }
+        }
+
+        if ((std::getenv("AIO_TRACE_SMA2_SAVEVALID_WRITES") != nullptr) && cpu) {
+            if (address >= 0x03007B80u && address < 0x03007C80u) {
+                static int wlogs32 = 0;
+                if (wlogs32 < 400) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "SMA2",
+                        "SAVEVALID W32 addr=0x%08x val=0x%08x PC=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        cpu ? (unsigned)cpu->GetRegister(15) : 0u);
+                    wlogs32++;
+                }
+            }
         }
 
         // Instrument key IO register writes to diagnose display/IRQ state
@@ -1929,6 +2201,41 @@ namespace AIO::Emulator::GBA {
                     uint16_t reload = value & 0xFFFF;
                     timerCounters[timerIdx] = reload;
                     timerPrescalerCounters[timerIdx] = 0;
+                }
+            }
+        }
+
+        if (traceIrqHandWrites && isIrqHandPtrWord) {
+            const uint32_t newIrqHandWord = Read32(0x03007FFCu);
+            if (newIrqHandWord != oldIrqHandWord) {
+                static int logs = 0;
+                if (logs++ < 300) {
+                    const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                    const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+                    const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
+                    const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
+                    const uint32_t r0 = cpu ? (uint32_t)cpu->GetRegister(0) : 0u;
+                    const uint32_t r1 = cpu ? (uint32_t)cpu->GetRegister(1) : 0u;
+                    const uint32_t r2 = cpu ? (uint32_t)cpu->GetRegister(2) : 0u;
+                    const uint32_t r3 = cpu ? (uint32_t)cpu->GetRegister(3) : 0u;
+                    const uint32_t r12 = cpu ? (uint32_t)cpu->GetRegister(12) : 0u;
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info,
+                        "IRQHAND",
+                        "IRQHAND_WRITE32 addr=0x%08x val=0x%08x old=0x%08x new=0x%08x PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x R12=0x%08x",
+                        (unsigned)address,
+                        (unsigned)value,
+                        (unsigned)oldIrqHandWord,
+                        (unsigned)newIrqHandWord,
+                        (unsigned)pc,
+                        (unsigned)lr,
+                        (unsigned)sp,
+                        (unsigned)cpsr,
+                        (unsigned)r0,
+                        (unsigned)r1,
+                        (unsigned)r2,
+                        (unsigned)r3,
+                        (unsigned)r12);
                 }
             }
         }
@@ -2245,12 +2552,14 @@ namespace AIO::Emulator::GBA {
         bool startingAtDataPhase = (eepromState == EEPROMState::ReadData);
         bool inReadSequence = (eepromState == EEPROMState::ReadDummy || eepromState == EEPROMState::ReadData);
         // CRITICAL: Only fast-path if buffer is valid for THIS transaction (set after address+stop bit)
-        bool canFastPath = srcIsEEPROM && inReadSequence && eepromBufferValid && count >= 4;
+        const bool disableFastPath = (std::getenv("AIO_EEPROM_DISABLE_FASTPATH") != nullptr);
+        bool canFastPath = !disableFastPath && srcIsEEPROM && inReadSequence && eepromBufferValid && count >= 4;
 
         // Fast-path validation (silent)
 
         if (canFastPath) {
             const bool lsbFirst = (std::getenv("AIO_EEPROM_LSB_FIRST") != nullptr);
+            const bool dummyHigh = (std::getenv("AIO_EEPROM_DUMMY_HIGH") != nullptr);
             if (verboseLogs) {
                 std::cout << "[EEPROM FAST-PATH] Activating for count=" << count << " src=0x" << std::hex << currentSrc << std::dec << std::endl;
             }
@@ -2274,7 +2583,11 @@ namespace AIO::Emulator::GBA {
             for (uint32_t i = 0; i < count; ++i) {
                 uint16_t word;
                 if (eepromState == EEPROMState::ReadDummy) {
-                    word = d0OnlyDMASamples ? 0x0000 : EEPROMConsts::BUSY_LOW;
+                    if (d0OnlyDMASamples) {
+                        word = 0x0000;
+                    } else {
+                        word = dummyHigh ? EEPROMConsts::READY_HIGH : EEPROMConsts::BUSY_LOW;
+                    }
                     eepromBitCounter++;
                     if (eepromBitCounter >= EEPROMConsts::DUMMY_BITS) {
                         eepromState = EEPROMState::ReadData;
@@ -2638,17 +2951,21 @@ namespace AIO::Emulator::GBA {
         }
 
         // Hardware-visible DMA register updates:
-        // Many titles poll DMA enable/count/address registers for completion.
-        // Reflect the final internal addresses back into the DMAxSAD/DAD registers.
-        auto writeIo32 = [&](uint32_t off, uint32_t v) {
-            if (off + 3 >= io_regs.size()) return;
-            io_regs[off + 0] = (uint8_t)(v & 0xFF);
-            io_regs[off + 1] = (uint8_t)((v >> 8) & 0xFF);
-            io_regs[off + 2] = (uint8_t)((v >> 16) & 0xFF);
-            io_regs[off + 3] = (uint8_t)((v >> 24) & 0xFF);
-        };
-        writeIo32(baseOffset + 0, currentSrc);
-        writeIo32(baseOffset + 4, currentDst);
+        // For normal memory-to-memory DMAs, reflecting final addresses can be useful.
+        // However, for EEPROM transfers (0x0Dxxxxxx), some libraries assume the
+        // programmed DMAxSAD/DAD remain stable and may use partial writes; writing
+        // back advanced addresses can desync subsequent DMA setup.
+        if (!srcIsEEPROM && !dstIsEEPROM) {
+            auto writeIo32 = [&](uint32_t off, uint32_t v) {
+                if (off + 3 >= io_regs.size()) return;
+                io_regs[off + 0] = (uint8_t)(v & 0xFF);
+                io_regs[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+                io_regs[off + 2] = (uint8_t)((v >> 16) & 0xFF);
+                io_regs[off + 3] = (uint8_t)((v >> 24) & 0xFF);
+            };
+            writeIo32(baseOffset + 0, currentSrc);
+            writeIo32(baseOffset + 4, currentDst);
+        }
 
         // Per GBA spec: Immediate timing always clears Enable bit after first transfer,
         // regardless of Repeat bit. Repeat only applies to VBlank/HBlank/FIFO triggered DMAs.
@@ -2773,6 +3090,7 @@ namespace AIO::Emulator::GBA {
 
     uint16_t GBAMemory::ReadEEPROM() {
         static const bool lsbFirst = (std::getenv("AIO_EEPROM_LSB_FIRST") != nullptr);
+        static const bool dummyHigh = (std::getenv("AIO_EEPROM_DUMMY_HIGH") != nullptr);
         if (std::getenv("AIO_TRACE_EEPROM_IO") != nullptr) {
             static int readLogs = 0;
             if (readLogs < 200) {
@@ -2811,7 +3129,7 @@ namespace AIO::Emulator::GBA {
             }
         }
         if (eepromState == EEPROMState::ReadDummy) {
-            ret = EEPROMConsts::BUSY_LOW;
+            ret = dummyHigh ? EEPROMConsts::READY_HIGH : EEPROMConsts::BUSY_LOW;
             eepromBitCounter++;
             if (eepromBitCounter >= EEPROMConsts::DUMMY_BITS) { // Standard 4 dummy bits
                 eepromState = EEPROMState::ReadData;
@@ -2917,6 +3235,28 @@ namespace AIO::Emulator::GBA {
                         
                         for (int i = 0; i < (int)EEPROMConsts::BYTES_PER_BLOCK; ++i) {
                             eepromBuffer |= ((uint64_t)eepromData[offset + i] << (56 - i * 8));
+                        }
+
+                        // SMA2 investigation: log read transactions (block + payload) so we can
+                        // identify which block triggers the game's "repair/format" path.
+                        // Enable with: AIO_TRACE_EEPROM_READ_TXN=1
+                        if (cpu && (std::getenv("AIO_TRACE_EEPROM_READ_TXN") != nullptr)) {
+                            // Keep this low-noise: only log AA2E and only the first N reads.
+                            if (gameCode == "AA2E") {
+                                static int txnLogs = 0;
+                                if (txnLogs < 300) {
+                                    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+                                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                                        AIO::Emulator::Common::LogLevel::Info,
+                                        "SMA2",
+                                        "EEPROM READ TXN: block=%u offset=0x%04x data=0x%016llx PC=0x%08x",
+                                        (unsigned)eepromAddress,
+                                        (unsigned)offset,
+                                        (unsigned long long)eepromBuffer,
+                                        (unsigned)pc);
+                                    txnLogs++;
+                                }
+                            }
                         }
                         
                         if (verboseLogs) {

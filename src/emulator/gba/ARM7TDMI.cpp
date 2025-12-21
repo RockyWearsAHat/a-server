@@ -33,6 +33,28 @@ namespace AIO::Emulator::GBA {
         branchLog.push_back({from, to});
         if (branchLog.size() > 50) branchLog.pop_front();
 
+        // SMA2 investigation: detect when the game branches to the save/validator object entry.
+        // Enable with: AIO_TRACE_SMA2_SAVEOBJ_CALL=1
+        if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_CALL") != nullptr) {
+            const uint32_t masked = to & ~1u;
+            if (masked >= 0x08177900u && masked <= 0x08177A50u) {
+                uint32_t instr = 0;
+                if (g_memoryForLog) {
+                    instr = g_thumbModeForLog ? g_memoryForLog->ReadInstruction16(from & ~1u)
+                                             : g_memoryForLog->ReadInstruction32(from & ~3u);
+                }
+                Logger::Instance().LogFmt(
+                    LogLevel::Info,
+                    "SMA2",
+                    "SAVEOBJ BRANCH from=0x%08x to=0x%08x masked=0x%08x instr=0x%08x fromThumb=%d",
+                    (unsigned)from,
+                    (unsigned)to,
+                    (unsigned)masked,
+                    (unsigned)instr,
+                    g_thumbModeForLog ? 1 : 0);
+            }
+        }
+
         // Treat jumps into the middle of the instruction encoding space as invalid.
         // If `to` looks like an ARM opcode rather than an address, something wrote PC with a fetched instruction.
         if ((to & 0xFF000000) == 0xE3000000) {
@@ -354,9 +376,11 @@ namespace AIO::Emulator::GBA {
         //               << " PC=0x" << registers[15] << std::dec << std::endl;
         // }
 
-        // Wake from halt if any enabled interrupt is pending
-        if (halted && (ie & if_reg)) {
+        // Wake from HALT/STOP/IntrWait if any enabled interrupt is pending.
+        // Do NOT auto-resume debugger breakpoints/stepback halts.
+        if (halted && sleepHalt && (ie & if_reg)) {
             halted = false;
+            sleepHalt = false;
         }
 
         if (!(ime & 1)) return;
@@ -511,6 +535,65 @@ namespace AIO::Emulator::GBA {
                 registers[13],
                 registers[14]);
         }
+
+        // SMA2 save-validation root-cause dump.
+        // The game takes the "Your saved data is corrupt" path when a validator returns 0,
+        // then rewrites the EEPROM header. This one-shot dump captures the validator return
+        // and the in-RAM buffer it validated.
+        // Enable with: AIO_TRACE_SMA2_SAVEVALID=1
+        if (std::getenv("AIO_TRACE_SMA2_SAVEVALID") != nullptr) {
+            static bool dumped = false;
+            if (!dumped && currentInstrThumb && currentInstrAddr == 0x080073D0u) {
+                dumped = true;
+
+                const uint32_t r0 = registers[0];
+                const uint32_t r1 = registers[1];
+                const uint32_t r2 = registers[2];
+                const uint32_t r3 = registers[3];
+                const uint32_t sp = registers[13];
+                const uint32_t lr = registers[14];
+
+                std::cerr << "[SMA2 SAVEVALID] PC=0x" << std::hex << currentInstrAddr
+                          << " R0(ret)=0x" << r0
+                          << " R1(buf)=0x" << r1
+                          << " R2=0x" << r2
+                          << " R3=0x" << r3
+                          << " SP=0x" << sp
+                          << " LR=0x" << lr
+                          << " CPSR=0x" << cpsr
+                          << std::dec << "\n";
+
+                auto dumpBytes = [&](uint32_t addr, size_t len) {
+                    std::cerr << "[SMA2 SAVEVALID] mem[0x" << std::hex << addr << "] (" << std::dec << len << " bytes):\n";
+                    for (size_t i = 0; i < len; ++i) {
+                        if ((i % 16) == 0) {
+                            std::cerr << "  0x" << std::hex << (addr + (uint32_t)i) << ": ";
+                        }
+                        const uint8_t b = memory.Read8(addr + (uint32_t)i);
+                        std::cerr << std::hex << std::setw(2) << std::setfill('0') << (unsigned)b;
+                        if ((i % 16) != 15) std::cerr << " ";
+                        if ((i % 16) == 15) std::cerr << std::dec << "\n";
+                    }
+                    if ((len % 16) != 0) std::cerr << std::dec << "\n";
+                };
+
+                // Dump the buffer the validator was pointed at (common observed: 0x03007BC8).
+                if (r1 >= 0x02000000 && r1 < 0x04000000) {
+                    dumpBytes(r1, 0x80);
+                }
+
+                // Dump the EWRAM staging region commonly used by the SMA2 EEPROM routines.
+                // This helps distinguish "validator object is zero" from "decoded header bytes are wrong".
+                dumpBytes(0x020003C0, 0x80);
+
+                // Dump the IWRAM scratch buffers where the EEPROM DMA bitstream is placed.
+                dumpBytes(0x03007CC0, 0x80);
+                dumpBytes(0x03007CE4, 0x80);
+
+                // Also dump the tail of IWRAM where BIOS variables live, in case the validator relies on them.
+                dumpBytes(0x03007B80, 0x100);
+            }
+        }
         if (r11Now != g_lastR11Observed) {
             const uint32_t instr = currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
             RecordR11Write(currentInstrAddr, currentInstrThumb, instr, g_lastR11Observed, r11Now);
@@ -563,6 +646,8 @@ namespace AIO::Emulator::GBA {
         for (auto addr : breakpoints) {
             if (bpPC == addr) {
                 halted = true;
+                debuggerHalt = true;
+                sleepHalt = false;
                 std::cout << "[BREAKPOINT] Hit at PC=0x" << std::hex << bpPC << std::dec << std::endl;
                 DumpState(std::cout);
                 return;
@@ -695,6 +780,8 @@ namespace AIO::Emulator::GBA {
         if (!valid) {
             std::cerr << "[FATAL] Invalid PC: 0x" << std::hex << pc << std::dec << std::endl;
             halted = true;
+            sleepHalt = false;
+            debuggerHalt = false;
             // Write crash info to log file asynchronously
             FILE* logFile = fopen("crash_log.txt", "a");
             if (logFile) {
@@ -805,11 +892,21 @@ namespace AIO::Emulator::GBA {
 
         lastPC = pc;
 
-        // BIOS HLE: We do not ship a real BIOS ROM. Execute common BIOS routines
-        // via HLE so games don't run into partial/garbage BIOS stubs.
+        // BIOS handling:
+        // We do not ship a full BIOS ROM, but we *do* install a real instruction-level
+        // IRQ vector + trampoline in the BIOS region (see GBAMemory constructor/Reset).
+        // For correctness, let that trampoline execute as normal instructions.
+        // For other BIOS entry points that games may call directly, we still provide HLE.
         if (pc < 0x4000) {
-            ExecuteBIOSFunction(pc);
-            return;
+            const uint32_t pcAligned = thumbMode ? (pc & ~1u) : (pc & ~3u);
+
+            const bool inIrqVector = (pcAligned == 0x00000018u);
+            const bool inIrqTrampoline = (pcAligned >= 0x00000180u && pcAligned < 0x000001A8u);
+
+            if (!inIrqVector && !inIrqTrampoline) {
+                ExecuteBIOSFunction(pcAligned);
+                return;
+            }
         }
 
         if (thumbMode) {
@@ -873,19 +970,67 @@ namespace AIO::Emulator::GBA {
             const bool inEepFuncRange = (instrAddr >= 0x0809E000 && instrAddr <= 0x0809E360);
             const bool inEepMiniRange = (instrAddr >= 0x0809E020 && instrAddr <= 0x0809E090);
 
-            if (traceEepCall && inEepMiniRange) {
-                static int eepMiniLogs = 0;
-                if (eepMiniLogs < 120) {
+            // SMA2 investigation: trace the EEPROM init/dispatch prologue just before the
+            // DMA-driven EEPROM routines (where the validator object at 0x03007BC8 is set up).
+            // Enable with: AIO_TRACE_SMA2_EEP_INIT=1
+            const bool traceEepInit = (std::getenv("AIO_TRACE_SMA2_EEP_INIT") != nullptr);
+            const bool inEepInitRange = (instrAddr >= 0x0809DF80 && instrAddr <= 0x0809E120);
+
+            if (traceEepInit && inEepInitRange) {
+                static int eepInitLogs = 0;
+                if (eepInitLogs < 900) {
                     Logger::Instance().LogFmt(
                         LogLevel::Info,
                         "CPU",
-                        "SMA2 EEPCALL mini pre PC=0x%08x op=0x%04x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+                        "SMA2 EEPINIT pre PC=0x%08x op=0x%04x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x R4=0x%08x R5=0x%08x R6=0x%08x R7=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
                         instrAddr,
                         instruction,
                         registers[0],
                         registers[1],
                         registers[2],
                         registers[3],
+                        registers[4],
+                        registers[5],
+                        registers[6],
+                        registers[7],
+                        registers[13],
+                        registers[14],
+                        cpsr);
+                    eepInitLogs++;
+                }
+            }
+
+            // This routine is large; keep logging extremely targeted to avoid drowning the run.
+            const bool isEepCallSite =
+                (instrAddr == 0x0809E1B4u) ||
+                (instrAddr == 0x0809E226u) ||
+                (instrAddr == 0x0809E23Eu) ||
+                (instrAddr == 0x0809E25Cu) ||
+                (instrAddr == 0x0809E272u) ||
+                (instrAddr == 0x0809E2D6u) ||
+                (instrAddr == 0x0809E2ECu) ||
+                (instrAddr == 0x0809E326u) ||
+                (instrAddr == 0x0809E33Au) ||
+                (instrAddr == 0x0809E352u) ||
+                (instrAddr == 0x0809E3B4u);
+
+            if (traceEepCall && (inEepMiniRange || isEepCallSite)) {
+                static int eepMiniLogs = 0;
+                if (eepMiniLogs < 120) {
+                    Logger::Instance().LogFmt(
+                        LogLevel::Info,
+                        "CPU",
+                        "SMA2 EEPCALL pre PC=0x%08x op=0x%04x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x R4=0x%08x R5=0x%08x R6=0x%08x R7=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+                        instrAddr,
+                        instruction,
+                        registers[0],
+                        registers[1],
+                        registers[2],
+                        registers[3],
+                        registers[4],
+                        registers[5],
+                        registers[6],
+                        registers[7],
                         registers[13],
                         registers[14],
                         cpsr);
@@ -971,6 +1116,153 @@ namespace AIO::Emulator::GBA {
             // Advance to next instruction.
             registers[15] = instrAddr + 2u;
             DecodeThumb(instruction, pcValue);
+
+            // SMA2 investigation: trace control flow and key PC-relative loads in the EEPROM helper window.
+            // Enable with: AIO_TRACE_SMA2_EEPWIN_CPU=1
+            if (std::getenv("AIO_TRACE_SMA2_EEPWIN_CPU") != nullptr) {
+                const uint32_t winLo = 0x0809E1B0u;
+                const uint32_t winHi = 0x0809E330u;
+                if (instrAddr >= winLo && instrAddr <= winHi) {
+                    static int winLogs = 0;
+                    if (winLogs < 2000) {
+                        const uint32_t pcAfter = registers[15];
+                        const uint32_t seqNext = instrAddr + 2u;
+                        const uint32_t n = (cpsr >> 31) & 1u;
+                        const uint32_t z = (cpsr >> 30) & 1u;
+                        const uint32_t c = (cpsr >> 29) & 1u;
+                        const uint32_t v = (cpsr >> 28) & 1u;
+
+                        auto signExtend = [](uint32_t value, uint32_t bits) -> int32_t {
+                            // Must perform the right-shift on a signed type to get arithmetic sign extension.
+                            const uint32_t shift = 32u - bits;
+                            const int32_t shifted = (int32_t)(value << shift);
+                            return (shifted >> shift);
+                        };
+
+                        bool logged = false;
+
+                        // Thumb conditional branch: 1101 cccc oooooooo (cccc != 1111)
+                        if ((instruction & 0xF000u) == 0xD000u && ((instruction >> 8) & 0xFu) != 0xFu) {
+                            const uint32_t cond = (instruction >> 8) & 0xFu;
+                            const uint32_t imm8 = instruction & 0xFFu;
+                            const int32_t off = signExtend((imm8 << 1u), 9u);
+                            const uint32_t target = (uint32_t)((int64_t)pcValue + (int64_t)off);
+                            const bool taken = (pcAfter == target);
+                            Logger::Instance().LogFmt(
+                                LogLevel::Info,
+                                "CPU",
+                                "SMA2 EEPWIN BCOND PC=0x%08x op=0x%04x cond=%u off=%d tgt=0x%08x taken=%u -> PC=0x%08x NZCV=%u%u%u%u",
+                                instrAddr,
+                                (unsigned)instruction,
+                                (unsigned)cond,
+                                (int)off,
+                                (unsigned)target,
+                                (unsigned)(taken ? 1 : 0),
+                                (unsigned)pcAfter,
+                                (unsigned)n,
+                                (unsigned)z,
+                                (unsigned)c,
+                                (unsigned)v);
+                            logged = true;
+                            winLogs++;
+                        }
+
+                        // Thumb unconditional branch: 11100 ooooooooooo
+                        if (!logged && (instruction & 0xF800u) == 0xE000u) {
+                            const uint32_t imm11 = instruction & 0x7FFu;
+                            const int32_t off = signExtend((imm11 << 1u), 12u);
+                            const uint32_t target = (uint32_t)((int64_t)pcValue + (int64_t)off);
+                            Logger::Instance().LogFmt(
+                                LogLevel::Info,
+                                "CPU",
+                                "SMA2 EEPWIN B PC=0x%08x op=0x%04x off=%d tgt=0x%08x -> PC=0x%08x NZCV=%u%u%u%u",
+                                instrAddr,
+                                (unsigned)instruction,
+                                (int)off,
+                                (unsigned)target,
+                                (unsigned)pcAfter,
+                                (unsigned)n,
+                                (unsigned)z,
+                                (unsigned)c,
+                                (unsigned)v);
+                            logged = true;
+                            winLogs++;
+                        }
+
+                        // Thumb LDR literal: 01001 RRR oooooooo (addr = Align(pcValue,4) + imm8*4)
+                        if (!logged && (instruction & 0xF800u) == 0x4800u) {
+                            const uint32_t rd = (instruction >> 8) & 0x7u;
+                            const uint32_t imm8 = instruction & 0xFFu;
+                            const uint32_t base = pcValue & ~3u;
+                            const uint32_t addr = base + (imm8 << 2u);
+                            const uint32_t loaded = registers[rd];
+                            const uint32_t expected = memory.Read32(addr);
+                            Logger::Instance().LogFmt(
+                                LogLevel::Info,
+                                "CPU",
+                                "SMA2 EEPWIN LDRLIT PC=0x%08x op=0x%04x Rd=%u addr=0x%08x loaded=0x%08x expected=0x%08x NZCV=%u%u%u%u",
+                                instrAddr,
+                                (unsigned)instruction,
+                                (unsigned)rd,
+                                (unsigned)addr,
+                                (unsigned)loaded,
+                                (unsigned)expected,
+                                (unsigned)n,
+                                (unsigned)z,
+                                (unsigned)c,
+                                (unsigned)v);
+                            logged = true;
+                            winLogs++;
+                        }
+
+                        // Fallback: any PC change in the window.
+                        if (!logged && pcAfter != seqNext) {
+                            Logger::Instance().LogFmt(
+                                LogLevel::Info,
+                                "CPU",
+                                "SMA2 EEPWIN FLOW PC=0x%08x op=0x%04x -> PC=0x%08x (seq=0x%08x) LR=0x%08x SP=0x%08x NZCV=%u%u%u%u",
+                                instrAddr,
+                                (unsigned)instruction,
+                                (unsigned)pcAfter,
+                                (unsigned)seqNext,
+                                (unsigned)registers[14],
+                                (unsigned)registers[13],
+                                (unsigned)n,
+                                (unsigned)z,
+                                (unsigned)c,
+                                (unsigned)v);
+                            winLogs++;
+                        }
+                    }
+                }
+            }
+
+            // SMA2 investigation: trace any control-flow transition into the save-object routine area.
+            // This catches indirect calls that won't show up as a normal branch trace (e.g. POP {pc}, LDR pc, [..]).
+            // Enable with: AIO_TRACE_SMA2_SAVEOBJ_TRANS=1
+            if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_TRANS") != nullptr) {
+                const uint32_t pcAfter = registers[15];
+                if (pcAfter >= 0x08177900u && pcAfter <= 0x08177A50u) {
+                    static int transLogsT = 0;
+                    if (transLogsT < 200) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Info,
+                            "CPU",
+                            "SMA2 SAVEOBJ TRANS (T) fromPC=0x%08x op=0x%04x -> PC=0x%08x LR=0x%08x SP=0x%08x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x CPSR=0x%08x",
+                            instrAddr,
+                            instruction,
+                            pcAfter,
+                            registers[14],
+                            registers[13],
+                            registers[0],
+                            registers[1],
+                            registers[2],
+                            registers[3],
+                            cpsr);
+                        transLogsT++;
+                    }
+                }
+            }
 
             // SMA2 investigation: trace R0 changes and the callsite return value.
             if (traceEepCall) {
@@ -1101,6 +1393,32 @@ namespace AIO::Emulator::GBA {
             registers[15] = instrAddr + 4u;
             Decode(instruction);
 
+            // SMA2 investigation: trace any control-flow transition into the save-object routine area.
+            // Enable with: AIO_TRACE_SMA2_SAVEOBJ_TRANS=1
+            if (std::getenv("AIO_TRACE_SMA2_SAVEOBJ_TRANS") != nullptr) {
+                const uint32_t pcAfter = registers[15];
+                if (pcAfter >= 0x08177900u && pcAfter <= 0x08177A50u) {
+                    static int transLogsA = 0;
+                    if (transLogsA < 200) {
+                        Logger::Instance().LogFmt(
+                            LogLevel::Info,
+                            "CPU",
+                            "SMA2 SAVEOBJ TRANS (A) fromPC=0x%08x op=0x%08x -> PC=0x%08x LR=0x%08x SP=0x%08x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x CPSR=0x%08x",
+                            instrAddr,
+                            instruction,
+                            pcAfter,
+                            registers[14],
+                            registers[13],
+                            registers[0],
+                            registers[1],
+                            registers[2],
+                            registers[3],
+                            cpsr);
+                        transLogsA++;
+                    }
+                }
+            }
+
             // Post-exec: trace LR changes.
             if (kEnableHeavyCpuTraces && registers[14] != lrBefore) {
                 static int lrLogCountA = 0;
@@ -1144,6 +1462,8 @@ namespace AIO::Emulator::GBA {
         spsr = s.spsr;
         thumbMode = s.thumbMode;
         halted = true; // stay halted in debugger
+        debuggerHalt = true;
+        sleepHalt = false;
     }
 
     // Debugger API implementations
@@ -1157,7 +1477,11 @@ namespace AIO::Emulator::GBA {
     const std::vector<uint32_t>& ARM7TDMI::GetBreakpoints() const { return breakpoints; }
     void ARM7TDMI::SetSingleStep(bool enabled) { singleStep = enabled; }
     bool ARM7TDMI::IsSingleStep() const { return singleStep; }
-    void ARM7TDMI::Continue() { halted = false; }
+    void ARM7TDMI::Continue() {
+        halted = false;
+        sleepHalt = false;
+        debuggerHalt = false;
+    }
     void ARM7TDMI::DumpState(std::ostream& os) const {
         os << std::hex;
         os << "CPSR=0x" << cpsr << " Thumb=" << thumbMode << "\n";
@@ -1481,6 +1805,8 @@ namespace AIO::Emulator::GBA {
                 if (newMode != CPUMode::USER && newMode != CPUMode::SYSTEM &&
                     newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR) {
                     halted = true;
+                    sleepHalt = false;
+                    debuggerHalt = false;
                     FILE* logFile = fopen("crash_log.txt", "a");
                     if (logFile) {
                         fprintf(logFile, "==== Emulator Crash (Invalid SPSR on CPSR restore) ====\n");
@@ -1757,6 +2083,8 @@ namespace AIO::Emulator::GBA {
             if (newMode != CPUMode::USER && newMode != CPUMode::SYSTEM &&
                 newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR) {
                 halted = true;
+                sleepHalt = false;
+                debuggerHalt = false;
                 FILE* logFile = fopen("crash_log.txt", "a");
                 if (logFile) {
                     fprintf(logFile, "==== Emulator Crash (Invalid SPSR on LDM^ CPSR restore) ====\n");
@@ -2150,9 +2478,13 @@ namespace AIO::Emulator::GBA {
             }
             case 0x02: // Halt
                 halted = true;
+                sleepHalt = true;
+                debuggerHalt = false;
                 break;
             case 0x03: // Stop/Sleep
                 halted = true;
+                sleepHalt = true;
+                debuggerHalt = false;
                 break;
             case 0x04: // IntrWait
             intrwait_entry:
@@ -2183,6 +2515,8 @@ namespace AIO::Emulator::GBA {
                 memory.Write16(IORegs::REG_IE, ie | (waitFlags & 0xFFFF)); // Enable required IRQs
                 cpsr &= ~0x80; // Enable IRQ in CPSR
                 halted = true;
+                sleepHalt = true;
+                debuggerHalt = false;
 
                 // Rewind PC to re-execute this SWI instruction
                 if (thumbMode) registers[15] -= 2;
@@ -2309,6 +2643,12 @@ namespace AIO::Emulator::GBA {
             }
             case 0x0B: // CpuSet (R0=Src, R1=Dst, R2=Cnt/Ctrl)
             {
+                // Real GBA behavior: SWI runs with IRQs masked (CPSR.I=1) and the
+                // caller CPSR is restored on return. Without this, our HLE loop can
+                // be interrupted mid-copy by an IRQ, which some titles don't expect.
+                const uint32_t savedCpsr = cpsr;
+                cpsr |= 0x80u;
+
                 uint32_t src = registers[0];
                 uint32_t dst = registers[1];
                 uint32_t len = registers[2] & 0x1FFFFF;
@@ -2362,15 +2702,22 @@ namespace AIO::Emulator::GBA {
                 }
                 // Advance SWI overhead
                 AdvanceHLECycles(kSwiOverheadCycles);
+
+                cpsr = savedCpsr;
                 break;
             }
             case 0x0C: // CpuFastSet (R0=Src, R1=Dst, R2=Cnt/Ctrl)
             {
+                // See CpuSet notes: keep IRQs masked during the bulk transfer.
+                const uint32_t savedCpsr = cpsr;
+                cpsr |= 0x80u;
+
                 uint32_t src = registers[0];
                 uint32_t dst = registers[1];
-                // GBA BIOS convention (GBATEK): low 21 bits are the number of 32-byte blocks.
-                // Total transfer size is: blockCount * 32 bytes == blockCount * 8 words.
-                uint32_t blockCount = registers[2] & 0x1FFFFF;
+                // BIOS convention: low 21 bits encode a 32-bit word count, processed in
+                // 8-word (32-byte) chunks. The BIOS effectively rounds up to the next
+                // multiple of 8 words.
+                const uint32_t wordCount = registers[2] & 0x1FFFFF;
 
                 bool fixedSrc = (registers[2] >> 24) & 1;
                 
@@ -2382,13 +2729,14 @@ namespace AIO::Emulator::GBA {
                 //               << " fixed=" << fixedSrc << std::endl;
                 // }
                 
-                // Always 32-bit; CpuFastSet transfers blockCount*8 32-bit words.
-                uint32_t units = blockCount * 8u;
+                // Always 32-bit; CpuFastSet transfers in 8-word blocks.
+                const uint32_t units = (wordCount + 7u) & ~7u;
                 const uint32_t batchSize = 64;  // Update PPU every 64 units
                 const int perUnitCycles = 4;
 
                 if (units == 0) {
                     AdvanceHLECycles(kSwiOverheadCycles);
+                    cpsr = savedCpsr;
                     break;
                 }
                 
@@ -2426,6 +2774,8 @@ namespace AIO::Emulator::GBA {
                 }
                 // Advance SWI overhead
                 AdvanceHLECycles(kSwiOverheadCycles);
+
+                cpsr = savedCpsr;
                 break;
             }
             case 0x0E: // BgAffineSet
@@ -3161,9 +3511,22 @@ namespace AIO::Emulator::GBA {
                 }
                 case 0x7: // ROR
                 {
-                    uint32_t shiftAmount = op2 & 0x1F;
+                    // Thumb ALU ROR: shift amount is taken from Rs[7:0].
+                    // If amount==0: result unchanged, carry unchanged.
+                    // If amount!=0 and (amount&31)==0: result unchanged, carry = bit31.
+                    const uint32_t amount8 = op2 & 0xFF;
                     uint32_t tempCPSR = cpsr;
-                    res = RotateRight(val, shiftAmount, tempCPSR, true);
+                    if (amount8 == 0) {
+                        res = val;
+                    } else {
+                        const uint32_t rot = amount8 & 0x1F;
+                        if (rot == 0) {
+                            res = val;
+                            SetCPSRFlag(tempCPSR, CPSR::FLAG_C, (val & 0x80000000U) != 0);
+                        } else {
+                            res = RotateRight(val, rot, tempCPSR, true);
+                        }
+                    }
                     UpdateNZFlags(cpsr, res);
                     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
                     {
@@ -3483,6 +3846,19 @@ namespace AIO::Emulator::GBA {
                 */
                 memory.Write16(addr, registers[rd] & 0xFFFF);
             }
+        }
+        // Format 12: Add Offset to PC / SP
+        // 1010 xddd oooooooo
+        // x=0: ADD Rd, PC, #imm*4   (PC is (pcValue & ~3))
+        // x=1: ADD Rd, SP, #imm*4
+        else if ((instruction & 0xF000) == 0xA000) {
+            const bool useSP = ((instruction >> 11) & 1u) != 0;
+            const uint32_t rd = (instruction >> 8) & 0x7u;
+            const uint32_t imm8 = instruction & 0xFFu;
+            const uint32_t offset = imm8 << 2u;
+
+            const uint32_t base = useSP ? registers[13] : (pcValue & ~3u);
+            registers[rd] = base + offset;
         }
         // Format 9: SP-relative Load/Store (CRITICAL - was missing!)
         // 1001 xxxx xxxx xxxx

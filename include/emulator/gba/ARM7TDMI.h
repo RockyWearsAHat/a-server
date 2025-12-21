@@ -81,6 +81,11 @@ namespace AIO::Emulator::GBA {
         uint32_t spsr;
         bool thumbMode = false;
         bool halted = false;
+        // Halt reason tracking:
+        // - sleepHalt: HALT/STOP/IntrWait-style halts which should resume on IRQ
+        // - debuggerHalt: debugger-triggered halts (breakpoints/stepback) which must NOT auto-resume
+        bool sleepHalt = false;
+        bool debuggerHalt = false;
         // Debugger
         std::vector<uint32_t> breakpoints;
         bool singleStep{false};

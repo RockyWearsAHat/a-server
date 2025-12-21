@@ -435,6 +435,57 @@ TEST_F(CPUTest, Thumb_ALU) {
     EXPECT_EQ(cpu.GetRegister(3), (uint32_t)-4);
 }
 
+TEST_F(CPUTest, Thumb_ShiftEdgeCases) {
+    cpu.SetThumbMode(true);
+    cpu.SetRegister(15, 0x08000000);
+
+    // Thumb ALU format: 0100 00op opRs Rd
+
+    // LSL (register): shift by 32 => result 0, carry = bit0
+    cpu.SetRegister(2, 0x00000001);
+    cpu.SetRegister(1, 0x00000020);
+    // Clear carry first so we can observe it changing (CMP 0-1 => borrow => C=0)
+    RunThumbInstr(0x2000); // MOV R0, #0
+    RunThumbInstr(0x2801); // CMP R0, #1
+    // opcode=LSL=0x2, rs=1, rd=2 => 0x4000 | (0x2<<6) | (1<<3) | 2 = 0x408A
+    RunThumbInstr(0x408A);
+    EXPECT_EQ(cpu.GetRegister(2), 0x00000000u);
+    EXPECT_NE(cpu.GetCPSR() & CPSR::FLAG_C, 0u);
+
+    // LSR (register): shift by 33 => result 0, carry = 0
+    cpu.SetRegister(2, 0x80000000u);
+    cpu.SetRegister(1, 0x00000021u);
+    // Set carry first (CMP 0-0 => no borrow => C=1)
+    RunThumbInstr(0x2000); // MOV R0, #0
+    RunThumbInstr(0x2800); // CMP R0, #0
+    // opcode=LSR=0x3 => 0x4000 | (0x3<<6) | (1<<3) | 2 = 0x40CA
+    RunThumbInstr(0x40CA);
+    EXPECT_EQ(cpu.GetRegister(2), 0x00000000u);
+    EXPECT_EQ(cpu.GetCPSR() & CPSR::FLAG_C, 0u);
+
+    // ASR (register): shift by 100 => result sign-extended, carry = sign bit
+    cpu.SetRegister(2, 0x80000001u);
+    cpu.SetRegister(1, 0x00000064u);
+    // Clear carry first
+    RunThumbInstr(0x2000); // MOV R0, #0
+    RunThumbInstr(0x2801); // CMP R0, #1
+    // opcode=ASR=0x4 => 0x4000 | (0x4<<6) | (1<<3) | 2 = 0x410A
+    RunThumbInstr(0x410A);
+    EXPECT_EQ(cpu.GetRegister(2), 0xFFFFFFFFu);
+    EXPECT_NE(cpu.GetCPSR() & CPSR::FLAG_C, 0u);
+
+    // ROR (register): amount is a non-zero multiple of 32 => result unchanged, carry = bit31
+    cpu.SetRegister(2, 0x80000001u);
+    cpu.SetRegister(1, 0x00000020u);
+    // Clear carry first
+    RunThumbInstr(0x2000); // MOV R0, #0
+    RunThumbInstr(0x2801); // CMP R0, #1
+    // opcode=ROR=0x7 => 0x4000 | (0x7<<6) | (1<<3) | 2 = 0x41CA
+    RunThumbInstr(0x41CA);
+    EXPECT_EQ(cpu.GetRegister(2), 0x80000001u);
+    EXPECT_NE(cpu.GetCPSR() & CPSR::FLAG_C, 0u);
+}
+
 TEST_F(CPUTest, Thumb_Stack) {
     cpu.SetThumbMode(true);
     uint32_t pc = 0x08000000;

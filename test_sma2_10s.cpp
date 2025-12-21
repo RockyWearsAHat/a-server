@@ -82,6 +82,147 @@ static void DumpMemHex(GBA& gba, uint32_t addr, size_t bytes, const char* label)
     }
 }
 
+static void DumpVideoSummary(GBA& gba) {
+    auto r16 = [&](uint32_t addr) { return gba.ReadMem16(addr); };
+    auto r32 = [&](uint32_t addr) { return gba.ReadMem32(addr); };
+
+    const uint16_t dispcnt = r16(0x04000000);
+    const uint16_t dispstat = r16(0x04000004);
+    const uint16_t vcount = r16(0x04000006);
+    const uint16_t bg0cnt = r16(0x04000008);
+    const uint16_t bg1cnt = r16(0x0400000A);
+    const uint16_t bg2cnt = r16(0x0400000C);
+    const uint16_t bg3cnt = r16(0x0400000E);
+
+    const uint16_t winin = r16(0x04000048);
+    const uint16_t winout = r16(0x0400004A);
+    const uint16_t bldcnt = r16(0x04000050);
+    const uint16_t bldalpha = r16(0x04000052);
+    const uint16_t bldy = r16(0x04000054);
+
+    const uint16_t keyinput = r16(0x04000130);
+
+    std::cout << "[VIDEO] DISPCNT=0x" << std::hex << dispcnt
+              << " mode=" << std::dec << (dispcnt & 0x7)
+              << " forcedBlank=" << (((dispcnt >> 7) & 1) ? 1 : 0)
+              << " BG0=" << (((dispcnt >> 8) & 1) ? 1 : 0)
+              << " BG1=" << (((dispcnt >> 9) & 1) ? 1 : 0)
+              << " BG2=" << (((dispcnt >> 10) & 1) ? 1 : 0)
+              << " BG3=" << (((dispcnt >> 11) & 1) ? 1 : 0)
+              << " OBJ=" << (((dispcnt >> 12) & 1) ? 1 : 0)
+              << " WIN0=" << (((dispcnt >> 13) & 1) ? 1 : 0)
+              << " WIN1=" << (((dispcnt >> 14) & 1) ? 1 : 0)
+              << " OBJWIN=" << (((dispcnt >> 15) & 1) ? 1 : 0)
+              << "\n";
+
+    std::cout << "[CPU] PC=0x" << std::hex << gba.GetPC() << std::dec
+              << " thumb=" << (gba.IsThumbMode() ? 1 : 0)
+              << " halted=" << (gba.IsCPUHalted() ? 1 : 0)
+              << " cpsr=0x" << std::hex << gba.GetCPSR() << std::dec
+              << " mode=0x" << std::hex << (gba.GetCPSR() & 0x1Fu) << std::dec
+              << "\n";
+
+    // Boot-critical IO state that games frequently poll during startup.
+    const uint16_t waitcnt = r16(0x04000204);
+    const uint16_t ie = r16(0x04000200);
+    const uint16_t iflg = r16(0x04000202);
+    const uint16_t ime = r16(0x04000208);
+    const uint8_t postflg = (uint8_t)(r16(0x04000300) & 0xFFu);
+    const uint16_t bios_if = r16(0x03007FF8);
+    const uint32_t irq_handler_ptr = r32(0x03007FFC);
+    std::cout << "[BOOT] WAITCNT=0x" << std::hex << waitcnt
+              << " IE=0x" << ie
+              << " IF=0x" << iflg
+              << " IME=0x" << ime
+              << " POSTFLG=0x" << (uint32_t)postflg
+              << " BIOS_IF=0x" << bios_if
+              << " IRQHAND=0x" << irq_handler_ptr
+              << std::dec << "\n";
+
+    // Minimal instruction window around current PC to identify tight loops.
+    const uint32_t pc = gba.GetPC();
+    if (gba.IsThumbMode()) {
+        const uint32_t base = (pc & ~1u);
+        std::cout << "[CPU] THUMB @0x" << std::hex << base << std::dec << ":";
+        for (int i = -4; i <= 4; ++i) {
+            const uint32_t a = base + (uint32_t)(i * 2);
+            const uint16_t hw = gba.ReadMem16(a);
+            std::cout << " " << "0x" << std::hex << std::setw(4) << std::setfill('0') << hw << std::dec;
+        }
+        std::cout << "\n";
+    } else {
+        const uint32_t base = (pc & ~3u);
+        std::cout << "[CPU] ARM   @0x" << std::hex << base << std::dec << ":";
+        for (int i = -2; i <= 2; ++i) {
+            const uint32_t a = base + (uint32_t)(i * 4);
+            const uint32_t w = r32(a);
+            std::cout << " " << "0x" << std::hex << std::setw(8) << std::setfill('0') << w << std::dec;
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << "[VIDEO] DISPSTAT=0x" << std::hex << dispstat
+              << " VCOUNT=0x" << vcount
+              << " BG0CNT=0x" << bg0cnt
+              << " BG1CNT=0x" << bg1cnt
+              << " BG2CNT=0x" << bg2cnt
+              << " BG3CNT=0x" << bg3cnt
+              << std::dec << "\n";
+
+    std::cout << "[VIDEO] WININ=0x" << std::hex << winin
+              << " WINOUT=0x" << winout
+              << " BLDCNT=0x" << bldcnt
+              << " BLDALPHA=0x" << bldalpha
+              << " BLDY=0x" << bldy
+              << std::dec << "\n";
+
+    std::cout << "[VIDEO] KEYINPUT(game)=0x" << std::hex << keyinput << std::dec << "\n";
+
+    // Palette sanity: backdrop color is palette[0]. If it remains 0x0000, "blank" == black.
+    const uint16_t pal0 = r16(0x05000000);
+    const uint16_t pal1 = r16(0x05000002);
+    const uint16_t pal2 = r16(0x05000004);
+    const uint16_t pal3 = r16(0x05000006);
+    std::cout << "[VIDEO] PAL[0..3]={0x" << std::hex << pal0 << ",0x" << pal1 << ",0x" << pal2 << ",0x" << pal3 << "}"
+              << std::dec << "\n";
+
+    // Framebuffer activity
+    const auto& fb = gba.GetPPU().GetFramebuffer();
+    uint32_t xorHash = 0;
+    uint32_t nonBlack = 0;
+    uint32_t nonZero = 0;
+    for (uint32_t px : fb) {
+        xorHash ^= px;
+        if (px != 0) nonZero++;
+        if ((px & 0x00FFFFFFu) != 0) nonBlack++; // ignore alpha
+    }
+    std::cout << "[VIDEO] FB size=" << fb.size()
+              << " nonZero=" << nonZero
+              << " nonBlackRGB=" << nonBlack
+              << " xor=0x" << std::hex << xorHash << std::dec << "\n";
+}
+
+static void DumpDMA3(GBA& gba) {
+    auto r16 = [&](uint32_t addr) { return gba.ReadMem16(addr); };
+    auto r32 = [&](uint32_t addr) { return gba.ReadMem32(addr); };
+
+    const uint32_t dmasad = r32(0x040000D4);
+    const uint32_t dmadad = r32(0x040000D8);
+    const uint16_t dmacnt_l = r16(0x040000DC);
+    const uint16_t dmacnt_h = r16(0x040000DE);
+
+    std::cerr << "[HARNESS] DMA3 SAD=0x" << std::hex << dmasad
+              << " DAD=0x" << dmadad
+              << " CNT_L=0x" << dmacnt_l
+              << " CNT_H=0x" << dmacnt_h
+              << std::dec << "\n";
+}
+
+static void DumpSMA2SaveHeaderStaging(GBA& gba) {
+    // Known staging area observed in traces for SMA2 save header.
+    DumpMemHex(gba, 0x02000380, 0x100, "EWRAM[0x02000380..]");
+}
+
 int main(int argc, char** argv) {
     try {
         const std::filesystem::path workspace = std::filesystem::current_path();
@@ -183,9 +324,14 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (breakPc != 0 && gba.IsHalted()) {
-            std::cerr << "[HARNESS] Breakpoint hit at pc=0x" << std::hex << gba.GetPC() << std::dec
-                      << " thumb=" << (gba.IsThumbMode() ? 1 : 0) << "\n";
+        // Note: internally, a debugger breakpoint may surface as a CPU-halt state rather than
+        // the emulator-wide halted flag. Treat either as a breakpoint stop.
+        if (breakPc != 0 && (gba.IsHalted() || gba.IsCPUHalted())) {
+            std::cerr << "[HARNESS] Breakpoint stop at pc=0x" << std::hex << gba.GetPC() << std::dec
+                      << " thumb=" << (gba.IsThumbMode() ? 1 : 0)
+                      << " IsCPUHalted=" << (gba.IsCPUHalted() ? 1 : 0)
+                      << " IsHalted=" << (gba.IsHalted() ? 1 : 0)
+                      << "\n";
 
             if (stepBackCount > 0) {
                 for (int i = 0; i < stepBackCount; ++i) {
@@ -196,6 +342,9 @@ int main(int argc, char** argv) {
             }
 
             gba.DumpCPUState(std::cerr);
+
+            DumpDMA3(gba);
+            DumpSMA2SaveHeaderStaging(gba);
 
             // Dump memory around likely pointers used by the save-validation routine.
             // This is the fastest way to see what tables/structures are involved.
@@ -231,6 +380,8 @@ int main(int argc, char** argv) {
 
         gba.SaveGame();
         const auto outSav = ReadFile(stagedSav);
+
+        DumpVideoSummary(gba);
 
         const size_t block2 = 2 * 8;
         const size_t block4 = 4 * 8;
