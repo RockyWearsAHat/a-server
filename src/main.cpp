@@ -150,6 +150,12 @@ int main(int argc, char *argv[]) {
 
     AIO::Emulator::Common::Logger::Instance().Log(AIO::Emulator::Common::LogLevel::Info, "main", "AIO Server Initializing...");
     AIO::Emulator::Common::Logger::Instance().LogFmt(AIO::Emulator::Common::LogLevel::Info, "main", "Log file: %s", logPath.c_str());
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info,
+        "main",
+        "Build: %s %s",
+        __DATE__,
+        __TIME__);
 
     // Load .env into process environment (optional)
     {

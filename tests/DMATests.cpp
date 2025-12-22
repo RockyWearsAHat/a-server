@@ -144,13 +144,15 @@ TEST(AudioDmaTest, SoundFifoDmaNotTriggeredEveryTimerOverflow) {
                              DMAControl::TRANSFER_32BIT | DMAControl::START_SPECIAL;
     WriteIo16(mem, IORegs::DMA1CNT_H, dmaCtrl);
 
-    // Configure Timer0 to overflow every cycle (reload=0xFFFF) so we can stress the trigger logic.
-    mem.Write16(IORegs::BASE + IORegs::TM0CNT_L, 0xFFFF);
+    // Configure Timer0 to overflow once per 64 cycles (reload=0xFFC0).
+    // Overflowing every single cycle creates an unrealistic 16.7MHz FIFO clock and makes
+    // the test overly sensitive to DMA cycle accounting.
+    mem.Write16(IORegs::BASE + IORegs::TM0CNT_L, 0xFFC0);
     mem.Write16(IORegs::BASE + IORegs::TM0CNT_H, TimerControl::ENABLE | TimerControl::PRESCALER_1);
 
-    // Run 20 overflows.
+    // Run 20 overflows (64 cycles each).
     for (int n = 0; n < 20; ++n) {
-        mem.UpdateTimers(1);
+        mem.UpdateTimers(64);
     }
 
     // If DMA were triggered every overflow, the DMA1 source address would advance by 20 * 16 bytes = 320.

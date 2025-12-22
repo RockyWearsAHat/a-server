@@ -23,6 +23,10 @@ namespace AIO::Emulator::GBA {
         // FIFO operations
         void WriteFIFO_A(uint32_t value);
         void WriteFIFO_B(uint32_t value);
+        void WriteFIFO_A16(uint16_t value);
+        void WriteFIFO_B16(uint16_t value);
+        void WriteFIFO_A8(uint8_t value);
+        void WriteFIFO_B8(uint8_t value);
         void ResetFIFO_A();
         void ResetFIFO_B();
         
@@ -77,6 +81,14 @@ namespace AIO::Emulator::GBA {
         float currentUpsampleRatio = 2.45f;  // Default, updated based on timer
         static constexpr float OUTPUT_SAMPLE_RATE = 32768.0f;
         static constexpr float GBA_CPU_FREQ = 16777216.0f;
+
+        // Linear resampling state (previous input sample).
+        bool hasPrevInputSample = false;
+        int16_t prevInputLeft = 0;
+        int16_t prevInputRight = 0;
+
+        // Resampler phase in [0, 1): output sample time within the current input interval.
+        float resamplePhase = 0.0f;
         
         // Add a sample to the ring buffer
         void PushSample(int16_t left, int16_t right);

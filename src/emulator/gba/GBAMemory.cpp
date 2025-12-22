@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <unordered_map>
 
 namespace AIO::Emulator::GBA {
 
@@ -20,9 +21,12 @@ namespace AIO::Emulator::GBA {
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }
 
-        template <size_t N>
-        inline bool EnvFlagCached(const char (&name)[N]) {
-            static const bool enabled = EnvTruthy(std::getenv(name));
+        inline bool EnvFlagCached(const char* name) {
+            static std::unordered_map<std::string, bool> cache;
+            auto it = cache.find(name);
+            if (it != cache.end()) return it->second;
+            const bool enabled = EnvTruthy(std::getenv(name));
+            cache.emplace(name, enabled);
             return enabled;
         }
 
@@ -1284,6 +1288,12 @@ namespace AIO::Emulator::GBA {
         return val;
     }
 
+    uint16_t GBAMemory::ReadIORegisterRaw16(uint32_t offset) const {
+        offset &= MemoryMap::IO_REG_MASK;
+        if (offset + 1 >= io_regs.size()) return 0;
+        return (uint16_t)(io_regs[offset] | (io_regs[offset + 1] << 8));
+    }
+
     uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
         // Direct ROM access for instruction fetch - bypass EEPROM and other checks
         if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
@@ -1639,6 +1649,20 @@ namespace AIO::Emulator::GBA {
             case 0x04: // IO Registers (GBATEK: 0x04000000-0x040003FF)
             {
                 uint32_t offset = address & MemoryMap::IO_REG_MASK;
+
+                // DirectSound FIFO registers accept 8/16/32-bit writes.
+                // Treat writes anywhere within the 32-bit register window as FIFO pushes.
+                // FIFO A: 0x040000A0-0x040000A3, FIFO B: 0x040000A4-0x040000A7
+                if (apu) {
+                    if (offset >= 0x0A0 && offset <= 0x0A3) {
+                        apu->WriteFIFO_A8(value);
+                        return;
+                    }
+                    if (offset >= 0x0A4 && offset <= 0x0A7) {
+                        apu->WriteFIFO_B8(value);
+                        return;
+                    }
+                }
                 
                 // Handle IF (Interrupt Request) - Write 1 to Clear (GBATEK)
                 if (offset == IORegs::IF || offset == IORegs::IF + 1) {
@@ -1679,6 +1703,71 @@ namespace AIO::Emulator::GBA {
                         io_regs[offset] = value;
                     }
 
+                    // If software updates DMA registers while the channel is enabled,
+                    // reflect that in the internal latch. This is especially important
+                    // for sound FIFO engines that patch DMA1/2 SAD on the fly.
+                    if (offset >= IORegs::DMA0SAD && offset < (IORegs::DMA0SAD + 4u * IORegs::DMA_CHANNEL_SIZE)) {
+                        const int chan = (int)((offset - IORegs::DMA0SAD) / IORegs::DMA_CHANNEL_SIZE);
+                        const uint32_t chanBase = IORegs::DMA0SAD + (uint32_t)chan * IORegs::DMA_CHANNEL_SIZE;
+                        if (chan >= 0 && chan < 4) {
+                            const uint16_t ctrlNow = io_regs[chanBase + 10] | (io_regs[chanBase + 11] << 8);
+                            const bool enabledNow = (ctrlNow & DMAControl::ENABLE) != 0;
+                            if (enabledNow) {
+                                const uint32_t ioSrcNow = io_regs[chanBase + 0] | (io_regs[chanBase + 1] << 8) |
+                                                          (io_regs[chanBase + 2] << 16) | (io_regs[chanBase + 3] << 24);
+                                const uint32_t ioDstNow = io_regs[chanBase + 4] | (io_regs[chanBase + 5] << 8) |
+                                                          (io_regs[chanBase + 6] << 16) | (io_regs[chanBase + 7] << 24);
+
+                                if (EnvFlagCached("AIO_TRACE_SOUND_DMA_REG_WRITES") && (chan == 1 || chan == 2) && cpu) {
+                                    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+                                    // Only log writes that touch SAD/DAD/CNT_L/CNT_H areas to avoid spam.
+                                    const uint32_t rel = (uint32_t)(offset - chanBase);
+                                    if (rel < 12) {
+                                        static uint32_t lastSrc[4] = {0,0,0,0};
+                                        static uint32_t lastDst[4] = {0,0,0,0};
+                                        static uint16_t lastCtrl[4] = {0,0,0,0};
+                                        static uint16_t lastCnt[4] = {0,0,0,0};
+                                        const uint16_t cntNow = (uint16_t)(io_regs[chanBase + 8] | (io_regs[chanBase + 9] << 8));
+                                        if (ioSrcNow != lastSrc[chan] || ioDstNow != lastDst[chan] || ctrlNow != lastCtrl[chan] || cntNow != lastCnt[chan]) {
+                                            lastSrc[chan] = ioSrcNow;
+                                            lastDst[chan] = ioDstNow;
+                                            lastCtrl[chan] = ctrlNow;
+                                            lastCnt[chan] = cntNow;
+                                            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                                                AIO::Emulator::Common::LogLevel::Info,
+                                                "SOUND_DMA",
+                                                "DMA%d REGWRITE rel=0x%02x SAD=0x%08x DAD=0x%08x CNT_L=0x%04x CNT_H=0x%04x PC=0x%08x",
+                                                chan,
+                                                (unsigned)rel,
+                                                (unsigned)ioSrcNow,
+                                                (unsigned)ioDstNow,
+                                                (unsigned)cntNow,
+                                                (unsigned)ctrlNow,
+                                                (unsigned)pc);
+                                        }
+                                    }
+                                }
+
+                                // Update internal latches.
+                                dmaInternalSrc[chan] = ioSrcNow;
+                                dmaInternalDst[chan] = ioDstNow;
+
+                                // For sound FIFO DMA, treat SAD updates as a new ring start.
+                                const int timingNow = (ctrlNow & DMAControl::START_TIMING_MASK) >> 12;
+                                const uint32_t alignedDstNow = ((ctrlNow & DMAControl::TRANSFER_32BIT) != 0) ? (ioDstNow & ~3u) : (ioDstNow & ~1u);
+                                const bool fifoNow = (alignedDstNow == 0x040000A0u) || (alignedDstNow == 0x040000A4u);
+                                if ((chan == 1 || chan == 2) && timingNow == 3 && fifoNow) {
+                                    uint16_t cntNow = (uint16_t)(io_regs[chanBase + 8] | (io_regs[chanBase + 9] << 8));
+                                    cntNow &= 0x3FFF;
+                                    if (cntNow == 0) cntNow = 0x4000;
+                                    dmaFifoInitialSrc[chan] = dmaInternalSrc[chan];
+                                    dmaFifoInitialCount[chan] = cntNow;
+                                    dmaFifoRemaining[chan] = cntNow;
+                                }
+                            }
+                        }
+                    }
+
                     // KEYCNT changes can make the keypad IRQ condition become true without any
                     // immediate KEYINPUT transition, so re-evaluate after writes.
                     if (offset == IORegs::KEYCNT || offset == IORegs::KEYCNT + 1) {
@@ -1692,6 +1781,24 @@ namespace AIO::Emulator::GBA {
                                                   (io_regs[dmaBase+2] << 16) | (io_regs[dmaBase+3] << 24);
                         dmaInternalDst[dmaChannel] = io_regs[dmaBase+4] | (io_regs[dmaBase+5] << 8) | 
                                                   (io_regs[dmaBase+6] << 16) | (io_regs[dmaBase+7] << 24);
+
+                        // Initialize FIFO DMA ring-buffer tracking on enable.
+                        {
+                            const uint16_t ctrl = (uint16_t)(io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8));
+                            const int timing = (ctrl & DMAControl::START_TIMING_MASK) >> 12;
+                            const uint32_t dstNow = (uint32_t)(io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
+                                                             (io_regs[dmaBase + 6] << 16) | (io_regs[dmaBase + 7] << 24));
+                            const uint32_t alignedDstNow = ((ctrl & DMAControl::TRANSFER_32BIT) != 0) ? (dstNow & ~3u) : (dstNow & ~1u);
+                            const bool fifoNow = (alignedDstNow == 0x040000A0u) || (alignedDstNow == 0x040000A4u);
+                            if ((dmaChannel == 1 || dmaChannel == 2) && timing == 3 && fifoNow) {
+                                uint16_t cnt = (uint16_t)(io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8));
+                                cnt &= 0x3FFF;
+                                if (cnt == 0) cnt = 0x4000;
+                                dmaFifoInitialSrc[dmaChannel] = dmaInternalSrc[dmaChannel];
+                                dmaFifoInitialCount[dmaChannel] = cnt;
+                                dmaFifoRemaining[dmaChannel] = cnt;
+                            }
+                        }
 
                         static int dmaStartLogs[4] = {0,0,0,0};
                         if (verboseLogs && dmaStartLogs[dmaChannel] < 8) {
@@ -1940,6 +2047,20 @@ namespace AIO::Emulator::GBA {
         // behave like aligned accesses.
         if (region == 0x04 && (address & 1u)) {
             address &= ~1u;
+        }
+
+        // DirectSound FIFO registers accept 16-bit writes.
+        // FIFO A: 0x040000A0-0x040000A3, FIFO B: 0x040000A4-0x040000A7
+        if (region == 0x04 && apu) {
+            const uint32_t off = address & MemoryMap::IO_REG_MASK;
+            if (off >= 0x0A0 && off <= 0x0A3) {
+                apu->WriteFIFO_A16(value);
+                return;
+            }
+            if (off >= 0x0A4 && off <= 0x0A7) {
+                apu->WriteFIFO_B16(value);
+                return;
+            }
         }
 
         const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
@@ -2506,6 +2627,50 @@ namespace AIO::Emulator::GBA {
         }
     }
 
+    void GBAMemory::ServicePendingSoundDma() {
+        if (dmaInProgress) return;
+        if (!apu) return;
+
+        // Only channels 1/2 are used for sound FIFO DMA on GBA.
+        for (int dma = 1; dma <= 2; ++dma) {
+            if (!pendingSoundDma[dma]) continue;
+
+            uint32_t dmaBase = IORegs::DMA0SAD + (dma * IORegs::DMA_CHANNEL_SIZE);
+            const uint16_t dmaControl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
+            if ((dmaControl & DMAControl::ENABLE) == 0) {
+                pendingSoundDma[dma] = false;
+                continue;
+            }
+
+            const int dmaTiming = (dmaControl & DMAControl::START_TIMING_MASK) >> 12;
+            if (dmaTiming != 3) {
+                pendingSoundDma[dma] = false;
+                continue;
+            }
+
+            const uint32_t dmaDest = io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
+                                     (io_regs[dmaBase + 6] << 16) | (io_regs[dmaBase + 7] << 24);
+            const bool isFifoA = (dmaDest == 0x040000A0);
+            const bool isFifoB = (dmaDest == 0x040000A4);
+
+            bool shouldRequest = false;
+            if (isFifoA) shouldRequest = (apu->GetFifoACount() <= 16);
+            if (isFifoB) shouldRequest = (apu->GetFifoBCount() <= 16);
+
+            if (!shouldRequest) {
+                // Still pending, but not currently eligible.
+                continue;
+            }
+
+            // Clear pending before running to avoid infinite recursion.
+            pendingSoundDma[dma] = false;
+            PerformDMA(dma);
+            // Only run one here; if another is pending, it will be serviced by the
+            // guard at the end of this DMA.
+            return;
+        }
+    }
+
     void GBAMemory::PerformDMA(int channel) {
         static int dmaSeq = 0;
         static bool inImmediateDMA = false;  // Only guard immediate DMAs
@@ -2516,17 +2681,24 @@ namespace AIO::Emulator::GBA {
         }
         dmaInProgress = true;
         struct DMAGuard {
+            GBAMemory* self;
             bool& flag;
-            ~DMAGuard() { flag = false; }
-        } guard{dmaInProgress};
+            ~DMAGuard() {
+                flag = false;
+                if (self) self->ServicePendingSoundDma();
+            }
+        } guard{this, dmaInProgress};
         
-        // DEBUG: Log first 10 DMA calls unconditionally
-        static int dmaDebugCount = 0;
-        if (dmaDebugCount < 10) {
-            std::ofstream df("/tmp/gba_dma_debug.txt", std::ios::app);
-            df << "[DMA#" << dmaSeq << " ch" << channel << " ENTER]" << std::endl;
-            df.close();
-            dmaDebugCount++;
+        // Optional: Log first few DMA calls for debugging.
+        // Enable with: AIO_TRACE_DMA_DEBUG=1
+        if (EnvFlagCached("AIO_TRACE_DMA_DEBUG")) {
+            static int dmaDebugCount = 0;
+            if (dmaDebugCount < 10) {
+                std::ofstream df("/tmp/gba_dma_debug.txt", std::ios::app);
+                df << "[DMA#" << dmaSeq << " ch" << channel << " ENTER]" << std::endl;
+                df.close();
+                dmaDebugCount++;
+            }
         }
         
         uint32_t baseOffset = IORegs::DMA0SAD + (channel * IORegs::DMA_CHANNEL_SIZE);
@@ -2536,6 +2708,23 @@ namespace AIO::Emulator::GBA {
         
         // Decode timing first
         int timing = (control & DMAControl::START_TIMING_MASK) >> 12;
+
+        // Optional targeted tracing: confirm when sound-timing DMAs run at all.
+        // Enable with: AIO_TRACE_SOUND_DMA=1
+        if (EnvFlagCached("AIO_TRACE_SOUND_DMA") && timing == 3 && (channel == 1 || channel == 2)) {
+            static int soundDmaEnterLogs = 0;
+            if (soundDmaEnterLogs < 200) {
+                const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "SOUND_DMA",
+                    "ENTER DMA%d timing=3 ctrl=0x%04x PC=0x%08x",
+                    channel,
+                    (unsigned)control,
+                    (unsigned)pc);
+                soundDmaEnterLogs++;
+            }
+        }
         
         // Only guard immediate timing (timing=0) DMAs from recursion.
         // Note: dmaInProgress already prevents nested DMAs across all timings.
@@ -2557,6 +2746,17 @@ namespace AIO::Emulator::GBA {
         int destCtrl = (control & DMAControl::DEST_ADDR_CONTROL_MASK) >> 5;
         int srcCtrl = (control & DMAControl::SRC_ADDR_CONTROL_MASK) >> 7;
         
+        // DMA uses latched internal addresses once enabled.
+        // Fall back to IO registers only when internal latches haven't been initialized.
+        const uint32_t ioSrc = io_regs[baseOffset + 0] | (io_regs[baseOffset + 1] << 8) |
+                               (io_regs[baseOffset + 2] << 16) | (io_regs[baseOffset + 3] << 24);
+        const uint32_t ioDst = io_regs[baseOffset + 4] | (io_regs[baseOffset + 5] << 8) |
+                               (io_regs[baseOffset + 6] << 16) | (io_regs[baseOffset + 7] << 24);
+        if (dmaInternalSrc[channel] == 0 && dmaInternalDst[channel] == 0 && (ioSrc != 0 || ioDst != 0)) {
+            dmaInternalSrc[channel] = ioSrc;
+            dmaInternalDst[channel] = ioDst;
+        }
+
         uint32_t dst = dmaInternalDst[channel];
         uint32_t src = dmaInternalSrc[channel];
         
@@ -2644,10 +2844,39 @@ namespace AIO::Emulator::GBA {
             }
         }
 
-        // For sound DMA (timing mode 3), always transfer 4 words (16 bytes)
-        if (timing == 3) {
+        // For sound FIFO DMA (timing=3), transfers are done in small fixed bursts.
+        // Keep the refill burst size fixed, but do NOT force the transfer width;
+        // honor the game's configured 16/32-bit mode.
+        const uint32_t fifoAlignedDst = is32Bit ? (currentDst & ~3u) : (currentDst & ~1u);
+        const bool isFifoDst = (fifoAlignedDst == 0x040000A0u) || (fifoAlignedDst == 0x040000A4u);
+        if (timing == 3 && (channel == 1 || channel == 2) && isFifoDst) {
             count = 4;
-            is32Bit = true;
+        }
+
+        // Optional targeted tracing for FIFO DMA to diagnose corrupt audio sample streams.
+        // Enable with: AIO_TRACE_SOUND_DMA=1
+        const bool traceSoundDma = EnvFlagCached("AIO_TRACE_SOUND_DMA");
+        if (traceSoundDma && timing == 3 && (channel == 1 || channel == 2) && isFifoDst) {
+            static int soundDmaLogs = 0;
+            if (soundDmaLogs < 200) {
+                const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info,
+                    "SOUND_DMA",
+                    "DMA%d FIFO dst=0x%08x(aligned 0x%08x) src=0x%08x count=%u width=%u repeat=%u srcCtrl=%d destCtrl=%d ctrl=0x%04x PC=0x%08x",
+                    channel,
+                    (unsigned)currentDst,
+                    (unsigned)fifoAlignedDst,
+                    (unsigned)currentSrc,
+                    (unsigned)count,
+                    (unsigned)(is32Bit ? 32 : 16),
+                    (unsigned)(repeat ? 1 : 0),
+                    (int)srcCtrl,
+                    (int)destCtrl,
+                    (unsigned)control,
+                    (unsigned)pc);
+                soundDmaLogs++;
+            }
         }
 
         // DMA count register sizes differ:
@@ -3098,10 +3327,66 @@ namespace AIO::Emulator::GBA {
                         uint32_t val = Read32(currentSrc);
                         Write32(currentDst, val);
                         totalCycles += 4;
+
+                        if (traceSoundDma && timing == 3 && (channel == 1 || channel == 2) && isFifoDst) {
+                            static int nonZeroWindow = 0;
+                            static int nonZeroWindowsLogged = 0;
+
+                            if (nonZeroWindow == 0 && val != 0 && nonZeroWindowsLogged < 6) {
+                                nonZeroWindow = 32;
+                                nonZeroWindowsLogged++;
+                                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                                    AIO::Emulator::Common::LogLevel::Info,
+                                    "SOUND_DMA",
+                                    "DMA%d FIFO FIRST_NONZERO src=0x%08x val=0x%08x",
+                                    channel,
+                                    (unsigned)currentSrc,
+                                    (unsigned)val);
+                            }
+
+                            if (nonZeroWindow > 0) {
+                                const uint8_t b0 = (uint8_t)(val & 0xFF);
+                                const uint8_t b1 = (uint8_t)((val >> 8) & 0xFF);
+                                const uint8_t b2 = (uint8_t)((val >> 16) & 0xFF);
+                                const uint8_t b3 = (uint8_t)((val >> 24) & 0xFF);
+                                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                                    AIO::Emulator::Common::LogLevel::Info,
+                                    "SOUND_DMA",
+                                    "DMA%d FIFO word[%u] src=0x%08x val=0x%08x bytes=%02x %02x %02x %02x",
+                                    channel,
+                                    (unsigned)i,
+                                    (unsigned)currentSrc,
+                                    (unsigned)val,
+                                    (unsigned)b0,
+                                    (unsigned)b1,
+                                    (unsigned)b2,
+                                    (unsigned)b3);
+                                nonZeroWindow--;
+                            }
+                        }
                     } else {
                         uint16_t val = Read16(currentSrc);
                         Write16(currentDst, val);
                         totalCycles += 2;
+
+                        if (traceSoundDma && timing == 3 && (channel == 1 || channel == 2) && isFifoDst) {
+                            static int soundDmaHalfDumps = 0;
+                            if (soundDmaHalfDumps < 80) {
+                                const uint8_t b0 = (uint8_t)(val & 0xFF);
+                                const uint8_t b1 = (uint8_t)((val >> 8) & 0xFF);
+                                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                                    AIO::Emulator::Common::LogLevel::Info,
+                                    "SOUND_DMA",
+                                    "DMA%d FIFO half[%u] src=0x%08x val=0x%04x bytes=%02x %02x",
+                                    channel,
+                                    (unsigned)i,
+                                    (unsigned)currentSrc,
+                                    (unsigned)val,
+                                    (unsigned)b0,
+                                    (unsigned)b1);
+                                soundDmaHalfDumps++;
+                            }
+                        }
                     }
 
                     // Advance source each unit (GBATEK: 0=inc, 1=dec, 2=fixed, 3=prohibited)
@@ -3123,6 +3408,9 @@ namespace AIO::Emulator::GBA {
                 }
             }
         }
+
+        // Note: FIFO DMA engines commonly patch DMA1/2 SAD while enabled. We support
+        // that by updating internal latches on IO writes (see Write8 IO handler).
 
         // Update system state to reflect DMA duration
         // This is crucial for games that check timers during DMA or expect delays
@@ -3219,7 +3507,8 @@ namespace AIO::Emulator::GBA {
                       << " PolledAddr[0x3001420]=0x" << polledAddr << std::dec << std::endl;
         }
         
-        // Trigger IRQ
+        // Trigger IRQ (DMA completion). For sound FIFO DMA, games may rely on per-burst
+        // DMA IRQ cadence, so do not gate it on any internal "wrap" concept.
         if (irq) {
             uint16_t if_reg = io_regs[0x202] | (io_regs[0x203] << 8);
             if_reg |= (1 << (8 + channel)); // DMA0=Bit8, DMA1=Bit9, DMA2=Bit10, DMA3=Bit11
@@ -3232,7 +3521,7 @@ namespace AIO::Emulator::GBA {
         // However, for EEPROM transfers (0x0Dxxxxxx), some libraries assume the
         // programmed DMAxSAD/DAD remain stable and may use partial writes; writing
         // back advanced addresses can desync subsequent DMA setup.
-        if (!srcIsEEPROM && !dstIsEEPROM) {
+        if (!srcIsEEPROM && !dstIsEEPROM && !(timing == 3 && (channel == 1 || channel == 2) && isFifoDst)) {
             auto writeIo32 = [&](uint32_t off, uint32_t v) {
                 if (off + 3 >= io_regs.size()) return;
                 io_regs[off + 0] = (uint8_t)(v & 0xFF);
@@ -3268,21 +3557,18 @@ namespace AIO::Emulator::GBA {
             if (eepromWriteDelay < 0) eepromWriteDelay = 0;
         }
 
-        bool previousOverflow = false;
+        int previousOverflows = 0;
         
         for (int i = 0; i < 4; ++i) {
             uint32_t baseOffset = IORegs::TM0CNT_L + (i * IORegs::TIMER_CHANNEL_SIZE);
             uint16_t control = io_regs[baseOffset + 2] | (io_regs[baseOffset + 3] << 8);
             
             if (control & TimerControl::ENABLE) { // Timer Enabled
-                
-                bool overflow = false;
+                int overflowsThisUpdate = 0;
                 int increments = 0;
                 
                 if (control & TimerControl::COUNT_UP) { // Count-Up (Cascade)
-                    if (previousOverflow) {
-                        increments = 1;
-                    }
+                    increments = previousOverflows;
                 } else {
                     // Prescaler
                     int prescaler = control & TimerControl::PRESCALER_MASK;
@@ -3302,18 +3588,18 @@ namespace AIO::Emulator::GBA {
                 }
                 
                 if (increments > 0) {
-                    uint32_t newVal = timerCounters[i] + increments;
-                    if (newVal > 0xFFFF) {
-                        overflow = true;
-                        // Reload
-                        uint16_t reload = io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8);
-                        timerCounters[i] = reload;
-                        
-                        // Notify APU of timer overflow (for sound sample consumption)
+                    const uint16_t reload = io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8);
+
+                    auto handleOverflow = [&]() {
+                        overflowsThisUpdate++;
+
+                        // Notify APU of timer overflow (for sound sample consumption).
+                        // Timers continue ticking during DMA; we should still generate audio
+                        // samples while advancing time for DMA cycles.
                         if (apu && (i == 0 || i == 1)) {
                             apu->OnTimerOverflow(i);
                         }
-                        
+
                         // IRQ
                         if (control & TimerControl::IRQ_ENABLE) {
                             uint16_t if_reg = io_regs[IORegs::IF] | (io_regs[IORegs::IF + 1] << 8);
@@ -3321,23 +3607,23 @@ namespace AIO::Emulator::GBA {
                             io_regs[IORegs::IF] = if_reg & 0xFF;
                             io_regs[IORegs::IF + 1] = (if_reg >> 8) & 0xFF;
                         }
-                        
+
                         // Sound DMA trigger (Timer 0 and Timer 1 only)
                         if (i == 0 || i == 1) {
                             uint16_t soundcntH = io_regs[IORegs::SOUNDCNT_H] | (io_regs[IORegs::SOUNDCNT_H + 1] << 8);
                             int fifoATimer = (soundcntH >> 10) & 1;
                             int fifoBTimer = (soundcntH >> 14) & 1;
-                            
+
                             for (int dma = 1; dma <= 2; dma++) {
                                 uint32_t dmaBase = IORegs::DMA0SAD + (dma * IORegs::DMA_CHANNEL_SIZE);
                                 uint16_t dmaControl = io_regs[dmaBase+10] | (io_regs[dmaBase+11] << 8);
-                                
+
                                 if (dmaControl & DMAControl::ENABLE) {
                                     int dmaTiming = (dmaControl & DMAControl::START_TIMING_MASK) >> 12;
                                     if (dmaTiming == 3) { // Special timing (sound FIFO)
-                                        uint32_t dmaDest = io_regs[dmaBase+4] | (io_regs[dmaBase+5] << 8) | 
+                                        uint32_t dmaDest = io_regs[dmaBase+4] | (io_regs[dmaBase+5] << 8) |
                                                           (io_regs[dmaBase+6] << 16) | (io_regs[dmaBase+7] << 24);
-                                        
+
                                         bool isFifoA = (dmaDest == 0x040000A0);
                                         bool isFifoB = (dmaDest == 0x040000A4);
 
@@ -3352,20 +3638,35 @@ namespace AIO::Emulator::GBA {
                                             }
                                         }
 
-                                        if (shouldRequest && !dmaInProgress) {
-                                            PerformDMA(dma);
+                                        if (shouldRequest) {
+                                            if (dmaInProgress) {
+                                                pendingSoundDma[dma] = true;
+                                            } else {
+                                                PerformDMA(dma);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        timerCounters[i] = newVal;
+                    };
+
+                    while (increments > 0) {
+                        const int remainingToOverflow = 0x10000 - (int)timerCounters[i];
+                        if (increments >= remainingToOverflow) {
+                            increments -= remainingToOverflow;
+                            timerCounters[i] = reload;
+                            handleOverflow();
+                        } else {
+                            timerCounters[i] = (uint16_t)(timerCounters[i] + increments);
+                            increments = 0;
+                        }
                     }
                 }
-                previousOverflow = overflow;
+
+                previousOverflows = overflowsThisUpdate;
             } else {
-                previousOverflow = false;
+                previousOverflows = 0;
             }
         }
     }

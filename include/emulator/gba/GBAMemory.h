@@ -57,6 +57,10 @@ namespace AIO::Emulator::GBA {
         uint16_t Read16(uint32_t address);
         uint32_t Read32(uint32_t address);
 
+        // Raw IO register read (bypasses special read behaviors like TMxCNT_L returning the live counter).
+        // Expects an IO offset (0x000-0x3FF), not an absolute 0x04000000-based address.
+        uint16_t ReadIORegisterRaw16(uint32_t offset) const;
+
         // Instruction Fetch (Bypasses EEPROM logic for ROM mirrors)
         uint16_t ReadInstruction16(uint32_t address);
         uint32_t ReadInstruction32(uint32_t address);
@@ -99,6 +103,11 @@ namespace AIO::Emulator::GBA {
     private:
         void EvaluateKeypadIRQ();
 
+        // If sound FIFO DMA becomes eligible during another DMA burst, hardware will
+        // effectively defer the transfer until the bus is free. We model this with
+        // a small pending latch serviced when DMA completes.
+        void ServicePendingSoundDma();
+
         // EEPROM protocol constants (self-documenting, no magic numbers)
         struct EEPROMConsts {
             static constexpr uint8_t DUMMY_BITS = 4;            // Number of dummy bits before data phase
@@ -126,6 +135,15 @@ namespace AIO::Emulator::GBA {
         uint32_t dmaInternalSrc[4] = {0};
         uint32_t dmaInternalDst[4] = {0};
         bool dmaInProgress = false;
+
+        // Sound FIFO DMA tracking (timing=3). Many games expect DMA1/2 to behave like a
+        // ring buffer: transfer in 4-word bursts, wrap at CNT_L boundary, and raise IRQ
+        // on wrap (if enabled) so the engine can refill/swap buffers.
+        uint32_t dmaFifoInitialSrc[4] = {0};
+        uint16_t dmaFifoInitialCount[4] = {0};
+        uint16_t dmaFifoRemaining[4] = {0};
+
+        bool pendingSoundDma[4] = {false, false, false, false};
 
         // Flash State
         int flashState = 0; // 0=Idle, 1=Cmd1(AA), 2=Cmd2(55), 3=ID Mode

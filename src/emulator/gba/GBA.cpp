@@ -10,6 +10,7 @@
 #include <fstream>
 #include <vector>
 #include <filesystem>
+#include <unordered_map>
 
 namespace AIO::Emulator::GBA {
 
@@ -18,9 +19,12 @@ namespace AIO::Emulator::GBA {
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }
 
-        template <size_t N>
-        inline bool EnvFlagCached(const char (&name)[N]) {
-            static const bool enabled = EnvTruthy(std::getenv(name));
+        inline bool EnvFlagCached(const char* name) {
+            static std::unordered_map<std::string, bool> cache;
+            auto it = cache.find(name);
+            if (it != cache.end()) return it->second;
+            const bool enabled = EnvTruthy(std::getenv(name));
+            cache.emplace(name, enabled);
             return enabled;
         }
 

@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <deque>
+#include <unordered_map>
 
 namespace AIO::Emulator::GBA {
     using AIO::Emulator::Common::Logger;
@@ -33,9 +34,12 @@ namespace AIO::Emulator::GBA {
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }
 
-        template <size_t N>
-        inline bool EnvFlagCached(const char (&name)[N]) {
-            static const bool enabled = EnvTruthy(std::getenv(name));
+        inline bool EnvFlagCached(const char* name) {
+            static std::unordered_map<std::string, bool> cache;
+            auto it = cache.find(name);
+            if (it != cache.end()) return it->second;
+            const bool enabled = EnvTruthy(std::getenv(name));
+            cache.emplace(name, enabled);
             return enabled;
         }
     }
@@ -159,6 +163,7 @@ namespace AIO::Emulator::GBA {
     static bool g_reportedFirstR11NonZero = false;
 
     static void RecordR11Write(uint32_t instrAddr, bool thumb, uint32_t instruction, uint32_t oldVal, uint32_t newVal) {
+        if (!kEnableHeavyCpuTraces) return;
         if (oldVal == newVal) return;
 
         g_r11WriteHistory.push_back({instrAddr, thumb, instruction, oldVal, newVal});
@@ -2961,6 +2966,17 @@ namespace AIO::Emulator::GBA {
                 uint32_t written = 0;
                 uint16_t vramBuffer = 0;
                 bool vramBufferFull = false;
+
+                // HLE timing model:
+                // These BIOS routines take a non-trivial amount of time on real hardware.
+                // If we execute them "instantly" without advancing emulated cycles,
+                // timers/PPU/APU freeze during large decompressions which causes audible
+                // underruns/crackle and timing glitches.
+                //
+                // We use a conservative, approximate cycle cost per output byte.
+                const int perOutByteCycles = toVram ? 40 : 30;
+                constexpr int kBatchBytes = 256;
+                uint32_t batchOutBytes = 0;
                 
                 while (written < decompSize) {
                     uint8_t flags = memory.Read8(src++);
@@ -2990,6 +3006,12 @@ namespace AIO::Emulator::GBA {
                                 }
                                 dst++;
                                 written++;
+
+                                batchOutBytes++;
+                                if (batchOutBytes >= (uint32_t)kBatchBytes) {
+                                    AdvanceHLECycles(perOutByteCycles * (int)batchOutBytes);
+                                    batchOutBytes = 0;
+                                }
                             }
                         } else {
                             // Uncompressed byte
@@ -3008,8 +3030,18 @@ namespace AIO::Emulator::GBA {
                             }
                             dst++;
                             written++;
+
+                            batchOutBytes++;
+                            if (batchOutBytes >= (uint32_t)kBatchBytes) {
+                                AdvanceHLECycles(perOutByteCycles * (int)batchOutBytes);
+                                batchOutBytes = 0;
+                            }
                         }
                     }
+                }
+
+                if (batchOutBytes != 0) {
+                    AdvanceHLECycles(perOutByteCycles * (int)batchOutBytes);
                 }
                 break;
             }
@@ -3025,6 +3057,13 @@ namespace AIO::Emulator::GBA {
                 uint32_t header = memory.Read32(source);
                 int remaining = header >> 8;  // Decompressed size
                 unsigned bits = header & 0xF;  // 4 or 8 bits per symbol
+
+                // HLE timing model: approximate cycles per output byte.
+                // Without this, large Huffman decompressions would freeze timers/APU/PPU.
+                const int totalOutBytes = remaining;
+                constexpr int kHuffPerOutByteCycles = 45;
+                constexpr int kHuffBatchBytes = 256;
+                int batchOutBytes = 0;
                 
                 if (bits == 0) {
                     bits = 8;  // mGBA defaults to 8 if 0
@@ -3109,8 +3148,23 @@ namespace AIO::Emulator::GBA {
                             dest += 4;
                             remaining -= 4;
                             block = 0;
+
+                            batchOutBytes += 4;
+                            if (batchOutBytes >= kHuffBatchBytes) {
+                                AdvanceHLECycles(kHuffPerOutByteCycles * batchOutBytes);
+                                batchOutBytes = 0;
+                            }
                         }
                     }
+                }
+
+                if (batchOutBytes != 0) {
+                    AdvanceHLECycles(kHuffPerOutByteCycles * batchOutBytes);
+                }
+
+                // If we never hit a full 32-bit boundary (should be rare), still advance time.
+                if (totalOutBytes > 0 && totalOutBytes < 4) {
+                    AdvanceHLECycles(kHuffPerOutByteCycles * totalOutBytes);
                 }
                 
                 // Update registers like real BIOS
@@ -3133,6 +3187,11 @@ namespace AIO::Emulator::GBA {
                 uint32_t written = 0;
                 uint16_t vramBuffer = 0;
                 bool vramBufferFull = false;
+
+                // HLE timing model: approximate cycles per output byte.
+                const int rlPerOutByteCycles = toVram ? 35 : 25;
+                constexpr int kRlBatchBytes = 256;
+                uint32_t batchOutBytes = 0;
                 
                 while (written < decompSize) {
                     uint8_t flag = memory.Read8(src++);
@@ -3157,6 +3216,12 @@ namespace AIO::Emulator::GBA {
                             }
                             dst++;
                             written++;
+
+                            batchOutBytes++;
+                            if (batchOutBytes >= (uint32_t)kRlBatchBytes) {
+                                AdvanceHLECycles(rlPerOutByteCycles * (int)batchOutBytes);
+                                batchOutBytes = 0;
+                            }
                         }
                     } else {
                         // Uncompressed run
@@ -3178,8 +3243,18 @@ namespace AIO::Emulator::GBA {
                             }
                             dst++;
                             written++;
+
+                            batchOutBytes++;
+                            if (batchOutBytes >= (uint32_t)kRlBatchBytes) {
+                                AdvanceHLECycles(rlPerOutByteCycles * (int)batchOutBytes);
+                                batchOutBytes = 0;
+                            }
                         }
                     }
+                }
+
+                if (batchOutBytes != 0) {
+                    AdvanceHLECycles(rlPerOutByteCycles * (int)batchOutBytes);
                 }
                 break;
             }
@@ -3194,6 +3269,11 @@ namespace AIO::Emulator::GBA {
                 uint32_t header = memory.Read32(src);
                 uint32_t size = header >> 8;
                 src += 4;
+
+                // HLE timing model: approximate cycles per output byte.
+                // Differential filters are typically smaller than decompressions, but still
+                // should advance time to avoid stalls.
+                const int diffPerOutByteCycles = (comment == 0x18) ? 18 : 14;
                 
                 if (comment == 0x18) {
                     // 16-bit differential
@@ -3213,6 +3293,13 @@ namespace AIO::Emulator::GBA {
                         prev += diff;
                         memory.Write8(dst++, prev);
                     }
+                }
+
+                if (size != 0) {
+                    // Clamp to int range defensively.
+                    const uint32_t maxBytes = 0x7FFFFFFFu / (uint32_t)diffPerOutByteCycles;
+                    const uint32_t accountedBytes = (size > maxBytes) ? maxBytes : size;
+                    AdvanceHLECycles(diffPerOutByteCycles * (int)accountedBytes);
                 }
                 break;
             }
