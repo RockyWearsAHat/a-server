@@ -77,6 +77,13 @@ set_target_properties(PPUTests PROPERTIES
 )
 target_link_libraries(PPUTests PRIVATE GTest::gtest_main GBAEmulator)
 
+add_executable(MemoryMapTests ${PROJECT_ROOT}/tests/MemoryMapTests.cpp)
+set_target_properties(MemoryMapTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/MemoryMapTests"
+)
+target_link_libraries(MemoryMapTests PRIVATE GTest::gtest_main GBAEmulator)
+
 
 # Headless SMA2 investigation harness (not a unit test).
 add_executable(SMA2Harness ${PROJECT_ROOT}/test_sma2_10s.cpp)
@@ -127,6 +134,12 @@ gtest_discover_tests(InputLogicTests
 )
 
 gtest_discover_tests(PPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(MemoryMapTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
