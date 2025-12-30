@@ -1,0 +1,55 @@
+name: Tests
+
+on:
+  push:
+    paths:
+      - '**/*.cpp'
+  pull_request:
+    paths:
+      - '**/*.cpp'
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            make \
+            pkg-config \
+            g++ \
+            libsdl2-dev \
+            libcurl4-openssl-dev \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-webengine-dev \
+            qt6-webengine-dev-tools
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake pkg-config sdl2 qt
+
+      - name: Build + CTest
+        env:
+          BUILD_TYPE: Release
+        run: |
+          make test
