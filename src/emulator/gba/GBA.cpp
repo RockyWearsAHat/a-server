@@ -18,10 +18,12 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
-  return enabled;
-}
+// Cache per-call-site (not per string length).
+#define EnvFlagCached(name_literal)                                            \
+  ([]() -> bool {                                                              \
+    static const bool enabled = EnvTruthy(std::getenv(name_literal));          \
+    return enabled;                                                            \
+  }())
 
 bool TraceGbaSpam() { return EnvFlagCached("AIO_TRACE_GBA_SPAM"); }
 } // namespace
@@ -385,6 +387,34 @@ int GBA::Step() {
     }
   }
 
+  // Periodic progress trace: helps diagnose titles that run past boot but
+  // remain in forced blank or never enable expected IRQs.
+  // Enable with: AIO_TRACE_PROGRESS=1
+  static const bool traceProgress = EnvFlagCached("AIO_TRACE_PROGRESS");
+  if (traceProgress && (totalSteps % 500000u) == 0u) {
+    const uint32_t pc = cpu->GetRegister(15);
+    const uint32_t pcAligned = pc & ~1u;
+    const uint16_t op0 = memory->Read16(pcAligned);
+    const uint16_t op1 = memory->Read16(pcAligned + 2u);
+    const uint32_t r2 = cpu->GetRegister(2);
+    const uint32_t r3 = cpu->GetRegister(3);
+    const uint32_t r4 = cpu->GetRegister(4);
+    const uint32_t r5 = cpu->GetRegister(5);
+    const uint32_t sp = cpu->GetRegister(13);
+    const uint16_t ime = memory->Read16(0x04000208);
+    const uint16_t ie = memory->Read16(0x04000200);
+    const uint16_t if_reg = memory->Read16(0x04000202);
+    const uint16_t dispcnt = memory->Read16(0x04000000);
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "GBA",
+      "PROGRESS step=%d PC=0x%08x thumb=%u halted=%u op0=0x%04x op1=0x%04x R2=0x%08x R3=0x%08x R4=0x%08x R5=0x%08x SP=0x%08x DISPCNT=0x%04x IME=%u IE=0x%04x IF=0x%04x",
+      totalSteps, (unsigned)pc, (unsigned)(cpu->IsThumbModeFlag() ? 1 : 0),
+      (unsigned)(cpu->IsHalted() ? 1 : 0), (unsigned)op0, (unsigned)op1,
+      (unsigned)r2, (unsigned)r3, (unsigned)r4, (unsigned)r5, (unsigned)sp,
+      (unsigned)dispcnt, (unsigned)(ime & 1), (unsigned)ie,
+      (unsigned)if_reg);
+  }
+
   if (prevPc == lastPC) {
     pcRepeatCount++;
     if (pcRepeatCount == 10000 && TraceGbaSpam()) {
@@ -464,10 +494,63 @@ int GBA::Step() {
   }
 
   // Batch peripheral time advancement to avoid doing 3 updates + IRQ polling
-  // on every instruction. This is a major speed win and still preserves
-  // ordering (peripherals advance after each instruction, just grouped).
+  // on every instruction.
+  //
+  // IMPORTANT: Some games rely on raster-timed work (HBlank/VCount IRQ or
+  // HBlank/VBlank DMA) to update VRAM/scroll state every scanline. In those
+  // cases, letting the CPU run too far ahead of the PPU can delay IRQ/DMA
+  // signaling enough to miss the expected window, causing visible artifacts.
+  //
+  // We therefore dynamically disable batching (cycle-accurate peripherals)
+  // when raster timing is in use.
+  int effectiveBatchCycles = PERIPHERAL_BATCH_CYCLES;
+  {
+    // Optional override:
+    //   AIO_PERIPHERAL_BATCH_CYCLES=<n>
+    // Use 1 for maximum accuracy (slowest), or 64 (default) for speed.
+    static int cachedOverride = -2; // -2 = uninitialized, -1 = none
+    if (cachedOverride == -2) {
+      cachedOverride = -1;
+      if (const char *s = std::getenv("AIO_PERIPHERAL_BATCH_CYCLES")) {
+        const int v = std::atoi(s);
+        if (v > 0) {
+          cachedOverride = v;
+        }
+      }
+    }
+    if (cachedOverride > 0) {
+      effectiveBatchCycles = cachedOverride;
+    } else {
+      // Raster-timing sensitivity heuristics:
+      // - HBlank IRQ enable (DISPSTAT bit 4)
+      // - VCount IRQ enable (DISPSTAT bit 5)
+      // - Any DMA channel enabled with VBlank/HBlank start timing
+      const uint16_t dispstat = memory->Read16(0x04000004);
+      const bool rasterIrqEnabled = (dispstat & 0x10u) || (dispstat & 0x20u);
+
+      auto dmaIsRasterTimed = [&](uint32_t cntHAddr) -> bool {
+        const uint16_t cntH = memory->Read16(cntHAddr);
+        if ((cntH & 0x8000u) == 0) {
+          return false;
+        }
+        const uint16_t timing = (cntH >> 12) & 0x3u;
+        return (timing == 1u) || (timing == 2u); // VBlank or HBlank
+      };
+
+      const bool rasterDmaEnabled =
+          dmaIsRasterTimed(0x040000BAu) || // DMA0CNT_H
+          dmaIsRasterTimed(0x040000C6u) || // DMA1CNT_H
+          dmaIsRasterTimed(0x040000D2u) || // DMA2CNT_H
+          dmaIsRasterTimed(0x040000DEu);   // DMA3CNT_H
+
+      if (rasterIrqEnabled || rasterDmaEnabled) {
+        effectiveBatchCycles = 1;
+      }
+    }
+  }
+
   pendingPeripheralCycles += peripheralCycles;
-  if (pendingPeripheralCycles >= PERIPHERAL_BATCH_CYCLES || cpu->IsHalted()) {
+  if (pendingPeripheralCycles >= effectiveBatchCycles || cpu->IsHalted()) {
     memory->AdvanceCycles(pendingPeripheralCycles);
     pendingPeripheralCycles = 0;
     cpu->PollInterrupts();

@@ -1,62 +1,164 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "Build",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && make build"],
-      "group": { "kind": "build", "isDefault": true },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "CTest",
-      "type": "shell",
-      "command": "zsh",
-      "args": [
-        "-lc",
-        "cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure"
-      ],
-      "group": { "kind": "test", "isDefault": true },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "Test",
-      "type": "shell",
-      "command": "echo Running tests",
-      "dependsOn": ["Build", "CTest"],
-      "group": { "kind": "test" },
-      "problemMatcher": []
-    },
-    {
-      "label": "Clean Workspace",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/clean.sh"],
-      "group": { "kind": "build" },
-      "problemMatcher": []
-    },
-    {
-      "label": "CPUTests",
-      "type": "process",
-      "command": "${workspaceFolder}/build/bin/CPUTests",
-      "group": { "kind": "test" },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "EEPROMTests",
-      "type": "process",
-      "command": "${workspaceFolder}/build/bin/EEPROMTests",
-      "group": { "kind": "test" },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "Test Suite",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/test_suite.py"],
-      "group": { "kind": "test" },
-      "problemMatcher": []
-    }
-  ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && make build"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "CTest",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure"
+			],
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "Test",
+			"type": "shell",
+			"command": "echo Running tests",
+			"dependsOrder": "sequence",
+			"dependsOn": [
+				"Build",
+				"CTest"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Clean Workspace",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && ./scripts/clean.sh"
+			],
+			"group": {
+				"kind": "build"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "CPUTests",
+			"type": "process",
+			"command": "${workspaceFolder}/build/bin/CPUTests",
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "EEPROMTests",
+			"type": "process",
+			"command": "${workspaceFolder}/build/bin/EEPROMTests",
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "Test Suite",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && ./scripts/test_suite.py"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build (verbose)",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"/Users/alexwaldmann/Desktop/AIO Server\" && make build VERBOSE=1"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run DMATests (failing test)",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"/Users/alexwaldmann/Desktop/AIO Server\" && ./build/bin/DMATests --gtest_filter=AudioDmaTest.SoundFifoDmaInternalSrcAdvancesBy16PerRefill"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "CTest (filter failing)",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"/Users/alexwaldmann/Desktop/AIO Server/build/generated/cmake\" && ctest --output-on-failure -R AudioDmaTest.SoundFifoDmaInternalSrcAdvancesBy16PerRefill"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run DMATest to XML",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"/Users/alexwaldmann/Desktop/AIO Server\" && ./build/bin/DMATests --gtest_filter=AudioDmaTest.SoundFifoDmaInternalSrcAdvancesBy16PerRefill --gtest_output=xml:/tmp/dma_fail.xml || true"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run DMATest to workspace XML",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"/Users/alexwaldmann/Desktop/AIO Server\" && ./build/bin/DMATests --gtest_filter=AudioDmaTest.SoundFifoDmaInternalSrcAdvancesBy16PerRefill --gtest_output=xml:dumps/dma_fail.xml || true"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run PPUTests filtered (0D mirror)",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && ./build/bin/PPUTests --gtest_filter=PPUTest.EepromCartsStillMirrorRomIn0DRegionOutsideIoWindow --gtest_color=no"
+			],
+			"isBackground": false
+		}
+	]
 }

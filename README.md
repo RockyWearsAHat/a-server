@@ -163,7 +163,3 @@ All code lives under structured namespaces (e.g. `AIO::Emulator::GBA`, `AIO::GUI
 See [LICENSE](LICENSE).
 
 ---
-
-### Badge setup (repo maintainers)
-
-Replace `<OWNER>/<REPO>` in badge URLs with your GitHub org/user and repository name, and ensure your GitHub Actions workflows are named accordingly (e.g. `ci.yml`, `tests.yml`).

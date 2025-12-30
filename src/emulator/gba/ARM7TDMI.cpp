@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 namespace AIO::Emulator::GBA {
 using AIO::Emulator::Common::Logger;
@@ -33,10 +34,12 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
-  return enabled;
-}
+// Cache per-call-site (not per string length).
+#define EnvFlagCached(name_literal)                                            \
+  ([]() -> bool {                                                              \
+    static const bool enabled = EnvTruthy(std::getenv(name_literal));          \
+    return enabled;                                                            \
+  }())
 } // namespace
 
 static void LogBranch([[maybe_unused]] uint32_t from,
@@ -100,9 +103,12 @@ static void LogBranch([[maybe_unused]] uint32_t from,
                               from, to, instr, g_thumbModeForLog);
   }
 
+  // Some commercial titles intentionally execute code from VRAM (self
+  // decompression / staging). Treat VRAM as a valid execution target.
   bool valid = (to >= 0x08000000 && to < 0x0E000000) ||
                (to >= 0x03000000 && to < 0x04000000) ||
-               (to >= 0x02000000 && to < 0x03000000) || (to < 0x4000) ||
+               (to >= 0x02000000 && to < 0x03000000) ||
+               (to >= 0x06000000 && to < 0x06018000) || (to < 0x4000) ||
                ((to & 0xFFFFFF00) == 0xFFFFFF00);
   if (!valid) {
     Logger::Instance().LogFmt(LogLevel::Error, "CPU",
@@ -114,6 +120,23 @@ static void LogBranch([[maybe_unused]] uint32_t from,
 static void TracePCWrite(const char *source, uint32_t pcFrom, uint32_t pcTo,
                          uint32_t instruction, uint32_t extra0 = 0,
                          uint32_t extra1 = 0) {
+  // Optional focused trace: log *all* PC writes that land in VRAM.
+  // Enable with: AIO_TRACE_PC_TO_VRAM=1
+  {
+    static const bool tracePcToVram =
+        (std::getenv("AIO_TRACE_PC_TO_VRAM") != nullptr);
+    if (tracePcToVram && (pcTo >= 0x06000000u && pcTo < 0x06018000u)) {
+      static int vramPcLogs = 0;
+      if (vramPcLogs++ < 200) {
+        Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+                                  "PC WRITE TO VRAM [%s] from=0x%08x to=0x%08x "
+                                  "instr=0x%08x extra0=0x%08x extra1=0x%08x",
+                                  source, pcFrom, pcTo, instruction, extra0,
+                                  extra1);
+      }
+    }
+  }
+
   // Keep this extremely focused; only print when the destination looks wrong.
   const bool looksLikeOpcode = ((pcTo & 0xFF000000) == 0xE3000000) ||
                                ((pcTo & 0xFF000000) == 0xE2000000);
@@ -129,6 +152,101 @@ static void TracePCWrite(const char *source, uint32_t pcFrom, uint32_t pcTo,
                               source, pcFrom, pcTo, instruction, extra0,
                               extra1);
   }
+}
+
+static inline bool IsVramExecAddr(uint32_t addr) {
+  return (addr >= 0x06000000u && addr < 0x06018000u);
+}
+
+static inline bool IsOgdkBootstrapAddr(uint32_t addr) {
+  // Keep extremely noisy traces scoped to OG-DK's early staging code paths.
+  // Observed hot ranges from traces:
+  // - IWRAM staging code around 0x03007000
+  // - Early ROM bootstrap around 0x08000000
+  // - VRAM staged routines at 0x06000000
+  return (addr >= 0x03007000u && addr < 0x03009000u) ||
+         (addr >= 0x08000000u && addr < 0x08002000u) ||
+         (addr >= 0x06000000u && addr < 0x06002000u);
+}
+
+static inline void TraceReg5WriteToVram(uint32_t instrAddr, bool thumb,
+                                        uint32_t instruction,
+                                        const char *source, uint32_t oldVal,
+                                        uint32_t newVal, uint32_t extra0 = 0,
+                                        uint32_t extra1 = 0) {
+  if (oldVal == newVal)
+    return;
+  if (!IsVramExecAddr(newVal))
+    return;
+  if (std::getenv("AIO_TRACE_R5_TO_VRAM") == nullptr)
+    return;
+
+  static int logs = 0;
+  if (logs++ >= 200)
+    return;
+  Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+                            "R5->VRAM [%s] at=0x%08x instr=0x%08x thumb=%u "
+                            "old=0x%08x new=0x%08x extra0=0x%08x extra1=0x%08x",
+                            source, (unsigned)instrAddr, (unsigned)instruction,
+                            (unsigned)(thumb ? 1u : 0u), (unsigned)oldVal,
+                            (unsigned)newVal, (unsigned)extra0,
+                            (unsigned)extra1);
+}
+
+static inline void TraceR5WriteOgdkLimited(uint32_t instrAddr, bool thumb,
+                                           uint32_t instruction,
+                                           const char *source, uint32_t oldVal,
+                                           uint32_t newVal, uint32_t extra0 = 0,
+                                           uint32_t extra1 = 0) {
+  if (oldVal == newVal)
+    return;
+  if (std::getenv("AIO_TRACE_OGDK_R5_WRITES") == nullptr)
+    return;
+  if (!IsOgdkBootstrapAddr(instrAddr))
+    return;
+
+  static int logs = 0;
+  if (logs++ >= 2000)
+    return;
+
+  Logger::Instance().LogFmt(
+      LogLevel::Error, "CPU",
+      "OGDK_R5_WRITE #%d [%s] at=0x%08x instr=0x%08x thumb=%u old=0x%08x "
+      "new=0x%08x extra0=0x%08x extra1=0x%08x",
+      logs - 1, source, (unsigned)instrAddr, (unsigned)instruction,
+      (unsigned)(thumb ? 1u : 0u), (unsigned)oldVal, (unsigned)newVal,
+      (unsigned)extra0, (unsigned)extra1);
+}
+
+static inline void TraceVramEnterDump(GBAMemory &memory, uint32_t from,
+                                      uint32_t to, uint32_t lr, uint32_t sp,
+                                      uint32_t cpsr, bool thumbMode,
+                                      uint32_t r5) {
+  if (std::getenv("AIO_TRACE_VRAM_ENTER_DUMP") == nullptr)
+    return;
+  if (!IsVramExecAddr(to))
+    return;
+  static int dumps = 0;
+  if (dumps++ >= 200)
+    return;
+
+  uint32_t words[8] = {};
+  for (int i = 0; i < 8; ++i) {
+    words[i] = memory.Read32(to + (uint32_t)i * 4u);
+  }
+  Logger::Instance().LogFmt(
+      LogLevel::Error, "CPU",
+      "VRAM_ENTER_DUMP #%d from=0x%08x to=0x%08x mode=%c LR=0x%08x SP=0x%08x "
+      "CPSR=0x%08x R5=0x%08x mem=%08x %08x %08x %08x %08x %08x %08x %08x",
+      dumps - 1, (unsigned)from, (unsigned)to, thumbMode ? 'T' : 'A',
+      (unsigned)lr, (unsigned)sp, (unsigned)cpsr, (unsigned)r5,
+      (unsigned)words[0], (unsigned)words[1], (unsigned)words[2],
+      (unsigned)words[3], (unsigned)words[4], (unsigned)words[5],
+      (unsigned)words[6], (unsigned)words[7]);
+}
+
+static inline uint32_t CanonicalizePCValue(uint32_t pc, bool thumbMode) {
+  return thumbMode ? (pc & ~1u) : (pc & ~3u);
 }
 
 // These traces rely on ARM7TDMI::Step() capturing a per-instruction context.
@@ -395,6 +513,27 @@ void ARM7TDMI::CheckInterrupts() {
   uint16_t ie = memory.Read16(IORegs::REG_IE);
   uint16_t if_reg = memory.Read16(IORegs::REG_IF);
 
+  const bool traceHaltWake = EnvFlagCached("AIO_TRACE_HALT_WAKE");
+
+  // If we're halted and waiting for an interrupt, emit a low-volume heartbeat
+  // so headless runs can prove whether we are (a) stuck in HALT waiting for
+  // IRQ, or (b) waking and progressing normally.
+  static uint64_t haltPollCount = 0;
+  const bool haltedWaiting = halted && sleepHalt;
+  if (haltedWaiting) {
+    ++haltPollCount;
+    if (traceHaltWake && (haltPollCount <= 50 || (haltPollCount % 6000) == 0)) {
+      Logger::Instance().LogFmt(LogLevel::Info, "CPU",
+                                "HALT poll: PC=0x%08x IME=%u IE=0x%04x "
+                                "IF=0x%04x pending=0x%04x CPSR=0x%08x",
+                                registers[15], (unsigned)(ime & 1),
+                                (unsigned)ie, (unsigned)if_reg,
+                                (unsigned)(ie & if_reg), cpsr);
+    }
+  } else {
+    haltPollCount = 0;
+  }
+
   // Debug logging (throttled)
   // static int debugCount = 0;
   // if (debugCount++ == 0 || debugCount % 60000 == 0) {
@@ -407,6 +546,13 @@ void ARM7TDMI::CheckInterrupts() {
   // Wake from HALT/STOP/IntrWait if any enabled interrupt is pending.
   // Do NOT auto-resume debugger breakpoints/stepback halts.
   if (halted && sleepHalt && (ie & if_reg)) {
+    if (traceHaltWake) {
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "HALT wake: PC=0x%08x IME=%u IE=0x%04x IF=0x%04x pending=0x%04x",
+          registers[15], (unsigned)(ime & 1), (unsigned)ie, (unsigned)if_reg,
+          (unsigned)(ie & if_reg));
+    }
     halted = false;
     sleepHalt = false;
   }
@@ -542,12 +688,15 @@ void ARM7TDMI::Step() {
   // If R11 changes (especially to zero) without going through our explicit
   // decode/execute trace call sites, catch it here.
   const uint32_t r11Now = registers[11];
-  if (!g_reportedFirstR11NonZero && r11Now != 0) {
-    g_reportedFirstR11NonZero = true;
-    Logger::Instance().LogFmt(
-        LogLevel::Error, "CPU",
-        "R11 FIRST!=0 observed at PC=0x%08x mode=%c R11=0x%08x",
-        currentInstrAddr, currentInstrThumb ? 'T' : 'A', r11Now);
+  const bool traceR11 = EnvFlagCached("AIO_TRACE_CPU_R11");
+  if (traceR11) {
+    if (!g_reportedFirstR11NonZero && r11Now != 0) {
+      g_reportedFirstR11NonZero = true;
+      Logger::Instance().LogFmt(
+          LogLevel::Error, "CPU",
+          "R11 FIRST!=0 observed at PC=0x%08x mode=%c R11=0x%08x",
+          currentInstrAddr, currentInstrThumb ? 'T' : 'A', r11Now);
+    }
   }
 
   if (kEnableHeavyCpuTraces && currentInstrAddr >= 0x08007310 &&
@@ -621,34 +770,38 @@ void ARM7TDMI::Step() {
       dumpBytes(0x03007B80, 0x100);
     }
   }
-  if (r11Now != g_lastR11Observed) {
-    const uint32_t instr =
-        currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
-    RecordR11Write(currentInstrAddr, currentInstrThumb, instr,
-                   g_lastR11Observed, r11Now);
+  if (traceR11) {
+    if (r11Now != g_lastR11Observed) {
+      const uint32_t instr =
+          currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+      RecordR11Write(currentInstrAddr, currentInstrThumb, instr,
+                     g_lastR11Observed, r11Now);
 
-    if (!g_reportedFirstR11Zero && g_lastR11Observed != 0 && r11Now == 0) {
-      g_reportedFirstR11Zero = true;
-      Logger::Instance().LogFmt(
-          LogLevel::Error, "CPU",
-          "R11 FIRST->0 (detected in Step prologue) at fromPC=0x%08x mode=%c "
-          "instr=0x%08x old=0x%08x new=0x%08x",
-          currentInstrAddr, currentInstrThumb ? 'T' : 'A', instr,
-          g_lastR11Observed, r11Now);
-
-      Logger::Instance().LogFmt(LogLevel::Error, "CPU",
-                                "R11 HISTORY (most recent last):");
-      for (const auto &e : g_r11WriteHistory) {
+      if (!g_reportedFirstR11Zero && g_lastR11Observed != 0 && r11Now == 0) {
+        g_reportedFirstR11Zero = true;
         Logger::Instance().LogFmt(
             LogLevel::Error, "CPU",
-            "  R11H fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
-            e.instrAddr, e.thumb ? 'T' : 'A', e.instruction, e.oldVal,
-            e.newVal);
+            "R11 FIRST->0 (detected in Step prologue) at fromPC=0x%08x mode=%c "
+            "instr=0x%08x old=0x%08x new=0x%08x",
+            currentInstrAddr, currentInstrThumb ? 'T' : 'A', instr,
+            g_lastR11Observed, r11Now);
+
+        Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+                                  "R11 HISTORY (most recent last):");
+        for (const auto &e : g_r11WriteHistory) {
+          Logger::Instance().LogFmt(
+              LogLevel::Error, "CPU",
+              "  R11H fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
+              e.instrAddr, e.thumb ? 'T' : 'A', e.instruction, e.oldVal,
+              e.newVal);
+        }
       }
     }
-
-    g_lastR11Observed = r11Now;
   }
+
+  // Keep the shadow value in sync even when tracing is off, so enabling the
+  // env flag mid-run gives sensible diffs.
+  g_lastR11Observed = r11Now;
 
   // Record CPU state snapshot only when debugger features are active
   // (breakpoints or single-step)
@@ -799,11 +952,49 @@ void ARM7TDMI::Step() {
     pc = 0x03000000 | (pc & 0x7FFF);
   if (pc >= 0x02040000 && pc < 0x03000000)
     pc = 0x02000000 | (pc & 0x3FFFF);
-  if (pc >= 0x06018000 && pc < 0x07000000)
-    pc = 0x06000000 | (pc & 0x17FFF);
+  // VRAM is 96KB (0x00000-0x17FFF). The upper 32KB window (0x18000-0x1FFFF)
+  // mirrors to 0x10000-0x17FFF (GBATEK VRAM mirroring).
+  // Only apply mirroring inside the VRAM+mirror window (0x06000000-0x0601FFFF).
+  if (pc >= 0x06000000 && pc < 0x06020000) {
+    uint32_t off = pc & 0x1FFFFu;
+    if (off >= 0x18000u) {
+      off -= 0x8000u;
+    }
+    pc = 0x06000000u | off;
+  }
   if (pc >= 0x08000000 && pc < 0x10000000)
     pc = 0x08000000 | (pc & 0x1FFFFFF);
   registers[15] = pc;
+
+  // Optional: trace transitions into/out of VRAM execution.
+  // Enable with: AIO_TRACE_VRAM_EXEC_TRANSITIONS=1
+  {
+    static const bool traceVramTransitions =
+        (std::getenv("AIO_TRACE_VRAM_EXEC_TRANSITIONS") != nullptr);
+    if (traceVramTransitions) {
+      static bool lastWasVram = false;
+      static uint32_t lastPc = 0;
+      const bool nowWasVram = (pc >= 0x06000000u && pc < 0x06018000u);
+      if (nowWasVram != lastWasVram) {
+        static int logs = 0;
+        if (logs++ < 200) {
+          Logger::Instance().LogFmt(
+              LogLevel::Error, "CPU",
+              "VRAM_EXEC transition %s: from=0x%08x to=0x%08x thumb=%u "
+              "CPSR=0x%08x SP=0x%08x LR=0x%08x",
+              nowWasVram ? "ENTER" : "LEAVE", (unsigned)lastPc, (unsigned)pc,
+              (unsigned)(thumbMode ? 1u : 0u), (unsigned)cpsr,
+              (unsigned)registers[13], (unsigned)registers[14]);
+          if (nowWasVram) {
+            TraceVramEnterDump(memory, lastPc, pc, registers[14], registers[13],
+                               cpsr, thumbMode, registers[5]);
+          }
+        }
+      }
+      lastWasVram = nowWasVram;
+      lastPc = pc;
+    }
+  }
 
   // Validate PC region
   bool valid = false;
@@ -872,6 +1063,11 @@ void ARM7TDMI::Step() {
   static bool crashTraceEnabled = crashTraceRequested;
   static int crashTraceCount = 0;
 
+  // If we've emitted our quota, disable until a re-arm trigger hits.
+  if (crashTraceRequested && crashTraceEnabled && crashTraceCount >= 200) {
+    crashTraceEnabled = false;
+  }
+
   // Trace caller at ROM before BX R0
   if (crashTraceEnabled && pc >= 0x8032400 && pc <= 0x8032420) {
     uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc)
@@ -929,18 +1125,56 @@ void ARM7TDMI::Step() {
                 << registers[12] << std::dec << std::endl;
     }
   }
+
+  // DKC: dump the computed-jump table + target window when we branch into the
+  // 0x02xxxxxx EWRAM mirror region (this correlates with the crash).
+  if (crashTraceRequested && pc == 0x300330c) {
+    static int dkcJumpDumpCount = 0;
+    const uint32_t base = registers[12];
+    const uint32_t offset = registers[0];
+    const uint32_t target = base + offset;
+    const uint8_t targetRegion = (uint8_t)(target >> 24);
+    if (targetRegion == 0x02 && dkcJumpDumpCount < 20) {
+      dkcJumpDumpCount++;
+      std::cout << "[DKCJump] base=0x" << std::hex << base << " offset=0x"
+                << offset << " target=0x" << target << std::dec << std::endl;
+
+      std::cout << "[DKCJump] table[0..7]=" << std::hex;
+      for (int i = 0; i < 8; ++i) {
+        const uint32_t v = memory.Read32(base + (uint32_t)i * 4u);
+        std::cout << ((i == 0) ? "" : ",") << "0x" << v;
+      }
+      std::cout << std::dec << std::endl;
+
+      const uint32_t tgtAligned = target & ~3u;
+      std::cout << "[DKCJump] targetWords=" << std::hex;
+      for (int i = 0; i < 8; ++i) {
+        const uint32_t v = memory.Read32(tgtAligned + (uint32_t)i * 4u);
+        std::cout << ((i == 0) ? "" : ",") << "0x" << v;
+      }
+      std::cout << std::dec << std::endl;
+    }
+  }
   if (crashTraceRequested && pc >= 0x3003300 && pc <= 0x3003320) {
     crashTraceEnabled = true;
+    crashTraceCount = 0;
+  }
+  // DKC crash window: the computed-jump lands in mirrored EWRAM around
+  // 0x020140xx and then branches to an invalid address.
+  if (crashTraceRequested && pc >= 0x02014000 && pc <= 0x02014200) {
+    crashTraceEnabled = true;
+    crashTraceCount = 0;
   }
   if (crashTraceRequested && crashTraceEnabled && crashTraceCount < 200) {
     crashTraceCount++;
     uint32_t instr = (thumbMode) ? memory.ReadInstruction16(pc)
                                  : memory.ReadInstruction32(pc);
     std::cout << "[CrashTrace] PC=0x" << std::hex << pc << " Instr=0x" << instr
-              << " R0=0x" << registers[0] << " R11=0x" << registers[11]
-              << " R12=0x" << registers[12] << " LR=0x" << registers[14]
-              << " R1=0x" << registers[1] << " R2=0x" << registers[2]
-              << " SP=0x" << registers[13] << std::dec << std::endl;
+              << " R0=0x" << registers[0] << " R1=0x" << registers[1]
+              << " R2=0x" << registers[2] << " R3=0x" << registers[3]
+              << " R11=0x" << registers[11] << " R12=0x" << registers[12]
+              << " LR=0x" << registers[14] << " SP=0x" << registers[13]
+              << " Mode=" << (thumbMode ? "T" : "A") << std::dec << std::endl;
   }
 
   // ...existing code...
@@ -957,8 +1191,11 @@ void ARM7TDMI::Step() {
     const uint32_t pcAligned = thumbMode ? (pc & ~1u) : (pc & ~3u);
 
     const bool inIrqVector = (pcAligned == 0x00000018u);
+    // Our synthetic BIOS installs a small IRQ trampoline. Let it execute as
+    // normal ARM instructions, but keep the rest of BIOS entrypoints handled
+    // via HLE.
     const bool inIrqTrampoline =
-        (pcAligned >= 0x00000180u && pcAligned < 0x000001A8u);
+      (pcAligned >= 0x00003F00u && pcAligned < 0x00003F2Cu);
 
     if (!inIrqVector && !inIrqTrampoline) {
       ExecuteBIOSFunction(pcAligned);
@@ -1553,9 +1790,28 @@ void ARM7TDMI::Decode(uint32_t instruction) {
   // Software Interrupt: xxxx 1111 xxxx xxxx xxxx xxxx xxxx xxxx
   else if ((instruction & ARMInstructionFormat::SWI_MASK) ==
            ARMInstructionFormat::SWI_PATTERN) {
-    // ARM SWI has a 24-bit immediate; GBA BIOS uses the low 8 bits as the
-    // function number.
-    ExecuteSWI(instruction & 0xFF);
+    // ARM SWI has a 24-bit immediate (comment field).
+    // In practice, GBA toolchains have emitted both:
+    //   - 0xEF00000C (SWI number in low byte)
+    //   - 0xEF0C0000 (SWI number in bits 16-23)
+    // Commercial ROMs exist that rely on the latter form.
+    const uint32_t imm24 = instruction & 0x00FFFFFFu;
+    uint8_t swiNum = static_cast<uint8_t>(imm24 & 0xFFu);
+    const uint8_t hiByte = static_cast<uint8_t>((imm24 >> 16) & 0xFFu);
+
+    // Heuristic: BIOS SWIs are 0x00..0x1F. Prefer the encoding that yields a
+    // plausible SWI number.
+    const bool lowPlausible = (swiNum <= 0x1Fu);
+    const bool highPlausible = (hiByte <= 0x1Fu);
+
+    if (!lowPlausible && highPlausible) {
+      swiNum = hiByte;
+    } else if (swiNum == 0 && hiByte != 0 && highPlausible) {
+      // Common for 0xEF110000-style encodings.
+      swiNum = hiByte;
+    }
+
+    ExecuteSWI(swiNum);
   } else {
     std::cout << "Unknown Instruction: 0x" << std::hex << instruction
               << " at PC=" << (registers[15] - 4)
@@ -1779,11 +2035,27 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
         }
       }
       const uint32_t from = registers[15] - 4;
+      // Canonicalize PC for non-S writes. For S+Rd==PC, CPSR/Thumb state may
+      // change later in this function; canonicalize after CPSR restore.
+      if (!S) {
+        result = CanonicalizePCValue(result, thumbMode);
+      }
       TracePCWrite("ALU", from, result, instruction, (uint32_t)opcode,
                    (uint32_t)S);
       LogBranch(from, result);
     }
+    const uint32_t oldRd = registers[rd];
     registers[rd] = result;
+    if (rd == 5) {
+      TraceReg5WriteToVram(currentInstrAddr, currentInstrThumb,
+                           currentInstrThumb ? (uint32_t)currentOp16
+                                             : currentOp32,
+                           "ALU", oldRd, registers[rd]);
+      TraceR5WriteOgdkLimited(currentInstrAddr, currentInstrThumb,
+                              currentInstrThumb ? (uint32_t)currentOp16
+                                                : currentOp32,
+                              "ALU", oldRd, registers[rd]);
+    }
   }
 
   // Update Flags (CPSR) if S is set
@@ -1851,6 +2123,10 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       cpsr = spsrCopy;
       thumbMode = IsThumbMode(cpsr);
 
+      // Now that Thumb state is final, canonicalize the destination PC.
+      registers[Register::PC] =
+          CanonicalizePCValue(registers[Register::PC], thumbMode);
+
       // Debug: confirm CPSR restore actually re-enters Thumb when expected.
       if (oldMode == CPUMode::IRQ) {
         static int irqReturnPostLogCount = 0;
@@ -1884,11 +2160,31 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
     offset = instruction & 0xFFF;
   } else {
     uint32_t rm = ExtractRegisterField(instruction, 0);
-    offset = registers[rm];
+    uint32_t rmVal = registers[rm];
+    if (rm == Register::PC) {
+      // In this core, R15 has already advanced to (current instruction + 4)
+      // by the time we execute the instruction. Add +4 to get the
+      // architectural PC+8 operand value for ARM state.
+      rmVal += 4;
+    }
+
+    const bool shiftByReg = ((instruction >> 4) & 1u) != 0;
+    const uint32_t shiftType = ExtractBits(instruction, 5, 0x3);
+    uint32_t shiftAmount = 0;
+    if (shiftByReg) {
+      const uint32_t rs = ExtractRegisterField(instruction, 8);
+      shiftAmount = registers[rs] & 0xFFu;
+    } else {
+      shiftAmount = ExtractBits(instruction, 7, 0x1Fu);
+    }
+
+    uint32_t tempCpsr = cpsr;
+    offset = BarrelShift(rmVal, shiftType, shiftAmount, tempCpsr, true);
   }
 
   uint32_t baseAddr = registers[rn];
   if (rn == Register::PC) {
+    // See above: R15 is (current instruction + 4) at execute time.
     baseAddr += 4;
   }
 
@@ -1904,7 +2200,18 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
     // Load
     if (B) {
       const uint32_t old = registers[rd];
+      const uint32_t oldRd = registers[rd];
       registers[rd] = memory.Read8(targetAddr);
+      if (rd == 5) {
+        TraceReg5WriteToVram(currentInstrAddr, currentInstrThumb,
+                             currentInstrThumb ? (uint32_t)currentOp16
+                                               : currentOp32,
+                             "LDRB", oldRd, registers[rd], targetAddr);
+        TraceR5WriteOgdkLimited(currentInstrAddr, currentInstrThumb,
+                                currentInstrThumb ? (uint32_t)currentOp16
+                                                  : currentOp32,
+                                "LDRB", oldRd, registers[rd], targetAddr);
+      }
       if (rd == 8) {
         TraceR8Write(currentInstrAddr, currentInstrThumb,
                      currentInstrThumb ? (uint32_t)currentOp16 : currentOp32,
@@ -1914,11 +2221,25 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
       uint32_t val = memory.Read32(targetAddr);
       if (rd == Register::PC) {
         const uint32_t from = registers[Register::PC] - 4;
+        // LDR into PC is a branch. It does not exchange state on ARM7TDMI;
+        // just canonicalize alignment for the current instruction set.
+        val = CanonicalizePCValue(val, thumbMode);
         TracePCWrite("LDR", from, val, instruction, targetAddr, rn);
         LogBranch(from, val);
       }
       const uint32_t old = registers[rd];
+      const uint32_t oldRd = registers[rd];
       registers[rd] = val;
+      if (rd == 5) {
+        TraceReg5WriteToVram(currentInstrAddr, currentInstrThumb,
+                             currentInstrThumb ? (uint32_t)currentOp16
+                                               : currentOp32,
+                             "LDR", oldRd, registers[rd], targetAddr);
+        TraceR5WriteOgdkLimited(currentInstrAddr, currentInstrThumb,
+                                currentInstrThumb ? (uint32_t)currentOp16
+                                                  : currentOp32,
+                                "LDR", oldRd, registers[rd], targetAddr);
+      }
       if (rd == 8) {
         TraceR8Write(currentInstrAddr, currentInstrThumb,
                      currentInstrThumb ? (uint32_t)currentOp16 : currentOp32,
@@ -1986,9 +2307,10 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
   const uint32_t rn = ExtractRegisterField(instruction, 16);
   uint16_t regList = instruction & 0xFFFF;
 
-  // PC-relative logging: in ARM state, registers[15] is already PC+8 after
-  // prefetch increment.
-  const uint32_t instrAddr = registers[15] - 8;
+  // ARM-state execution convention in this core:
+  // - Step() sets R15 = instrAddr + 4 before Decode().
+  // - Reading PC as an operand yields instrAddr + 8.
+  const uint32_t instrAddr = registers[15] - 4;
 
   // One-time pre-exec snapshot for the known failing instruction.
   if (instrAddr == 0x08001774 && instruction == 0x8818DA2F) {
@@ -2008,8 +2330,9 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
               << std::dec << std::endl;
   }
 
+  // If Rn is PC, the base operand must read as instrAddr+8.
   const uint32_t base =
-      (rn == Register::PC) ? (registers[Register::PC] - 8 + 8) : registers[rn];
+      (rn == Register::PC) ? (registers[Register::PC] + 4u) : registers[rn];
   uint32_t startAddress = base;
 
   // Count set bits
@@ -2034,9 +2357,44 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
   uint32_t currentAddr = startAddress;
   bool writeBack = W;
 
-  // If we're about to load PC and the computed address is clearly wrong, log
-  // it. This is focused on SMA2's early crash: LDMDA R8, {...,PC}.
-  if (L && ((regList >> 15) & 1)) {
+  // OG-DK bring-up: dump the exact VRAM-side conditional LDM that is currently
+  // loading PC from the decompressed IWRAM blob.
+  if (EnvFlagCached("AIO_TRACE_OGDK_VRAM_LDM") && instrAddr == 0x06001024u) {
+    static int logs = 0;
+    if (logs++ < 8) {
+      const uint32_t cond = (instruction >> 28) & 0xFu;
+      const bool condOk = ConditionSatisfied(cond, cpsr);
+      Logger::Instance().LogFmt(
+          LogLevel::Error, "CPU",
+          "OGDK_VRAM_LDM at=0x%08x instr=0x%08x cond=%u condOk=%d CPSR=0x%08x "
+          "Rn=R%u base=0x%08x start=0x%08x regList=0x%04x",
+          (unsigned)instrAddr, (unsigned)instruction, (unsigned)cond,
+          condOk ? 1 : 0, (unsigned)cpsr, (unsigned)rn, (unsigned)base,
+          (unsigned)startAddress, (unsigned)regList);
+      Logger::Instance().LogFmt(
+          LogLevel::Error, "CPU",
+          "OGDK_VRAM_LDM flags N=%u Z=%u C=%u V=%u thumb=%u",
+          (unsigned)((cpsr & CPSR::FLAG_N) ? 1u : 0u),
+          (unsigned)((cpsr & CPSR::FLAG_Z) ? 1u : 0u),
+          (unsigned)((cpsr & CPSR::FLAG_C) ? 1u : 0u),
+          (unsigned)((cpsr & CPSR::FLAG_V) ? 1u : 0u),
+          (unsigned)(thumbMode ? 1u : 0u));
+      // Dump the IWRAM words the LDM is about to read.
+      const uint32_t w0 = memory.Read32(startAddress + 0u);
+      const uint32_t w1 = memory.Read32(startAddress + 4u);
+      const uint32_t w2 = memory.Read32(startAddress + 8u);
+      const uint32_t w3 = memory.Read32(startAddress + 12u);
+      Logger::Instance().LogFmt(
+          LogLevel::Error, "CPU",
+          "OGDK_VRAM_LDM mem[0x%08x]=0x%08x 0x%08x 0x%08x 0x%08x",
+          (unsigned)startAddress, (unsigned)w0, (unsigned)w1, (unsigned)w2,
+          (unsigned)w3);
+    }
+  }
+
+  // Optional trace: LDM that loads PC (very noisy; most function returns use
+  // this). Enable with: AIO_TRACE_LDM_PC=1
+  if (EnvFlagCached("AIO_TRACE_LDM_PC") && L && ((regList >> 15) & 1)) {
     Logger::Instance().LogFmt(LogLevel::Error, "CPU",
                               "LDM setup: instr=0x%08x Rn=R%u base=0x%08x "
                               "start=0x%08x P=%d U=%d W=%d S=%d regList=0x%04x",
@@ -2064,10 +2422,24 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
                          registers[13]);
 
         // If we're loading into PC, canonicalize the address.
-        // Some code relies on bit0 for Thumb state; memory fetch is always
-        // aligned.
         if (i == 15) {
-          val &= ~1u;
+          const uint32_t rawVal = val;
+          val = CanonicalizePCValue(val, thumbMode);
+          if (std::getenv("AIO_TRACE_LDM_PC_TO_VRAM") != nullptr &&
+              IsVramExecAddr(val)) {
+            static int logs = 0;
+            if (logs++ < 200) {
+              Logger::Instance().LogFmt(
+                  LogLevel::Error, "CPU",
+                  "LDM_PC_TO_VRAM at=0x%08x instr=0x%08x thumb=%u CPSR=0x%08x "
+                  "Rn=R%u base=0x%08x start=0x%08x cur=0x%08x raw=0x%08x "
+                  "pc=0x%08x regList=0x%04x",
+                  (unsigned)instrAddr, (unsigned)instruction,
+                  (unsigned)(thumbMode ? 1u : 0u), (unsigned)cpsr, (unsigned)rn,
+                  (unsigned)base, (unsigned)startAddress, (unsigned)currentAddr,
+                  (unsigned)rawVal, (unsigned)val, (unsigned)regList);
+            }
+          }
         }
         if (i == 15) {
           TracePCWrite("LDM", instrAddr, val, instruction, currentAddr,
@@ -2089,6 +2461,16 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
         } else {
           const uint32_t old = registers[i];
           registers[i] = val;
+          if (i == 5) {
+            TraceReg5WriteToVram(
+                currentInstrAddr, currentInstrThumb,
+                currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, "LDM",
+                old, registers[i], currentAddr, regList);
+            TraceR5WriteOgdkLimited(
+                currentInstrAddr, currentInstrThumb,
+                currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, "LDM",
+                old, registers[i], currentAddr, regList);
+          }
           if (i == 8) {
             TraceR8Write(currentInstrAddr, currentInstrThumb,
                          currentInstrThumb ? (uint32_t)currentOp16
@@ -2124,7 +2506,8 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
         }
 
         if (i == 15)
-          val += 4; // PC store quirk? Usually PC+12
+          val +=
+              8; // ARM STM stores PC as instrAddr+12; R15 is instrAddr+4 here
 
         // DEBUG: Trace ARM STM to 0x3001500
         if ((currentAddr >> 24) == 0x03 && (currentAddr & 0x7FFF) >= 0x1500 &&
@@ -2182,6 +2565,12 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
     }
     cpsr = spsrCopy;
     thumbMode = IsThumbMode(cpsr);
+
+    // Thumb state may have changed; re-canonicalize PC for the new state.
+    if (pcInList) {
+      registers[Register::PC] =
+          CanonicalizePCValue(registers[Register::PC], thumbMode);
+    }
   }
 
   // Writeback
@@ -2234,8 +2623,10 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
   }
 
   uint32_t baseAddr = registers[rn];
-  if (rn == Register::PC)
-    baseAddr += 4; // PC+8 (registers[15] is PC+4)
+  if (rn == Register::PC) {
+    // R15 is (current instruction + 4) at execute time; add +4 => PC+8.
+    baseAddr += 4;
+  }
 
   uint32_t targetAddr = baseAddr;
   if (P) {
@@ -2249,12 +2640,14 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
     // Load
     if (opcode == 1) { // LDRH (Unsigned Halfword)
       uint16_t value = memory.Read16(targetAddr);
-      // Log LDRH at 0x188 specifically
-      if (registers[15] == 0x190) { // PC is already +8 when we execute
-        std::cerr << "[LDRH at 0x188] targetAddr=0x" << std::hex << targetAddr
-                  << " value=0x" << value << " rd=" << rd
-                  << " Current PC after fetch=0x" << registers[15] << std::dec
-                  << std::endl;
+      // Extremely noisy bring-up trace; keep available but disabled by default.
+      // Enable with: AIO_TRACE_LDRH_0188=1 and (optionally) AIO_LOG_LEVEL=debug
+      if (kEnableHeavyCpuTraces && EnvFlagCached("AIO_TRACE_LDRH_0188") &&
+          registers[15] == 0x190) { // PC is already +8 when we execute
+        Logger::Instance().LogFmt(
+            LogLevel::Debug, "CPU_TRACE",
+            "[LDRH@0x188] target=0x%08x value=0x%04x rd=%u pc=0x%08x",
+            targetAddr, value, rd, registers[15]);
       }
       registers[rd] = value;
     } else if (opcode == 2) { // LDRSB (Signed Byte)
@@ -2312,6 +2705,18 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
   // subroutines
 
   uint32_t returnAddr = registers[14]; // LR holds return address
+
+  // Some titles jump into the middle of BIOS routines instead of the official
+  // entrypoint (notably around IntrWait/VBlankIntrWait). Since we don't ship a
+  // real BIOS ROM, normalize known subroutine ranges back to their canonical
+  // entrypoints so behavior stays correct.
+  //
+  // GBATEK notes that games may call intermediate BIOS addresses.
+  if (biosPC >= 0x188 && biosPC < 0x194) {
+    biosPC = 0x188; // VBlankIntrWait (and its internal labels)
+  } else if (biosPC >= 0x194 && biosPC < 0x1A0) {
+    biosPC = 0x194; // IntrWait (and its internal labels)
+  }
 
   // Identify BIOS function by entry point
   // For unknown entry points, just return (no-op)
@@ -2402,8 +2807,13 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
     uint16_t dispstat = memory.Read16(IORegs::REG_DISPSTAT);
     memory.Write16(IORegs::REG_DISPSTAT, dispstat | 0x0008);
 
-    registers[0] = 1;      // discard old flags
-    registers[1] = 0x0001; // wait for VBlank
+    // VBlankIntrWait is a thin wrapper around IntrWait(discardOld=1, flags=1).
+    // When we HALT and later wake, we must *not* re-run the wrapper prologue
+    // (which would discard the just-delivered BIOS_IF bit).
+    if (!intrWaitResume) {
+      registers[0] = 1;      // discard old flags
+      registers[1] = 0x0001; // wait for VBlank
+    }
     [[fallthrough]];
   }
 
@@ -2411,6 +2821,13 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
   {
     uint32_t discardOld = registers[0];
     uint32_t waitFlags = registers[1];
+
+    // If we're resuming after a HALT wake, preserve the previous wait mask and
+    // skip the discard-old phase (the real BIOS resumes inside the wait loop).
+    if (intrWaitResume) {
+      discardOld = 0;
+      waitFlags = intrWaitWaitFlags;
+    }
 
     uint32_t biosIF = memory.Read16(0x03007FF8);
 
@@ -2421,6 +2838,8 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
     biosIF = memory.Read16(0x03007FF8);
     if (biosIF & waitFlags) {
       memory.Write16(0x03007FF8, biosIF & ~waitFlags);
+      intrWaitResume = false;
+      intrWaitWaitFlags = 0;
     } else {
       // Condition not met. Enable interrupts and halt until an IRQ happens.
       memory.Write16(IORegs::REG_IME, 1);
@@ -2431,6 +2850,11 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
       memory.Write16(IORegs::REG_IE, (uint16_t)(ie | (waitFlags & 0xFFFF)));
       cpsr &= ~0x80; // Clear CPSR I-bit (enable IRQ)
       halted = true;
+      sleepHalt = true;
+      debuggerHalt = false;
+
+      intrWaitResume = true;
+      intrWaitWaitFlags = (uint16_t)(waitFlags & 0xFFFFu);
 
       // Re-run the BIOS call after waking.
       registers[15] = biosPC;
@@ -2494,6 +2918,22 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   // When we HLE a BIOS routine, we skip the real instruction stream, so we
   // must charge some time explicitly.
   constexpr int kSwiOverheadCycles = 32;
+
+  if (EnvFlagCached("AIO_TRACE_SWI")) {
+    static int swiLogs = 0;
+    if (swiLogs < 500) {
+      const uint32_t pc = currentInstrAddr;
+      const uint32_t lr = registers[Register::LR];
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "SWI",
+          "SWI 0x%02x PC=0x%08x LR=0x%08x R0=0x%08x R1=0x%08x R2=0x%08x "
+          "R3=0x%08x",
+          (unsigned)comment, (unsigned)pc, (unsigned)lr, (unsigned)registers[0],
+          (unsigned)registers[1], (unsigned)registers[2],
+          (unsigned)registers[3]);
+      swiLogs++;
+    }
+  }
 
   switch (comment) {
   case 0x00: // SoftReset
@@ -2571,11 +3011,29 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     break;
   }
   case 0x02: // Halt
+    if (EnvFlagCached("AIO_TRACE_INTRWAIT")) {
+      const uint16_t ime = memory.Read16(IORegs::REG_IME);
+      const uint16_t ie = memory.Read16(IORegs::REG_IE);
+      const uint16_t if_reg = memory.Read16(IORegs::REG_IF);
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "SWI Halt: PC=0x%08x IME=%u IE=0x%04x IF=0x%04x", registers[15],
+          (unsigned)(ime & 1), (unsigned)ie, (unsigned)if_reg);
+    }
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
     break;
   case 0x03: // Stop/Sleep
+    if (EnvFlagCached("AIO_TRACE_INTRWAIT")) {
+      const uint16_t ime = memory.Read16(IORegs::REG_IME);
+      const uint16_t ie = memory.Read16(IORegs::REG_IE);
+      const uint16_t if_reg = memory.Read16(IORegs::REG_IF);
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "SWI Stop/Sleep: PC=0x%08x IME=%u IE=0x%04x IF=0x%04x", registers[15],
+          (unsigned)(ime & 1), (unsigned)ie, (unsigned)if_reg);
+    }
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
@@ -2585,6 +3043,21 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     // R0 = Clear Old Flags (1=Clear), R1 = Wait Flags
     uint32_t clearOld = registers[0];
     uint32_t waitFlags = registers[1];
+
+    const bool traceIntrWait = EnvFlagCached("AIO_TRACE_INTRWAIT");
+    if (traceIntrWait) {
+      const uint16_t biosIF = memory.Read16(0x03007FF8);
+      const uint16_t ie0 = memory.Read16(IORegs::REG_IE);
+      const uint16_t if0 = memory.Read16(IORegs::REG_IF);
+      const uint16_t ime0 = memory.Read16(IORegs::REG_IME);
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "IntrWait entry: PC=0x%08x thumb=%u clearOld=%u waitFlags=0x%04x "
+          "BIOS_IF=0x%04x IME=%u IE=0x%04x IF=0x%04x",
+          registers[15], (unsigned)(thumbMode ? 1 : 0),
+          (unsigned)(clearOld != 0), (unsigned)(waitFlags & 0xFFFFu),
+          (unsigned)biosIF, (unsigned)(ime0 & 1), (unsigned)ie0, (unsigned)if0);
+    }
 
     if (clearOld) {
       uint16_t currentFlags = memory.Read16(0x03007FF8);
@@ -2608,6 +3081,15 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
           (uint16_t)(currentFlags & ~(waitFlags & 0xFFFF)), registers[13]);
       memory.Write16(0x03007FF8,
                      (uint16_t)(currentFlags & ~(waitFlags & 0xFFFF)));
+
+      if (traceIntrWait) {
+        const uint16_t biosIF2 = memory.Read16(0x03007FF8);
+        Logger::Instance().LogFmt(
+            LogLevel::Info, "CPU",
+            "IntrWait satisfied: PC=0x%08x waitFlags=0x%04x "
+            "BIOS_IF(after)=0x%04x",
+            registers[15], (unsigned)(waitFlags & 0xFFFFu), (unsigned)biosIF2);
+      }
       return;
     }
 
@@ -2620,6 +3102,20 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
+
+    if (traceIntrWait) {
+      const uint16_t ie1 = memory.Read16(IORegs::REG_IE);
+      const uint16_t if1 = memory.Read16(IORegs::REG_IF);
+      const uint16_t ime1 = memory.Read16(IORegs::REG_IME);
+      const uint16_t dispstat = memory.Read16(IORegs::REG_DISPSTAT);
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "IntrWait HALT: PC=0x%08x waitFlags=0x%04x IME=%u IE=0x%04x "
+          "IF=0x%04x pending=0x%04x DISPSTAT=0x%04x",
+          registers[15], (unsigned)(waitFlags & 0xFFFFu), (unsigned)(ime1 & 1),
+          (unsigned)ie1, (unsigned)if1, (unsigned)(ie1 & if1),
+          (unsigned)dispstat);
+    }
 
     // Rewind PC to re-execute this SWI instruction
     if (thumbMode)
@@ -2828,10 +3324,10 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
 
     uint32_t src = registers[0];
     uint32_t dst = registers[1];
-    // BIOS convention: low 21 bits encode a 32-bit word count, processed in
-    // 8-word (32-byte) chunks. The BIOS effectively rounds up to the next
-    // multiple of 8 words.
-    const uint32_t wordCount = registers[2] & 0x1FFFFF;
+    // GBATEK/BIOS convention: low 21 bits encode the number of 32-bit words
+    // to transfer. The word count must be a multiple of 8 (CpuFastSet copies
+    // in 8-word chunks for speed, but the count itself is in words).
+    uint32_t wordCount = registers[2] & 0x1FFFFF;
 
     bool fixedSrc = (registers[2] >> 24) & 1;
 
@@ -2844,8 +3340,10 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     //               << " fixed=" << fixedSrc << std::endl;
     // }
 
-    // Always 32-bit; CpuFastSet transfers in 8-word blocks.
-    const uint32_t units = (wordCount + 7u) & ~7u;
+    // Always 32-bit.
+    // BIOS requires the count to be a multiple of 8; mask off low bits.
+    wordCount &= ~7u;
+    const uint32_t units = wordCount;
     const uint32_t batchSize = 64; // Update PPU every 64 units
     const int perUnitCycles = 4;
 
@@ -3069,6 +3567,11 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   case 0x11: // LZ77UnCompWram - Decompress LZ77 to WRAM (8-bit writes)
   case 0x12: // LZ77UnCompVram - Decompress LZ77 to VRAM (16-bit writes)
   {
+    // Real GBA behavior: SWI runs with IRQs masked (CPSR.I=1) and the
+    // caller CPSR is restored on return.
+    const uint32_t savedCpsr = cpsr;
+    cpsr |= 0x80u;
+
     uint32_t src = registers[0];
     uint32_t dst = registers[1];
     bool toVram = (comment == 0x12);
@@ -3086,59 +3589,72 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     }
     src += 4;
 
-    uint32_t written = 0;
-    uint16_t vramBuffer = 0;
-    bool vramBufferFull = false;
+    // Decompress into a local buffer first. This avoids relying on reading
+    // partially-written destination memory (important for VRAM halfword writes)
+    // and keeps the algorithm self-contained.
+    std::vector<uint8_t> out;
+    out.reserve(decompSize);
 
-    while (written < decompSize) {
-      uint8_t flags = memory.Read8(src++);
+    while (out.size() < decompSize) {
+      const uint8_t flags = memory.Read8(src++);
+      for (int bit = 7; bit >= 0 && out.size() < decompSize; --bit) {
+        const bool isCompressed = (flags & (1u << bit)) != 0u;
+        if (!isCompressed) {
+          out.push_back(memory.Read8(src++));
+          continue;
+        }
 
-      for (int i = 7; i >= 0 && written < decompSize; --i) {
-        if (flags & (1 << i)) {
-          // Compressed block
-          uint8_t byte1 = memory.Read8(src++);
-          uint8_t byte2 = memory.Read8(src++);
-          uint32_t length = ((byte1 >> 4) & 0xF) + 3;
-          uint32_t offset = ((byte1 & 0xF) << 8) | byte2;
-          offset += 1;
+        const uint8_t byte1 = memory.Read8(src++);
+        const uint8_t byte2 = memory.Read8(src++);
+        const uint32_t length = (uint32_t)(((byte1 >> 4) & 0xFu) + 3u);
+        const uint32_t offset =
+            (uint32_t)((((uint32_t)(byte1 & 0xFu)) << 8) | byte2) + 1u;
 
-          for (uint32_t j = 0; j < length && written < decompSize; ++j) {
-            uint8_t val = memory.Read8(dst - offset);
-            if (toVram) {
-              if (!vramBufferFull) {
-                vramBuffer = val;
-                vramBufferFull = true;
-              } else {
-                vramBuffer |= (val << 8);
-                memory.Write16(dst & ~1, vramBuffer);
-                vramBufferFull = false;
-              }
-            } else {
-              memory.Write8(dst, val);
-            }
-            dst++;
-            written++;
-          }
-        } else {
-          // Uncompressed byte
-          uint8_t val = memory.Read8(src++);
-          if (toVram) {
-            if (!vramBufferFull) {
-              vramBuffer = val;
-              vramBufferFull = true;
-            } else {
-              vramBuffer |= (val << 8);
-              memory.Write16(dst & ~1, vramBuffer);
-              vramBufferFull = false;
-            }
+        for (uint32_t j = 0; j < length && out.size() < decompSize; ++j) {
+          if (offset > out.size()) {
+            // Invalid stream; BIOS behavior is undefined. Emit 0 for safety.
+            out.push_back(0);
           } else {
-            memory.Write8(dst, val);
+            out.push_back(out[out.size() - offset]);
           }
-          dst++;
-          written++;
         }
       }
     }
+
+    // Write decompressed bytes to destination.
+    if (toVram) {
+      uint16_t vramBuffer = 0;
+      bool vramBufferFull = false;
+
+      for (size_t i = 0; i < out.size(); ++i) {
+        const uint8_t val = out[i];
+        if (!vramBufferFull) {
+          vramBuffer = val;
+          vramBufferFull = true;
+        } else {
+          vramBuffer |= (uint16_t)((uint16_t)val << 8);
+          memory.Write16(dst & ~1u, vramBuffer);
+          vramBufferFull = false;
+        }
+        dst++;
+      }
+
+      // If the output size is odd, BIOS still performs 16-bit writes; flush
+      // the trailing byte in the low half.
+      if (vramBufferFull) {
+        memory.Write16(dst & ~1u, vramBuffer);
+      }
+    } else {
+      for (size_t i = 0; i < out.size(); ++i) {
+        memory.Write8(dst, out[i]);
+        dst++;
+      }
+    }
+
+    // Charge a small, consistent overhead.
+    AdvanceHLECycles(kSwiOverheadCycles);
+
+    cpsr = savedCpsr;
     break;
   }
   case 0x13: // HuffUnComp - Huffman decompression (based on mGBA)
@@ -3350,8 +3866,12 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   }
   case 0x19: // SoundBias - Set sound bias
   {
-    // R0 = delay, bias level
-    // Not critical for most games
+    // GBATEK: SWI 0x19 sets SOUNDBIAS (0x04000088) to avoid pop/clicks.
+    // Many titles call this during audio init.
+    // R0 encodes bias (and optionally delay); we apply the bias value.
+    const uint32_t r0 = registers[0];
+    const uint16_t bias = (uint16_t)(r0 & 0xFFFFu);
+    memory.Write16(IORegs::REG_SOUNDBIAS, bias);
     break;
   }
   case 0x1F: // MidiKey2Freq - MIDI to frequency conversion

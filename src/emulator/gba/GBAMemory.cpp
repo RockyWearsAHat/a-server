@@ -20,6 +20,17 @@ constexpr uint32_t kIrqHandlerAddress = 0x03007FFCu;
 constexpr uint32_t kIrqHandlerOffset = 0x7FFCu;
 constexpr uint32_t kIrqHandlerDefault = 0x00003FF0u;
 
+// EEPROM is accessed via a serial protocol at 0x0Dxxxxxx, but games also use
+// the 0x0D region as a ROM mirror. In practice, EEPROM I/O targets a small
+// window near 0x0D000000; routing *all* 0x0D accesses to EEPROM breaks ROM
+// mirror reads for EEPROM carts.
+constexpr uint32_t kEepromIoWindowBytes = 0x200u;
+inline bool IsEepromIoAddress(uint32_t address) {
+  if ((address & 0xFF000000u) != 0x0D000000u)
+    return false;
+  return (address & 0x00FFFFFFu) < kEepromIoWindowBytes;
+}
+
 inline bool IsIwramMappedAddress(uint32_t address) {
   // IWRAM is 32KB at 0x03000000-0x03007FFF.
   // Hardware also mirrors the last 32KB of the 0x03xxxxxx region at
@@ -224,19 +235,28 @@ void GBAMemory::InitializeHLEBIOS() {
     bios[addr + 3] = 0xE3;
   }
 
-  // BIOS IRQ handler at 0x18 (reset vector + 0x18)
-  // Real BIOS jumps to address in 0x03007FFC
-  // We'll put a trampoline at 0x180 to do this safely
-  // At 0x18: B 0x180
-  // 0x180 - 0x18 - 8 = 0x160
-  // 0x160 >> 2 = 0x58
-  // Opcode: EA 00 00 58
-  bios[0x18] = 0x58;
-  bios[0x19] = 0x00;
-  bios[0x1A] = 0x00;
-  bios[0x1B] = 0xEA;
+  // BIOS IRQ vector at 0x18
+  // Real BIOS branches into its internal IRQ dispatcher, which then calls the
+  // user handler pointer at 0x03007FFC. We install a small dispatcher in the
+  // BIOS region.
+  //
+  // IMPORTANT: Do NOT place this dispatcher at 0x180..0x1A4, because the real
+  // BIOS uses 0x188/0x194 for VBlankIntrWait/IntrWait entrypoints. Placing a
+  // trampoline there collides with direct-call BIOS usage in DirectBoot titles.
 
-  // IRQ Trampoline at 0x180
+  constexpr uint32_t kIrqTrampolineBase = 0x00003F00u;
+
+  // At 0x18: B kIrqTrampolineBase
+  // B immediate uses PC-relative: target = (pc+8) + (imm24<<2)
+  // imm24 = (kIrqTrampolineBase - (0x18+8)) >> 2
+  const uint32_t imm24 = (kIrqTrampolineBase - 0x00000020u) >> 2;
+  const uint32_t bInstr = 0xEA000000u | (imm24 & 0x00FFFFFFu);
+  bios[0x18] = (uint8_t)(bInstr & 0xFFu);
+  bios[0x19] = (uint8_t)((bInstr >> 8) & 0xFFu);
+  bios[0x1A] = (uint8_t)((bInstr >> 16) & 0xFFu);
+  bios[0x1B] = (uint8_t)((bInstr >> 24) & 0xFFu);
+
+  // IRQ Trampoline
   // This trampoline is a minimal IRQ dispatcher suitable for DirectBoot.
   //
   // Key behaviors:
@@ -250,7 +270,7 @@ void GBAMemory::InitializeHLEBIOS() {
   // Clearing IF before the call can hide the source; clearing after the
   // call avoids IRQ storms if the handler forgets to ack.
 
-  uint32_t base = 0x180;
+  uint32_t base = kIrqTrampolineBase;
   const uint32_t trampoline[] = {
       // 00000128  stmfd  r13!,r0-r3,r12,r14  ;save regs to SP_irq
       // 0000012C  mov    r0,4000000h         ;ptr+4 to 03FFFFFC (mirror of
@@ -262,16 +282,27 @@ void GBAMemory::InitializeHLEBIOS() {
       // 00000140  subs   r15,r14,4h          ;return from IRQ (PC=LR-4,
       // CPSR=SPSR)
 
-      0xE92D500F, // 0x180: STMDB SP!, {R0-R3, R12, LR}
-      0xE3A00404, // 0x184: MOV   R0, #0x04000000
-      0xE28FE000, // 0x188: ADD   LR, PC, #0
-      0xE510F004, // 0x18c: LDR   PC, [R0, #-4]
-      0xE59F1008, // 0x190: LDR   R1, [PC, #8]      ; &0x03007FF4 (literal)
-      0xE1D110B0, // 0x194: LDRH  R1, [R1]          ; triggered mask
-      0xE1C012B2, // 0x198: STRH  R1, [R0, #0x202]  ; REG_IF (write-1-to-clear)
-      0xE8BD500F, // 0x19c: LDMIA SP!, {R0-R3, R12, LR}
-      0xE25EF004, // 0x1a0: SUBS  PC, LR, #4
-      0x03007FF4  // 0x1a4: literal
+    // Save volatile regs in IRQ mode.
+    0xE92D500F, // +0x00: STMDB SP!, {R0-R3, R12, LR}
+
+    // Call user handler at [0x03FFFFFC] (mirror of 0x03007FFC).
+    // Do NOT clear IF before the call; many dispatchers read REG_IF.
+    0xE3A02404, // +0x04: MOV   R2, #0x04000000
+    0xE28FE000, // +0x08: ADD   LR, PC, #0
+    0xE512F004, // +0x0c: LDR   PC, [R2, #-4]      ; jump to user handler
+
+    // After user handler returns, clear the triggered IF bits.
+    0xE3A02404, // +0x10: MOV   R2, #0x04000000
+    0xE59F1010, // +0x14: LDR   R1, [PC, #16]     ; &0x03007FF4 (literal)
+    0xE1D110B0, // +0x18: LDRH  R1, [R1]          ; triggered mask
+    0xE2820F80, // +0x1c: ADD   R0, R2, #0x200     ; R0 = 0x04000200
+    0xE1C010B2, // +0x20: STRH  R1, [R0, #2]       ; REG_IF (write-1-to-clear)
+
+    // Restore regs and return from IRQ.
+    0xE8BD500F, // +0x24: LDMIA SP!, {R0-R3, R12, LR}
+    0xE25EF004, // +0x28: SUBS  PC, LR, #4
+
+    0x03007FF4  // +0x2c: literal
   };
 
   for (size_t i = 0; i < sizeof(trampoline) / sizeof(uint32_t); ++i) {
@@ -318,9 +349,10 @@ void GBAMemory::InitializeHLEBIOS() {
     bios[0x3FF3] = 0xE1;
   }
 
-  // NOTE: IRQ trampoline at 0x180 must NOT be overwritten!
-  // All BIOS functions should be called via SWI, handled by ExecuteSWI().
-  // Direct BIOS function calls are not supported in HLE mode.
+  // NOTE: IRQ trampoline must NOT be overwritten!
+  // BIOS direct function calls are supported via ARM7TDMI::ExecuteBIOSFunction
+  // for common entry points (used by DirectBoot titles), while IRQ dispatch
+  // uses the instruction-level vector + trampoline above.
 }
 
 void GBAMemory::Reset() {
@@ -633,10 +665,10 @@ bool GBAMemory::ScanForEEPROMSize(const std::vector<uint8_t> &data) {
 }
 
 void GBAMemory::LoadGamePak(const std::vector<uint8_t> &data) {
-  if (data.size() > rom.size()) {
-    rom.resize(data.size());
-  }
-  std::copy(data.begin(), data.end(), rom.begin());
+  // Keep ROM storage at the actual cartridge size so address mirroring wraps
+  // correctly (modulo the real ROM length) and so re-loading a smaller ROM
+  // doesn't leave stale bytes past data.size().
+  rom.assign(data.begin(), data.end());
 
   // GBA BIOS Header Validation - Required for games to boot correctly!
   // The real BIOS validates the header checksum and sets a flag in IWRAM.
@@ -1231,6 +1263,41 @@ uint8_t GBAMemory::Read8(uint32_t address) {
       }
     }
 
+    // Generic IO polling trace (8-bit). Useful for diagnosing games stuck in
+    // init loops while DISPCNT remains forced blank.
+    // Enable with: AIO_TRACE_IO_POLL=1
+    if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu) {
+      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+      if (pc >= 0x03000000u && pc < 0x03008000u) {
+        static uint32_t lastOffset8 = 0xFFFFFFFFu;
+        static uint8_t lastVal8 = 0xFFu;
+        static uint32_t repeats8 = 0;
+        static int logs8 = 0;
+        if (logs8 < 800) {
+          if (offset == lastOffset8 && val == lastVal8) {
+            repeats8++;
+            if (repeats8 == 1u || (repeats8 % 4096u) == 0u) {
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
+                  "IO poll8 repeat off=0x%03x val=0x%02x PC=0x%08x repeats=%u",
+                  (unsigned)offset, (unsigned)val, (unsigned)pc,
+                  (unsigned)repeats8);
+              logs8++;
+            }
+          } else {
+            repeats8 = 0;
+            lastOffset8 = offset;
+            lastVal8 = val;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
+                "IO poll8 off=0x%03x val=0x%02x PC=0x%08x", (unsigned)offset,
+                (unsigned)val, (unsigned)pc);
+            logs8++;
+          }
+        }
+      }
+    }
+
     return val;
   }
   case 0x05: // Palette RAM (GBATEK: 0x05000000-0x050003FF)
@@ -1272,13 +1339,24 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
     break;
   }
-  case 0x0D: // EEPROM (GBATEK: 0x0D000000)
+  case 0x0D: // Game Pak ROM (WS2) or EEPROM depending on cart save type
   {
-    // Route 8-bit reads through the EEPROM state machine so the
-    // serial line returns READY/BUSY bits instead of zero.
-    // Even though games typically use 16-bit DMA, some titles may
-    // poll with byte reads during the protocol handshake.
-    return ReadEEPROM() & 0xFF;
+    // GBATEK: 0x08000000-0x0DFFFFFF is Game Pak ROM space.
+    // EEPROM-accessible cartridges multiplex EEPROM protocol at 0x0Dxxxxxx;
+    // for non-EEPROM carts, this must behave like ROM mirroring.
+    const bool usesEEPROM = (!hasSRAM && !isFlash);
+    if (usesEEPROM && IsEepromIoAddress(address)) {
+      // Route reads through the EEPROM state machine so the serial line
+      // returns READY/BUSY bits instead of zero.
+      return ReadEEPROM() & 0xFF;
+    }
+
+    // Treat as ROM mirror (same behavior as 0x08-0x0C).
+    const uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
+    if (!rom.empty()) {
+      return rom[offset % rom.size()];
+    }
+    break;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
   {
@@ -1316,9 +1394,9 @@ uint8_t GBAMemory::Read8(uint32_t address) {
 }
 
 uint16_t GBAMemory::Read16(uint32_t address) {
-  // Universal EEPROM Handling: Only allow reads from 0x0D region
+  // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
-  if (region == 0x0D) {
+  if (region == 0x0D && (!hasSRAM && !isFlash) && IsEepromIoAddress(address)) {
     return ReadEEPROM();
   }
 
@@ -1366,6 +1444,40 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 
   uint16_t val = Read8(address) | (Read8(address + 1) << 8);
 
+  // Trace tight IO polling loops (diagnostic for "stuck in forced blank").
+  // Enable with: AIO_TRACE_IO_POLL=1
+  // This is intentionally very low-volume (change-triggered + periodic).
+  if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu && region == 0x04 &&
+      (address & 0xFF000000u) == 0x04000000u) {
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    // Many titles run hot loops from IWRAM; focus there to keep signal high.
+    if (pc >= 0x03000000u && pc < 0x03008000u) {
+      const uint32_t offset = address & 0x3FFu;
+      static uint32_t lastOffset = 0xFFFFFFFFu;
+      static uint16_t lastVal = 0xFFFFu;
+      static uint32_t repeats = 0;
+
+      if (offset == lastOffset && val == lastVal) {
+        repeats++;
+        if (repeats == 1u || (repeats % 4096u) == 0u) {
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
+              "IO poll repeat off=0x%03x val=0x%04x PC=0x%08x repeats=%u",
+              (unsigned)offset, (unsigned)val, (unsigned)pc,
+              (unsigned)repeats);
+        }
+      } else {
+        repeats = 0;
+        lastOffset = offset;
+        lastVal = val;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
+            "IO poll off=0x%03x val=0x%04x PC=0x%08x", (unsigned)offset,
+            (unsigned)val, (unsigned)pc);
+      }
+    }
+  }
+
   // SMA2 investigation: trace reads from the EEPROM DMA destination buffers in
   // IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1 This helps confirm
   // whether the game is actually consuming the expected 0xFFFE/0xFFFF bitstream
@@ -1401,7 +1513,11 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 
 uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
-  if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
+  const uint8_t region = (uint8_t)(address >> 24);
+  if (region >= 0x08 && region <= 0x0D) {
+    const bool isEepromIo =
+        (region == 0x0D) && (!hasSRAM && !isFlash) && IsEepromIoAddress(address);
+    if (!isEepromIo) {
     uint32_t offset = address & 0x01FFFFFF;
     if (!rom.empty()) {
       // Handle wrapping if needed, though usually not for code
@@ -1409,19 +1525,29 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       uint8_t b1 = rom[(offset + 1) % rom.size()];
       return b0 | (b1 << 8);
     }
+    }
   }
   // Fallback
   return Read8(address) | (Read8(address + 1) << 8);
 }
 
 uint32_t GBAMemory::Read32(uint32_t address) {
-  // Universal EEPROM Handling - 32-bit read performs two 16-bit reads from 0x0D
-  // region only
+  // EEPROM Handling - 32-bit read performs two 16-bit reads for EEPROM-save
+  // cartridges only.
   uint8_t region = (address >> 24);
-  if (region == 0x0D) {
+  if (region == 0x0D && (!hasSRAM && !isFlash) && IsEepromIoAddress(address)) {
     uint16_t low = ReadEEPROM();
     uint16_t high = ReadEEPROM();
     return low | (high << 16);
+  }
+
+  // Palette RAM / VRAM are on a 16-bit bus. Word accesses behave like two
+  // halfword accesses at addr (A0 ignored) and addr+2.
+  if (region == 0x05 || region == 0x06) {
+    const uint32_t addrEven = address & ~1u;
+    const uint16_t lo = Read16(addrEven);
+    const uint16_t hi = Read16(addrEven + 2u);
+    return (uint32_t)lo | ((uint32_t)hi << 16);
   }
 
   // Diagnostics: detect unaligned IO word reads.
@@ -1468,6 +1594,38 @@ uint32_t GBAMemory::Read32(uint32_t address) {
   uint32_t val = Read8(address) | (Read8(address + 1) << 8) |
                  (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
 
+  // Trace tight IO polling loops via 32-bit reads.
+  // Enable with: AIO_TRACE_IO_POLL=1
+  if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu && region == 0x04 &&
+      (address & 0xFF000000u) == 0x04000000u) {
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    if (pc >= 0x03000000u && pc < 0x03008000u) {
+      const uint32_t offset = address & 0x3FFu;
+      static uint32_t lastOffset32 = 0xFFFFFFFFu;
+      static uint32_t lastVal32 = 0xFFFFFFFFu;
+      static uint32_t repeats32 = 0;
+
+      if (offset == lastOffset32 && val == lastVal32) {
+        repeats32++;
+        if (repeats32 == 1u || (repeats32 % 4096u) == 0u) {
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
+              "IO poll32 repeat off=0x%03x val=0x%08x PC=0x%08x repeats=%u",
+              (unsigned)offset, (unsigned)val, (unsigned)pc,
+              (unsigned)repeats32);
+        }
+      } else {
+        repeats32 = 0;
+        lastOffset32 = offset;
+        lastVal32 = val;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
+            "IO poll32 off=0x%03x val=0x%08x PC=0x%08x", (unsigned)offset,
+            (unsigned)val, (unsigned)pc);
+      }
+    }
+  }
+
   // SMA2 investigation: trace 32-bit reads from the EEPROM DMA destination
   // buffers in IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1
   if (EnvFlagCached("AIO_TRACE_SMA2_EEPDMA_BUF_READS") && cpu) {
@@ -1501,7 +1659,11 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
 uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
-  if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
+  const uint8_t region = (uint8_t)(address >> 24);
+  if (region >= 0x08 && region <= 0x0D) {
+    const bool isEepromIo =
+        (region == 0x0D) && (!hasSRAM && !isFlash) && IsEepromIoAddress(address);
+    if (!isEepromIo) {
     uint32_t offset = address & 0x01FFFFFF;
     if (!rom.empty()) {
       uint8_t b0 = rom[offset % rom.size()];
@@ -1509,6 +1671,7 @@ uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
       uint8_t b2 = rom[(offset + 2) % rom.size()];
       uint8_t b3 = rom[(offset + 3) % rom.size()];
       return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    }
     }
   }
   // Fallback
@@ -2011,7 +2174,9 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
   case 0x0D: // EEPROM - ignore 8-bit writes
     // Some titles may clock the EEPROM serial interface via byte writes.
     // Treat this as a normal EEPROM bit write (D0).
-    WriteEEPROM(value);
+    if ((!hasSRAM && !isFlash) && IsEepromIoAddress(address)) {
+      WriteEEPROM(value);
+    }
     break;
   }
 
@@ -2048,11 +2213,10 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   const bool isIrqHandPtrHalf = isIwram && ((iwramOff & ~1u) == 0x7FFCu);
   const uint32_t oldIrqHandWord =
       (traceIrqHandWrites && isIrqHandPtrHalf) ? Read32(0x03007FFCu) : 0u;
-  // EEPROM Handling - Restrict writes to 0x0D (Wait State 2) to avoid conflicts
-  // with ROM Most games use 0x0D for EEPROM. Some might use 0x0C.
+  // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
 
-  if (region == 0x0D) {
+  if (region == 0x0D && (!hasSRAM && !isFlash) && IsEepromIoAddress(address)) {
     WriteEEPROM(value);
     return;
   }
@@ -2118,6 +2282,18 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 
   if ((address & 0xFF000000) == 0x04000000) {
     uint32_t offset = address & 0x3FF;
+
+    // IF (Interrupt Request) is write-1-to-clear (GBATEK).
+    // Many BIOS/game paths (including our IRQ trampoline) acknowledge IRQs via
+    // halfword stores to 0x04000202.
+    if (offset == IORegs::IF) {
+      const uint16_t cur = (uint16_t)(io_regs[IORegs::IF] |
+                                      (io_regs[IORegs::IF + 1] << 8));
+      const uint16_t cleared = (uint16_t)(cur & (uint16_t)~value);
+      io_regs[IORegs::IF] = (uint8_t)(cleared & 0xFFu);
+      io_regs[IORegs::IF + 1] = (uint8_t)((cleared >> 8) & 0xFFu);
+      return;
+    }
 
     if (EnvFlagCached("AIO_TRACE_WAITCNT") && (offset == 0x204)) {
       static uint32_t lastPc = 0xFFFFFFFFu;
@@ -2244,6 +2420,19 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
       int timerIdx = (offset - IORegs::TM0CNT_L) / IORegs::TIMER_CHANNEL_SIZE;
 
+      // TMxCNT_L (reload) writes while enabled: hardware immediately reloads
+      // the counter and resets the prescaler divider.
+      if ((offset % IORegs::TIMER_CHANNEL_SIZE) == 0) { // TMxCNT_L
+        const uint32_t ctrlOff =
+            IORegs::TM0CNT_L + (timerIdx * IORegs::TIMER_CHANNEL_SIZE) + 2u;
+        const uint16_t controlNow =
+            (uint16_t)(io_regs[ctrlOff] | (io_regs[ctrlOff + 1] << 8));
+        if (controlNow & TimerControl::ENABLE) {
+          timerCounters[timerIdx] = value;
+          timerPrescalerCounters[timerIdx] = 0;
+        }
+      }
+
       if ((offset % IORegs::TIMER_CHANNEL_SIZE) == 2) { // TMxCNT_H
         uint16_t oldControl = io_regs[offset] | (io_regs[offset + 1] << 8);
         bool wasEnabled = oldControl & TimerControl::ENABLE;
@@ -2263,6 +2452,21 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   // (video memory is fundamentally 16-bit addressed).
   if (region == 0x05 || region == 0x06 || region == 0x07) {
     address &= ~1u;
+  }
+
+  // Optional: trace CPU halfword writes into Palette RAM.
+  // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
+  if (region == 0x05 && EnvFlagCached("AIO_TRACE_PALETTE_CPU_WRITES") && cpu) {
+    static int palW16Logs = 0;
+    if (palW16Logs < 2000) {
+      const uint32_t pc2 = (uint32_t)cpu->GetRegister(15);
+      const uint32_t lr2 = (uint32_t)cpu->GetRegister(14);
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "PAL",
+          "CPU W16 pal addr=0x%08x val=0x%04x PC=0x%08x LR=0x%08x",
+          (unsigned)address, (unsigned)value, (unsigned)pc2, (unsigned)lr2);
+      palW16Logs++;
+    }
   }
 
   // IMPORTANT: Don't implement halfword writes via two Write8() calls for RAM.
@@ -2455,6 +2659,19 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     address &= ~3u;
   }
 
+  // IE/IF are adjacent 16-bit registers at 0x04000200/0x04000202.
+  // A 32-bit write starting at 0x04000200 should behave as:
+  // - low16: normal write to IE
+  // - high16: write-1-to-clear to IF
+  if ((address & 0xFF000000u) == 0x04000000u) {
+    const uint32_t offset = address & 0x3FFu;
+    if (offset == IORegs::IE) {
+      Write16(0x04000200u, (uint16_t)(value & 0xFFFFu));
+      Write16(0x04000202u, (uint16_t)(value >> 16));
+      return;
+    }
+  }
+
   const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
   TracePpuIoWrite32(address, value, pc);
 
@@ -2485,12 +2702,20 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     }
   }
 
-  // EEPROM Handling - 32-bit write performs two 16-bit writes
-  // Restrict writes to 0x0D
+  // EEPROM Handling - only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
-  if (region == 0x0D) {
+  if (region == 0x0D && (!hasSRAM && !isFlash) && IsEepromIoAddress(address)) {
     WriteEEPROM(value & 0xFFFF);
     WriteEEPROM(value >> 16);
+    return;
+  }
+
+  // Palette RAM / VRAM are on a 16-bit bus. Word accesses behave like two
+  // halfword stores at addr (A0 ignored) and addr+2.
+  if (region == 0x05 || region == 0x06) {
+    const uint32_t addrEven = address & ~1u;
+    Write16(addrEven, (uint16_t)(value & 0xFFFFu));
+    Write16(addrEven + 2u, (uint16_t)((value >> 16) & 0xFFFFu));
     return;
   }
 
@@ -2586,10 +2811,24 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     return;
   }
 
-  // For VRAM, Palette, OAM - write directly without 8-bit quirk.
-  // Optionally align unaligned word stores to match HW behavior.
-  if (region == 0x05 || region == 0x06 || region == 0x07) {
+  // For OAM, word accesses are aligned on hardware.
+  if (region == 0x07) {
     address &= ~3u;
+  }
+
+  // Optional: trace CPU word writes into Palette RAM.
+  // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
+  if (region == 0x05 && EnvFlagCached("AIO_TRACE_PALETTE_CPU_WRITES") && cpu) {
+    static int palW32Logs = 0;
+    if (palW32Logs < 2000) {
+      const uint32_t pc2 = (uint32_t)cpu->GetRegister(15);
+      const uint32_t lr2 = (uint32_t)cpu->GetRegister(14);
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "PAL",
+          "CPU W32 pal addr=0x%08x val=0x%08x PC=0x%08x LR=0x%08x",
+          (unsigned)address, (unsigned)value, (unsigned)pc2, (unsigned)lr2);
+      palW32Logs++;
+    }
   }
 
   // IMPORTANT: Don't implement word writes via four Write8() calls for RAM.
@@ -2656,7 +2895,8 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     return;
   }
 
-  if (region == 0x05 || region == 0x06 || region == 0x07) {
+  if (region == 0x07) {
+    // OAM: 32-bit bus.
     Write8Internal(address, value & 0xFF);
     Write8Internal(address + 1, (value >> 8) & 0xFF);
     Write8Internal(address + 2, (value >> 16) & 0xFF);
@@ -2857,11 +3097,29 @@ void GBAMemory::PerformDMA(int channel) {
   uint32_t currentSrc = dmaInternalSrc[channel];
   uint32_t currentDst = dmaInternalDst[channel];
 
+  const bool traceDmaPalette = EnvFlagCached("AIO_TRACE_DMA_PALETTE");
+  const bool dstIsPalette =
+      (currentDst >= 0x05000000u && currentDst < 0x05000400u);
+  if (traceDmaPalette && dstIsPalette) {
+    static int dmaPalStartLogs = 0;
+    if (dmaPalStartLogs < 64) {
+      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DMA/PALETTE",
+          "DMA start ch=%d src=0x%08x dst=0x%08x count=%u width=%u srcCtrl=%d "
+          "dstCtrl=%d timing=%d ctrl=0x%04x PC=0x%08x",
+          channel, (unsigned)currentSrc, (unsigned)currentDst, (unsigned)count,
+          (unsigned)(is32Bit ? 32 : 16), srcCtrl, destCtrl, timing,
+          (unsigned)control, (unsigned)pc);
+      dmaPalStartLogs++;
+    }
+  }
+
   // EEPROM Size Detection via DMA Count
   // 4Kbit EEPROM uses 6-bit address -> 9 bits total (2 cmd + 6 addr + 1 stop)
   // 64Kbit EEPROM uses 14-bit address -> 17 bits total (2 cmd + 14 addr + 1
   // stop) Games use DMA to bit-bang these requests.
-  if (currentDst >= 0x0D000000 && currentDst <= 0x0DFFFFFF) {
+  if (IsEepromIoAddress(currentDst)) {
     if (!saveTypeLocked) {
       if (count == 9) {
         if (eepromIs64Kbit) {
@@ -2890,8 +3148,8 @@ void GBAMemory::PerformDMA(int channel) {
 
   // EEPROM instrumentation: log typical EEPROM-related DMA3 bursts
   if (verboseLogs && channel == 3) {
-    bool srcIsEEPROM = (currentSrc >= 0x0D000000 && currentSrc < 0x0E000000);
-    bool dstIsEEPROM = (currentDst >= 0x0D000000 && currentDst < 0x0E000000);
+    const bool srcIsEEPROM = IsEepromIoAddress(currentSrc);
+    const bool dstIsEEPROM = IsEepromIoAddress(currentDst);
     if (srcIsEEPROM || dstIsEEPROM) {
       std::cout << "[DMA3 START] Src=0x" << std::hex << currentSrc << " Dst=0x"
                 << currentDst << " Count=0x" << count << " Ctrl=0x" << control
@@ -2956,35 +3214,7 @@ void GBAMemory::PerformDMA(int channel) {
               << std::hex << currentVal << std::endl;
   }
 
-  // WORKAROUND: DKC sound engine sets destCtrl=2 (Fixed) for DMA to IWRAM.
-  // With Fixed destination, all values write to the same address repeatedly.
-  // For large counts, this is audio streaming - we skip the actual writes
-  // to avoid corrupting whatever value was there before.
-  // The game expects the pre-existing value at the destination to remain.
   bool dstIsIWRAM = (currentDst >> 24) == 0x03;
-  if (destCtrl == 2 && dstIsIWRAM && count > 100) {
-    std::cout << "[DMA SKIP] destCtrl=2 IWRAM 0x" << std::hex << currentDst
-              << " count=" << std::dec << count
-              << " (Fixed dest - preserving existing value)" << std::endl;
-    // Update timing as if full DMA happened
-    int step = is32Bit ? 4 : 2;
-    int totalCycles = 2 + count * (is32Bit ? 4 : 2);
-    if (srcCtrl == 0)
-      currentSrc += count * step;
-    else if (srcCtrl == 1)
-      currentSrc -= count * step;
-    dmaInternalSrc[channel] = currentSrc;
-    lastDMACycles += totalCycles;
-    UpdateTimers(totalCycles);
-    if (apu)
-      apu->Update(totalCycles);
-    if (ppu)
-      ppu->Update(totalCycles);
-    inImmediateDMA = wasInImmediate;
-    io_regs[baseOffset + 10] &= ~(DMAControl::ENABLE & 0xFF);
-    io_regs[baseOffset + 11] &= ~(DMAControl::ENABLE >> 8);
-    return;
-  }
 
   int step = is32Bit ? 4 : 2;
   int totalCycles = 2; // DMA Setup Overhead (approx)
@@ -3386,10 +3616,40 @@ void GBAMemory::PerformDMA(int channel) {
         if (is32Bit) {
           uint32_t val = Read32(currentSrc);
           Write32(currentDst, val);
+
+          if (traceDmaPalette &&
+              (currentDst >= 0x05000000u && currentDst < 0x05000400u)) {
+            static int dmaPalWordLogs = 0;
+            if (dmaPalWordLogs < 256) {
+              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "DMA/PALETTE",
+                  "W32 dst=0x%08x val=0x%08x src=0x%08x i=%u PC=0x%08x",
+                  (unsigned)currentDst, (unsigned)val, (unsigned)currentSrc,
+                  (unsigned)i, (unsigned)pc);
+              dmaPalWordLogs++;
+            }
+          }
+
           totalCycles += 4;
         } else {
           uint16_t val = Read16(currentSrc);
           Write16(currentDst, val);
+
+          if (traceDmaPalette &&
+              (currentDst >= 0x05000000u && currentDst < 0x05000400u)) {
+            static int dmaPalHalfLogs = 0;
+            if (dmaPalHalfLogs < 512) {
+              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "DMA/PALETTE",
+                  "W16 dst=0x%08x val=0x%04x src=0x%08x i=%u PC=0x%08x",
+                  (unsigned)currentDst, (unsigned)val, (unsigned)currentSrc,
+                  (unsigned)i, (unsigned)pc);
+              dmaPalHalfLogs++;
+            }
+          }
+
           totalCycles += 2;
         }
 
@@ -3569,7 +3829,7 @@ void GBAMemory::UpdateTimers(int cycles) {
       eepromWriteDelay = 0;
   }
 
-  bool previousOverflow = false;
+  int previousOverflows = 0;
 
   for (int i = 0; i < 4; ++i) {
     uint32_t baseOffset = IORegs::TM0CNT_L + (i * IORegs::TIMER_CHANNEL_SIZE);
@@ -3577,17 +3837,13 @@ void GBAMemory::UpdateTimers(int cycles) {
 
     if (control & TimerControl::ENABLE) { // Timer Enabled
 
-      bool overflow = false;
       int increments = 0;
-
       if (control & TimerControl::COUNT_UP) { // Count-Up (Cascade)
-        if (previousOverflow) {
-          increments = 1;
-        }
+        increments = previousOverflows;
       } else {
         // Prescaler
-        int prescaler = control & TimerControl::PRESCALER_MASK;
-        int threshold = 0;
+        const int prescaler = control & TimerControl::PRESCALER_MASK;
+        int threshold = 1;
         switch (prescaler) {
         case 0:
           threshold = 1;
@@ -3604,86 +3860,98 @@ void GBAMemory::UpdateTimers(int cycles) {
         }
 
         timerPrescalerCounters[i] += cycles;
-        while (timerPrescalerCounters[i] >= threshold) {
-          timerPrescalerCounters[i] -= threshold;
-          increments++;
+        if (timerPrescalerCounters[i] >= threshold) {
+          increments = timerPrescalerCounters[i] / threshold;
+          timerPrescalerCounters[i] %= threshold;
         }
       }
 
+      int overflowCount = 0;
       if (increments > 0) {
-        uint32_t newVal = timerCounters[i] + increments;
-        if (newVal > 0xFFFF) {
-          overflow = true;
-          // Reload
-          uint16_t reload =
-              io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8);
-          timerCounters[i] = reload;
+        uint16_t counter = timerCounters[i];
+        const uint16_t reload =
+            (uint16_t)(io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8));
 
-          // Notify APU of timer overflow (for sound sample consumption)
-          if (apu && (i == 0 || i == 1)) {
-            apu->OnTimerOverflow(i);
-          }
+        while (increments > 0) {
+          const int toOverflow = 0x10000 - (int)counter;
+          if (increments >= toOverflow) {
+            increments -= toOverflow;
+            overflowCount++;
+            counter = reload;
 
-          // IRQ
-          if (control & TimerControl::IRQ_ENABLE) {
-            uint16_t if_reg =
-                io_regs[IORegs::IF] | (io_regs[IORegs::IF + 1] << 8);
-            if_reg |= (InterruptFlags::TIMER0 << i);
-            io_regs[IORegs::IF] = if_reg & 0xFF;
-            io_regs[IORegs::IF + 1] = (if_reg >> 8) & 0xFF;
-          }
+            // Notify APU of timer overflow (for sound sample consumption).
+            // While a DMA is executing, GBAMemory accounts cycles by calling
+            // UpdateTimers(); suppressing the APU tick during that internal
+            // accounting prevents the sound FIFO from being drained during the
+            // DMA itself (which otherwise causes pathological re-requests).
+            if (!dmaInProgress && apu && (i == 0 || i == 1)) {
+              apu->OnTimerOverflow(i);
+            }
 
-          // Sound DMA trigger (Timer 0 and Timer 1 only)
-          if (i == 0 || i == 1) {
-            uint16_t soundcntH = io_regs[IORegs::SOUNDCNT_H] |
-                                 (io_regs[IORegs::SOUNDCNT_H + 1] << 8);
-            int fifoATimer = (soundcntH >> 10) & 1;
-            int fifoBTimer = (soundcntH >> 14) & 1;
+            // IRQ
+            if (control & TimerControl::IRQ_ENABLE) {
+              uint16_t if_reg =
+                  io_regs[IORegs::IF] | (io_regs[IORegs::IF + 1] << 8);
+              if_reg |= (InterruptFlags::TIMER0 << i);
+              io_regs[IORegs::IF] = if_reg & 0xFF;
+              io_regs[IORegs::IF + 1] = (if_reg >> 8) & 0xFF;
+            }
 
-            for (int dma = 1; dma <= 2; dma++) {
-              uint32_t dmaBase =
-                  IORegs::DMA0SAD + (dma * IORegs::DMA_CHANNEL_SIZE);
-              uint16_t dmaControl =
-                  io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
+            // Sound DMA trigger (Timer 0 and Timer 1 only)
+            if (i == 0 || i == 1) {
+              uint16_t soundcntH = io_regs[IORegs::SOUNDCNT_H] |
+                                   (io_regs[IORegs::SOUNDCNT_H + 1] << 8);
+              int fifoATimer = (soundcntH >> 10) & 1;
+              int fifoBTimer = (soundcntH >> 14) & 1;
 
-              if (dmaControl & DMAControl::ENABLE) {
-                int dmaTiming =
-                    (dmaControl & DMAControl::START_TIMING_MASK) >> 12;
-                if (dmaTiming == 3) { // Special timing (sound FIFO)
-                  uint32_t dmaDest = io_regs[dmaBase + 4] |
-                                     (io_regs[dmaBase + 5] << 8) |
-                                     (io_regs[dmaBase + 6] << 16) |
-                                     (io_regs[dmaBase + 7] << 24);
+              for (int dma = 1; dma <= 2; dma++) {
+                uint32_t dmaBase =
+                    IORegs::DMA0SAD + (dma * IORegs::DMA_CHANNEL_SIZE);
+                uint16_t dmaControl =
+                    io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
 
-                  bool isFifoA = (dmaDest == 0x040000A0);
-                  bool isFifoB = (dmaDest == 0x040000A4);
+                if (dmaControl & DMAControl::ENABLE) {
+                  int dmaTiming =
+                      (dmaControl & DMAControl::START_TIMING_MASK) >> 12;
+                  if (dmaTiming == 3) { // Special timing (sound FIFO)
+                    uint32_t dmaDest = io_regs[dmaBase + 4] |
+                                       (io_regs[dmaBase + 5] << 8) |
+                                       (io_regs[dmaBase + 6] << 16) |
+                                       (io_regs[dmaBase + 7] << 24);
 
-                  // Real hardware requests sound FIFO DMA when the FIFO level
-                  // is low (roughly <= 16 samples remain), not on every timer
-                  // overflow.
-                  bool shouldRequest = false;
-                  if (apu) {
-                    if (isFifoA && fifoATimer == i) {
-                      shouldRequest = (apu->GetFifoACount() <= 16);
-                    } else if (isFifoB && fifoBTimer == i) {
-                      shouldRequest = (apu->GetFifoBCount() <= 16);
+                    bool isFifoA = (dmaDest == 0x040000A0);
+                    bool isFifoB = (dmaDest == 0x040000A4);
+
+                    // Real hardware requests sound FIFO DMA when the FIFO
+                    // level is low (roughly <= 16 samples remain).
+                    bool shouldRequest = false;
+                    if (apu) {
+                      if (isFifoA && fifoATimer == i) {
+                        shouldRequest = (apu->GetFifoACount() <= 16);
+                      } else if (isFifoB && fifoBTimer == i) {
+                        shouldRequest = (apu->GetFifoBCount() <= 16);
+                      }
                     }
-                  }
 
-                  if (shouldRequest && !dmaInProgress) {
-                    PerformDMA(dma);
+                    if (shouldRequest && !dmaInProgress) {
+                      PerformDMA(dma);
+                    }
                   }
                 }
               }
             }
+          } else {
+            counter = (uint16_t)(counter + increments);
+            increments = 0;
           }
-        } else {
-          timerCounters[i] = newVal;
         }
+
+        timerCounters[i] = counter;
       }
-      previousOverflow = overflow;
+
+      previousOverflows = overflowCount;
     } else {
-      previousOverflow = false;
+      previousOverflows = 0;
     }
   }
 }
@@ -3694,6 +3962,27 @@ void GBAMemory::AdvanceCycles(int cycles) {
     ppu->Update(cycles);
   if (apu)
     apu->Update(cycles);
+}
+
+uint16_t GBAMemory::GetTimerReload(int timerIdx) const {
+  if (timerIdx < 0 || timerIdx >= 4)
+    return 0;
+  const uint32_t baseOffset = IORegs::TM0CNT_L +
+                              (uint32_t)timerIdx * IORegs::TIMER_CHANNEL_SIZE;
+  if (baseOffset + 1 >= io_regs.size())
+    return 0;
+  return (uint16_t)(io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8));
+}
+
+uint16_t GBAMemory::GetTimerControl(int timerIdx) const {
+  if (timerIdx < 0 || timerIdx >= 4)
+    return 0;
+  const uint32_t baseOffset = IORegs::TM0CNT_L +
+                              (uint32_t)timerIdx * IORegs::TIMER_CHANNEL_SIZE;
+  const uint32_t ctrlOff = baseOffset + 2u;
+  if (ctrlOff + 1 >= io_regs.size())
+    return 0;
+  return (uint16_t)(io_regs[ctrlOff] | (io_regs[ctrlOff + 1] << 8));
 }
 
 uint16_t GBAMemory::ReadEEPROM() {

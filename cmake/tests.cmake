@@ -84,6 +84,62 @@ set_target_properties(MemoryMapTests PROPERTIES
 )
 target_link_libraries(MemoryMapTests PRIVATE GTest::gtest_main GBAEmulator)
 
+add_executable(InterruptTests ${PROJECT_ROOT}/tests/InterruptTests.cpp)
+set_target_properties(InterruptTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/InterruptTests"
+)
+target_link_libraries(InterruptTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(BlendTests ${PROJECT_ROOT}/tests/BlendTests.cpp)
+set_target_properties(BlendTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/BlendTests"
+)
+target_link_libraries(BlendTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(WindowTests ${PROJECT_ROOT}/tests/WindowTests.cpp)
+set_target_properties(WindowTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/WindowTests"
+)
+target_link_libraries(WindowTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(TimerTests ${PROJECT_ROOT}/tests/TimerTests.cpp)
+set_target_properties(TimerTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/TimerTests"
+)
+target_link_libraries(TimerTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(AffineBgTests ${PROJECT_ROOT}/tests/AffineBgTests.cpp)
+set_target_properties(AffineBgTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/AffineBgTests"
+)
+target_link_libraries(AffineBgTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(DMAEdgeTests ${PROJECT_ROOT}/tests/DMAEdgeTests.cpp)
+set_target_properties(DMAEdgeTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DMAEdgeTests"
+)
+target_link_libraries(DMAEdgeTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(DisplayInterruptTests ${PROJECT_ROOT}/tests/DisplayInterruptTests.cpp)
+set_target_properties(DisplayInterruptTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DisplayInterruptTests"
+)
+target_link_libraries(DisplayInterruptTests PRIVATE GTest::gtest_main GBAEmulator)
+
+add_executable(APUTests ${PROJECT_ROOT}/tests/APUTests.cpp)
+set_target_properties(APUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/APUTests"
+)
+target_link_libraries(APUTests PRIVATE GTest::gtest_main GBAEmulator)
+
 
 # Headless SMA2 investigation harness (not a unit test).
 add_executable(SMA2Harness ${PROJECT_ROOT}/test_sma2_10s.cpp)
@@ -140,6 +196,54 @@ gtest_discover_tests(PPUTests
 )
 
 gtest_discover_tests(MemoryMapTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(InterruptTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(BlendTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(WindowTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(TimerTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(AffineBgTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(DMAEdgeTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(DisplayInterruptTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+gtest_discover_tests(APUTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST

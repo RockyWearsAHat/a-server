@@ -19,7 +19,6 @@ include_directories(
     ${PROJECT_ROOT}/include
     ${PROJECT_ROOT}/src/gui
     ${PROJECT_ROOT}/src/input
-    /opt/homebrew/opt/sdl2/include
 )
 
 set(CMAKE_CXX_STANDARD 20)
@@ -51,7 +50,18 @@ foreach(OUTPUTCONFIG ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 
 # Find Qt6
-set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
+# On macOS, Homebrew installs Qt under /opt/homebrew (Apple Silicon) or /usr/local (Intel).
+# Prefer user-provided CMAKE_PREFIX_PATH, but fall back to common Homebrew prefixes.
+if(APPLE)
+    if(NOT CMAKE_PREFIX_PATH)
+        if(EXISTS "/opt/homebrew/opt/qt")
+            list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
+        elseif(EXISTS "/usr/local/opt/qt")
+            list(APPEND CMAKE_PREFIX_PATH "/usr/local/opt/qt")
+        endif()
+    endif()
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets Network)
 
 # Find SDL2
@@ -60,6 +70,9 @@ find_package(SDL2 REQUIRED)
 # Optional: libcurl (used by YouTube service skeleton)
 find_package(CURL REQUIRED)
 
+
+# Helps clangd/VSCode index the *same* flags CMake builds with.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Centralized build logic
 include(core.cmake)

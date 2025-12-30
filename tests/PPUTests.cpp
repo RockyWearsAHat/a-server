@@ -148,12 +148,37 @@ TEST(PPUTest, UnalignedVramWritesAlign) {
 
     mem.Reset();
 
-    // Unaligned word store should be forced to a word-aligned address.
+    // VRAM is on a 16-bit bus: word stores behave like two halfword stores.
+    // Only A0 is ignored; A1 remains significant.
     mem.Write32(0x06000002u, 0xDDCCBBAAu);
-    EXPECT_EQ(mem.Read8(0x06000000u), 0xAAu);
-    EXPECT_EQ(mem.Read8(0x06000001u), 0xBBu);
-    EXPECT_EQ(mem.Read8(0x06000002u), 0xCCu);
-    EXPECT_EQ(mem.Read8(0x06000003u), 0xDDu);
+    EXPECT_EQ(mem.Read8(0x06000000u), 0x00u);
+    EXPECT_EQ(mem.Read8(0x06000001u), 0x00u);
+    EXPECT_EQ(mem.Read8(0x06000002u), 0xAAu);
+    EXPECT_EQ(mem.Read8(0x06000003u), 0xBBu);
+    EXPECT_EQ(mem.Read8(0x06000004u), 0xCCu);
+    EXPECT_EQ(mem.Read8(0x06000005u), 0xDDu);
+}
+
+TEST(PPUTest, EepromCartsStillMirrorRomIn0DRegionOutsideIoWindow) {
+    GBAMemory mem;
+    mem.Reset();
+
+    // Build a small dummy ROM with a recognizable byte pattern.
+    std::vector<uint8_t> rom(0x2000u, 0u);
+    for (size_t i = 0; i < rom.size(); ++i) {
+        rom[i] = (uint8_t)(i & 0xFFu);
+    }
+    // Make the probe byte distinctive.
+    rom[0x200u] = 0x42u;
+
+    // LoadGamePak will default-init EEPROM for many carts; we specifically
+    // want EEPROM mode enabled while still allowing ROM mirroring at 0x0D.
+    mem.LoadGamePak(rom);
+
+    // 0x0D000000 is reserved for EEPROM serial I/O on EEPROM carts.
+    // But addresses outside the small I/O window should behave as ROM mirror.
+    EXPECT_EQ(mem.Read8(0x0D000200u), 0x42u);
+    EXPECT_EQ(mem.ReadInstruction16(0x0D000200u), (uint16_t)(0x42u | (0x01u << 8)));
 }
 
 TEST(PPUTest, TextBgScreenSize1SelectsSecondHorizontalScreenBlock) {

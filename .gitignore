@@ -2,8 +2,10 @@
 build/
 generated/
 
+# Keep binaries
+!build/bin
+
 # VS Code and editor junk
-.vscode/
 *.code-workspace
 
 # Logs and transient outputs
@@ -21,10 +23,10 @@ debug.log
 *.state
 *.srm
 
-# ROM files - do not commit
+# ROM files - do not ever commit copyrighted
 *.gba
 *.gb
 *.gbc
 
-# macOS
+# macOS balogney
 .DS_Store

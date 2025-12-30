@@ -125,9 +125,38 @@ def _build_test_manifest(args: argparse.Namespace) -> List[TestCase]:
     if eeprom.exists():
         add("gba", "eeprom", [str(eeprom)], timeout_s=float(args.unit_timeout_s))
 
+    dma = bin_dir / "DMATests"
+    if dma.exists():
+        add("gba", "dma", [str(dma)], timeout_s=float(args.unit_timeout_s))
+
+    ppu = bin_dir / "PPUTests"
+    if ppu.exists():
+        add("gba", "ppu", [str(ppu)], timeout_s=float(args.unit_timeout_s))
+
+    bios = bin_dir / "BIOSTests"
+    if bios.exists():
+        add("gba", "bios", [str(bios)], timeout_s=float(args.unit_timeout_s))
+
+    memmap = bin_dir / "MemoryMapTests"
+    if memmap.exists():
+        add("gba", "memory_map", [str(memmap)], timeout_s=float(args.unit_timeout_s))
+
+    rommeta = bin_dir / "ROMMetadataTests"
+    if rommeta.exists():
+        add("gba", "rom_metadata", [str(rommeta)], timeout_s=float(args.unit_timeout_s))
+
     input_logic = bin_dir / "InputLogicTests"
     if input_logic.exists():
         add("input", "logic", [str(input_logic)], timeout_s=float(args.unit_timeout_s))
+
+    # Auto-discover any additional GoogleTest executables.
+    # This keeps the suite scalable as new *Tests binaries are added in CMake.
+    seen = {Path(c.cmd[0]).name for c in cases if c.cmd}
+    discovered = sorted(bin_dir.glob("*Tests"))
+    for exe in discovered:
+        if not exe.is_file() or exe.name in seen:
+            continue
+        add("unit", _sanitize_test_token(exe.stem), [str(exe)], timeout_s=float(args.unit_timeout_s))
 
     # --- App-level smoke tests (AIOServer) ---
     aioserver = bin_dir / "AIOServer"

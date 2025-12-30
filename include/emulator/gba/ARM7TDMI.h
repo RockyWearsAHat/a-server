@@ -62,6 +62,14 @@ namespace AIO::Emulator::GBA {
     private:
         GBAMemory& memory;
 
+        // BIOS IntrWait/VBlankIntrWait direct-call state.
+        // When these routines HALT and later wake on an IRQ, execution resumes
+        // inside the BIOS loop rather than re-running the entry prologue. We
+        // model that by remembering the requested wait mask and skipping the
+        // discard-old phase on resume.
+        bool intrWaitResume = false;
+        uint16_t intrWaitWaitFlags = 0;
+
         // Current instruction context (captured in Step())
         uint32_t currentInstrAddr{0};
         bool currentInstrThumb{false};

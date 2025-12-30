@@ -82,6 +82,12 @@ public:
   void UpdateTimers(int cycles);
   void AdvanceCycles(int cycles); // Advance timers, PPU, and APU together
 
+  // Timers: expose reload/control to peripherals.
+  // Note: Reads of TMxCNT_L via Read16 return the *current counter*; these
+  // helpers return the programmed reload/control values from IO regs.
+  uint16_t GetTimerReload(int timerIdx) const;
+  uint16_t GetTimerControl(int timerIdx) const;
+
   int GetLastDMACycles() {
     int c = lastDMACycles;
     lastDMACycles = 0;

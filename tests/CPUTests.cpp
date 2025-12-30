@@ -53,6 +53,22 @@ TEST_F(CPUTest, DataProcessing_ADD) {
   EXPECT_EQ(cpu.GetRegister(2), 30);
 }
 
+TEST_F(CPUTest, DataProcessing_ADD_PC_CanonicalizesAlignment_ARM) {
+  // DKC-style computed jump pattern: ADD PC, R0, R12.
+  // Real ARM7TDMI canonicalizes PC to a word boundary in ARM state.
+  cpu.SetThumbMode(false);
+  cpu.SetRegister(15, 0x08000000u);
+
+  cpu.SetRegister(0, 0x02014000u);
+  cpu.SetRegister(12, 0x00000077u);
+
+  // ADD PC, R0, R12 => 0xE080F00C
+  RunInstr(0xE080F00Cu);
+
+  EXPECT_EQ(cpu.GetRegister(15), 0x02014074u);
+  EXPECT_FALSE(cpu.IsThumbModeFlag());
+}
+
 TEST_F(CPUTest, DataProcessing_SUB_Flags) {
   // MOV R0, #10
   RunInstr(0xE3A0000A);
@@ -82,6 +98,25 @@ TEST_F(CPUTest, Memory_LDR_STR) {
 
   EXPECT_EQ(cpu.GetRegister(2), 123);
   EXPECT_EQ(memory.Read32(0x02000000), 123);
+}
+
+TEST_F(CPUTest, SingleDataTransfer_LDR_RegisterOffset_AppliesShift) {
+  cpu.SetThumbMode(false);
+  cpu.SetRegister(15, 0x08000000u);
+
+  // Base in EWRAM.
+  cpu.SetRegister(12, 0x02000000u);
+  cpu.SetRegister(0, 3u);
+
+  // Place a distinctive word at base + (3 << 2) = 0x0200000C.
+  memory.Write32(0x02000000u, 0xAABBCCDDu);
+  memory.Write32(0x0200000Cu, 0x11223344u);
+
+  // LDR R1, [R12, R0, LSL #2]
+  // Encoded as: 0xE79C1100
+  RunInstr(0xE79C1100u);
+
+  EXPECT_EQ(cpu.GetRegister(1), 0x11223344u);
 }
 
 TEST_F(CPUTest, Branch_B) {
@@ -170,6 +205,45 @@ TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_ARM) {
   for (int i = 0; i < 8; ++i) {
     EXPECT_EQ(memory.Read32(dst + (uint32_t)i * 4), 0x01010101u);
   }
+
+  // Must not write past the requested 8 words.
+  memory.Write32(dst + 8u * 4u, 0xCAFEBABEu);
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  cpu.SetRegister(2, (8u & 0x1FFFFF) | (1u << 24));
+  RunInstr(0xEF00000C);
+  EXPECT_EQ(memory.Read32(dst + 8u * 4u), 0xCAFEBABEu);
+}
+
+TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_ARM_ImmInHighByte) {
+  // Same SWI as above, but encoded with the SWI number in bits 16-23.
+  // Some commercial ROMs (e.g. NES Classics) use this form.
+  const uint32_t src = 0x02000500;
+  const uint32_t dst = 0x02000600;
+  memory.Write32(src, 0x01010101);
+  for (int i = 0; i < 8; ++i) {
+    memory.Write32(dst + (uint32_t)i * 4, 0x00000000);
+  }
+
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  cpu.SetRegister(2, (8u /*word count (must be multiple of 8)*/ & 0x1FFFFF) |
+                         (1u << 24)); // fixed source
+
+  // ARM SWI 0x0C alternative encoding: 0xEF0C0000
+  RunInstr(0xEF0C0000);
+
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_EQ(memory.Read32(dst + (uint32_t)i * 4), 0x01010101u);
+  }
+
+  // Must not write past the requested 8 words.
+  memory.Write32(dst + 8u * 4u, 0xCAFEBABEu);
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  cpu.SetRegister(2, (8u & 0x1FFFFF) | (1u << 24));
+  RunInstr(0xEF0C0000);
+  EXPECT_EQ(memory.Read32(dst + 8u * 4u), 0xCAFEBABEu);
 }
 
 TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_Thumb) {
@@ -193,6 +267,16 @@ TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_Thumb) {
   for (int i = 0; i < 8; ++i) {
     EXPECT_EQ(memory.Read32(dst + (uint32_t)i * 4), 0x01010101u);
   }
+
+  // Must not write past the requested 8 words.
+  memory.Write32(dst + 8u * 4u, 0xCAFEBABEu);
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  cpu.SetRegister(2, (8u & 0x1FFFFF) | (1u << 24));
+  RunThumbInstr(0xDF0C);
+  EXPECT_EQ(memory.Read32(dst + 8u * 4u), 0xCAFEBABEu);
 }
 
 TEST_F(CPUTest, Memory_STM_LDM) {
@@ -227,6 +311,52 @@ TEST_F(CPUTest, Memory_STM_LDM) {
 
   EXPECT_EQ(cpu.GetRegister(1), 0x10);
   EXPECT_EQ(cpu.GetRegister(2), 0x20);
+}
+
+TEST_F(CPUTest, Memory_STMDB_LDMIA_SP_PushPop_R8_R11_LR) {
+  // Repro pattern seen in real games (e.g. 0xE92D4F00 / 0xE8BD4F00).
+  // Validate correct addressing + writeback for stack push/pop.
+
+  cpu.SetThumbMode(false);
+  cpu.SetRegister(15, 0x08000000u);
+
+  const uint32_t sp0 = 0x03007F00u;
+  cpu.SetRegister(13, sp0);
+
+  cpu.SetRegister(8, 0x11111111u);
+  cpu.SetRegister(9, 0x22222222u);
+  cpu.SetRegister(10, 0x33333333u);
+  cpu.SetRegister(11, 0x44444444u);
+  cpu.SetRegister(14, 0x55555555u);
+
+  // STMDB SP!, {R8-R11,LR}  (aka PUSH {R8-R11,LR})
+  RunInstr(0xE92D4F00u);
+
+  const uint32_t sp1 = sp0 - 5u * 4u;
+  EXPECT_EQ(cpu.GetRegister(13), sp1);
+
+  EXPECT_EQ(memory.Read32(sp1 + 0u), 0x11111111u);  // R8
+  EXPECT_EQ(memory.Read32(sp1 + 4u), 0x22222222u);  // R9
+  EXPECT_EQ(memory.Read32(sp1 + 8u), 0x33333333u);  // R10
+  EXPECT_EQ(memory.Read32(sp1 + 12u), 0x44444444u); // R11
+  EXPECT_EQ(memory.Read32(sp1 + 16u), 0x55555555u); // LR
+
+  // Clear regs and then restore via pop.
+  cpu.SetRegister(8, 0);
+  cpu.SetRegister(9, 0);
+  cpu.SetRegister(10, 0);
+  cpu.SetRegister(11, 0);
+  cpu.SetRegister(14, 0);
+
+  // LDMIA SP!, {R8-R11,LR}  (aka POP {R8-R11,LR})
+  RunInstr(0xE8BD4F00u);
+
+  EXPECT_EQ(cpu.GetRegister(13), sp0);
+  EXPECT_EQ(cpu.GetRegister(8), 0x11111111u);
+  EXPECT_EQ(cpu.GetRegister(9), 0x22222222u);
+  EXPECT_EQ(cpu.GetRegister(10), 0x33333333u);
+  EXPECT_EQ(cpu.GetRegister(11), 0x44444444u);
+  EXPECT_EQ(cpu.GetRegister(14), 0x55555555u);
 }
 
 TEST_F(CPUTest, DataProcessing_Logic) {

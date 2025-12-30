@@ -5,7 +5,7 @@
   "cmake.generator": "Unix Makefiles",
   "cmake.configureOnOpen": true,
   "C_Cpp.intelliSenseEngine": "disabled",
-  "clangd.arguments": ["--compile-commands-dir=build/generated"],
+  "clangd.arguments": ["--compile-commands-dir=build/generated/cmake"],
   "makefile.configurations": [
     {
       "name": "Default",

@@ -19,8 +19,12 @@ find . -maxdepth 1 -type f -name "*.txt" -delete || true
 find . -type f \( -name "*.sav" -o -name "*.state" \) -delete || true
 
 echo "Cleaning build artifacts"
-rm -rf build/generated/*
-rm -rf build/bin/*
-rm -rf build/lib/*
+rm -rf build/
+
+echo "Cleaning dev directories (PPU dumps folder)"
+rm -rf dumps/
+
+echo "Rebuilding for proper future tests"
+make
 
 echo "Done."
