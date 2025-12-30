@@ -149,7 +149,7 @@ All code lives under structured namespaces (e.g. `AIO::Emulator::GBA`, `AIO::GUI
 
 ## Contributing
 
-Anyone is free to contribute, modify, or otherwise improve upon or use this code as a starting point in accordance with the rules and guidelines outlined in this document. If you would like to contribute directly please feel free to reach out via [phone](tel:+14357317654) or [email](mailto:alexwaldmann2004@gmail.com).
+Anyone is free to contribute, modify, or otherwise improve upon or use this code as a starting point in accordance with the rules and guidelines outlined in this document. If you would like to contribute directly please feel free to reach out via [phone](tel:4357317654) or [email](mailto:alexwaldmann2004@gmail.com).
 
 ---
 
