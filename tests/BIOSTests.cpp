@@ -9,27 +9,62 @@ TEST(BIOSTest, IRQVectorBranchesToTrampoline) {
   GBAMemory mem;
 
   // BIOS region is 0x00000000-0x00003FFF.
-  // At 0x18, our HLE BIOS installs a branch to 0x180.
-  // Bytes written: 0x58 0x00 0x00 0xEA => 0xEA000058.
-  EXPECT_EQ(mem.Read32(0x00000018), 0xEA000058u);
+  // At 0x18, our HLE BIOS installs a branch to the IRQ
+  // trampoline in BIOS space. The current trampoline base
+  // is 0x00003F00.
+  constexpr uint32_t kIrqTrampolineBase = 0x00003F00u;
+
+  // B immediate uses PC-relative: target = (pc+8) + (imm24<<2)
+  // with pc=0x18. Compute the expected encoding here so this
+  // test stays aligned with the documented layout.
+  const uint32_t imm24 = (kIrqTrampolineBase - 0x00000020u) >> 2;
+  const uint32_t expected = 0xEA000000u | (imm24 & 0x00FFFFFFu);
+  EXPECT_EQ(mem.Read32(0x00000018u), expected);
 }
 
 TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   GBAMemory mem;
 
-  // Verify the exact instruction words we install at 0x180.
-  EXPECT_EQ(mem.Read32(0x00000180), 0xE92D500Fu); // STMDB SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(0x00000184), 0xE3A00404u); // MOV R0, #0x04000000
-  EXPECT_EQ(mem.Read32(0x00000188), 0xE28FE000u); // ADD LR, PC, #0
-  EXPECT_EQ(mem.Read32(0x0000018C), 0xE510F004u); // LDR PC, [R0, #-4]
-  EXPECT_EQ(mem.Read32(0x00000190), 0xE59F1008u); // LDR R1, [PC, #8]
-  EXPECT_EQ(mem.Read32(0x00000194), 0xE1D110B0u); // LDRH R1, [R1]
-  EXPECT_EQ(mem.Read32(0x00000198), 0xE1C012B2u); // STRH R1, [R0, #0x202]
-  EXPECT_EQ(mem.Read32(0x0000019C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(0x000001A0), 0xE25EF004u); // SUBS PC, LR, #4
+  // Verify the exact instruction words we install at the
+  // IRQ trampoline base. These implement a small IRQ
+  // dispatcher that:
+  //  - saves volatile regs on SP_irq
+  //  - switches to System mode so the user handler runs
+  //    on the System stack
+  //  - calls the handler at [0x03FFFFFC] (mirror of
+  //    0x03007FFC)
+  //  - switches back to IRQ mode
+  //  - clears REG_IF using the mask at 0x03007FF4
+  //  - restores regs and returns via SUBS PC, LR, #4
+
+  constexpr uint32_t base = 0x00003F00u;
+
+  EXPECT_EQ(mem.Read32(base + 0x00), 0xE92D500Fu); // STMDB SP!, {R0-R3,R12,LR}
+  EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A02404u); // MOV   R2, #0x04000000
+  EXPECT_EQ(mem.Read32(base + 0x08), 0xE10F3000u); // MRS   R3, CPSR
+  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
+  EXPECT_EQ(mem.Read32(base + 0x10), 0xE383301Fu); // ORR   R3, R3, #0x1F (SYS)
+  EXPECT_EQ(mem.Read32(base + 0x14), 0xE129F003u); // MSR   CPSR_c, R3
+
+  EXPECT_EQ(mem.Read32(base + 0x18), 0xE28FE000u); // ADD   LR, PC, #0
+  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE512F004u); // LDR   PC, [R2, #-4]
+
+  EXPECT_EQ(mem.Read32(base + 0x20), 0xE10F3000u); // MRS   R3, CPSR
+  EXPECT_EQ(mem.Read32(base + 0x24), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
+  EXPECT_EQ(mem.Read32(base + 0x28), 0xE3833012u); // ORR   R3, R3, #0x12 (IRQ)
+  EXPECT_EQ(mem.Read32(base + 0x2C), 0xE129F003u); // MSR   CPSR_c, R3
+
+  EXPECT_EQ(mem.Read32(base + 0x30), 0xE3A02404u); // MOV   R2, #0x04000000
+  EXPECT_EQ(mem.Read32(base + 0x34), 0xE59F1010u); // LDR   R1, [PC, #16]
+  EXPECT_EQ(mem.Read32(base + 0x38), 0xE1D110B0u); // LDRH  R1, [R1]
+  EXPECT_EQ(mem.Read32(base + 0x3C), 0xE2820F80u); // ADD   R0, R2, #0x200
+  EXPECT_EQ(mem.Read32(base + 0x40), 0xE1C010B2u); // STRH  R1, [R0, #2]
+
+  EXPECT_EQ(mem.Read32(base + 0x44), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
+  EXPECT_EQ(mem.Read32(base + 0x48), 0xE25EF004u); // SUBS  PC, LR, #4
 
   // Literal pool used by the trampoline.
-  EXPECT_EQ(mem.Read32(0x000001A4), 0x03007FF4u);
+  EXPECT_EQ(mem.Read32(base + 0x4C), 0x03007FF4u);
 }
 
 TEST(BIOSTest, ResetInitializesIRQHandlerPointer) {
@@ -200,7 +235,7 @@ TEST(BIOSTest, IRQReturnRestoresThumbState) {
   // Next Step() should take the IRQ before executing the next ROM instruction.
   cpu.Step();
   EXPECT_EQ(cpu.GetRegister(15),
-            0x00000180u); // BIOS IRQ trampoline after the vector branch
+            0x00003F00u); // BIOS IRQ trampoline after the vector branch
   EXPECT_FALSE(cpu.IsThumbModeFlag());
   EXPECT_EQ(cpu.GetCPSR() & 0x20u, 0u);
 

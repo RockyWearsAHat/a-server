@@ -949,16 +949,19 @@ void ARM7TDMI::Step() {
 
   // BIOS handling:
   // We do not ship a full BIOS ROM, but we *do* install a real
-  // instruction-level IRQ vector + trampoline in the BIOS region (see GBAMemory
-  // constructor/Reset). For correctness, let that trampoline execute as normal
-  // instructions. For other BIOS entry points that games may call directly, we
-  // still provide HLE.
+  // instruction-level IRQ vector + trampoline in the BIOS region (see
+  // GBAMemory::InitializeHLEBIOS/Reset). For correctness, let that trampoline
+  // execute as normal instructions. For other BIOS entry points that games may
+  // call directly, we still provide HLE.
   if (pc < 0x4000) {
     const uint32_t pcAligned = thumbMode ? (pc & ~1u) : (pc & ~3u);
 
     const bool inIrqVector = (pcAligned == 0x00000018u);
+    // The IRQ trampoline is installed in BIOS space; execute it as
+    // normal ARM instructions rather than HLE. Keep the address range
+    // in sync with the layout used in GBAMemory::InitializeHLEBIOS.
     const bool inIrqTrampoline =
-        (pcAligned >= 0x00000180u && pcAligned < 0x000001A8u);
+        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F50u);
 
     if (!inIrqVector && !inIrqTrampoline) {
       ExecuteBIOSFunction(pcAligned);
