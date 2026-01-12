@@ -12,5 +12,8 @@
       "makeDirectory": "${workspaceFolder}/cmake",
       "makefilePath": "${workspaceFolder}/cmake/Makefile"
     }
-  ]
+  ],
+  "files.associations": {
+    "LICENSE": "plaintext"
+  }
 }
