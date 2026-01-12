@@ -20,6 +20,8 @@ namespace AIO::Emulator::GBA {
         const std::vector<uint32_t>& GetFramebuffer() const;
         void SwapBuffers(); // Call this after frame complete to make it visible to GUI
 
+        uint64_t GetInstanceId() const { return instanceId; }
+
     private:
         void DrawScanline();
         void RenderMode0();
@@ -68,6 +70,8 @@ namespace AIO::Emulator::GBA {
         int cycleCounter;
         int scanline;
         int frameCount;
+
+        uint64_t instanceId{0};
         
         // Track previous VBlank state for edge detection
         bool prevVBlankState = false;

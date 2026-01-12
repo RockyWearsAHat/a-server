@@ -1,6 +1,7 @@
 #include <emulator/gba/PPU.h>
 #include <emulator/gba/GBAMemory.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -8,6 +9,11 @@
 namespace AIO::Emulator::GBA {
 
     namespace {
+        std::atomic<uint64_t> g_ppuInstanceCounter{1};
+
+        inline uint64_t NextPpuInstanceId() {
+            return g_ppuInstanceCounter.fetch_add(1, std::memory_order_relaxed);
+        }
         inline bool EnvTruthy(const char* v) {
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }
@@ -155,6 +161,7 @@ namespace AIO::Emulator::GBA {
     }
 
     PPU::PPU(GBAMemory& mem) : memory(mem), cycleCounter(0), scanline(0), frameCount(0) {
+        instanceId = NextPpuInstanceId();
         // Initialize double buffers with black
         backBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
         frontBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
@@ -204,6 +211,9 @@ namespace AIO::Emulator::GBA {
             
             cycleCounter += step;
             cycles -= step;
+
+            // Publish current timing so GBAMemory can enforce timing-dependent access rules.
+            memory.SetPpuTimingState(scanline, cycleCounter);
             
             // Check if we hit an event
             if (cycleCounter == 960) {
@@ -237,6 +247,8 @@ namespace AIO::Emulator::GBA {
                 // End of Line
                 cycleCounter = 0;
 
+                memory.SetPpuTimingState(scanline, cycleCounter);
+
                 bool triggerVBlankDMA = false;
                 
                 // Clear DISPSTAT HBlank Flag
@@ -266,6 +278,8 @@ namespace AIO::Emulator::GBA {
                 
                 // Update VCOUNT
                 memory.WriteIORegisterInternal(0x06, scanline);
+
+                memory.SetPpuTimingState(scanline, cycleCounter);
 
                 // Update DISPSTAT VBlank flag
                 dispstat = memory.Read16(0x04000004);
@@ -1486,7 +1500,9 @@ namespace AIO::Emulator::GBA {
                     blockOffset = blockX * 2048;
                     break;
                 case 2: // 32x64, two vertical blocks
-                    blockOffset = blockY * 2048;
+                    // GBATEK: for ScreenSize=2 (32x64 tiles), the second vertical screenblock
+                    // is screen base + 2 (not +1) => +0x1000 bytes.
+                    blockOffset = blockY * 4096;
                     break;
                 case 3: // 64x64, four blocks
                     blockOffset = blockX * 2048 + blockY * 4096;
@@ -1517,7 +1533,7 @@ namespace AIO::Emulator::GBA {
                 // 4bpp (16 colors)
                 // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
                 tileAddr = tileBase + (tileIndex * 32) + (inTileY * 4) + (inTileX / 2);
-                tileByte = ReadVram8(vramData, vramSize, tileAddr - 0x06000000u);
+                tileByte = ReadVram8(vramData, vramSize, (tileAddr - 0x06000000u) & 0xFFFFu);
 
                 bool useHighNibble = (inTileX & 1) != 0;
                 if (PpuSwap4bppNibbles()) {
@@ -1528,7 +1544,7 @@ namespace AIO::Emulator::GBA {
                 // 8bpp (256 colors)
                 // 64 bytes per tile
                 tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
-                tileByte = ReadVram8(vramData, vramSize, tileAddr - 0x06000000u);
+                tileByte = ReadVram8(vramData, vramSize, (tileAddr - 0x06000000u) & 0xFFFFu);
                 colorIndex = tileByte;
             }
 
@@ -1911,17 +1927,17 @@ namespace AIO::Emulator::GBA {
         // Second target layers (bits 8-13 of BLDCNT)  
         uint8_t secondTarget = (bldcnt >> 8) & 0x3F;
         
-        auto blendChannel = [](uint8_t a, uint8_t b, int eva, int evb) -> uint8_t {
-            int out = (a * eva + b * evb) / 16;
-            if (out < 0) out = 0;
-            if (out > 255) out = 255;
-            return (uint8_t)out;
+        auto clamp5 = [](int v) -> int {
+            if (v < 0) return 0;
+            if (v > 31) return 31;
+            return v;
         };
 
-        auto clamp8 = [](int v) -> uint8_t {
-            if (v < 0) return 0;
-            if (v > 255) return 255;
-            return (uint8_t)v;
+        auto blendChannel5 = [&](uint8_t a8, uint8_t b8, int eva, int evb) -> uint8_t {
+            const int a5 = (int)a8 >> 3;
+            const int b5 = (int)b8 >> 3;
+            const int out5 = clamp5((a5 * eva + b5 * evb) / 16);
+            return (uint8_t)(out5 << 3);
         };
 
         // Apply effect to each pixel on this scanline
@@ -1971,9 +1987,9 @@ namespace AIO::Emulator::GBA {
                 const uint8_t ug = (under >> 8) & 0xFF;
                 const uint8_t ub = under & 0xFF;
 
-                r = blendChannel(r, ur, eva, evb);
-                g = blendChannel(g, ug, eva, evb);
-                b = blendChannel(b, ub, eva, evb);
+                r = blendChannel5(r, ur, eva, evb);
+                g = blendChannel5(g, ug, eva, evb);
+                b = blendChannel5(b, ub, eva, evb);
             } else if (effectMode == 1) {
                 if (!topIsFirstTarget) {
                     continue;
@@ -1989,27 +2005,33 @@ namespace AIO::Emulator::GBA {
                 const uint8_t ug = (under >> 8) & 0xFF;
                 const uint8_t ub = under & 0xFF;
 
-                r = blendChannel(r, ur, eva, evb);
-                g = blendChannel(g, ug, eva, evb);
-                b = blendChannel(b, ub, eva, evb);
+                r = blendChannel5(r, ur, eva, evb);
+                g = blendChannel5(g, ug, eva, evb);
+                b = blendChannel5(b, ub, eva, evb);
             } else if (effectMode == 2) {
                 if (!topIsFirstTarget) {
                     continue;
                 }
-                // Brightness Increase (fade to white)
-                // I = I + (31-I) * EVY / 16
-                r = clamp8((int)r + ((255 - (int)r) * evy / 16));
-                g = clamp8((int)g + ((255 - (int)g) * evy / 16));
-                b = clamp8((int)b + ((255 - (int)b) * evy / 16));
+                // Brightness Increase (fade to white) in 5-bit domain.
+                // GBATEK: I = I + (31-I) * EVY / 16
+                const int r5 = (int)r >> 3;
+                const int g5 = (int)g >> 3;
+                const int b5 = (int)b >> 3;
+                r = (uint8_t)(clamp5(r5 + ((31 - r5) * evy / 16)) << 3);
+                g = (uint8_t)(clamp5(g5 + ((31 - g5) * evy / 16)) << 3);
+                b = (uint8_t)(clamp5(b5 + ((31 - b5) * evy / 16)) << 3);
             } else if (effectMode == 3) {
                 if (!topIsFirstTarget) {
                     continue;
                 }
-                // Brightness Decrease (fade to black)
-                // I = I - I * EVY / 16
-                r = clamp8((int)r - ((int)r * evy / 16));
-                g = clamp8((int)g - ((int)g * evy / 16));
-                b = clamp8((int)b - ((int)b * evy / 16));
+                // Brightness Decrease (fade to black) in 5-bit domain.
+                // GBATEK: I = I - I * EVY / 16
+                const int r5 = (int)r >> 3;
+                const int g5 = (int)g >> 3;
+                const int b5 = (int)b >> 3;
+                r = (uint8_t)(clamp5(r5 - (r5 * evy / 16)) << 3);
+                g = (uint8_t)(clamp5(g5 - (g5 * evy / 16)) << 3);
+                b = (uint8_t)(clamp5(b5 - (b5 * evy / 16)) << 3);
             }
             
             backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;

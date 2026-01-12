@@ -98,20 +98,17 @@ TEST(MemoryMapTest, VramUpperWindowMirrorsObjRegion) {
 TEST(MemoryMapTest, VramByteWritesAlsoAffectObjVram) {
   GBAMemory mem;
 
-  // Byte writes to VRAM are performed on a 16-bit bus; hardware duplicates the
-  // byte into both halves of the aligned halfword. This should apply to OBJ
-  // VRAM too.
-  const uint32_t objVramAddr =
-      0x06010001; // unaligned byte write in OBJ VRAM region
+  // GBATEK: OBJ VRAM byte writes are ignored (VRAM is 16-bit, but OBJ region
+  // does not accept 8-bit writes).
+  const uint32_t objVramAddr = 0x06010001; // unaligned byte write in OBJ VRAM
   mem.Write8(objVramAddr, 0x7A);
+  EXPECT_EQ(mem.Read16(0x06010000), 0x0000u);
 
-  // Should write 0x7A7A into the aligned halfword at 0x06010000.
-  EXPECT_EQ(mem.Read16(0x06010000), 0x7A7A);
-
-  // Upper VRAM window mirrors into OBJ region; ensure it behaves the same.
+  // Upper VRAM window mirrors into OBJ region; mirroring must not change the
+  // byte-write ignore behavior.
   const uint32_t mirroredObjVramAddr = 0x06018001; // mirrors to 0x06010001
   mem.Write8(mirroredObjVramAddr, 0x3C);
-  EXPECT_EQ(mem.Read16(0x06010000), 0x3C3C);
+  EXPECT_EQ(mem.Read16(0x06010000), 0x0000u);
 }
 
 TEST(AudioDmaTest, SoundFifoDmaNotTriggeredEveryTimerOverflow) {

@@ -475,6 +475,39 @@ int GBA::Step() {
 
   totalCyclesExecuted.fetch_add((uint64_t)totalCycles,
                                 std::memory_order_relaxed);
+
+  // Optional: periodic PC sampling for regression triage.
+  // Enable with: AIO_TRACE_PC_EVERY_CYCLES=<N>
+  // Example: AIO_TRACE_PC_EVERY_CYCLES=16777216 (roughly 1 second)
+  {
+    static bool parsed = false;
+    static uint64_t every = 0;
+    static uint64_t nextAt = 0;
+    if (!parsed) {
+      parsed = true;
+      if (const char *s = std::getenv("AIO_TRACE_PC_EVERY_CYCLES")) {
+        const long long v = std::atoll(s);
+        if (v > 0) {
+          every = (uint64_t)v;
+          nextAt = every;
+        }
+      }
+    }
+    if (every != 0) {
+      const uint64_t nowCycles =
+          totalCyclesExecuted.load(std::memory_order_relaxed);
+      if (nowCycles >= nextAt) {
+        nextAt += every;
+        const uint32_t pc = GetPC();
+        const bool thumb = IsThumbMode();
+        Common::Logger::Instance().LogFmt(
+            Common::LogLevel::Info, "GBA",
+            "PC_SAMPLE cycles=%llu PC=0x%08X Thumb=%d halted=%d",
+            (unsigned long long)nowCycles, (unsigned)pc, thumb ? 1 : 0,
+            (IsCPUHalted() ? 1 : 0));
+      }
+    }
+  }
   return totalCycles;
 }
 

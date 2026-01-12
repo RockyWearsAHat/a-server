@@ -61,6 +61,9 @@ find_package(SDL2 REQUIRED)
 find_package(CURL REQUIRED)
 
 
+# Helps clangd/VSCode index the *same* flags CMake builds with.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Centralized build logic
 include(core.cmake)
 include(tests.cmake)

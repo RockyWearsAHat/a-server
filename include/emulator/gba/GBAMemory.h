@@ -82,6 +82,10 @@ public:
   void UpdateTimers(int cycles);
   void AdvanceCycles(int cycles); // Advance timers, PPU, and APU together
 
+  // PPU timing helper: publishes the current scanline/cycle so memory
+  // access rules (VRAM/OAM/Palette visibility) can be enforced accurately.
+  void SetPpuTimingState(int scanline, int cycleCounter);
+
   int GetLastDMACycles() {
     int c = lastDMACycles;
     lastDMACycles = 0;
@@ -93,6 +97,12 @@ public:
 
   // Cycle-accurate memory access timing
   int GetAccessCycles(uint32_t address, int accessSize) const;
+
+  // Timer helpers for audio and other timing-sensitive systems. These read the
+  // programmed reload value and control bits for TM0-3 directly from IO
+  // registers without side effects.
+  uint16_t GetTimerReload(int timerIdx) const;
+  uint16_t GetTimerControl(int timerIdx) const;
 
   // Fast-path helpers for the renderer (PPU).
   // These bypass bus side-effects and are meant ONLY for reading the backing
@@ -146,6 +156,13 @@ private:
   int timerPrescalerCounters[4] = {0};
   uint16_t timerCounters[4] = {0};
 
+  // Last published PPU timing state from the renderer. When valid, this is
+  // used to gate writes to VRAM/OAM/Palette to periods where hardware allows
+  // them (HBlank/VBlank) and to approximate bus visibility.
+  bool ppuTimingValid = false;
+  int ppuTimingScanline = 0;
+  int ppuTimingCycle = 0;
+
   // Internal DMA address registers (shadow registers for repeat DMAs)
   uint32_t dmaInternalSrc[4] = {0};
   uint32_t dmaInternalDst[4] = {0};
@@ -158,7 +175,8 @@ private:
   bool isFlash = false; // True if Flash, False if SRAM/EEPROM
   bool hasSRAM = false; // True if SRAM/Flash is present, False if EEPROM only
   bool saveTypeLocked = false; // If true, prevent dynamic save type switching
-  std::string gameCode;        // Store the game code for game-specific hacks
+  SaveType configuredSaveType = SaveType::Auto; // Last configured save type
+  std::string gameCode; // Store the game code for game-specific hacks
 
   // EEPROM State
   enum class EEPROMState {

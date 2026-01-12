@@ -44,6 +44,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/common/Dotenv.cpp
     ${PROJECT_ROOT}/src/common/Logging.cpp
     ${PROJECT_ROOT}/src/common/CssVars.cpp
+    ${PROJECT_ROOT}/src/common/PixelScaler.cpp
     ${PROJECT_ROOT}/src/common/AssetPaths.cpp
     ${PROJECT_ROOT}/src/nas/NASServer.cpp
     ${PROJECT_ROOT}/src/nas/server/NASServer_Http.cpp
@@ -67,6 +68,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/ButtonListAdapter.cpp
     ${PROJECT_ROOT}/src/gui/EmulatorSelectAdapter.cpp
     ${PROJECT_ROOT}/src/gui/GameSelectAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/EmulatorSettingsAdapter.cpp
     ${PROJECT_ROOT}/src/gui/SettingsMenuAdapter.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
     ${PROJECT_ROOT}/src/input/manager/InputManager_SDL.cpp
