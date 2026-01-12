@@ -1,8 +1,8 @@
 # AIO Entertainment System
 
-[![Build](https://img.shields.io/github/actions/workflow/status/RockyWearsAHat/a-server/ci.yml?branch=main)](https://github.com/RockyWearsAHat/a-server/actions)
-[![Tests](https://img.shields.io/github/actions/workflow/status/RockyWearsAHat/a-server/tests.yml?branch=main&label=tests)](https://github.com/RockyWearsAHat/a-server/actions)
-[![License](https://img.shields.io/github/license/RockyWearsAHat/a-server)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/RockyWearsAHat/a-server/ci.yml?branch=main&label=build)](https://github.com/RockyWearsAHat/a-server/actions)
+[![Tests](https://img.shields.io/github/actions/workflow/status/RockyWearsAHat/a-server/ci.yml?branch=main&label=tests)](https://github.com/RockyWearsAHat/a-server/actions)
+[![License](<https://img.shields.io/badge/license-Free%20Use%20(Non--commercial)-blue>)](LICENSE)
 [![C++](https://img.shields.io/badge/C%2B%2B-20%2F23-blue)](https://isocpp.org/)
 [![Qt](https://img.shields.io/badge/Qt-6-41cd52)](https://www.qt.io/)
 [![SDL2](https://img.shields.io/badge/SDL2-audio%2Finput-lightgrey)](https://www.libsdl.org/)
