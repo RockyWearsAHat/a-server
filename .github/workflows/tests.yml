@@ -47,9 +47,9 @@ jobs:
 
       - name: Build
         run: |
-          export CC="ccache clang"
-          export CXX="ccache clang++"
-          make build -j3
+          export CMAKE_C_COMPILER_LAUNCHER=ccache
+          export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+          make build
 
       - name: Run CTest
         working-directory: build/generated/cmake
