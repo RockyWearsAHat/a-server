@@ -36,6 +36,7 @@ jobs:
             /opt/homebrew/Cellar/sdl2
             /opt/homebrew/Cellar/qt
             /opt/homebrew/Cellar/ccache
+            /opt/homebrew/Cellar/blake3
           key: ${{ runner.os }}-brew-cellar-${{ hashFiles('Brewfile') }}
           restore-keys: |
             ${{ runner.os }}-brew-cellar-
