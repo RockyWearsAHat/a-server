@@ -10,6 +10,11 @@ jobs:
   tests:
     runs-on: macos-latest
 
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      CCACHE_DIR: ~/.ccache
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,10 +28,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-brew-
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
       - name: Set up Homebrew dependencies
         run: |
-          brew update
-          brew bundle --file=Brewfile
+          brew bundle --file=Brewfile --no-upgrade
 
       - name: Configure environment for Qt
         run: |
@@ -35,7 +47,9 @@ jobs:
 
       - name: Build
         run: |
-          make build
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          make build -j3
 
       - name: Run CTest
         working-directory: build/generated/cmake
