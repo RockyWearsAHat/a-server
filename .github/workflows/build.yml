@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Homebrew dependencies
+        run: |
+          brew update
+          brew install cmake sdl2 qt
+
+      - name: Configure environment for Qt
+        run: |
+          echo "QT_ROOT=$(brew --prefix qt)" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix qt)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          make build
