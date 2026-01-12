@@ -28,6 +28,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-brew-
 
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/homebrew/Cellar/cmake
+            /opt/homebrew/Cellar/sdl2
+            /opt/homebrew/Cellar/qt
+            /opt/homebrew/Cellar/ccache
+          key: ${{ runner.os }}-brew-cellar-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-cellar-
+
       - name: Cache ccache
         uses: actions/cache@v4
         with:
