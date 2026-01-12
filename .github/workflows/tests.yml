@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   tests:
@@ -14,10 +14,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-
+
       - name: Set up Homebrew dependencies
         run: |
           brew update
-          brew install cmake sdl2 qt
+          brew bundle --file=Brewfile
 
       - name: Configure environment for Qt
         run: |
