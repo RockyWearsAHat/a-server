@@ -481,8 +481,6 @@ void ARM7TDMI::CheckInterrupts() {
           handlerPtr);
     }
 
-    // A test comment to see speed of CI
-
     // Disable Thumb, enable IRQ mask
     thumbMode = false;
     SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
