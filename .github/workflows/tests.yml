@@ -28,14 +28,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-brew-
 
-      - name: Cache Homebrew installation
-        uses: actions/cache@v4
-        with:
-          path: /opt/homebrew
-          key: ${{ runner.os }}-homebrew-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            ${{ runner.os }}-homebrew-
-
       - name: Cache ccache
         uses: actions/cache@v4
         with:
