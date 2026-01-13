@@ -112,7 +112,6 @@ void APU::OnTimerOverflow(int timer) {
   const uint16_t tmControl = memory.GetTimerControl(audioTimer);
 
   // Calculate the actual sample rate from timer configuration
-  std::printf("Hello");
   int prescaler = 1;
   switch (tmControl & 3) {
   case 0:
