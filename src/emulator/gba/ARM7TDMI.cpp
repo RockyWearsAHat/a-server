@@ -481,6 +481,8 @@ void ARM7TDMI::CheckInterrupts() {
           handlerPtr);
     }
 
+    // Another test comment
+
     // Disable Thumb, enable IRQ mask
     thumbMode = false;
     SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
