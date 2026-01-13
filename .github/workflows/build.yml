@@ -13,6 +13,7 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
+      CCACHE_DIR: ~/.ccache
 
     steps:
       - name: Checkout
@@ -26,6 +27,21 @@ jobs:
           key: ${{ runner.os }}-brew-${{ hashFiles('Brewfile') }}
           restore-keys: |
             ${{ runner.os }}-brew-
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/homebrew/Cellar/cmake
+            /opt/homebrew/Cellar/sdl2
+            /opt/homebrew/Cellar/qt
+            /opt/homebrew/Cellar/ccache
+            /opt/homebrew/Cellar/blake3
+            /opt/homebrew/Cellar/fmt
+            /opt/homebrew/Cellar/xxhash
+          key: ${{ runner.os }}-brew-cellar-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-cellar-
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -46,4 +62,6 @@ jobs:
 
       - name: Build
         run: |
+          export CMAKE_C_COMPILER_LAUNCHER=ccache
+          export CMAKE_CXX_COMPILER_LAUNCHER=ccache
           make build

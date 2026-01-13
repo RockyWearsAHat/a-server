@@ -1,3 +1,7 @@
 brew "cmake"
 brew "sdl2"
 brew "qt"
+brew "ccache"
+brew "blake3"
+brew "fmt"
+brew "xxhash"
