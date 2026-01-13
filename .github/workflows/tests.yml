@@ -37,6 +37,7 @@ jobs:
             /opt/homebrew/Cellar/qt
             /opt/homebrew/Cellar/ccache
             /opt/homebrew/Cellar/blake3
+            /opt/homebrew/Cellar/fmt
           key: ${{ runner.os }}-brew-cellar-${{ hashFiles('Brewfile') }}
           restore-keys: |
             ${{ runner.os }}-brew-cellar-
