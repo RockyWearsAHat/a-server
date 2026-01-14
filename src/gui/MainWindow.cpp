@@ -6,9 +6,12 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTextStream>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QtGlobal>
+
+#include <atomic>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
@@ -26,26 +29,46 @@
 #include "gui/SettingsMenuAdapter.h"
 
 // Helper function at global scope to avoid Qt template instantiation issues
-static bool crashPopupShown = false;
+static std::atomic_bool crashPopupShown{false};
 
 static void ShowCrashPopup(const char *logPath) {
-  if (crashPopupShown)
+  bool expected = false;
+  if (!crashPopupShown.compare_exchange_strong(expected, true)) {
     return;
-  crashPopupShown = true;
+  }
+
+  const QString path = QString::fromUtf8(logPath ? logPath : "");
+  QCoreApplication *app = QCoreApplication::instance();
+  if (!app) {
+    return;
+  }
+
+  // CrashPopupCallback is invoked from the emulation thread; UI work must run
+  // on the Qt main thread (macOS AppKit will abort otherwise).
+  if (QThread::currentThread() != app->thread()) {
+    QMetaObject::invokeMethod(
+        app,
+        [path]() {
+          ShowCrashPopup(path.isEmpty() ? nullptr : path.toUtf8().constData());
+        },
+        Qt::QueuedConnection);
+    return;
+  }
+
   QMessageBox msg;
   msg.setWindowTitle("Emulator Crash Detected");
   msg.setText("The emulator has crashed. A detailed log has been saved.\nWould "
               "you like to view the log?");
   msg.setIcon(QMessageBox::Critical);
   msg.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-  int ret = msg.exec();
-  if (ret == QMessageBox::Yes) {
-    AIO::GUI::LogViewerDialog *dlg = new AIO::GUI::LogViewerDialog(nullptr);
-    dlg->loadLogFile(QString::fromUtf8(logPath));
+  const int ret = msg.exec();
+  if (ret == QMessageBox::Yes && !path.isEmpty()) {
+    auto *dlg = new AIO::GUI::LogViewerDialog(nullptr);
+    dlg->loadLogFile(path);
     dlg->exec();
     delete dlg;
   }
-  QApplication::quit();
+  QCoreApplication::quit();
 }
 
 namespace AIO {

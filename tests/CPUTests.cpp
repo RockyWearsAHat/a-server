@@ -84,6 +84,24 @@ TEST_F(CPUTest, Memory_LDR_STR) {
   EXPECT_EQ(memory.Read32(0x02000000), 123);
 }
 
+TEST_F(CPUTest, ARM_LDR_RegisterOffset_Shifted) {
+  // Mirrors the DKC pattern: LDR Rd, [Rn, Rm, LSL #2]
+  // If the shift is ignored, the load becomes unaligned and reads the wrong
+  // word.
+
+  cpu.SetRegister(12, 0x02000000u); // Rn
+  cpu.SetRegister(0, 3u);           // Rm (index)
+
+  // Place distinct sentinel words.
+  memory.Write32(0x02000000u, 0xAABBCCDDu);
+  memory.Write32(0x0200000Cu, 0x11223344u); // base + (3 << 2)
+
+  // Encoding: LDR R3, [R12, R0, LSL #2] => 0xE79C3100
+  RunInstr(0xE79C3100u);
+
+  EXPECT_EQ(cpu.GetRegister(3), 0x11223344u);
+}
+
 TEST_F(CPUTest, Branch_B) {
   uint32_t startPC = cpu.GetRegister(15);
   // B #0 (Target = PC + 8 + 0)

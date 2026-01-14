@@ -118,10 +118,15 @@ static void TracePCWrite(const char *source, uint32_t pcFrom, uint32_t pcTo,
   const bool looksLikeOpcode = ((pcTo & 0xFF000000) == 0xE3000000) ||
                                ((pcTo & 0xFF000000) == 0xE2000000);
   const bool looksInvalidAddr =
-      !((pcTo < 0x00004000) || (pcTo >= 0x02000000 && pcTo < 0x02040000) ||
-        (pcTo >= 0x03000000 && pcTo < 0x03008000) ||
-        (pcTo >= 0x06000000 && pcTo < 0x06018000) ||
-        (pcTo >= 0x08000000 && pcTo < 0x10000000));
+      !((pcTo < 0x00004000) ||
+        // EWRAM is 256KB mirrored across the whole 0x02xxxxxx region.
+        ((pcTo & 0xFF000000u) == 0x02000000u) ||
+        // IWRAM is 32KB mirrored across the whole 0x03xxxxxx region.
+        ((pcTo & 0xFF000000u) == 0x03000000u) ||
+        // VRAM is mirrored within 0x06xxxxxx.
+        ((pcTo & 0xFF000000u) == 0x06000000u) ||
+        // GamePak ROM is mirrored in 0x08..0x0D.
+        (pcTo >= 0x08000000u && pcTo < 0x0E000000u));
   if (looksLikeOpcode || looksInvalidAddr) {
     Logger::Instance().LogFmt(LogLevel::Error, "CPU",
                               "PC WRITE [%s] from=0x%08x to=0x%08x "
@@ -801,31 +806,23 @@ void ARM7TDMI::Step() {
     return;
   }
 
-  // Universal PC region validation and mirroring
-  // Canonicalize IWRAM/EWRAM/VRAM/ROM
+  // Validate PC region.
+  // IMPORTANT: Do not canonicalize PC into base ranges. On hardware, EWRAM,
+  // IWRAM, VRAM, and GamePak regions are mirrored by address line decoding;
+  // the CPU's PC retains the full mirrored address and games may use that
+  // value for PC-relative calculations.
   uint32_t pc = registers[15];
-  if (pc >= 0x03008000 && pc < 0x04000000)
-    pc = 0x03000000 | (pc & 0x7FFF);
-  if (pc >= 0x02040000 && pc < 0x03000000)
-    pc = 0x02000000 | (pc & 0x3FFFF);
-  if (pc >= 0x06018000 && pc < 0x07000000)
-    pc = 0x06000000 | (pc & 0x17FFF);
-  if (pc >= 0x08000000 && pc < 0x10000000)
-    pc = 0x08000000 | (pc & 0x1FFFFFF);
-  registers[15] = pc;
-
-  // Validate PC region
   bool valid = false;
-  if (pc < 0x00004000)
+  if (pc < 0x00004000u)
     valid = true; // BIOS
-  if (pc >= 0x02000000 && pc < 0x02040000)
-    valid = true; // EWRAM
-  if (pc >= 0x03000000 && pc < 0x03008000)
-    valid = true; // IWRAM
-  if (pc >= 0x06000000 && pc < 0x06018000)
-    valid = true; // VRAM
-  if (pc >= 0x08000000 && pc < 0x10000000)
-    valid = true; // ROM
+  if ((pc & 0xFF000000u) == 0x02000000u)
+    valid = true; // EWRAM mirrors (0x02000000-0x02FFFFFF)
+  if ((pc & 0xFF000000u) == 0x03000000u)
+    valid = true; // IWRAM mirrors (0x03000000-0x03FFFFFF)
+  if ((pc & 0xFF000000u) == 0x06000000u)
+    valid = true; // VRAM mirrors (0x06000000-0x06FFFFFF)
+  if (pc >= 0x08000000u && pc < 0x0E000000u)
+    valid = true; // GamePak ROM mirrors (0x08000000-0x0DFFFFFF)
   if (!valid) {
     std::cerr << "[FATAL] Invalid PC: 0x" << std::hex << pc << std::dec
               << std::endl;
@@ -857,7 +854,20 @@ void ARM7TDMI::Step() {
     return;
   }
 
+  // Keep a local copy for the rest of this step.
+  // (Do not modify registers[15] here.)
   pc = registers[15];
+
+  // Instruction fetch on ARM7TDMI ignores the low address bits:
+  // - ARM state fetches are word-aligned (bits[1:0]=0)
+  // - Thumb state fetches are halfword-aligned (bit0=0)
+  // If something wrote an unaligned PC, align it here so we fetch the same
+  // opcodes real hardware would.
+  const uint32_t pcAligned = thumbMode ? (pc & ~1u) : (pc & ~3u);
+  if (pcAligned != pc) {
+    registers[15] = pcAligned;
+    pc = pcAligned;
+  }
 
   // ...existing code...
 
@@ -1893,6 +1903,12 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
     uint32_t oldR0 = registers[0];
     const uint32_t oldRdVal = registers[rd];
     if (rd == Register::PC) {
+      // ARM state: writing to PC ignores the low 2 bits.
+      // For the S=1 return path, we will re-align after CPSR restore based on
+      // the restored T bit.
+      if (!S) {
+        result &= ~3u;
+      }
       // DEBUG: Log PC writes during IRQ return
       if (S && opcode == DPOpcode::SUB) {
         uint32_t currentMode = GetCPUMode(cpsr);
@@ -2034,6 +2050,10 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       cpsr = spsrCopy;
       thumbMode = IsThumbMode(cpsr);
 
+      // Align PC based on the restored state.
+      registers[Register::PC] = thumbMode ? (registers[Register::PC] & ~1u)
+                                          : (registers[Register::PC] & ~3u);
+
       // Debug: confirm CPSR restore actually re-enters Thumb when expected.
       if (oldMode == CPUMode::IRQ) {
         static int irqReturnPostLogCount = 0;
@@ -2066,8 +2086,23 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
   if (!I) {
     offset = instruction & 0xFFF;
   } else {
-    uint32_t rm = ExtractRegisterField(instruction, 0);
-    offset = registers[rm];
+    // ARM addressing mode 2 (register offset): bits[11:0] encode a shifted
+    // register (Rm with optional shift by immediate or by register).
+    // Many games (including DKC) rely on the shift (e.g. LSL #2) being applied
+    // to the index.
+    const uint32_t rm = ExtractRegisterField(instruction, 0);
+    const uint32_t shiftType = (instruction >> 5) & 0x3u;
+    const bool shiftByReg = ((instruction >> 4) & 1u) != 0;
+    uint32_t shiftAmount = 0;
+    if (shiftByReg) {
+      const uint32_t rs = ExtractRegisterField(instruction, 8);
+      shiftAmount = registers[rs] & 0xFFu;
+    } else {
+      shiftAmount = (instruction >> 7) & 0x1Fu;
+    }
+
+    offset = ARM7TDMIHelpers::BarrelShift(registers[rm], shiftType, shiftAmount,
+                                          cpsr, false);
   }
 
   uint32_t baseAddr = registers[rn];
@@ -2113,12 +2148,15 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
       // 8 * (addr[1:0]) after reading from the aligned word address. Many
       // games (including DKC) rely on this for jump tables in IWRAM.
       const uint32_t alignedAddr = targetAddr & ~3u;
-      uint32_t val = memory.Read32(alignedAddr);
+      const uint32_t rawAligned = memory.Read32(alignedAddr);
+      uint32_t val = rawAligned;
       const uint32_t rotBytes = (targetAddr & 3u) * 8u;
       if (rotBytes != 0) {
         val = (val >> rotBytes) | (val << (32u - rotBytes));
       }
       if (rd == Register::PC) {
+        // ARM state: ignore low 2 bits when loading into PC.
+        val &= ~3u;
         const uint32_t from = registers[Register::PC] - 4;
         TracePCWrite("LDR", from, val, instruction, targetAddr, rn);
         LogBranch(from, val);
@@ -2131,12 +2169,26 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
             (pc >= 0x02013C00u && pc <= 0x02014400u)) {
           const uint32_t tracedInstr =
               currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
-          Logger::Instance().LogFmt(
-              LogLevel::Info, "CPU",
-              "DKC_R0_WRITE(LDR) pc=0x%08x instr=0x%08x rn=R%u oldR0=0x%08x "
-              "addr=0x%08x val=0x%08x newR0=0x%08x",
-              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn, (unsigned)old,
-              (unsigned)targetAddr, (unsigned)val, (unsigned)registers[0]);
+          if (tracedInstr == 0xE79C0100u) {
+            Logger::Instance().LogFmt(
+                LogLevel::Info, "CPU",
+                "DKC_R0_WRITE(LDR-JT) pc=0x%08x instr=0x%08x rn=R%u "
+                "oldR0=0x%08x "
+                "addr=0x%08x aligned=0x%08x raw=0x%08x rot=%u val=0x%08x "
+                "newR0=0x%08x",
+                (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
+                (unsigned)old, (unsigned)targetAddr, (unsigned)alignedAddr,
+                (unsigned)rawAligned, (unsigned)rotBytes, (unsigned)val,
+                (unsigned)registers[0]);
+          } else {
+            Logger::Instance().LogFmt(
+                LogLevel::Info, "CPU",
+                "DKC_R0_WRITE(LDR) pc=0x%08x instr=0x%08x rn=R%u oldR0=0x%08x "
+                "addr=0x%08x val=0x%08x newR0=0x%08x",
+                (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
+                (unsigned)old, (unsigned)targetAddr, (unsigned)val,
+                (unsigned)registers[0]);
+          }
         }
       }
       if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 12) {
@@ -2300,7 +2352,8 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
         // Some code relies on bit0 for Thumb state; memory fetch is always
         // aligned.
         if (i == 15) {
-          val &= ~1u;
+          // Align later based on restored CPSR for LDM^, otherwise word-align.
+          val &= ~3u;
         }
         if (i == 15) {
           TracePCWrite("LDM", instrAddr, val, instruction, currentAddr,
@@ -2430,6 +2483,10 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
     }
     cpsr = spsrCopy;
     thumbMode = IsThumbMode(cpsr);
+
+    // Align PC based on the restored state.
+    registers[Register::PC] = thumbMode ? (registers[Register::PC] & ~1u)
+                                        : (registers[Register::PC] & ~3u);
   }
 
   // Writeback
@@ -3191,6 +3248,11 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     cpsr = savedCpsr;
     break;
   }
+  case 0x0D: // GetBiosChecksum
+    // Returns a constant checksum of the GBA BIOS ROM.
+    // Many toolchains/documentation refer to this as SWI 0x0D.
+    registers[0] = 0xBAAE187F;
+    break;
   case 0x0E: // BgAffineSet
   {
     // R0 = Source Address, R1 = Destination Address, R2 = Number of

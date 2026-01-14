@@ -21,14 +21,10 @@ constexpr uint32_t kIrqHandlerOffset = 0x7FFCu;
 constexpr uint32_t kIrqHandlerDefault = 0x00003FF0u;
 
 inline bool IsIwramMappedAddress(uint32_t address) {
-  // IWRAM is 32KB at 0x03000000-0x03007FFF.
-  // Hardware also mirrors the last 32KB of the 0x03xxxxxx region at
-  // 0x03FF8000-0x03FFFFFF. Avoid aliasing arbitrary 0x03xxxxxx addresses (e.g.
-  // 0x03057FFC) into IWRAM.
-  if ((address & 0xFF000000u) != 0x03000000u)
-    return false;
-  const uint32_t lo = address & 0x00FFFFFFu;
-  return (lo < 0x00008000u) || (lo >= 0x00FF8000u);
+  // IWRAM is 32KB physically, but is mirrored throughout the entire 0x03xxxxxx
+  // address region on real hardware. Many titles rely on this (intentionally
+  // or incidentally) when using computed jumps or pointers.
+  return (address & 0xFF000000u) == 0x03000000u;
 }
 
 inline bool IsValidIrqHandlerAddress(uint32_t addr) {
@@ -1748,6 +1744,25 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
 void GBAMemory::Write8(uint32_t address, uint8_t value) {
   const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
   TracePpuIoWrite8(address, value, pc);
+
+  // DKC crash investigation: trace byte writes into the EWRAM window that
+  // later gets executed via mirrored targets around 0x02FCD8xx/0x0238D8xx.
+  // Enable with: AIO_TRACE_DKC_EWRAM_CODE=1
+  if (EnvFlagCached("AIO_TRACE_DKC_EWRAM_CODE") && cpu &&
+      ((address & 0xFF000000u) == 0x02000000u)) {
+    const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+    const bool inLowWin = (off >= 0x08D800u && off < 0x08E200u);
+    const bool inHighWin = (off >= 0x3CD800u && off < 0x3CE200u);
+    if (inLowWin || inHighWin) {
+      static int dkcEwramW8 = 0;
+      if (dkcEwramW8++ < 400) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "DKC",
+            "DKC_EWRAM_W8  bus=0x%08x off=0x%05x val=0x%02x PC=0x%08x",
+            (unsigned)address, (unsigned)off, (unsigned)value, (unsigned)pc);
+      }
+    }
+  }
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIwram = IsIwramMappedAddress(address);
   const uint32_t iwramOff = address & 0x7FFFu;
@@ -2232,6 +2247,25 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
   TracePpuIoWrite16(address, value, pc);
 
+  // DKC crash investigation: trace writes into the EWRAM window that later
+  // gets executed via the mirrored targets around 0x02FCD8xx/0x0238D8xx.
+  // Enable with: AIO_TRACE_DKC_EWRAM_CODE=1
+  if (EnvFlagCached("AIO_TRACE_DKC_EWRAM_CODE") && cpu &&
+      ((address & 0xFF000000u) == 0x02000000u)) {
+    const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+    const bool inLowWin = (off >= 0x08D800u && off < 0x08E200u);
+    const bool inHighWin = (off >= 0x3CD800u && off < 0x3CE200u);
+    if (inLowWin || inHighWin) {
+      static int dkcEwramW16 = 0;
+      if (dkcEwramW16++ < 400) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "DKC",
+            "DKC_EWRAM_W16 bus=0x%08x off=0x%05x val=0x%04x PC=0x%08x",
+            (unsigned)address, (unsigned)off, (unsigned)value, (unsigned)pc);
+      }
+    }
+  }
+
   // SMA2 investigation: trace non-zero writes into the header staging buffer in
   // EWRAM. Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
   if (EnvFlagCached("AIO_TRACE_SMA2_STAGE_WRITES") && cpu) {
@@ -2675,6 +2709,36 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
 
   const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
   TracePpuIoWrite32(address, value, pc);
+
+  // DKC crash investigation: trace writes into the EWRAM window that later
+  // gets executed via the mirrored targets around 0x02FCD8xx/0x0238D8xx.
+  // Enable with: AIO_TRACE_DKC_EWRAM_CODE=1
+  if (EnvFlagCached("AIO_TRACE_DKC_EWRAM_CODE") && cpu &&
+      ((address & 0xFF000000u) == 0x02000000u)) {
+    const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+    const bool inLowWin = (off >= 0x08D800u && off < 0x08E200u);
+    const bool inHighWin = (off >= 0x3CD800u && off < 0x3CE200u);
+    if (inLowWin || inHighWin) {
+      static int dkcEwramW32 = 0;
+      if (dkcEwramW32++ < 400) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "DKC",
+            "DKC_EWRAM_W32 bus=0x%08x off=0x%05x val=0x%08x PC=0x%08x",
+            (unsigned)address, (unsigned)off, (unsigned)value, (unsigned)pc);
+      }
+    }
+  }
+
+  // DKC audio investigation: trace word writes that might touch the
+  // 0x03003378-0x0300337F jump-table region.
+  if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && cpu) {
+    if (address >= 0x03003378u && address <= 0x0300337Cu) {
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DKC",
+          "DKC_W32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
+          (unsigned)value, (unsigned)pc);
+    }
+  }
 
   // Instrument IE/IME writes done via 32-bit access
   if ((address & 0xFF000000) == 0x04000000) {
@@ -3784,79 +3848,6 @@ void GBAMemory::PerformDMA(int channel) {
     ctrlNow &= ~DMAControl::ENABLE;
     io_regs[baseOffset + 10] = (uint8_t)(ctrlNow & 0xFF);
     io_regs[baseOffset + 11] = (uint8_t)((ctrlNow >> 8) & 0xFF);
-  }
-
-  // DEBUG: Check jump table after DMA#1 (channel 3, dst starts at 0x3000000)
-  // This reproduces the behavior from the last known good revision where
-  // Donkey Kong Country (DKC, game code A5NE) was "mostly working".
-  if (channel == 3 && dst == 0x3000000 && gameCode == "A5NE") {
-    // DMA#1 clears/fills IWRAM by writing the same value (from 0x3007ef0)
-    // everywhere. Now we need to initialize the audio engine area that the
-    // game expects.
-    std::cout << "[After DMA#1] Initializing audio engine area for DKC"
-              << std::endl;
-
-    // Clear entire audio engine area 0x3001400-0x30016FF to 0
-    for (int i = 0x1400; i < 0x1700; i++) {
-      wram_chip[i] = 0;
-    }
-
-    // Write audio init stub at 0x30013E0 (before the audio engine data area)
-    // This stub clears the "not ready" flag at 0x3001420 and returns.
-    // ARM code:
-    //   0x30013E0: LDR R12, [PC, #8]    ; Load 0x3001420 from literal pool at
-    //               0x30013F0
-    //   0x30013E4: MOV R0, #0           ; R0 = 0
-    //   0x30013E8: STR R0, [R12]        ; Store 0 at 0x3001420
-    //   0x30013EC: BX LR                ; Return
-    //   0x30013F0: .word 0x03001420     ; Literal pool
-
-    // LDR R12, [PC, #8]  = 0xE59FC008
-    wram_chip[0x13E0] = 0x08;
-    wram_chip[0x13E1] = 0xC0;
-    wram_chip[0x13E2] = 0x9F;
-    wram_chip[0x13E3] = 0xE5;
-
-    // MOV R0, #0 = 0xE3A00000
-    wram_chip[0x13E4] = 0x00;
-    wram_chip[0x13E5] = 0x00;
-    wram_chip[0x13E6] = 0xA0;
-    wram_chip[0x13E7] = 0xE3;
-
-    // STR R0, [R12] = 0xE58C0000
-    wram_chip[0x13E8] = 0x00;
-    wram_chip[0x13E9] = 0x00;
-    wram_chip[0x13EA] = 0x8C;
-    wram_chip[0x13EB] = 0xE5;
-
-    // BX LR = 0xE12FFF1E
-    wram_chip[0x13EC] = 0x1E;
-    wram_chip[0x13ED] = 0xFF;
-    wram_chip[0x13EE] = 0x2F;
-    wram_chip[0x13EF] = 0xE1;
-
-    // Literal pool: 0x03001420
-    wram_chip[0x13F0] = 0x20;
-    wram_chip[0x13F1] = 0x14;
-    wram_chip[0x13F2] = 0x00;
-    wram_chip[0x13F3] = 0x03;
-
-    // Jump table at 0x3001500-0x16FF: 128 entries (512 bytes), all point to
-    // stub at 0x30013E0
-    for (int i = 0; i < 128; i++) {
-      uint32_t offset = 0x1500 + i * 4;
-      wram_chip[offset + 0] = 0xE0; // 0x30013E0
-      wram_chip[offset + 1] = 0x13;
-      wram_chip[offset + 2] = 0x00;
-      wram_chip[offset + 3] = 0x03;
-    }
-
-    uint32_t jumpTableVal = Read32(0x3001500);
-    uint32_t stubVal = Read32(0x30013E0); // Stub is at 0x30013E0, not 0x3001400
-    uint32_t polledAddr = Read32(0x3001420);
-    std::cout << "[After Init] JumpTable[0]=0x" << std::hex << jumpTableVal
-              << " Stub@0x30013E0=0x" << stubVal << " PolledAddr[0x3001420]=0x"
-              << polledAddr << std::dec << std::endl;
   }
 
   // Trigger IRQ
