@@ -467,7 +467,7 @@ int GBA::Step() {
   int totalCycles = cpuCycles + dmaCycles + hleCycles;
 
   int peripheralCycles = cpuCycles + hleCycles;
-  if (cpu->IsHalted()) {
+  if (cpu->IsSleepHalted()) {
     totalCycles = 1232;
     peripheralCycles = totalCycles;
   }
@@ -496,7 +496,7 @@ int GBA::Step() {
   // on every instruction. This is a major speed win and still preserves
   // ordering (peripherals advance after each instruction, just grouped).
   pendingPeripheralCycles += peripheralCycles;
-  if (pendingPeripheralCycles >= PERIPHERAL_BATCH_CYCLES || cpu->IsHalted()) {
+  if (pendingPeripheralCycles >= PERIPHERAL_BATCH_CYCLES || cpu->IsSleepHalted()) {
     memory->AdvanceCycles(pendingPeripheralCycles);
     pendingPeripheralCycles = 0;
     cpu->PollInterrupts();
@@ -540,7 +540,7 @@ int GBA::Step() {
   return totalCycles;
 }
 
-bool GBA::IsCPUHalted() const { return cpu && cpu->IsHalted(); }
+bool GBA::IsCPUHalted() const { return cpu && cpu->IsSleepHalted(); }
 
 void GBA::UpdateInput(uint16_t keyState) {
   if (memory) {
@@ -622,7 +622,7 @@ void GBA::SetSingleStep(bool enabled) {
 bool GBA::IsHalted() const {
   if (!cpu)
     return false;
-  return cpu->IsHalted();
+  return cpu->IsDebuggerHalted();
 }
 
 void GBA::Continue() {

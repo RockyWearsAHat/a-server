@@ -468,9 +468,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Note: internally, a debugger breakpoint may surface as a CPU-halt state rather than
-        // the emulator-wide halted flag. Treat either as a breakpoint stop.
-        if (breakPc != 0 && (gba.IsHalted() || gba.IsCPUHalted())) {
+        // Breakpoint stops should surface as debugger halts.
+        if (breakPc != 0 && gba.IsHalted()) {
             std::cerr << "[HARNESS] Breakpoint stop at pc=0x" << std::hex << gba.GetPC() << std::dec
                       << " thumb=" << (gba.IsThumbMode() ? 1 : 0)
                       << " IsCPUHalted=" << (gba.IsCPUHalted() ? 1 : 0)

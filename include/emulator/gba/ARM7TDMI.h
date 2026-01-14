@@ -49,6 +49,8 @@ namespace AIO::Emulator::GBA {
             SetCPSRFlag(cpsr, CPSR::FLAG_T, thumb);
         }
         bool IsHalted() const { return halted; }
+        bool IsSleepHalted() const { return halted && sleepHalt; }
+        bool IsDebuggerHalted() const { return halted && debuggerHalt; }
         bool IsThumbModeFlag() const { return thumbMode; }
         struct CpuSnapshot {
             uint32_t registers[16];
