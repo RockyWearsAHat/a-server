@@ -25,6 +25,11 @@ public:
   void SetSaveType(SaveType type); // Configure save type from metadata analysis
   void FlushSave();                // Write EEPROM/SRAM to disk immediately
   void InitializeHLEBIOS();        // Initialize High-Level Emulated BIOS
+  bool LoadLLEBIOS(const std::string &path); // Load user-provided BIOS image
+
+  // Query whether a real (LLE) BIOS image is present. When true, CPU should
+  // execute BIOS code directly instead of using HLE stubs.
+  bool HasLLEBIOS() const { return lleBiosLoaded; }
 
   // APU connection for sound callbacks
   void SetAPU(APU *apuPtr) { apu = apuPtr; }
@@ -220,6 +225,11 @@ private:
   std::vector<uint8_t> palette_ram;
   std::vector<uint8_t> vram;
   std::vector<uint8_t> oam;
+
+  // True when a user-provided BIOS image has been loaded into `bios`.
+  // When set, the CPU should treat the BIOS region as real code/data and
+  // avoid High-Level Emulation shortcuts for BIOS entry points.
+  bool lleBiosLoaded = false;
   std::vector<uint8_t> rom;
   std::vector<uint8_t> sram;
 

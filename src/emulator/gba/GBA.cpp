@@ -221,6 +221,21 @@ bool GBA::LoadROM(const std::string &path) {
       memory->SetVerboseLogs(true);
     }
 
+    // Optional LLE BIOS support via environment variable.
+    // If AIO_GBA_BIOS is set to a valid BIOS image path, load it into the
+    // BIOS region so the CPU can execute the real BIOS instead of HLE.
+    if (const char *biosPath = std::getenv("AIO_GBA_BIOS")) {
+      if (biosPath[0] != '\0') {
+        std::cout << "[LoadROM] Attempting to load LLE BIOS from: " << biosPath
+                  << std::endl;
+        if (!memory->LoadLLEBIOS(biosPath)) {
+          std::cout
+              << "[LoadROM] LLE BIOS load failed; continuing with HLE BIOS"
+              << std::endl;
+        }
+      }
+    }
+
     Reset();
 
     std::cout << "[LoadROM] CPU Reset complete. PC=0x" << std::hex
@@ -397,6 +412,20 @@ int GBA::Step() {
       std::cout << "  SP=0x" << cpu->GetRegister(13) << " LR=0x"
                 << cpu->GetRegister(14) << " CPSR=0x" << cpu->GetCPSR()
                 << std::dec << std::endl;
+
+      // Also capture display timing state when we detect a tight CPU loop.
+      // Many games (including OG-DK style emulation titles) busy-wait on
+      // VCOUNT / DISPSTAT, so seeing their instantaneous values helps
+      // distinguish a legitimate wait loop from a broken PPU/VCOUNT model.
+      uint16_t dispstat = memory->Read16(0x04000004);
+      uint16_t vcount = memory->Read16(0x04000006);
+      uint16_t ime = memory->Read16(0x04000208);
+      uint16_t ie = memory->Read16(0x04000200);
+      uint16_t if_reg = memory->Read16(0x04000202);
+      std::cout << "  DISPSTAT=0x" << std::hex << dispstat
+                << " VCOUNT=" << std::dec << (unsigned)vcount << " IME=" << ime
+                << " IE=0x" << std::hex << ie << " IF=0x" << if_reg << std::dec
+                << std::endl;
     }
   } else {
     lastPC = prevPc;

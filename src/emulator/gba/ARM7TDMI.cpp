@@ -258,12 +258,11 @@ ARM7TDMI::~ARM7TDMI() = default;
 
 void ARM7TDMI::Reset() {
   std::memset(registers, 0, sizeof(registers));
-  cpsr = CPUMode::SYSTEM; // System Mode
   spsr = 0;
   thumbMode = false;
   halted = false;
 
-  // Initialize Banked Registers
+  // Initialize Banked Registers (stack tops chosen to match common GBA usage)
   r13_svc = 0x03007FE0;
   r14_svc = 0;
   spsr_svc = 0;
@@ -273,13 +272,23 @@ void ARM7TDMI::Reset() {
   r13_usr = 0x03007F00;
   r14_usr = 0;
 
-  // Note: LR in System/User mode is game-defined; do not force it.
-
-  // DirectBoot mode: Skip BIOS and jump straight to ROM entry (0x08000000)
-  // Hardware state is initialized by GBAMemory::Reset() to match what BIOS
-  // would set up
-  registers[Register::PC] = 0x08000000;
-  registers[Register::SP] = r13_usr; // Initialize SP (User/System)
+  // When no real BIOS is present, use DirectBoot: skip BIOS and jump straight
+  // to ROM entry (0x08000000). Hardware state is initialized by
+  // GBAMemory::Reset() to match what BIOS would set up.
+  //
+  // When a user-provided BIOS image is loaded (LLE BIOS), start execution
+  // from 0x00000000 in Supervisor mode and let the real BIOS perform all
+  // initialization.
+  const bool hasLLEBios = memory.HasLLEBIOS();
+  if (!hasLLEBios) {
+    cpsr = CPUMode::SYSTEM; // System Mode
+    registers[Register::PC] = 0x08000000;
+    registers[Register::SP] = r13_usr; // Initialize SP (User/System)
+  } else {
+    cpsr = CPUMode::SUPERVISOR; // BIOS starts in SVC mode
+    registers[Register::PC] = 0x00000000;
+    registers[Register::SP] = r13_svc; // Use SVC stack for BIOS
+  }
 
   // Reset R11 tracking state for debugging.
   g_lastR11Observed = registers[11];
@@ -920,15 +929,47 @@ void ARM7TDMI::Step() {
               << " R11=0x" << registers[11] << " LR=0x" << registers[14]
               << " Mode=" << (thumbMode ? "T" : "A") << std::dec << std::endl;
   }
+
+  // Focused crash instrumentation for the SMA2 LDR at 0x3003308:
+  //   LDR R0, [R12, R0, LSL #4]
+  // R0 is expected to be a small table index. When it is unexpectedly large,
+  // dump additional context so we can trace where the bad index comes from.
   if (pc == 0x3003308) {
-    // This is the LDR R0, [R12, R0, LSL #4] instruction
-    // R0 should be a small index (0-15 or so)
-    if (registers[0] > 20) {
+    const uint32_t index = registers[0];
+    if (index > 20) {
+      const uint32_t base = registers[12];
+      const uint32_t effAddr = base + (index << 4);
+
+      uint32_t tableWord0 = 0;
+      uint32_t tableWord1 = 0;
+      uint32_t sp = registers[13];
+      uint32_t sp0 = 0;
+      uint32_t sp1 = 0;
+      uint32_t sp2 = 0;
+
+      // Best-effort: only probe memory if the effective address is in a
+      // typical ROM/RAM region to avoid unintended side effects on IO.
+      if ((effAddr >= 0x02000000 && effAddr < 0x0A000000)) {
+        tableWord0 = memory.Read32(effAddr);
+        tableWord1 = memory.Read32(effAddr + 4);
+      }
+
+      // Stack snapshot to understand the current call frame.
+      if (sp >= 0x02000000 && sp < 0x0A000000) {
+        sp0 = memory.Read32(sp);
+        sp1 = memory.Read32(sp + 4);
+        sp2 = memory.Read32(sp + 8);
+      }
+
       std::cout << "[CRASH TRACE] LDR at 0x3003308 with BAD R0=0x" << std::hex
-                << registers[0] << " R11=0x" << registers[11] << " R12=0x"
-                << registers[12] << std::dec << std::endl;
+                << index << " R11=0x" << registers[11] << " R12=0x" << base
+                << " SP=0x" << sp << " effAddr=0x" << effAddr << " tbl[0]=0x"
+                << tableWord0 << " tbl[1]=0x" << tableWord1 << " SP[0]=0x"
+                << sp0 << " SP[1]=0x" << sp1 << " SP[2]=0x" << sp2 << std::dec
+                << std::endl;
     }
   }
+
   if (crashTraceRequested && pc >= 0x3003300 && pc <= 0x3003320) {
     crashTraceEnabled = true;
   }
@@ -953,7 +994,7 @@ void ARM7TDMI::Step() {
   // GBAMemory::InitializeHLEBIOS/Reset). For correctness, let that trampoline
   // execute as normal instructions. For other BIOS entry points that games may
   // call directly, we still provide HLE.
-  if (pc < 0x4000) {
+  if (!memory.HasLLEBIOS() && pc < 0x4000) {
     const uint32_t pcAligned = thumbMode ? (pc & ~1u) : (pc & ~3u);
 
     const bool inIrqVector = (pcAligned == 0x00000018u);
@@ -1016,6 +1057,35 @@ void ARM7TDMI::Step() {
     currentInstrThumb = true;
     currentOp16 = instruction;
     currentOp32 = 0;
+
+    // DKC audio investigation: focused instruction-window trace around the
+    // ROM site that ultimately populates the IWRAM jump-table slot at
+    // 0x03003378-0x0300337F (observed PC ~= 0x0803234C in prior logs).
+    // Enable with: AIO_TRACE_DKC_AUDIO=1
+    if (EnvFlagCached("AIO_TRACE_DKC_AUDIO")) {
+      if (instrAddr >= 0x08032320u && instrAddr <= 0x08032380u) {
+        static int dkcWinThumbLogs = 0;
+        if (dkcWinThumbLogs < 2000) {
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_PC_WIN mode=T pc=0x%08x op=0x%04x "
+              "R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x "
+              "R4=0x%08x R5=0x%08x R6=0x%08x R7=0x%08x "
+              "R8=0x%08x R9=0x%08x R10=0x%08x R11=0x%08x "
+              "R12=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+              (unsigned)instrAddr, (unsigned)instruction,
+              (unsigned)registers[0], (unsigned)registers[1],
+              (unsigned)registers[2], (unsigned)registers[3],
+              (unsigned)registers[4], (unsigned)registers[5],
+              (unsigned)registers[6], (unsigned)registers[7],
+              (unsigned)registers[8], (unsigned)registers[9],
+              (unsigned)registers[10], (unsigned)registers[11],
+              (unsigned)registers[12], (unsigned)registers[13],
+              (unsigned)registers[14], (unsigned)cpsr);
+          dkcWinThumbLogs++;
+        }
+      }
+    }
 
     // SMA2 investigation: trace the save/repair decision window.
     // Enable with: AIO_TRACE_SMA2_SAVE_WINDOW=1
@@ -1376,6 +1446,35 @@ void ARM7TDMI::Step() {
     currentOp16 = 0;
     currentOp32 = instruction;
 
+    // DKC audio investigation: focused instruction-window trace around the
+    // ROM site that ultimately populates the IWRAM jump-table slot at
+    // 0x03003378-0x0300337F (observed PC ~= 0x0803234C in prior logs).
+    // Enable with: AIO_TRACE_DKC_AUDIO=1
+    if (EnvFlagCached("AIO_TRACE_DKC_AUDIO")) {
+      if (instrAddr >= 0x08032320u && instrAddr <= 0x08032380u) {
+        static int dkcWinArmLogs = 0;
+        if (dkcWinArmLogs < 2000) {
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_PC_WIN mode=A pc=0x%08x op=0x%08x "
+              "R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x "
+              "R4=0x%08x R5=0x%08x R6=0x%08x R7=0x%08x "
+              "R8=0x%08x R9=0x%08x R10=0x%08x R11=0x%08x "
+              "R12=0x%08x SP=0x%08x LR=0x%08x CPSR=0x%08x",
+              (unsigned)instrAddr, (unsigned)instruction,
+              (unsigned)registers[0], (unsigned)registers[1],
+              (unsigned)registers[2], (unsigned)registers[3],
+              (unsigned)registers[4], (unsigned)registers[5],
+              (unsigned)registers[6], (unsigned)registers[7],
+              (unsigned)registers[8], (unsigned)registers[9],
+              (unsigned)registers[10], (unsigned)registers[11],
+              (unsigned)registers[12], (unsigned)registers[13],
+              (unsigned)registers[14], (unsigned)cpsr);
+          dkcWinArmLogs++;
+        }
+      }
+    }
+
     registers[15] = instrAddr + 4u;
     Decode(instruction);
 
@@ -1657,6 +1756,29 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
   bool overflow = OverflowFlagSet(cpsr);
   bool cOut = carry;
 
+  const bool traceDkcAudio = EnvFlagCached("AIO_TRACE_DKC_AUDIO");
+  if (traceDkcAudio) {
+    // Targeted trace for DKC audio engine crash analysis.
+    // Log the specific ADD that computes the function pointer from the
+    // jump table, and any arithmetic around the later bad branch site in
+    // EWRAM. These addresses are based on observed crash logs.
+    const uint32_t instrAddr = currentInstrAddr;
+    if (instrAddr == 0x0300330Cu || instrAddr == 0x020140D8u) {
+      const uint32_t tracedInstr =
+          currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "DKC_DP TRACE pc=0x%08x instr=0x%08x opcode=%u S=%u rn=R%u "
+          "rd=R%u rnVal=0x%08x op2=0x%08x R0=0x%08x R1=0x%08x R2=0x%08x "
+          "R3=0x%08x R12=0x%08x LR=0x%08x",
+          (unsigned)instrAddr, (unsigned)tracedInstr, (unsigned)opcode,
+          S ? 1u : 0u, (unsigned)rn, (unsigned)rd, (unsigned)rnVal,
+          (unsigned)op2, (unsigned)registers[0], (unsigned)registers[1],
+          (unsigned)registers[2], (unsigned)registers[3],
+          (unsigned)registers[12], (unsigned)registers[14]);
+    }
+  }
+
   switch (opcode) {
   case DPOpcode::AND: // AND
     result = rnVal & op2;
@@ -1768,6 +1890,8 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
   // Write back result if not a test instruction
   if (opcode != DPOpcode::TST && opcode != DPOpcode::TEQ &&
       opcode != DPOpcode::CMP && opcode != DPOpcode::CMN) {
+    uint32_t oldR0 = registers[0];
+    const uint32_t oldRdVal = registers[rd];
     if (rd == Register::PC) {
       // DEBUG: Log PC writes during IRQ return
       if (S && opcode == DPOpcode::SUB) {
@@ -1787,6 +1911,62 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       LogBranch(from, result);
     }
     registers[rd] = result;
+
+    // DKC audio investigation: capture data-processing results in the
+    // narrow ROM window around the site that computes the bogus
+    // function-pointer/jump-table entry later stored at 0x03003378-0x0300337F.
+    // Enable with: AIO_TRACE_DKC_AUDIO=1
+    if (traceDkcAudio) {
+      const uint32_t pcWin = currentInstrAddr;
+      if (pcWin >= 0x08032320u && pcWin <= 0x08032380u) {
+        const uint32_t tracedInstr =
+            currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+        Logger::Instance().LogFmt(
+            LogLevel::Info, "CPU",
+            "DKC_DP_WIN pc=0x%08x instr=0x%08x opcode=%u S=%u rn=R%u rd=R%u "
+            "rnVal=0x%08x op2=0x%08x oldRd=0x%08x newRd=0x%08x",
+            (unsigned)pcWin, (unsigned)tracedInstr, (unsigned)opcode,
+            S ? 1u : 0u, (unsigned)rn, (unsigned)rd, (unsigned)rnVal,
+            (unsigned)op2, (unsigned)oldRdVal, (unsigned)registers[rd]);
+      }
+
+      // Also trace any writes to R12 in the IWRAM audio routine window
+      // where the jump-table base pointer is established. This helps
+      // diagnose why R12 ends up as 0x03003378 instead of the expected
+      // base (e.g., 0x03004000) when computing function pointers.
+      if (rd == 12) {
+        const uint32_t pcIw = currentInstrAddr;
+        if (pcIw >= 0x03002C00u && pcIw <= 0x03003800u) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R12_WRITE(DP) pc=0x%08x instr=0x%08x opcode=%u S=%u rn=R%u "
+              "oldR12=0x%08x rnVal=0x%08x op2=0x%08x newR12=0x%08x",
+              (unsigned)pcIw, (unsigned)tracedInstr, (unsigned)opcode,
+              S ? 1u : 0u, (unsigned)rn, (unsigned)oldRdVal, (unsigned)rnVal,
+              (unsigned)op2, (unsigned)registers[12]);
+        }
+      }
+    }
+
+    // DKC-specific tracing: track actual writes to R0 in the regions of
+    // interest once the result has been computed and committed.
+    if (traceDkcAudio && rd == 0) {
+      const uint32_t pc = currentInstrAddr;
+      if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+          (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+        const uint32_t tracedInstr =
+            currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+        Logger::Instance().LogFmt(
+            LogLevel::Info, "CPU",
+            "DKC_R0_WRITE pc=0x%08x instr=0x%08x opcode=%u S=%u rn=R%u "
+            "oldR0=0x%08x rnVal=0x%08x op2=0x%08x newR0=0x%08x",
+            (unsigned)pc, (unsigned)tracedInstr, (unsigned)opcode, S ? 1u : 0u,
+            (unsigned)rn, (unsigned)oldR0, (unsigned)rnVal, (unsigned)op2,
+            (unsigned)registers[0]);
+      }
+    }
   }
 
   // Update Flags (CPSR) if S is set
@@ -1907,14 +2087,37 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
     // Load
     if (B) {
       const uint32_t old = registers[rd];
-      registers[rd] = memory.Read8(targetAddr);
+      uint32_t val8 = memory.Read8(targetAddr);
+      registers[rd] = val8;
+      if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
+        const uint32_t pc = currentInstrAddr;
+        if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+            (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R0_WRITE(LDRB) pc=0x%08x instr=0x%08x rn=R%u oldR0=0x%08x "
+              "addr=0x%08x val=0x%08x newR0=0x%08x",
+              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn, (unsigned)old,
+              (unsigned)targetAddr, (unsigned)val8, (unsigned)registers[0]);
+        }
+      }
       if (rd == 8) {
         TraceR8Write(currentInstrAddr, currentInstrThumb,
                      currentInstrThumb ? (uint32_t)currentOp16 : currentOp32,
                      old, registers[rd]);
       }
     } else {
-      uint32_t val = memory.Read32(targetAddr);
+      // ARM ARM: word loads from unaligned addresses are rotated right by
+      // 8 * (addr[1:0]) after reading from the aligned word address. Many
+      // games (including DKC) rely on this for jump tables in IWRAM.
+      const uint32_t alignedAddr = targetAddr & ~3u;
+      uint32_t val = memory.Read32(alignedAddr);
+      const uint32_t rotBytes = (targetAddr & 3u) * 8u;
+      if (rotBytes != 0) {
+        val = (val >> rotBytes) | (val << (32u - rotBytes));
+      }
       if (rd == Register::PC) {
         const uint32_t from = registers[Register::PC] - 4;
         TracePCWrite("LDR", from, val, instruction, targetAddr, rn);
@@ -1922,6 +2125,33 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
       }
       const uint32_t old = registers[rd];
       registers[rd] = val;
+      if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
+        const uint32_t pc = currentInstrAddr;
+        if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+            (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R0_WRITE(LDR) pc=0x%08x instr=0x%08x rn=R%u oldR0=0x%08x "
+              "addr=0x%08x val=0x%08x newR0=0x%08x",
+              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn, (unsigned)old,
+              (unsigned)targetAddr, (unsigned)val, (unsigned)registers[0]);
+        }
+      }
+      if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 12) {
+        const uint32_t pc = currentInstrAddr;
+        if (pc >= 0x03002C00u && pc <= 0x03003800u) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R12_WRITE(LDR) pc=0x%08x instr=0x%08x rn=R%u oldR12=0x%08x "
+              "addr=0x%08x val=0x%08x newR12=0x%08x",
+              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn, (unsigned)old,
+              (unsigned)targetAddr, (unsigned)val, (unsigned)registers[12]);
+        }
+      }
       if (rd == 8) {
         TraceR8Write(currentInstrAddr, currentInstrThumb,
                      currentInstrThumb ? (uint32_t)currentOp16 : currentOp32,
@@ -2092,6 +2322,21 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
         } else {
           const uint32_t old = registers[i];
           registers[i] = val;
+          if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && i == 0) {
+            const uint32_t pc = currentInstrAddr;
+            if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+                (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+              const uint32_t tracedInstr =
+                  currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+              Logger::Instance().LogFmt(
+                  LogLevel::Info, "CPU",
+                  "DKC_R0_WRITE(LDM) pc=0x%08x instr=0x%08x rn=R%u addr=0x%08x "
+                  "oldR0=0x%08x val=0x%08x newR0=0x%08x",
+                  (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
+                  (unsigned)currentAddr - 4u, (unsigned)old, (unsigned)val,
+                  (unsigned)registers[0]);
+            }
+          }
           if (i == 8) {
             TraceR8Write(currentInstrAddr, currentInstrThumb,
                          currentInstrThumb ? (uint32_t)currentOp16
@@ -2260,12 +2505,56 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
                   << std::endl;
       }
       registers[rd] = value;
+      if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
+        const uint32_t pc = currentInstrAddr;
+        if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+            (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R0_WRITE(LDRH) pc=0x%08x instr=0x%08x rn=R%u addr=0x%08x "
+              "val=0x%08x newR0=0x%08x",
+              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
+              (unsigned)targetAddr, (unsigned)value, (unsigned)registers[0]);
+        }
+      }
     } else if (opcode == 2) { // LDRSB (Signed Byte)
       int8_t val = (int8_t)memory.Read8(targetAddr);
       registers[rd] = (int32_t)val;
+      if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
+        const uint32_t pc = currentInstrAddr;
+        if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+            (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R0_WRITE(LDRSB) pc=0x%08x instr=0x%08x rn=R%u addr=0x%08x "
+              "val=0x%08x newR0=0x%08x",
+              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
+              (unsigned)targetAddr, (unsigned)(int32_t)val,
+              (unsigned)registers[0]);
+        }
+      }
     } else if (opcode == 3) { // LDRSH (Signed Halfword)
       int16_t val = (int16_t)memory.Read16(targetAddr);
       registers[rd] = (int32_t)val;
+      if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
+        const uint32_t pc = currentInstrAddr;
+        if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
+            (pc >= 0x02013C00u && pc <= 0x02014400u)) {
+          const uint32_t tracedInstr =
+              currentInstrThumb ? (uint32_t)currentOp16 : currentOp32;
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "DKC_R0_WRITE(LDRSH) pc=0x%08x instr=0x%08x rn=R%u addr=0x%08x "
+              "val=0x%08x newR0=0x%08x",
+              (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
+              (unsigned)targetAddr, (unsigned)(int32_t)val,
+              (unsigned)registers[0]);
+        }
+      }
     }
   } else {
     // Store
@@ -3979,7 +4268,14 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       if (B) {
         registers[rd] = memory.Read8(addr);
       } else {
-        const uint32_t val = memory.Read32(addr);
+        // Thumb word loads share the same unaligned semantics as ARM LDR:
+        // align address, then rotate right by 8 * (addr[1:0]).
+        const uint32_t alignedAddr = addr & ~3u;
+        uint32_t val = memory.Read32(alignedAddr);
+        const uint32_t rotBytes = (addr & 3u) * 8u;
+        if (rotBytes != 0) {
+          val = (val >> rotBytes) | (val << (32u - rotBytes));
+        }
         TraceWatchRead32(currentInstrAddr, true, (uint32_t)currentOp16, addr,
                          val, registers[13]);
         registers[rd] = val;
@@ -4057,8 +4353,15 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     if (L) { // Load
       if (B) {
         registers[rd] = memory.Read8(addr);
-      } else
-        registers[rd] = memory.Read32(addr);
+      } else {
+        const uint32_t alignedAddr = addr & ~3u;
+        uint32_t val = memory.Read32(alignedAddr);
+        const uint32_t rotBytes = (addr & 3u) * 8u;
+        if (rotBytes != 0) {
+          val = (val >> rotBytes) | (val << (32u - rotBytes));
+        }
+        registers[rd] = val;
+      }
     } else { // Store
       if (B)
         memory.Write8(addr, registers[rd] & 0xFF);
