@@ -1665,9 +1665,16 @@ void ARM7TDMI::Decode(uint32_t instruction) {
   // Software Interrupt: xxxx 1111 xxxx xxxx xxxx xxxx xxxx xxxx
   else if ((instruction & ARMInstructionFormat::SWI_MASK) ==
            ARMInstructionFormat::SWI_PATTERN) {
-    // ARM SWI has a 24-bit immediate; GBA BIOS uses the low 8 bits as the
-    // function number.
-    ExecuteSWI(instruction & 0xFF);
+    // ARM SWI has a 24-bit immediate.
+    // Commercial ROMs commonly encode the SWI number in the *upper* byte of
+    // the immediate (e.g. 0xEF110000 for SWI 0x11), while others use the more
+    // conventional low-byte encoding (e.g. 0xEF000011).
+    const uint32_t imm24 = (instruction & 0x00FFFFFFu);
+    uint32_t swi = (imm24 & 0xFFu);
+    if (swi == 0u) {
+      swi = ((imm24 >> 16) & 0xFFu);
+    }
+    ExecuteSWI(swi);
   } else {
     std::cout << "Unknown Instruction: 0x" << std::hex << instruction
               << " at PC=" << (registers[15] - 4)
