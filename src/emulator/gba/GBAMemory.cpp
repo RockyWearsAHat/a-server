@@ -2053,6 +2053,15 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (offset >= 0x18000u) {
       offset -= 0x8000u;
     }
+
+    // GBA VRAM byte-write quirks:
+    // - BG VRAM (0x06000000-0x0600FFFF): 8-bit writes duplicate to both bytes
+    //   of the addressed halfword on the 16-bit bus.
+    // - OBJ VRAM (0x06010000-0x06017FFF): 8-bit writes are ignored.
+    if (offset >= 0x10000u) {
+      break;
+    }
+
     uint32_t alignedOffset = offset & ~1;
     if (alignedOffset + 1 < vram.size()) {
       vram[alignedOffset] = value;

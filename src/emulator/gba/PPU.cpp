@@ -18,6 +18,14 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
+inline int EnvInt(const char *name, int defaultValue) {
+  const char *v = std::getenv(name);
+  if (!EnvTruthy(v)) {
+    return defaultValue;
+  }
+  return std::atoi(v);
+}
+
 template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
   static const bool enabled = EnvTruthy(std::getenv(name));
   return enabled;
@@ -93,6 +101,16 @@ struct ObjPixelTraceConfig {
   int maxHits{16};
 };
 
+struct OamTraceConfig {
+  bool enabled{false};
+  int startFrame{0};
+  int endFrame{-1};
+  int maxLines{1200};
+  bool spriteDetails{false};
+  int spriteDetailsFrame{-1};
+  int spriteDetailsMax{16};
+};
+
 const ObjPixelTraceConfig &GetObjPixelTraceConfig() {
   static ObjPixelTraceConfig cfg;
   static bool initialized = false;
@@ -112,6 +130,25 @@ const ObjPixelTraceConfig &GetObjPixelTraceConfig() {
       cfg.maxHits = std::atoi(s);
       if (cfg.maxHits <= 0)
         cfg.maxHits = 16;
+    }
+  }
+  return cfg;
+}
+
+const OamTraceConfig &GetOamTraceConfig() {
+  static OamTraceConfig cfg;
+  static bool initialized = false;
+  if (!initialized) {
+    initialized = true;
+    cfg.enabled = EnvTruthy(std::getenv("AIO_TRACE_PPU_OAM"));
+    cfg.startFrame = EnvInt("AIO_TRACE_PPU_OAM_START", 0);
+    cfg.endFrame = EnvInt("AIO_TRACE_PPU_OAM_END", -1);
+    cfg.maxLines = EnvInt("AIO_TRACE_PPU_OAM_MAX", 1200);
+    cfg.spriteDetails = EnvTruthy(std::getenv("AIO_TRACE_PPU_OAM_SPR"));
+    cfg.spriteDetailsFrame = EnvInt("AIO_TRACE_PPU_OAM_SPR_FRAME", -1);
+    cfg.spriteDetailsMax = EnvInt("AIO_TRACE_PPU_OAM_SPR_MAX", 16);
+    if (cfg.spriteDetailsMax <= 0) {
+      cfg.spriteDetailsMax = 16;
     }
   }
   return cfg;
@@ -390,48 +427,196 @@ void PPU::DrawScanline() {
   // Enable with: AIO_TRACE_PPU_FRAMESTATE=1
   if (scanline == 0) {
     static const bool traceFrameState =
-        (std::getenv("AIO_TRACE_PPU_FRAMESTATE") != nullptr);
+        EnvTruthy(std::getenv("AIO_TRACE_PPU_FRAMESTATE"));
     if (traceFrameState) {
-      static int framesLogged = 0;
-      if (framesLogged < 1200) {
-        const uint16_t bldcnt = ReadRegister(0x50);
-        const uint16_t bldalpha = ReadRegister(0x52);
-        const uint16_t winin = ReadRegister(0x48);
-        const uint16_t winout = ReadRegister(0x4A);
-        const uint16_t mosaic = ReadRegister(0x4C);
-        const uint16_t win0h = ReadRegister(0x40);
-        const uint16_t win0v = ReadRegister(0x44);
-        const uint16_t win1h = ReadRegister(0x42);
-        const uint16_t win1v = ReadRegister(0x46);
-        const uint16_t bg0cnt = ReadRegister(0x08);
-        const uint16_t bg1cnt = ReadRegister(0x0A);
-        const uint16_t bg2cnt = ReadRegister(0x0C);
-        const uint16_t bg3cnt = ReadRegister(0x0E);
-        const uint16_t bg0hofs = ReadRegister(0x10);
-        const uint16_t bg0vofs = ReadRegister(0x12);
-        const uint16_t bg1hofs = ReadRegister(0x14);
-        const uint16_t bg1vofs = ReadRegister(0x16);
-        const uint16_t bg2hofs = ReadRegister(0x18);
-        const uint16_t bg2vofs = ReadRegister(0x1A);
-        const uint16_t bg3hofs = ReadRegister(0x1C);
-        const uint16_t bg3vofs = ReadRegister(0x1E);
+      static bool initialized = false;
+      static int startFrame = 0;
+      static int endFrame = -1;
+      static int maxLines = 1200;
+      static int linesLogged = 0;
 
-        std::cout << "[PPU_FRAME] f=" << framesLogged << " DISPCNT=0x"
-                  << std::hex << dispcnt << " mode=" << std::dec << mode
-                  << " BG_EN=0x" << std::hex << ((dispcnt >> 8) & 0xF)
-                  << " OBJ_EN=" << (((dispcnt >> 12) & 1) ? 1 : 0) << " WIN=0x"
-                  << (((dispcnt >> 13) & 0x7) | (((dispcnt >> 15) & 1) << 3))
-                  << " BG0=0x" << bg0cnt << " BG1=0x" << bg1cnt << " BG2=0x"
-                  << bg2cnt << " BG3=0x" << bg3cnt << " BG0HOFS=0x" << bg0hofs
-                  << " BG0VOFS=0x" << bg0vofs << " BG1HOFS=0x" << bg1hofs
-                  << " BG1VOFS=0x" << bg1vofs << " BG2HOFS=0x" << bg2hofs
-                  << " BG2VOFS=0x" << bg2vofs << " BG3HOFS=0x" << bg3hofs
-                  << " BG3VOFS=0x" << bg3vofs << " BLDCNT=0x" << bldcnt
-                  << " BLDALPHA=0x" << bldalpha << " WININ=0x" << winin
-                  << " WINOUT=0x" << winout << " WIN0H=0x" << win0h
-                  << " WIN0V=0x" << win0v << " WIN1H=0x" << win1h << " WIN1V=0x"
-                  << win1v << " MOSAIC=0x" << mosaic << std::dec << std::endl;
-        framesLogged++;
+      if (!initialized) {
+        initialized = true;
+        // Defaults preserve old behavior: log first 1200 frames.
+        startFrame = EnvInt("AIO_TRACE_PPU_FRAMESTATE_START", 0);
+        endFrame = EnvInt("AIO_TRACE_PPU_FRAMESTATE_END", -1);
+        maxLines = EnvInt("AIO_TRACE_PPU_FRAMESTATE_MAX", 1200);
+      }
+
+      const int fc = (int)frameCount;
+      if (fc < startFrame) {
+        return;
+      }
+      if (endFrame >= 0 && fc > endFrame) {
+        return;
+      }
+      if (maxLines >= 0 && linesLogged >= maxLines) {
+        return;
+      }
+
+      linesLogged++;
+
+      const uint16_t bldcnt = ReadRegister(0x50);
+      const uint16_t bldalpha = ReadRegister(0x52);
+      const uint16_t winin = ReadRegister(0x48);
+      const uint16_t winout = ReadRegister(0x4A);
+      const uint16_t mosaic = ReadRegister(0x4C);
+      const uint16_t win0h = ReadRegister(0x40);
+      const uint16_t win0v = ReadRegister(0x44);
+      const uint16_t win1h = ReadRegister(0x42);
+      const uint16_t win1v = ReadRegister(0x46);
+      const uint16_t bg0cnt = ReadRegister(0x08);
+      const uint16_t bg1cnt = ReadRegister(0x0A);
+      const uint16_t bg2cnt = ReadRegister(0x0C);
+      const uint16_t bg3cnt = ReadRegister(0x0E);
+      const uint16_t bg0hofs = ReadRegister(0x10);
+      const uint16_t bg0vofs = ReadRegister(0x12);
+      const uint16_t bg1hofs = ReadRegister(0x14);
+      const uint16_t bg1vofs = ReadRegister(0x16);
+      const uint16_t bg2hofs = ReadRegister(0x18);
+      const uint16_t bg2vofs = ReadRegister(0x1A);
+      const uint16_t bg3hofs = ReadRegister(0x1C);
+      const uint16_t bg3vofs = ReadRegister(0x1E);
+
+      std::cout << "[PPU_FRAME] frameCount=" << fc << " logLine=" << linesLogged
+                << " DISPCNT=0x" << std::hex << dispcnt << " mode=" << std::dec
+                << mode << " BG_EN=0x" << std::hex << ((dispcnt >> 8) & 0xF)
+                << " OBJ_EN=" << (((dispcnt >> 12) & 1) ? 1 : 0) << " WIN=0x"
+                << (((dispcnt >> 13) & 0x7) | (((dispcnt >> 15) & 1) << 3))
+                << " BG0=0x" << bg0cnt << " BG1=0x" << bg1cnt << " BG2=0x"
+                << bg2cnt << " BG3=0x" << bg3cnt << " BG0HOFS=0x" << bg0hofs
+                << " BG0VOFS=0x" << bg0vofs << " BG1HOFS=0x" << bg1hofs
+                << " BG1VOFS=0x" << bg1vofs << " BG2HOFS=0x" << bg2hofs
+                << " BG2VOFS=0x" << bg2vofs << " BG3HOFS=0x" << bg3hofs
+                << " BG3VOFS=0x" << bg3vofs << " BLDCNT=0x" << bldcnt
+                << " BLDALPHA=0x" << bldalpha << " WININ=0x" << winin
+                << " WINOUT=0x" << winout << " WIN0H=0x" << win0h << " WIN0V=0x"
+                << win0v << " WIN1H=0x" << win1h << " WIN1V=0x" << win1v
+                << " MOSAIC=0x" << mosaic << std::dec << std::endl;
+    }
+
+    const auto &oamTraceCfg = GetOamTraceConfig();
+    static int oamLinesLogged = 0;
+    if (oamTraceCfg.enabled) {
+      const int fc = (int)frameCount;
+      if (fc >= oamTraceCfg.startFrame &&
+          (oamTraceCfg.endFrame < 0 || fc <= oamTraceCfg.endFrame) &&
+          (oamTraceCfg.maxLines < 0 || oamLinesLogged < oamTraceCfg.maxLines)) {
+        oamLinesLogged++;
+
+        uint32_t enabled = 0;
+        uint32_t disabled = 0;
+        uint32_t objWindow = 0;
+        uint32_t prohibited = 0;
+        uint32_t affine = 0;
+        uint32_t semiTransparent = 0;
+        uint32_t anyNonZeroAttr = 0;
+
+        const uint8_t *oamData = memory.GetOAMData();
+        const size_t oamSize = memory.GetOAMSize();
+        const uint8_t *vramData = memory.GetVRAMData();
+        const size_t vramSize = memory.GetVRAMSize();
+        for (int i = 0; i < 128; ++i) {
+          const uint32_t oamOff = (uint32_t)(i * 8);
+          const uint16_t attr0 = ReadLE16(oamData, oamSize, oamOff);
+          const uint16_t attr1 = ReadLE16(oamData, oamSize, oamOff + 2);
+          const uint16_t attr2 = ReadLE16(oamData, oamSize, oamOff + 4);
+          if ((attr0 | attr1 | attr2) != 0) {
+            anyNonZeroAttr++;
+          }
+
+          const bool isAffine = ((attr0 >> 8) & 1) != 0;
+          const bool doubleSizeOrDisable = ((attr0 >> 9) & 1) != 0;
+          const uint8_t objMode = (attr0 >> 10) & 0x3;
+
+          if (isAffine) {
+            affine++;
+          }
+          if (objMode == 1) {
+            semiTransparent++;
+          }
+
+          if (!isAffine && doubleSizeOrDisable) {
+            disabled++;
+            continue;
+          }
+          if (objMode == 3) {
+            prohibited++;
+            continue;
+          }
+          if (objMode == 2) {
+            objWindow++;
+            continue;
+          }
+          enabled++;
+        }
+
+        std::cout << "[PPU_OAM] frameCount=" << fc << " enabled=" << enabled
+                  << " disabled=" << disabled << " objWindow=" << objWindow
+                  << " prohibited=" << prohibited << " affine=" << affine
+                  << " semiT=" << semiTransparent
+                  << " anyNonZeroAttr=" << anyNonZeroAttr << std::endl;
+
+        if (oamTraceCfg.spriteDetails &&
+            (oamTraceCfg.spriteDetailsFrame < 0 ||
+             fc == oamTraceCfg.spriteDetailsFrame)) {
+          int printed = 0;
+          const uint16_t dispcnt = ReadRegister(0x00);
+          const bool mapping1D = ((dispcnt >> 6) & 1) != 0;
+
+          for (int i = 0; i < 128 && printed < oamTraceCfg.spriteDetailsMax;
+               ++i) {
+            const uint32_t oamOff = (uint32_t)(i * 8);
+            const uint16_t attr0 = ReadLE16(oamData, oamSize, oamOff);
+            const uint16_t attr1 = ReadLE16(oamData, oamSize, oamOff + 2);
+            const uint16_t attr2 = ReadLE16(oamData, oamSize, oamOff + 4);
+
+            const bool isAffine = ((attr0 >> 8) & 1) != 0;
+            const bool doubleSizeOrDisable = ((attr0 >> 9) & 1) != 0;
+            const uint8_t objMode = (attr0 >> 10) & 0x3;
+            if (!isAffine && doubleSizeOrDisable)
+              continue;
+            if (objMode == 3 || objMode == 2)
+              continue;
+
+            const int x = attr1 & 0x1FF;
+            int y = attr0 & 0xFF;
+            if (y > 160)
+              y -= 256;
+
+            const uint8_t paletteBank = (attr2 >> 12) & 0xF;
+            const uint8_t priority = (attr2 >> 10) & 0x3;
+            const bool is8bpp = ((attr0 >> 13) & 1) != 0;
+            const uint32_t rawTileIndex = (attr2 & 0x3FFu);
+            const uint32_t baseTileIndex =
+                is8bpp ? (rawTileIndex & ~1u) : rawTileIndex;
+
+            const uint32_t tileBase = 0x06010000u;
+            const uint32_t baseAddr = tileBase + baseTileIndex * 32u;
+            const uint32_t bytesToScan = is8bpp ? 64u : 32u;
+            uint32_t nonZeroBytes = 0;
+            for (uint32_t off = 0; off < bytesToScan; ++off) {
+              const uint8_t b =
+                  ReadVram8(vramData, vramSize, (baseAddr - 0x06000000u) + off);
+              if (b != 0) {
+                nonZeroBytes++;
+              }
+            }
+
+            printed++;
+            std::cout << "[PPU_OAM_SPR] frameCount=" << fc << " i=" << i
+                      << " x=" << x << " y=" << y << " mode=" << (int)objMode
+                      << " map1D=" << (mapping1D ? 1 : 0)
+                      << " 8bpp=" << (is8bpp ? 1 : 0)
+                      << " tile=" << rawTileIndex
+                      << " baseTile=" << baseTileIndex
+                      << " prio=" << (int)priority
+                      << " palBank=" << (int)paletteBank
+                      << " tileNonZeroBytes=" << nonZeroBytes << " attr0=0x"
+                      << std::hex << attr0 << " attr1=0x" << attr1
+                      << " attr2=0x" << attr2 << std::dec << std::endl;
+          }
+        }
       }
     }
   }
@@ -633,6 +818,40 @@ void PPU::RenderOBJ() {
   // Basic OBJ Rendering (No Affine/Rotation yet)
   // OAM is at 0x07000000 (1KB)
   // 128 Sprites, 8 bytes each
+
+  // Optional: per-frame OBJ rendering stats to diagnose "sprites disappeared"
+  // issues without dumping huge pixel traces.
+  // Enable with: AIO_TRACE_PPU_OBJSTATS=1
+  // Optional: AIO_TRACE_PPU_OBJSTATS_START / _END (frameCount bounds)
+  static const bool objStatsEnabled =
+      EnvTruthy(std::getenv("AIO_TRACE_PPU_OBJSTATS"));
+  static const int objStatsStart = EnvInt("AIO_TRACE_PPU_OBJSTATS_START", 0);
+  static const int objStatsEnd = EnvInt("AIO_TRACE_PPU_OBJSTATS_END", -1);
+  static uint64_t objStatsFrame = UINT64_MAX;
+  static uint64_t objStatsNonZero = 0;
+  static uint64_t objStatsDrawn = 0;
+  static uint64_t objStatsWinRejected = 0;
+  static uint64_t objStatsPrioRejected = 0;
+  if (objStatsEnabled) {
+    if (objStatsFrame == UINT64_MAX) {
+      objStatsFrame = frameCount;
+    }
+    if (objStatsFrame != frameCount) {
+      const int prev = (int)objStatsFrame;
+      if (prev >= objStatsStart && (objStatsEnd < 0 || prev <= objStatsEnd)) {
+        std::cout << "[PPU_OBJSTATS] frameCount=" << prev
+                  << " nonZero=" << objStatsNonZero
+                  << " drawn=" << objStatsDrawn
+                  << " winReject=" << objStatsWinRejected
+                  << " prioReject=" << objStatsPrioRejected << std::endl;
+      }
+      objStatsFrame = frameCount;
+      objStatsNonZero = 0;
+      objStatsDrawn = 0;
+      objStatsWinRejected = 0;
+      objStatsPrioRejected = 0;
+    }
+  }
 
   const auto &objTraceCfg = GetObjPixelTraceConfig();
   static int objTraceFrame = -1;
@@ -879,8 +1098,21 @@ void PPU::RenderOBJ() {
           }
         }
         if (colorIndex != 0) {
+          if (objStatsEnabled) {
+            const int fc = (int)frameCount;
+            if (fc >= objStatsStart && (objStatsEnd < 0 || fc <= objStatsEnd)) {
+              objStatsNonZero++;
+            }
+          }
           // Check if OBJ layer is enabled by window settings at this pixel
           if (!IsLayerEnabledAtPixel(screenX, scanline, 4)) {
+            if (objStatsEnabled) {
+              const int fc = (int)frameCount;
+              if (fc >= objStatsStart &&
+                  (objStatsEnd < 0 || fc <= objStatsEnd)) {
+                objStatsWinRejected++;
+              }
+            }
             continue; // Window masks OBJ at this position
           }
 
@@ -893,6 +1125,13 @@ void PPU::RenderOBJ() {
           // Only draw if sprite priority <= existing pixel priority
           // (lower number = higher display priority)
           if (priority <= priorityBuffer[pixelIndex]) {
+            if (objStatsEnabled) {
+              const int fc = (int)frameCount;
+              if (fc >= objStatsStart &&
+                  (objStatsEnd < 0 || fc <= objStatsEnd)) {
+                objStatsDrawn++;
+              }
+            }
             // Fetch Color (OBJ Palette starts at 0x05000200)
             uint32_t paletteAddr = 0x05000200;
             if (is8bpp) {
@@ -1008,6 +1247,14 @@ void PPU::RenderOBJ() {
                   std::cout << "[PPU_OBJTILE_DUMP] failed to open " << file
                             << std::endl;
                 }
+              }
+            }
+          } else {
+            if (objStatsEnabled) {
+              const int fc = (int)frameCount;
+              if (fc >= objStatsStart &&
+                  (objStatsEnd < 0 || fc <= objStatsEnd)) {
+                objStatsPrioRejected++;
               }
             }
           }

@@ -93,8 +93,8 @@ bool MainWindow::DumpCurrentFramePPM(const std::string &path,
 
   AIO::Emulator::Common::Logger::Instance().LogFmt(
       AIO::Emulator::Common::LogLevel::Info, "MainWindow",
-      "DumpCurrentFramePPM: wrote %dx%d PPM to '%s' (nonBlackRatio=%.6f)", w,
-      h, path.c_str(), ratio);
+      "DumpCurrentFramePPM: wrote %dx%d PPM to '%s' (nonBlackRatio=%.6f)", w, h,
+      path.c_str(), ratio);
   return true;
 }
 
@@ -683,6 +683,14 @@ void MainWindow::UpdateDisplay() {
         nextScriptEvent_++;
       }
       inputState = scriptKeyState_;
+    }
+
+    // Publish the computed input state to the emulation thread.
+    // The core input update is applied from EmulatorThreadMain() in small
+    // chunks for low latency; UpdateDisplay() is where scripted input events
+    // are advanced based on the chosen timebase.
+    if (inEmu) {
+      pendingEmuKeyinput.store(inputState, std::memory_order_relaxed);
     }
 
     // Copy framebuffer to display image
