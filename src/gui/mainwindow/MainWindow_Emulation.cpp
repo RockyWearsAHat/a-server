@@ -442,12 +442,84 @@ void MainWindow::EmulatorThreadMain() {
   };
 
   while (emulatorRunning) {
-    if (emulatorPaused) {
+    // Handle step-back request FIRST (before pause check)
+    int stepBackCount = emulatorStepBack.exchange(0, std::memory_order_relaxed);
+    if (stepBackCount > 0) {
+      std::cout << "[STEP_BACK] Request detected, history size="
+                << frameHistory.size() << " emulator="
+                << (currentEmulator == EmulatorType::GBA ? "GBA" : "other")
+                << std::endl;
+
+      if (!frameHistory.empty() && currentEmulator == EmulatorType::GBA) {
+        // Get the most recent snapshot from history
+        size_t snapshotIdx;
+        if (frameHistory.size() < MAX_FRAME_HISTORY) {
+          if (frameHistory.size() > 0) {
+            snapshotIdx = frameHistory.size() - 1;
+          } else {
+            snapshotIdx = 0;
+          }
+        } else {
+          snapshotIdx =
+              (frameHistoryIndex + MAX_FRAME_HISTORY - 1) % MAX_FRAME_HISTORY;
+        }
+
+        if (frameHistory.size() > 0) {
+          const auto &snap = frameHistory[snapshotIdx];
+          std::cout << "[STEP_BACK] Restoring frame " << snap.frameNum
+                    << " (current=" << emulatorFrameNumber.load() << ")"
+                    << std::endl;
+
+          // Restore memory
+          auto &mem = gba.GetMemory();
+          std::copy(snap.iwram.begin(), snap.iwram.end(), mem.GetIWRAM());
+          std::copy(snap.ewram.begin(), snap.ewram.end(), mem.GetEWRAM());
+          std::copy(snap.vram.begin(), snap.vram.end(), mem.GetVRAM());
+          std::copy(snap.oam.begin(), snap.oam.end(), mem.GetOAM());
+          std::copy(snap.palette.begin(), snap.palette.end(),
+                    mem.GetPaletteRAM());
+          std::copy(snap.ioRegs.begin(), snap.ioRegs.end(), mem.GetIORegs());
+
+          // Restore CPU state
+          for (int i = 0; i < 16; i++) {
+            gba.SetRegister(i, snap.cpuRegisters[i]);
+          }
+
+          // Restore framebuffer so display updates immediately
+          if (!snap.framebuffer.empty()) {
+            gba.GetPPU().RestoreFramebuffer(snap.framebuffer);
+          }
+
+          emulatorFrameNumber.store(snap.frameNum, std::memory_order_relaxed);
+
+          // Remove this snapshot from history
+          if (frameHistory.size() < MAX_FRAME_HISTORY) {
+            frameHistory.pop_back();
+          } else {
+            if (frameHistoryIndex > 0) {
+              frameHistoryIndex--;
+            } else {
+              frameHistoryIndex = MAX_FRAME_HISTORY - 1;
+            }
+          }
+
+          std::cout << "[STEP_BACK] Restore complete, staying paused"
+                    << std::endl;
+        }
+      }
+
+      // After step-back, update timing and continue (stay paused)
+      nextFrame = Clock::now();
+      continue;
+    }
+
+    if (emulatorPaused && !emulatorStepOne.load()) {
       nextFrame = Clock::now();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
 
+    // Execute one frame
     if (currentEmulator == EmulatorType::GBA) {
       int totalCycles = 0;
 
@@ -490,6 +562,50 @@ void MainWindow::EmulatorThreadMain() {
       }
     } else if (currentEmulator == EmulatorType::Switch) {
       switchEmulator.RunFrame();
+    }
+
+    // Always save frame snapshot for step-back capability (BEFORE incrementing
+    // counter)
+    if (currentEmulator == EmulatorType::GBA) {
+      FrameSnapshot snap;
+      snap.frameNum = emulatorFrameNumber.load();
+
+      // Capture key memory regions
+      const auto &mem = gba.GetMemory();
+      snap.iwram.assign(mem.GetIWRAM(), mem.GetIWRAM() + 0x8000);
+      snap.ewram.assign(mem.GetEWRAM(), mem.GetEWRAM() + 0x40000);
+      snap.vram.assign(mem.GetVRAMData(),
+                       mem.GetVRAMData() + mem.GetVRAMSize());
+      snap.oam.assign(mem.GetOAMData(), mem.GetOAMData() + mem.GetOAMSize());
+      snap.palette.assign(mem.GetPaletteData(),
+                          mem.GetPaletteData() + mem.GetPaletteSize());
+      snap.ioRegs.assign(mem.GetIORegs(), mem.GetIORegs() + 0x400);
+
+      // Capture framebuffer for display
+      const auto &fb = gba.GetPPU().GetFramebuffer();
+      snap.framebuffer.assign(fb.begin(), fb.end());
+
+      // Capture CPU state
+      for (int i = 0; i < 16; i++) {
+        snap.cpuRegisters[i] = gba.GetRegister(i);
+      }
+      snap.cpsr = gba.GetCPSR();
+
+      // Ring buffer for history
+      if (frameHistory.size() < MAX_FRAME_HISTORY) {
+        frameHistory.push_back(std::move(snap));
+      } else {
+        frameHistory[frameHistoryIndex] = std::move(snap);
+        frameHistoryIndex = (frameHistoryIndex + 1) % MAX_FRAME_HISTORY;
+      }
+    }
+
+    // Increment frame counter
+    emulatorFrameNumber.fetch_add(1, std::memory_order_relaxed);
+
+    // If step-one was requested, pause after this frame
+    if (emulatorStepOne.exchange(false, std::memory_order_relaxed)) {
+      emulatorPaused.store(true, std::memory_order_relaxed);
     }
 
     // Advance deadline (pick duration based on active emulator).
@@ -774,7 +890,10 @@ void MainWindow::UpdateDisplay() {
   // Update dev panel if visible
   if (devPanelLabel->isVisible()) {
     ::std::stringstream ss;
+    ss << "<b>Frame:</b> " << emulatorFrameNumber.load() << "<br>";
     ss << "<b>FPS:</b> " << ::std::fixed << ::std::setprecision(1) << currentFPS
+       << "<br>";
+    ss << "<b>Status:</b> " << (emulatorPaused.load() ? "PAUSED" : "RUNNING")
        << "<br>";
 
     if (currentEmulator == EmulatorType::GBA) {

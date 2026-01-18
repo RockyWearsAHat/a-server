@@ -585,6 +585,11 @@ bool GBA::IsThumbMode() const {
 
 uint32_t GBA::GetRegister(int reg) const { return cpu->GetRegister(reg); }
 
+void GBA::SetRegister(int reg, uint32_t val) {
+  if (cpu)
+    cpu->SetRegister(reg, val);
+}
+
 uint32_t GBA::GetCPSR() const {
   if (cpu)
     return cpu->GetCPSR();
@@ -633,6 +638,14 @@ void GBA::Continue() {
 void GBA::DumpCPUState(std::ostream &os) const {
   if (cpu)
     cpu->DumpState(os);
+}
+
+void GBA::FlushPendingPeripheralCycles() {
+  if (pendingPeripheralCycles > 0) {
+    memory->AdvanceCycles(pendingPeripheralCycles);
+    pendingPeripheralCycles = 0;
+    cpu->PollInterrupts();
+  }
 }
 
 void GBA::StepBack() {

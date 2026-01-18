@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -558,10 +559,11 @@ void ARM7TDMI::Step() {
   const uint32_t r11Now = registers[11];
   if (!g_reportedFirstR11NonZero && r11Now != 0) {
     g_reportedFirstR11NonZero = true;
-    Logger::Instance().LogFmt(
-        LogLevel::Error, "CPU",
-        "R11 FIRST!=0 observed at PC=0x%08x mode=%c R11=0x%08x",
-        currentInstrAddr, currentInstrThumb ? 'T' : 'A', r11Now);
+    // DISABLED: R11 error logging to avoid potential interference
+    // Logger::Instance().LogFmt(
+    //     LogLevel::Error, "CPU",
+    //     "R11 FIRST!=0 observed at PC=0x%08x mode=%c R11=0x%08x",
+    //     currentInstrAddr, currentInstrThumb ? 'T' : 'A', r11Now);
   }
 
   if (kEnableHeavyCpuTraces && currentInstrAddr >= 0x08007310 &&
@@ -643,22 +645,22 @@ void ARM7TDMI::Step() {
 
     if (!g_reportedFirstR11Zero && g_lastR11Observed != 0 && r11Now == 0) {
       g_reportedFirstR11Zero = true;
-      Logger::Instance().LogFmt(
-          LogLevel::Error, "CPU",
-          "R11 FIRST->0 (detected in Step prologue) at fromPC=0x%08x mode=%c "
-          "instr=0x%08x old=0x%08x new=0x%08x",
-          currentInstrAddr, currentInstrThumb ? 'T' : 'A', instr,
-          g_lastR11Observed, r11Now);
-
-      Logger::Instance().LogFmt(LogLevel::Error, "CPU",
-                                "R11 HISTORY (most recent last):");
-      for (const auto &e : g_r11WriteHistory) {
-        Logger::Instance().LogFmt(
-            LogLevel::Error, "CPU",
-            "  R11H fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x new=0x%08x",
-            e.instrAddr, e.thumb ? 'T' : 'A', e.instruction, e.oldVal,
-            e.newVal);
-      }
+      // DISABLED: R11->0 logging to avoid potential interference
+      // Logger::Instance().LogFmt(
+      //     LogLevel::Error, "CPU",
+      //     "R11 FIRST->0 (detected in Step prologue) at fromPC=0x%08x mode=%c
+      //     " "instr=0x%08x old=0x%08x new=0x%08x", currentInstrAddr,
+      //     currentInstrThumb ? 'T' : 'A', instr, g_lastR11Observed, r11Now);
+      //
+      // Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+      //                           "R11 HISTORY (most recent last):");
+      // for (const auto &e : g_r11WriteHistory) {
+      //   Logger::Instance().LogFmt(
+      //       LogLevel::Error, "CPU",
+      //       "  R11H fromPC=0x%08x mode=%c instr=0x%08x old=0x%08x
+      //       new=0x%08x", e.instrAddr, e.thumb ? 'T' : 'A', e.instruction,
+      //       e.oldVal, e.newVal);
+      // }
     }
 
     g_lastR11Observed = r11Now;
@@ -1705,12 +1707,12 @@ void ARM7TDMI::ExecuteBranch(uint32_t instruction) {
 
   uint32_t target = currentPC + 4 + offset;
 
-  // DEBUG: Trace branches in audio code
-  if (currentPC >= 0x30032b0 && currentPC <= 0x3003400) {
-    std::cout << "[BRANCH DEBUG] PC=0x" << std::hex << (currentPC - 4)
-              << " instr=0x" << instruction << " offset=" << offset
-              << " target=0x" << target << std::dec << std::endl;
-  }
+  // DEBUG: Trace branches in audio code (DISABLED - too verbose)
+  // if (currentPC >= 0x30032b0 && currentPC <= 0x3003400) {
+  //   std::cout << "[BRANCH DEBUG] PC=0x" << std::hex << (currentPC - 4)
+  //             << " instr=0x" << instruction << " offset=" << offset
+  //             << " target=0x" << target << std::dec << std::endl;
+  // }
 
   LogBranch(currentPC - 4, target); // Log from actual instruction address
   registers[Register::PC] = target;
@@ -3439,11 +3441,14 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint32_t header = memory.Read32(src);
     uint32_t decompSize = header >> 8;
 
-    // Debug: trace LZ77 to VRAM
-    if (toVram && (dst & 0xFF000000) == 0x06000000) {
-      std::cout << "[SWI 0x12] LZ77 to VRAM: src=0x" << std::hex << src
-                << " dst=0x" << dst << " size=" << std::dec << decompSize
-                << std::endl;
+    // Debug: trace LZ77 decompression - especially palette writes
+    if ((dst & 0xFF000000) == 0x05000000) {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "[SWI 0x12] LZ77 PALETTE: src=0x%x dst=0x%x size=0x%x", src, dst,
+               decompSize);
+      AIO::Emulator::Common::Logger::Instance().Log(
+          AIO::Emulator::Common::LogLevel::Info, "BIOS", buf);
     }
     src += 4;
 
@@ -3500,6 +3505,14 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
         }
       }
     }
+
+    // CRITICAL BUG FIX: Flush remaining vramBuffer byte if decompSize is odd
+    // After decompression loop ends, if vramBufferFull is true, there's an
+    // unflushed byte in vramBuffer that must be written
+    if (toVram && vramBufferFull) {
+      memory.Write16((dst - 1) & ~1, vramBuffer);
+    }
+
     break;
   }
   case 0x13: // HuffUnComp - Huffman decompression (based on mGBA)
@@ -3514,6 +3527,17 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint32_t header = memory.Read32(source);
     int remaining = header >> 8;  // Decompressed size
     unsigned bits = header & 0xF; // 4 or 8 bits per symbol
+
+    // Debug: trace Huffman decompression - especially palette writes
+    if ((dest & 0xFF000000) == 0x05000000) {
+      char buf[256];
+      snprintf(
+          buf, sizeof(buf),
+          "[SWI 0x13] HUFFMAN PALETTE: src=0x%x dst=0x%x size=0x%x bits=%u",
+          source, dest, remaining, bits);
+      AIO::Emulator::Common::Logger::Instance().Log(
+          AIO::Emulator::Common::LogLevel::Info, "BIOS", buf);
+    }
 
     if (bits == 0) {
       bits = 8; // mGBA defaults to 8 if 0
@@ -3606,6 +3630,18 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
       }
     }
 
+    // CRITICAL BUG FIX: Flush remaining block data if decompressed size is not
+    // a multiple of 4. If bitsSeen > 0, there are unflushed bits in 'block'
+    // that haven't been written. This causes data loss in non-4-byte-aligned
+    // decompressed output, leading to palette/tile corruption.
+    if (bitsSeen > 0 && remaining <= 0) {
+      // Only write the bytes we actually need (not full 32-bit block)
+      for (int b = 0; b < (bitsSeen + 7) / 8; ++b) {
+        uint8_t byteVal = (block >> (b * 8)) & 0xFF;
+        memory.Write8Internal(dest + b, byteVal);
+      }
+    }
+
     // Update registers like real BIOS
     registers[0] = bitSource;
     registers[1] = dest;
@@ -3621,6 +3657,16 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
 
     uint32_t header = memory.Read32(src);
     uint32_t decompSize = header >> 8;
+
+    // Debug: trace RLE decompression - especially palette writes
+    if ((dst & 0xFF000000) == 0x05000000) {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "[SWI 0x15] RLE PALETTE: src=0x%x dst=0x%x size=0x%x", src, dst,
+               decompSize);
+      AIO::Emulator::Common::Logger::Instance().Log(
+          AIO::Emulator::Common::LogLevel::Info, "BIOS", buf);
+    }
     src += 4;
 
     uint32_t written = 0;
@@ -3674,6 +3720,14 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
         }
       }
     }
+
+    // CRITICAL BUG FIX: Flush remaining vramBuffer byte if decompSize is odd
+    // After decompression loop ends, if vramBufferFull is true, there's an
+    // unflushed byte in vramBuffer that must be written
+    if (toVram && vramBufferFull) {
+      memory.Write16((dst - 1) & ~1, vramBuffer);
+    }
+
     break;
   }
   case 0x16: // Diff8bitUnFilterWram

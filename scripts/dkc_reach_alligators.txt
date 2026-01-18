@@ -1,0 +1,51 @@
+# DKC: Navigate to alligator level
+# Format: <time_ms> <KEY> <DOWN|UP>
+# KEYINPUT: 0 = pressed, 1 = released
+
+# Press START to get past intro/title (usually around 1-2 seconds)
+2000 START DOWN
+2100 START UP
+
+# Now spam A to click through menus
+3000 A DOWN
+3100 A UP
+
+4000 A DOWN
+4100 A UP
+
+5000 A DOWN
+5100 A UP
+
+6000 A DOWN
+6100 A UP
+
+7000 A DOWN
+7100 A UP
+
+8000 A DOWN
+8100 A UP
+
+9000 A DOWN
+9100 A UP
+
+10000 A DOWN
+10100 A UP
+
+11000 A DOWN
+11100 A UP
+
+12000 A DOWN
+12100 A UP
+
+13000 A DOWN
+13100 A UP
+
+14000 A DOWN
+14100 A UP
+
+15000 A DOWN
+15100 A UP
+
+# Now hold A to go through game faster to reach alligators
+16000 A DOWN
+25000 A UP

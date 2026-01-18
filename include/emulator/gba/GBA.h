@@ -25,6 +25,7 @@ public:
   bool IsCPUHalted() const; // Check if CPU is waiting for interrupt
 
   const PPU &GetPPU() const { return *ppu; }
+  PPU &GetPPU() { return *ppu; }
   APU &GetAPU() { return *apu; }
   GBAMemory &GetMemory() { return *memory; }
   const GBAMemory &GetMemory() const { return *memory; }
@@ -54,6 +55,9 @@ public:
   void Continue();
   void DumpCPUState(std::ostream &os) const;
   void StepBack();
+
+  // Flush pending peripheral cycles - called when graphics memory is written
+  void FlushPendingPeripheralCycles();
 
 private:
   std::unique_ptr<ARM7TDMI> cpu;

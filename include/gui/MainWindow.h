@@ -247,7 +247,27 @@ private:
   std::thread emulatorThread;
   std::atomic<bool> emulatorRunning{false};
   std::atomic<bool> emulatorPaused{false};
+  std::atomic<bool> emulatorStepOne{false};
+  std::atomic<int> emulatorStepBack{0};
+  std::atomic<uint64_t> emulatorFrameNumber{0};
   std::mutex emulatorStateMutex;
+
+  // Frame history for step-back (simple serialized states)
+  struct FrameSnapshot {
+    std::vector<uint8_t> iwram;
+    std::vector<uint8_t> ewram;
+    std::vector<uint8_t> vram;
+    std::vector<uint8_t> oam;
+    std::vector<uint8_t> palette;
+    std::vector<uint8_t> ioRegs;
+    std::vector<uint32_t> framebuffer; // PPU front buffer (display)
+    uint32_t cpuRegisters[16];         // R0-R15
+    uint32_t cpsr;
+    uint64_t frameNum = 0;
+  };
+  std::vector<FrameSnapshot> frameHistory;
+  static constexpr size_t MAX_FRAME_HISTORY = 100;
+  size_t frameHistoryIndex = 0;
 
   // Debugger flags
   bool debuggerEnabled = false;

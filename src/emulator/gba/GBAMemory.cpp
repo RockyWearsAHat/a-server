@@ -1513,7 +1513,39 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       return b0 | (b1 << 8);
     }
   }
-  // Fallback
+  // Handle IWRAM instruction fetch with proper mirroring
+  else if ((address & 0xFF000000u) == 0x03000000u) {
+    uint32_t offset = address & MemoryMap::WRAM_CHIP_MASK;
+    // ALWAYS access IWRAM - it's guaranteed 32KB (0x8000 = 32768 bytes)
+    if (offset < wram_chip.size() && offset + 1 < wram_chip.size()) {
+      uint8_t b0 = wram_chip[offset];
+      uint8_t b1 = wram_chip[offset + 1];
+      uint16_t result = b0 | (b1 << 8);
+      // Debug: log fetches from suspect address
+      if (address == 0x03002e40 && result == 0x0000) {
+        fprintf(stderr,
+                "[DEBUG] ReadInstruction16(0x%08x) offset=0x%04x b0=0x%02x "
+                "b1=0x%02x result=0x%04x\n",
+                address, offset, b0, b1, result);
+      }
+      return result;
+    }
+    // If we get here, something is very wrong
+    fprintf(stderr,
+            "[ERROR] ReadInstruction16(0x%08x) offset=0x%04x exceeds "
+            "wram_chip.size()=%zu\n",
+            address, offset, wram_chip.size());
+  }
+  // Handle EWRAM instruction fetch
+  else if ((address & 0xFF000000u) == 0x02000000u) {
+    uint32_t offset = address & MemoryMap::WRAM_BOARD_MASK;
+    if (offset + 1 < wram_board.size()) {
+      uint8_t b0 = wram_board[offset];
+      uint8_t b1 = wram_board[offset + 1];
+      return b0 | (b1 << 8);
+    }
+  }
+  // Fallback for other memory regions
   return Read8(address) | (Read8(address + 1) << 8);
 }
 
@@ -1679,16 +1711,21 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
-    if (TraceGbaSpam()) {
-      static int paletteWriteCount = 0;
-      if (paletteWriteCount < 50) {
-        paletteWriteCount++;
-        std::cout << "[PALETTE WRITE] offset=0x" << std::hex << offset
-                  << " val=0x" << (int)value;
-        if (cpu)
-          std::cout << " PC=0x" << cpu->GetRegister(15);
-        std::cout << std::dec << std::endl;
-      }
+    // Log ALL palette writes to understand the pattern
+    static int palWriteCount = 0;
+    if (palWriteCount < 500) {
+      palWriteCount++;
+      const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
+      const char *state =
+          ppuTimingValid
+              ? (ppuTimingScanline >= 160
+                     ? "VBLANK"
+                     : (ppuTimingCycle >= 960 ? "HBLANK" : "VISIBLE"))
+              : "NO_TIMING";
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "PAL_WRITE",
+          "frame=%d offset=0x%03x val=0x%02x state=%s scanline=%d", frame,
+          offset, value, state, ppuTimingScanline);
     }
 
     if (offset < palette_ram.size())
@@ -1716,16 +1753,6 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
         }
       }
     }
-    // DISABLED: Too verbose during boot
-    // if (offset < 0x4000 && value != 0) {
-    //     vramCharWriteCount++;
-    //     if (vramCharWriteCount <= 20) {
-    //         std::cout << "[VRAM Char0 Write] offset=0x" << std::hex << offset
-    //                   << " val=0x" << (int)value;
-    //         if (cpu) std::cout << " PC=0x" << cpu->GetRegister(15);
-    //         std::cout << std::dec << std::endl;
-    //     }
-    // }
 
     if (offset < vram.size())
       vram[offset] = value;
@@ -1736,6 +1763,11 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     uint32_t offset = address & MemoryMap::OAM_MASK;
     if (offset < oam.size())
       oam[offset] = value;
+
+    // Force PPU sync to ensure immediate visibility
+    if (ppu && onGraphicsWrite) {
+      onGraphicsWrite(graphicsWriteContext);
+    }
     break;
   }
   }
@@ -4045,6 +4077,44 @@ void GBAMemory::AdvanceCycles(int cycles) {
     ppu->Update(cycles);
   if (apu)
     apu->Update(cycles);
+}
+
+void GBAMemory::ApplyDeferredWrites() {
+  if (deferredWrites.empty())
+    return;
+
+  static int applyCount = 0;
+  if (applyCount < 10) {
+    applyCount++;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "DEFER",
+        "[APPLY_DEFERRED] count=%zu scanline=%d cycle=%d",
+        deferredWrites.size(), ppuTimingScanline, ppuTimingCycle);
+  }
+
+  for (const auto &write : deferredWrites) {
+    uint32_t offset;
+    switch (write.region) {
+    case 0x05: // Palette
+      offset = write.address & MemoryMap::PALETTE_MASK;
+      if (offset < palette_ram.size())
+        palette_ram[offset] = write.value;
+      break;
+    case 0x06: // VRAM
+      offset = write.address & 0x1FFFFu;
+      if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
+        offset -= 0x8000u;
+      if (offset < vram.size())
+        vram[offset] = write.value;
+      break;
+    case 0x07: // OAM
+      offset = write.address & MemoryMap::OAM_MASK;
+      if (offset < oam.size())
+        oam[offset] = write.value;
+      break;
+    }
+  }
+  deferredWrites.clear();
 }
 
 uint16_t GBAMemory::GetTimerReload(int timerIdx) const {

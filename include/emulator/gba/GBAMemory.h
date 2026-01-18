@@ -82,10 +82,18 @@ public:
                                    uint16_t value);
   void SetIOWriteCallback(IOWriteCallback callback, void *context);
 
+  // Callback for Graphics Memory Writes (palette/VRAM/OAM) - forces PPU sync
+  using GraphicsWriteCallback = void (*)(void *context);
+  void SetGraphicsWriteCallback(GraphicsWriteCallback callback, void *context) {
+    onGraphicsWrite = callback;
+    graphicsWriteContext = context;
+  }
+
   void PerformDMA(int channel);
   void CheckDMA(int timing);
   void UpdateTimers(int cycles);
   void AdvanceCycles(int cycles); // Advance timers, PPU, and APU together
+  void ApplyDeferredWrites();     // Apply queued palette/VRAM/OAM writes
 
   // PPU timing helper: publishes the current scanline/cycle so memory
   // access rules (VRAM/OAM/Palette visibility) can be enforced accurately.
@@ -118,6 +126,17 @@ public:
   size_t GetPaletteSize() const { return palette_ram.size(); }
   const uint8_t *GetOAMData() const { return oam.data(); }
   size_t GetOAMSize() const { return oam.size(); }
+
+  // Mutable accessors for frame snapshots (step-back feature)
+  uint8_t *GetVRAM() { return vram.data(); }
+  uint8_t *GetOAM() { return oam.data(); }
+  uint8_t *GetPaletteRAM() { return palette_ram.data(); }
+  uint8_t *GetIWRAM() { return wram_chip.data(); }
+  uint8_t *GetEWRAM() { return wram_board.data(); }
+  uint8_t *GetIORegs() { return io_regs.data(); }
+  const uint8_t *GetIWRAM() const { return wram_chip.data(); }
+  const uint8_t *GetEWRAM() const { return wram_board.data(); }
+  const uint8_t *GetIORegs() const { return io_regs.data(); }
 
 private:
   void EvaluateKeypadIRQ();
@@ -167,6 +186,16 @@ private:
   bool ppuTimingValid = false;
   int ppuTimingScanline = 0;
   int ppuTimingCycle = 0;
+
+  // Deferred write queue for graphics memory (palette/VRAM/OAM)
+  // Writes during unsafe timing (VISIBLE period) are queued and applied at
+  // HBlank/VBlank
+  struct DeferredWrite {
+    uint32_t address;
+    uint8_t value;
+    uint8_t region; // 5=palette, 6=VRAM, 7=OAM
+  };
+  std::vector<DeferredWrite> deferredWrites;
 
   // Internal DMA address registers (shadow registers for repeat DMAs)
   uint32_t dmaInternalSrc[4] = {0};
@@ -241,6 +270,8 @@ private:
 
   IOWriteCallback ioWriteCallback = nullptr;
   void *ioWriteContext = nullptr;
+  GraphicsWriteCallback onGraphicsWrite = nullptr;
+  void *graphicsWriteContext = nullptr;
 
   std::string savePath;    // Path to save file for auto-flush
   APU *apu = nullptr;      // APU pointer for sound callbacks

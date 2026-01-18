@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <emulator/common/Logger.h>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/PPU.h>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 
 namespace AIO::Emulator::GBA {
@@ -330,8 +332,9 @@ void PPU::Update(int cycles) {
 
       bool wasVBlank = prevVBlankState;
       prevVBlankState = isVBlank;
-
       if (isVBlank) {
+        // Mark that we've entered VBlank
+
         dispstat |= 1; // Set VBlank
         // std::cout << "[PPU DISPSTAT VBlank=1] Scanline=" << scanline << "
         // Frame=" << frameCount << std::endl;
@@ -341,6 +344,10 @@ void PPU::Update(int cycles) {
 
         // Trigger VBlank IRQ on rising edge
         if (!wasVBlank) {
+          // Apply any deferred palette writes now that we're in VBlank
+          // This ensures palette is stable for entire previous frame
+          memory.ApplyDeferredWrites();
+
           // Latch BGxX/BGxY to internal registers at VBlank start
           // BG2 reference point (0x04000028-0x0400002F)
           uint32_t bg2x_l = ReadRegister(0x28);
@@ -818,6 +825,15 @@ void PPU::RenderOBJ() {
   // Basic OBJ Rendering (No Affine/Rotation yet)
   // OAM is at 0x07000000 (1KB)
   // 128 Sprites, 8 bytes each
+
+  // Debug: Log when sprite rendering occurs
+  static int renderObjCalls = 0;
+  if (renderObjCalls < 10) {
+    renderObjCalls++;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "PPU",
+        "[RenderOBJ_CALLED] frame=%llu scanline=%d", frameCount, scanline);
+  }
 
   // Optional: per-frame OBJ rendering stats to diagnose "sprites disappeared"
   // issues without dumping huge pixel traces.
@@ -1921,6 +1937,13 @@ const std::vector<uint32_t> &PPU::GetFramebuffer() const {
 void PPU::SwapBuffers() {
   std::lock_guard<std::mutex> lock(bufferMutex);
   std::swap(frontBuffer, backBuffer);
+}
+
+void PPU::RestoreFramebuffer(const std::vector<uint32_t> &buffer) {
+  std::lock_guard<std::mutex> lock(bufferMutex);
+  if (buffer.size() == frontBuffer.size()) {
+    frontBuffer = buffer;
+  }
 }
 
 // Get window enable bits for a given pixel position

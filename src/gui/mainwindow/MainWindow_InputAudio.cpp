@@ -97,6 +97,30 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
       (stackedWidget && stackedWidget->currentWidget() == emulatorPage &&
        emulatorRunning);
 
+  // Frame stepping controls (work in emulator mode)
+  if (inEmu && !debuggerEnabled) {
+    if (event->key() == Qt::Key_P &&
+        (event->modifiers() & Qt::ControlModifier)) {
+      // Ctrl+P: Toggle pause
+      emulatorPaused.store(!emulatorPaused.load(), std::memory_order_relaxed);
+      event->accept();
+      return;
+    }
+    if (event->key() == Qt::Key_BracketRight && emulatorPaused.load()) {
+      // ] (right bracket): Step forward one frame while paused
+      emulatorStepOne.store(true, std::memory_order_relaxed);
+      event->accept();
+      return;
+    }
+    if (event->key() == Qt::Key_BracketLeft && emulatorPaused.load()) {
+      // [ (left bracket): Step back one frame while paused
+      std::cout << "[STEP_BACK] Key pressed, setting flag" << std::endl;
+      emulatorStepBack.store(1, std::memory_order_relaxed);
+      event->accept();
+      return;
+    }
+  }
+
   // Select correct keymap for this sub-application.
   auto &input = Input::InputManager::instance();
   input.setActiveContext(inEmu ? Input::InputContext::Emulator
