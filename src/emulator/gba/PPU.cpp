@@ -7,6 +7,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <set>
+#include <vector>
 
 namespace AIO::Emulator::GBA {
 
@@ -307,6 +309,33 @@ void PPU::Update(int cycles) {
 
         // Swap buffers after frame completion for thread-safe display
         SwapBuffers();
+
+        // DKC diagnostic: Log DISPCNT during problem frames
+        if ((frameCount >= 2195 && frameCount <= 2205) ||
+            (frameCount >= 2400 && frameCount <= 2415)) {
+          uint16_t dispcnt = memory.Read16(0x04000000);
+          bool forcedBlank = (dispcnt >> 7) & 1;
+          uint8_t bgMode = dispcnt & 0x7;
+          bool displayBG0 = (dispcnt >> 8) & 1;
+          bool displayBG1 = (dispcnt >> 9) & 1;
+          bool displayBG2 = (dispcnt >> 10) & 1;
+          bool displayBG3 = (dispcnt >> 11) & 1;
+          bool displayOBJ = (dispcnt >> 12) & 1;
+          std::cout << "[DKC_DIAG] Frame " << frameCount << " DISPCNT=0x"
+                    << std::hex << dispcnt << std::dec
+                    << " mode=" << (int)bgMode << " forcedBlank=" << forcedBlank
+                    << " BG0=" << displayBG0 << " BG1=" << displayBG1
+                    << " BG2=" << displayBG2 << " BG3=" << displayBG3
+                    << " OBJ=" << displayOBJ;
+
+          // Check BG palette (first 16 colors)
+          std::cout << " | BG_PAL:";
+          for (int i = 0; i < 16; i++) {
+            uint16_t color = memory.Read16(0x05000000 + i * 2);
+            std::cout << " " << std::hex << color << std::dec;
+          }
+          std::cout << std::endl;
+        }
 
         if (TraceGbaSpam()) {
           // Log every frame completion
@@ -773,19 +802,48 @@ void PPU::DrawScanline() {
       }
     }
 
-    // Optional: dump a single frame to a PPM file for visual inspection.
-    // Enable with: AIO_DUMP_PPU_FRAME_PPM=<frameCount>
-    // Optional: AIO_DUMP_PPU_FRAME_PPM_PATH=/some/dir (default: /tmp)
+    // Optional: dump frame(s) to PPM files for visual inspection.
+    // Enable with: AIO_DUMP_PPU_FRAME_PPM=<frame> or
+    // AIO_DUMP_PPU_FRAME_PPM=<start>-<end> or comma-separated list Optional:
+    // AIO_DUMP_PPU_FRAME_PPM_PATH=/some/dir (default: /tmp)
     {
       static bool dumpParsed = false;
-      static bool dumped = false;
-      static int dumpFrame = -1;
+      static std::vector<int> dumpFrames;
+      static std::set<int> dumpedFrames;
       static std::string dumpPath;
 
       if (!dumpParsed) {
         dumpParsed = true;
         if (const char *s = std::getenv("AIO_DUMP_PPU_FRAME_PPM")) {
-          dumpFrame = std::atoi(s);
+          std::string spec(s);
+          // Parse comma-separated list: "100,200,300" or range "100-200" or
+          // single "100"
+          size_t pos = 0;
+          while (pos < spec.length()) {
+            size_t comma = spec.find(',', pos);
+            std::string token = (comma == std::string::npos)
+                                    ? spec.substr(pos)
+                                    : spec.substr(pos, comma - pos);
+
+            // Check for range format "start-end"
+            size_t dash = token.find('-');
+            if (dash != std::string::npos && dash > 0 &&
+                dash < token.length() - 1) {
+              int start = std::atoi(token.substr(0, dash).c_str());
+              int end = std::atoi(token.substr(dash + 1).c_str());
+              for (int f = start; f <= end; f++) {
+                dumpFrames.push_back(f);
+              }
+            } else {
+              int frame = std::atoi(token.c_str());
+              if (frame >= 0)
+                dumpFrames.push_back(frame);
+            }
+
+            if (comma == std::string::npos)
+              break;
+            pos = comma + 1;
+          }
         }
         if (const char *p = std::getenv("AIO_DUMP_PPU_FRAME_PPM_PATH")) {
           dumpPath = p;
@@ -794,8 +852,17 @@ void PPU::DrawScanline() {
         }
       }
 
-      if (!dumped && dumpFrame >= 0 && frameCount == dumpFrame) {
-        dumped = true;
+      // Check if current frame should be dumped
+      bool shouldDump = false;
+      for (int f : dumpFrames) {
+        if (frameCount == f && dumpedFrames.find(f) == dumpedFrames.end()) {
+          shouldDump = true;
+          break;
+        }
+      }
+
+      if (shouldDump) {
+        dumpedFrames.insert(frameCount);
         const std::string file =
             dumpPath + "/ppu_frame_" + std::to_string(frameCount) + ".ppm";
         std::ofstream out(file, std::ios::binary);
@@ -812,7 +879,8 @@ void PPU::DrawScanline() {
             out.write((const char *)&b, 1);
           }
           out.close();
-          std::cout << "[PPU_DUMP] wrote " << file << std::endl;
+          std::cout << "[PPU_DUMP] wrote " << file << " (frame " << frameCount
+                    << ")" << std::endl;
         } else {
           std::cout << "[PPU_DUMP] failed to open " << file << std::endl;
         }
@@ -1937,6 +2005,86 @@ const std::vector<uint32_t> &PPU::GetFramebuffer() const {
 void PPU::SwapBuffers() {
   std::lock_guard<std::mutex> lock(bufferMutex);
   std::swap(frontBuffer, backBuffer);
+
+  // DKC diagnostic: Log around problem frames + OAM analysis
+  if (frameCount >= 1655 && frameCount <= 1665) {
+    // Count non-zero sprites
+    int activeSprites = 0;
+    for (int i = 0; i < 128; i++) {
+      uint16_t attr0 = memory.Read16(0x07000000 + i * 8);
+      if ((attr0 & 0x300) != 0x200) { // Not disabled
+        activeSprites++;
+      }
+    }
+    std::cout << "[DKC_DIAG] Frame " << frameCount << " complete, "
+              << activeSprites << " active sprites" << std::endl;
+  }
+  if (frameCount >= 1885 && frameCount <= 1895) {
+    int activeSprites = 0;
+    for (int i = 0; i < 128; i++) {
+      uint16_t attr0 = memory.Read16(0x07000000 + i * 8);
+      if ((attr0 & 0x300) != 0x200) {
+        activeSprites++;
+      }
+    }
+    std::cout << "[DKC_DIAG] Frame " << frameCount
+              << " complete (banana load expected ~1890), " << activeSprites
+              << " active sprites" << std::endl;
+  }
+  if (frameCount >= 2195 && frameCount <= 2205) {
+    std::cout << "[DKC_DIAG] Frame " << frameCount
+              << " complete (rope expected ~2200)" << std::endl;
+    // Detailed OAM analysis for first 20 sprites
+    for (int i = 0; i < 20; i++) {
+      uint16_t attr0 = memory.Read16(0x07000000 + i * 8);
+      uint16_t attr1 = memory.Read16(0x07000000 + i * 8 + 2);
+      uint16_t attr2 = memory.Read16(0x07000000 + i * 8 + 4);
+      if ((attr0 & 0x300) != 0x200) { // Not disabled
+        int y = attr0 & 0xFF;
+        int x = attr1 & 0x1FF;
+        int tileIndex = attr2 & 0x3FF;
+        int paletteNum = (attr2 >> 12) & 0xF;
+        bool is8bpp = (attr0 >> 13) & 1;
+        std::cout << "  [OAM] Sprite " << i << ": pos=(" << x << "," << y
+                  << ") tile=" << tileIndex << " pal=" << paletteNum << " "
+                  << (is8bpp ? "8bpp" : "4bpp") << std::endl;
+      }
+    }
+    // Log OBJ palette 0
+    std::cout << "  [PAL] OBJ Palette 0: ";
+    for (int i = 0; i < 16; i++) {
+      uint16_t color = memory.Read16(0x05000200 + i * 2);
+      std::cout << std::hex << color << " " << std::dec;
+    }
+    std::cout << std::endl;
+  }
+  if (frameCount >= 2389 && frameCount <= 2399) {
+    std::cout << "[DKC_DIAG] Frame " << frameCount
+              << " complete (alligator expected ~2394)" << std::endl;
+    // Detailed OAM analysis for first 20 sprites
+    for (int i = 0; i < 20; i++) {
+      uint16_t attr0 = memory.Read16(0x07000000 + i * 8);
+      uint16_t attr1 = memory.Read16(0x07000000 + i * 8 + 2);
+      uint16_t attr2 = memory.Read16(0x07000000 + i * 8 + 4);
+      if ((attr0 & 0x300) != 0x200) { // Not disabled
+        int y = attr0 & 0xFF;
+        int x = attr1 & 0x1FF;
+        int tileIndex = attr2 & 0x3FF;
+        int paletteNum = (attr2 >> 12) & 0xF;
+        bool is8bpp = (attr0 >> 13) & 1;
+        std::cout << "  [OAM] Sprite " << i << ": pos=(" << x << "," << y
+                  << ") tile=" << tileIndex << " pal=" << paletteNum << " "
+                  << (is8bpp ? "8bpp" : "4bpp") << std::endl;
+      }
+    }
+    // Log OBJ palette 0
+    std::cout << "  [PAL] OBJ Palette 0: ";
+    for (int i = 0; i < 16; i++) {
+      uint16_t color = memory.Read16(0x05000200 + i * 2);
+      std::cout << std::hex << color << " " << std::dec;
+    }
+    std::cout << std::endl;
+  }
 }
 
 void PPU::RestoreFramebuffer(const std::vector<uint32_t> &buffer) {

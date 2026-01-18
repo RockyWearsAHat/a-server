@@ -1711,11 +1711,21 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
+    // DKC diagnostic: Log palette writes that set BG palette to 0 during
+    // problem window
+    const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
+    if (frame >= 2200 && frame <= 2395 && offset < 32 && value == 0) {
+      std::cout << "[DKC_DIAG] Frame " << frame
+                << " PALETTE ZERO WRITE: offset=0x" << std::hex << offset
+                << " (BG palette index " << std::dec << (offset / 2) << ")"
+                << " PC=0x" << std::hex << (cpu ? cpu->GetRegister(15) : 0)
+                << std::dec << std::endl;
+    }
+
     // Log ALL palette writes to understand the pattern
     static int palWriteCount = 0;
     if (palWriteCount < 500) {
       palWriteCount++;
-      const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
       const char *state =
           ppuTimingValid
               ? (ppuTimingScanline >= 160
@@ -1737,6 +1747,20 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     uint32_t offset = address & 0x1FFFFu;
     if (offset >= MemoryMap::VRAM_ACTUAL_SIZE) {
       offset -= 0x8000u;
+    }
+
+    // DKC diagnostic: Log VRAM writes during problem frames
+    const int frame = ppu ? ppu->GetFrameCount() : -1;
+    if ((frame >= 1655 && frame <= 1665) || (frame >= 1885 && frame <= 1895) ||
+        (frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399)) {
+      static int diagVramWrites = 0;
+      if (diagVramWrites++ < 100) {
+        std::cout << "[DKC_DIAG] Frame " << frame << " VRAM write offset=0x"
+                  << std::hex << offset << " val=0x" << (int)value << std::dec;
+        if (cpu)
+          std::cout << " PC=0x" << std::hex << cpu->GetRegister(15) << std::dec;
+        std::cout << std::endl;
+      }
     }
 
     // DEBUG: Trace writes to BG character area 0 (first 16KB: 0x0000-0x3FFF)
@@ -1763,11 +1787,6 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     uint32_t offset = address & MemoryMap::OAM_MASK;
     if (offset < oam.size())
       oam[offset] = value;
-
-    // Force PPU sync to ensure immediate visibility
-    if (ppu && onGraphicsWrite) {
-      onGraphicsWrite(graphicsWriteContext);
-    }
     break;
   }
   }
@@ -3110,7 +3129,22 @@ void GBAMemory::WriteIORegisterInternal(uint32_t offset, uint16_t value) {
 }
 
 void GBAMemory::CheckDMA(int timing) {
+  // DKC diagnostic: Log VBlank DMA checks during problem frames
+  const int frame = ppu ? ppu->GetFrameCount() : -1;
+  const bool isDiagFrame =
+      (frame >= 1655 && frame <= 1665) || (frame >= 1885 && frame <= 1895) ||
+      (frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399);
+
+  if (isDiagFrame && timing == 1) {
+    std::cout << "[DKC_DIAG] Frame " << frame
+              << " CheckDMA timing=1 (VBlank) called" << std::endl;
+  }
+
   if (dmaInProgress) {
+    if (isDiagFrame && timing == 1) {
+      std::cout << "[DKC_DIAG] Frame " << frame
+                << " VBlank DMA blocked - dmaInProgress=true" << std::endl;
+    }
     return;
   }
   for (int i = 0; i < 4; ++i) {
@@ -3121,6 +3155,10 @@ void GBAMemory::CheckDMA(int timing) {
     if (control & DMAControl::ENABLE) {
       int dmaTiming = (control >> 12) & 3;
       if (dmaTiming == timing) {
+        if (isDiagFrame) {
+          std::cout << "[DKC_DIAG] Frame " << frame << " Found enabled DMA ch"
+                    << i << " with timing=" << timing << std::endl;
+        }
         PerformDMA(i);
       }
     }
@@ -3135,6 +3173,12 @@ void GBAMemory::PerformDMA(int channel) {
   if (dmaInProgress) {
     return;
   }
+
+  // DKC diagnostic: Check if we're in problem frame range
+  const int frame = ppu ? ppu->GetFrameCount() : -1;
+  const bool isDiagFrame =
+      (frame >= 1655 && frame <= 1665) || (frame >= 1885 && frame <= 1895) ||
+      (frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399);
   dmaInProgress = true;
   struct DMAGuard {
     bool &flag;
@@ -3215,6 +3259,19 @@ void GBAMemory::PerformDMA(int channel) {
   const bool traceDmaPalette = EnvFlagCached("AIO_TRACE_DMA_PALETTE");
   const bool dstIsPalette =
       (currentDst >= 0x05000000u && currentDst < 0x05000400u);
+  const bool dstIsVRAM =
+      (currentDst >= 0x06000000u && currentDst < 0x06018000u);
+  const bool dstIsOAM = (currentDst >= 0x07000000u && currentDst < 0x07000400u);
+
+  // DKC diagnostic: Log graphics DMA during problem frames
+  if (isDiagFrame && (dstIsPalette || dstIsVRAM || dstIsOAM)) {
+    std::cout << "[DKC_DIAG] Frame " << frame << " DMA ch" << channel
+              << " dst=0x" << std::hex << currentDst << std::dec
+              << " count=" << count << " timing=" << timing
+              << (dstIsPalette ? " PALETTE" : "") << (dstIsVRAM ? " VRAM" : "")
+              << (dstIsOAM ? " OAM" : "") << std::endl;
+  }
+
   if (traceDmaPalette && dstIsPalette) {
     static int dmaPalStartLogs = 0;
     if (dmaPalStartLogs < 64) {
@@ -3340,6 +3397,14 @@ void GBAMemory::PerformDMA(int channel) {
   const bool allowFixedIWRAMSkip =
       EnvFlagCached("AIO_DKC_DMA_FIXED_IWRAM_SKIP") || isDKC;
   if (allowFixedIWRAMSkip && destCtrl == 2 && dstIsIWRAM && count > 100) {
+    // DKC diagnostic: Log skips during problem frames
+    const int frame = ppu ? ppu->GetFrameCount() : -1;
+    if ((frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399)) {
+      std::cout << "[DKC_DIAG] Frame " << frame
+                << " DMA SKIP: Fixed-dest IWRAM dst=0x" << std::hex
+                << currentDst << " count=" << std::dec << count << std::endl;
+    }
+
     if (TraceGbaSpam() || verboseLogs) {
       std::cout << "[DMA SKIP] destCtrl=2 IWRAM 0x" << std::hex << currentDst
                 << " count=" << std::dec << count
