@@ -28,3 +28,6 @@ debug.log
 
 # macOS
 .DS_Store
+
+
+_worktrees/

@@ -2,6 +2,7 @@
 
 #include "emulator/gba/ARM7TDMI.h"
 #include "emulator/gba/GBAMemory.h"
+#include "emulator/gba/IORegs.h"
 
 using namespace AIO::Emulator::GBA;
 
@@ -46,25 +47,27 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   EXPECT_EQ(mem.Read32(base + 0x10), 0xE383301Fu); // ORR   R3, R3, #0x1F (SYS)
   EXPECT_EQ(mem.Read32(base + 0x14), 0xE129F003u); // MSR   CPSR_c, R3
 
-  EXPECT_EQ(mem.Read32(base + 0x18), 0xE28FE000u); // ADD   LR, PC, #0
-  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE512F004u); // LDR   PC, [R2, #-4]
+  EXPECT_EQ(mem.Read32(base + 0x18), 0xE92D4000u); // STMDB SP!, {LR}
+  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE28FE000u); // ADD   LR, PC, #0
+  EXPECT_EQ(mem.Read32(base + 0x20), 0xE512F004u); // LDR   PC, [R2, #-4]
+  EXPECT_EQ(mem.Read32(base + 0x24), 0xE8BD4000u); // LDMIA SP!, {LR}
 
-  EXPECT_EQ(mem.Read32(base + 0x20), 0xE10F3000u); // MRS   R3, CPSR
-  EXPECT_EQ(mem.Read32(base + 0x24), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
-  EXPECT_EQ(mem.Read32(base + 0x28), 0xE3833012u); // ORR   R3, R3, #0x12 (IRQ)
-  EXPECT_EQ(mem.Read32(base + 0x2C), 0xE129F003u); // MSR   CPSR_c, R3
+  EXPECT_EQ(mem.Read32(base + 0x28), 0xE10F3000u); // MRS   R3, CPSR
+  EXPECT_EQ(mem.Read32(base + 0x2C), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
+  EXPECT_EQ(mem.Read32(base + 0x30), 0xE3833012u); // ORR   R3, R3, #0x12 (IRQ)
+  EXPECT_EQ(mem.Read32(base + 0x34), 0xE129F003u); // MSR   CPSR_c, R3
 
-  EXPECT_EQ(mem.Read32(base + 0x30), 0xE3A02404u); // MOV   R2, #0x04000000
-  EXPECT_EQ(mem.Read32(base + 0x34), 0xE59F1010u); // LDR   R1, [PC, #16]
-  EXPECT_EQ(mem.Read32(base + 0x38), 0xE1D110B0u); // LDRH  R1, [R1]
-  EXPECT_EQ(mem.Read32(base + 0x3C), 0xE2820F80u); // ADD   R0, R2, #0x200
-  EXPECT_EQ(mem.Read32(base + 0x40), 0xE1C010B2u); // STRH  R1, [R0, #2]
+  EXPECT_EQ(mem.Read32(base + 0x38), 0xE3A02404u); // MOV   R2, #0x04000000
+  EXPECT_EQ(mem.Read32(base + 0x3C), 0xE59F1010u); // LDR   R1, [PC, #16]
+  EXPECT_EQ(mem.Read32(base + 0x40), 0xE1D110B0u); // LDRH  R1, [R1]
+  EXPECT_EQ(mem.Read32(base + 0x44), 0xE2820F80u); // ADD   R0, R2, #0x200
+  EXPECT_EQ(mem.Read32(base + 0x48), 0xE1C010B2u); // STRH  R1, [R0, #2]
 
-  EXPECT_EQ(mem.Read32(base + 0x44), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(base + 0x48), 0xE25EF004u); // SUBS  PC, LR, #4
+  EXPECT_EQ(mem.Read32(base + 0x4C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
+  EXPECT_EQ(mem.Read32(base + 0x50), 0xE25EF004u); // SUBS  PC, LR, #4
 
   // Literal pool used by the trampoline.
-  EXPECT_EQ(mem.Read32(base + 0x4C), 0x03007FF4u);
+  EXPECT_EQ(mem.Read32(base + 0x54), 0x03007FF4u);
 }
 
 TEST(BIOSTest, ResetInitializesIRQHandlerPointer) {
@@ -201,6 +204,37 @@ TEST(BIOSTest, CpuFastSetFixedSourceFillsBlocks) {
   for (uint32_t i = 0; i < 8; ++i) {
     EXPECT_EQ(mem.Read32(dst + i * 4), 0xDEADBEEFu);
   }
+}
+
+TEST(BIOSTest, DirectCallIntrWaitWakesFromSleepHaltOnPendingIRQ) {
+  GBAMemory mem;
+  mem.Reset();
+
+  ARM7TDMI cpu(mem);
+  mem.SetCPU(&cpu);
+
+  // Simulate a game calling BIOS IntrWait directly (common in DirectBoot).
+  // BIOS entrypoint 0x194: IntrWait(discardOld=r0, waitFlags=r1)
+  cpu.SetThumbMode(false);
+  cpu.SetRegister(15, 0x00000194u);
+  cpu.SetRegister(14, 0x08000000u); // return address (unused in this test)
+  cpu.SetRegister(0, 1u);           // discard old flags
+  cpu.SetRegister(1, 0x0001u);      // wait for VBlank
+
+  mem.Write16(IORegs::REG_IE, 0x0000u);
+  mem.Write16(IORegs::REG_IF, 0x0000u);
+  mem.Write16(IORegs::REG_IME, 0x0000u);
+
+  cpu.Step();
+  EXPECT_TRUE(cpu.IsHalted());
+
+  // Wake should happen even if IME is 0; HALT/IntrWait wake is gated by IE&IF.
+  mem.Write16(IORegs::REG_IE, 0x0001u);
+  // IF is write-1-to-clear when written by the CPU. To simulate hardware
+  // setting a pending IRQ, use the internal IO write.
+  mem.WriteIORegisterInternal(IORegs::IF, 0x0001u);
+  cpu.PollInterrupts();
+  EXPECT_FALSE(cpu.IsHalted());
 }
 
 TEST(BIOSTest, IRQReturnRestoresThumbState) {

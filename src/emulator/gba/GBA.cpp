@@ -9,6 +9,9 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
@@ -18,8 +21,16 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
   return enabled;
 }
 

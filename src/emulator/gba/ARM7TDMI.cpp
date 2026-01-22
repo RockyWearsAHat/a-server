@@ -9,7 +9,10 @@
 #include <emulator/gba/IORegs.h>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace AIO::Emulator::GBA {
 using AIO::Emulator::Common::Logger;
@@ -34,8 +37,16 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
   return enabled;
 }
 } // namespace
@@ -410,6 +421,22 @@ void ARM7TDMI::CheckInterrupts() {
   uint16_t ie = memory.Read16(IORegs::REG_IE);
   uint16_t if_reg = memory.Read16(IORegs::REG_IF);
 
+  // Optional trace: interrupts are pending/enabled but CPSR.I prevents entry.
+  // Enable with: AIO_TRACE_IRQ_BLOCKED=1
+  if (EnvFlagCached("AIO_TRACE_IRQ_BLOCKED") && (ime & 1) && (ie & if_reg) &&
+      IRQDisabled(cpsr)) {
+    static int blockedCount = 0;
+    if (blockedCount++ < 50) {
+      Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+                                "IRQ BLOCKED: PC=0x%08x CPSR=0x%08x "
+                                "mode=0x%02x IME=%u IE=0x%04x IF=0x%04x",
+                                (unsigned)registers[Register::PC],
+                                (unsigned)cpsr, (unsigned)GetCPUMode(cpsr),
+                                (unsigned)(ime & 1u), (unsigned)ie,
+                                (unsigned)if_reg);
+    }
+  }
+
   // Debug logging (throttled)
   // static int debugCount = 0;
   // if (debugCount++ == 0 || debugCount % 60000 == 0) {
@@ -486,6 +513,25 @@ void ARM7TDMI::CheckInterrupts() {
 
     if (traceIrqEntry) {
       const uint32_t handlerPtr = memory.Read32(0x03007FFCu);
+      if (EnvFlagCached("AIO_TRACE_IRQ_HANDLER_DUMP")) {
+        // Dump a small instruction window at the handler target.
+        // This helps diagnose cases where 0x03007FFC is corrupted or points to
+        // data instead of code.
+        const uint32_t base = handlerPtr & ~3u;
+        uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+        // Guard reads: only dump for plausible RAM/code addresses.
+        if (base >= 0x02000000u && base < 0x04000000u) {
+          w0 = memory.Read32(base + 0);
+          w1 = memory.Read32(base + 4);
+          w2 = memory.Read32(base + 8);
+          w3 = memory.Read32(base + 12);
+        }
+        Logger::Instance().LogFmt(
+            LogLevel::Error, "CPU",
+            "IRQ HANDLER DUMP: ptr=0x%08x base=0x%08x [0]=0x%08x [4]=0x%08x "
+            "[8]=0x%08x [12]=0x%08x",
+            handlerPtr, base, w0, w1, w2, w3);
+      }
       Logger::Instance().LogFmt(
           LogLevel::Error, "CPU",
           "IRQ ENTRY: trig=0x%04x PC=0x%08x SP(before)=0x%08x "
@@ -1009,12 +1055,38 @@ void ARM7TDMI::Step() {
   if (!memory.HasLLEBIOS() && pc < 0x4000) {
     const uint32_t pcAligned = thumbMode ? (pc & ~1u) : (pc & ~3u);
 
+    // Debug trap: catching unexpected execution at the SWI vector (0x08).
+    // Some black-screen cases end up looping with PC=0x08, which usually means
+    // a bad return address / corrupted LR somewhere.
+    if (EnvFlagCached("AIO_TRACE_TRAP_BIOS_08") && pcAligned == 0x00000008u) {
+      static bool trapped = false;
+      if (!trapped) {
+        trapped = true;
+        Logger::Instance().LogFmt(
+            LogLevel::Error, "CPU",
+            "TRAP BIOS 0x08: PC=0x%08x aligned=0x%08x Thumb=%d CPSR=0x%08x "
+            "SPSR=0x%08x SP=0x%08x LR=0x%08x R0=0x%08x R1=0x%08x",
+            (unsigned)pc, (unsigned)pcAligned, thumbMode ? 1 : 0,
+            (unsigned)cpsr, (unsigned)spsr, (unsigned)registers[13],
+            (unsigned)registers[14], (unsigned)registers[0],
+            (unsigned)registers[1]);
+        Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+                                  "TRAP BIOS 0x08: BranchLog (last %zu)",
+                                  branchLog.size());
+        for (const auto &br : branchLog) {
+          Logger::Instance().LogFmt(LogLevel::Error, "CPU",
+                                    "  BR 0x%08x -> 0x%08x", (unsigned)br.first,
+                                    (unsigned)br.second);
+        }
+      }
+    }
+
     const bool inIrqVector = (pcAligned == 0x00000018u);
     // The IRQ trampoline is installed in BIOS space; execute it as
     // normal ARM instructions rather than HLE. Keep the address range
     // in sync with the layout used in GBAMemory::InitializeHLEBIOS.
     const bool inIrqTrampoline =
-        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F50u);
+        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F54u);
 
     if (!inIrqVector && !inIrqTrampoline) {
       ExecuteBIOSFunction(pcAligned);
@@ -1728,6 +1800,17 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
   const uint32_t rd =
       ExtractRegisterField(instruction, ARMInstructionFormat::DP_RD_SHIFT);
 
+  if (EnvFlagCached("AIO_TRACE_HLE_TRAMPOLINE_RETURN") &&
+      instruction == 0xE25EF004u) {
+    Logger::Instance().LogFmt(LogLevel::Info, "CPU",
+                              "DP ENTER instr=0x%08x pc=0x%08x opcode=%u S=%u "
+                              "rn=R%u rd=R%u CPSR=0x%08x SPSR=0x%08x",
+                              (unsigned)instruction, (unsigned)currentInstrAddr,
+                              (unsigned)opcode, (unsigned)(S ? 1u : 0u),
+                              (unsigned)rn, (unsigned)rd, (unsigned)cpsr,
+                              (unsigned)spsr);
+  }
+
   uint32_t op2 = 0;
   bool shifterCarry = CarryFlagSet(cpsr);
 
@@ -2058,6 +2141,20 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       }
       cpsr = spsrCopy;
       thumbMode = IsThumbMode(cpsr);
+
+      if (EnvFlagCached("AIO_TRACE_HLE_TRAMPOLINE_RETURN") &&
+          currentInstrAddr >= 0x00003F00u && currentInstrAddr < 0x00003F60u) {
+        Logger::Instance().LogFmt(
+            LogLevel::Info, "CPU",
+            "HLE_TRAMPOLINE RETURN pc=0x%08x instr=0x%08x oldMode=0x%02x "
+            "newMode=0x%02x SPSR=0x%08x -> CPSR=0x%08x T=%u PC=0x%08x "
+            "LR(now)=0x%08x",
+            (unsigned)currentInstrAddr, (unsigned)instruction,
+            (unsigned)oldMode, (unsigned)newMode, (unsigned)spsrCopy,
+            (unsigned)cpsr, (unsigned)(IsThumbMode(cpsr) ? 1u : 0u),
+            (unsigned)registers[Register::PC],
+            (unsigned)registers[Register::LR]);
+      }
 
       // Align PC based on the restored state.
       registers[Register::PC] = thumbMode ? (registers[Register::PC] & ~1u)
@@ -2700,8 +2797,14 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
     ctx.thumbMode = thumbMode;
     irqStack.push_back(ctx);
 
-    // Return point after handler completes.
-    registers[14] = 0x000001A0;
+    // Real BIOS trampoline executes the user handler in System mode (not IRQ
+    // mode) so it uses the user/system banked SP/LR. Many games rely on this.
+    // We emulate that here before branching to the handler.
+    registers[14] = 0x000001A0; // Return point after handler completes.
+
+    // Switch to System mode while keeping IRQs masked (CPSR.I is already set
+    // by the IRQ entry path).
+    SwitchMode(CPUMode::SYSTEM);
 
     // Branch to user handler (BX semantics).
     if (handler & 1u) {
@@ -2789,6 +2892,8 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
       memory.Write16(IORegs::REG_IE, (uint16_t)(ie | (waitFlags & 0xFFFF)));
       cpsr &= ~0x80; // Clear CPSR I-bit (enable IRQ)
       halted = true;
+      sleepHalt = true;
+      debuggerHalt = false;
 
       // Re-run the BIOS call after waking.
       registers[15] = biosPC;
@@ -4946,6 +5051,19 @@ void ARM7TDMI::ExecuteMSR(uint32_t instruction) {
   uint32_t currentPSR = R ? spsr : cpsr;
   uint32_t newPSR = currentPSR;
 
+  // ARM privilege rules: User mode cannot write CPSR control/extension/status
+  // fields, and cannot access SPSR at all.
+  const uint32_t curMode = GetCPUMode(cpsr);
+  const bool userMode = (curMode == CPUMode::USER);
+  if (userMode) {
+    if (R) {
+      // Ignore attempts to write SPSR in User mode.
+      return;
+    }
+    // Allow only flag updates (CPSR_f). Ignore control/extension/status.
+    mask &= 0x8u;
+  }
+
   if (mask & 1)
     newPSR = (newPSR & 0xFFFFFF00) | (operand & 0x000000FF); // Control
   if (mask & 2)
@@ -4963,6 +5081,16 @@ void ARM7TDMI::ExecuteMSR(uint32_t instruction) {
     const uint32_t oldMode = cpsr & 0x1F;
     const uint32_t newMode = newPSR & 0x1F;
 
+    if (EnvFlagCached("AIO_TRACE_HLE_TRAMPOLINE_MSR") &&
+        currentInstrAddr >= 0x00003F00u && currentInstrAddr < 0x00003F60u) {
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "CPU",
+          "HLE_TRAMPOLINE MSR pc=0x%08x instr=0x%08x CPSR(before)=0x%08x "
+          "oldMode=0x%02x newPSR=0x%08x newMode=0x%02x",
+          (unsigned)currentInstrAddr, (unsigned)instruction, (unsigned)cpsr,
+          (unsigned)oldMode, (unsigned)newPSR, (unsigned)newMode);
+    }
+
     // IMPORTANT: SwitchMode() relies on the *current* CPSR mode to choose
     // which bank to save. Switch banks before overwriting CPSR.
     if (oldMode != newMode) {
@@ -4973,6 +5101,17 @@ void ARM7TDMI::ExecuteMSR(uint32_t instruction) {
 
     // Keep the execution-state flag consistent with CPSR.T.
     thumbMode = IsThumbMode(cpsr);
+
+    if (EnvFlagCached("AIO_TRACE_HLE_TRAMPOLINE_MSR") &&
+        currentInstrAddr >= 0x00003F00u && currentInstrAddr < 0x00003F60u) {
+      Logger::Instance().LogFmt(LogLevel::Info, "CPU",
+                                "HLE_TRAMPOLINE MSR pc=0x%08x "
+                                "CPSR(after)=0x%08x mode=0x%02x T=%u I=%u",
+                                (unsigned)currentInstrAddr, (unsigned)cpsr,
+                                (unsigned)GetCPUMode(cpsr),
+                                (unsigned)(IsThumbMode(cpsr) ? 1u : 0u),
+                                (unsigned)((cpsr >> 7) & 1u));
+    }
   }
 }
 

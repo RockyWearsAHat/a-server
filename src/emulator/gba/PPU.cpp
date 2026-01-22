@@ -7,7 +7,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <set>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
@@ -30,8 +33,16 @@ inline int EnvInt(const char *name, int defaultValue) {
   return std::atoi(v);
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
   return enabled;
 }
 
@@ -277,6 +288,10 @@ void PPU::Update(int cycles) {
       dispstat |= 2; // HBlank flag (Bit 1)
       memory.WriteIORegisterInternal(0x04, dispstat);
 
+      // Apply any palette/VRAM writes that were queued during the visible
+      // period so they become visible at the next safe window.
+      memory.ApplyDeferredWrites();
+
       // Trigger HBlank IRQ if enabled in DISPSTAT.
       if (dispstat & 0x10) { // HBlank IRQ Enable (Bit 4)
         uint16_t if_reg = memory.Read16(0x04000202);
@@ -513,14 +528,24 @@ void PPU::DrawScanline() {
       const uint16_t bg2vofs = ReadRegister(0x1A);
       const uint16_t bg3hofs = ReadRegister(0x1C);
       const uint16_t bg3vofs = ReadRegister(0x1E);
+      const uint16_t dispstat = ReadRegister(0x04);
+      const uint16_t vcount = ReadRegister(0x06);
+      const uint16_t ie = memory.Read16(0x04000200);
+      const uint16_t if_reg = memory.Read16(0x04000202);
+      const uint16_t ime = memory.Read16(0x04000208);
+      const uint16_t bios_if = memory.Read16(0x03007FF8);
 
       std::cout << "[PPU_FRAME] frameCount=" << fc << " logLine=" << linesLogged
                 << " DISPCNT=0x" << std::hex << dispcnt << " mode=" << std::dec
                 << mode << " BG_EN=0x" << std::hex << ((dispcnt >> 8) & 0xF)
                 << " OBJ_EN=" << (((dispcnt >> 12) & 1) ? 1 : 0) << " WIN=0x"
                 << (((dispcnt >> 13) & 0x7) | (((dispcnt >> 15) & 1) << 3))
-                << " BG0=0x" << bg0cnt << " BG1=0x" << bg1cnt << " BG2=0x"
-                << bg2cnt << " BG3=0x" << bg3cnt << " BG0HOFS=0x" << bg0hofs
+                << " DISPSTAT=0x" << std::hex << dispstat
+                << " VCOUNT=" << std::dec << (unsigned)vcount
+                << " IME=" << (unsigned)ime << " IE=0x" << std::hex << ie
+                << " IF=0x" << if_reg << " BIOS_IF=0x" << bios_if << " BG0=0x"
+                << bg0cnt << " BG1=0x" << bg1cnt << " BG2=0x" << bg2cnt
+                << " BG3=0x" << bg3cnt << " BG0HOFS=0x" << bg0hofs
                 << " BG0VOFS=0x" << bg0vofs << " BG1HOFS=0x" << bg1hofs
                 << " BG1VOFS=0x" << bg1vofs << " BG2HOFS=0x" << bg2hofs
                 << " BG2VOFS=0x" << bg2vofs << " BG3HOFS=0x" << bg3hofs
@@ -1797,6 +1822,10 @@ void PPU::RenderMode0() {
 }
 
 void PPU::RenderBackground(int bgIndex) {
+  const uint16_t dispcnt = ReadRegister(0x00);
+  const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
+  const bool wrapBgVram = (bgMode <= 2);
+
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
   uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
   uint16_t bgvofs = ReadRegister(0x12 + (bgIndex * 4)) & 0x01FF;
@@ -1886,10 +1915,9 @@ void PPU::RenderBackground(int bgIndex) {
       blockOffset = blockX * 2048;
       break;
     case 2: // 32x64, two vertical blocks
-      // For ScreenSize=2 (32x64 tiles), the second vertical
-      // screen block starts at screen base + 1 (not +2), i.e.
-      // +0x800 bytes per 32x32 block.
-      blockOffset = blockY * 2048;
+      // GBATEK: for ScreenSize=2 (32x64 tiles), the second vertical screen
+      // block is screen base + 2 (not +1) => +0x1000 bytes.
+      blockOffset = blockY * 4096;
       break;
     case 3: // 64x64, four blocks
       blockOffset = blockX * 2048 + blockY * 4096;
@@ -1899,7 +1927,11 @@ void PPU::RenderBackground(int bgIndex) {
     // Fetch Tile Map Entry
     // Each screen block is 32x32 entries (2KB = 2048 bytes)
     uint32_t mapAddr = mapBase + blockOffset + (ty * 32 + tx) * 2;
-    uint16_t tileEntry = ReadVram16(vramData, vramSize, mapAddr - 0x06000000u);
+    uint32_t mapOffset = mapAddr - 0x06000000u;
+    if (wrapBgVram) {
+      mapOffset &= 0xFFFFu;
+    }
+    uint16_t tileEntry = ReadVram16(vramData, vramSize, mapOffset);
 
     int tileIndex = tileEntry & 0x3FF;
     bool hFlip = (tileEntry >> 10) & 1;
@@ -1922,7 +1954,11 @@ void PPU::RenderBackground(int bgIndex) {
       // 4bpp (16 colors)
       // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
       tileAddr = tileBase + (tileIndex * 32) + (inTileY * 4) + (inTileX / 2);
-      tileByte = ReadVram8(vramData, vramSize, tileAddr - 0x06000000u);
+      uint32_t tileOffset = tileAddr - 0x06000000u;
+      if (wrapBgVram) {
+        tileOffset &= 0xFFFFu;
+      }
+      tileByte = ReadVram8(vramData, vramSize, tileOffset);
 
       bool useHighNibble = (inTileX & 1) != 0;
       if (PpuSwap4bppNibbles()) {
@@ -1933,7 +1969,11 @@ void PPU::RenderBackground(int bgIndex) {
       // 8bpp (256 colors)
       // 64 bytes per tile
       tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
-      tileByte = ReadVram8(vramData, vramSize, tileAddr - 0x06000000u);
+      uint32_t tileOffset = tileAddr - 0x06000000u;
+      if (wrapBgVram) {
+        tileOffset &= 0xFFFFu;
+      }
+      tileByte = ReadVram8(vramData, vramSize, tileOffset);
       colorIndex = tileByte;
     }
 
@@ -2247,6 +2287,11 @@ void PPU::BuildObjWindowMaskForScanline() {
 
     const int shape = (attr0 >> 14) & 0x3;
     const int size = (attr1 >> 14) & 0x3;
+
+    // GBATEK: OBJ shape=3 is prohibited.
+    if (shape == 3) {
+      continue;
+    }
     const int width = sizes[shape][size][0];
     const int height = sizes[shape][size][1];
 
@@ -2411,21 +2456,28 @@ void PPU::ApplyColorEffects() {
   // Second target layers (bits 8-13 of BLDCNT)
   uint8_t secondTarget = (bldcnt >> 8) & 0x3F;
 
-  auto blendChannel = [](uint8_t a, uint8_t b, int eva, int evb) -> uint8_t {
-    int out = (a * eva + b * evb) / 16;
-    if (out < 0)
-      out = 0;
-    if (out > 255)
-      out = 255;
-    return (uint8_t)out;
+  auto to5 = [](uint8_t v8) -> int {
+    // Our pipeline expands BGR555 -> 8-bit via <<3, so >>3 recovers the exact
+    // 5-bit channel.
+    return (int)(v8 >> 3);
+  };
+  auto from5 = [](int v5) -> uint8_t {
+    if (v5 < 0)
+      v5 = 0;
+    if (v5 > 31)
+      v5 = 31;
+    return (uint8_t)(v5 << 3);
   };
 
-  auto clamp8 = [](int v) -> uint8_t {
-    if (v < 0)
-      return 0;
-    if (v > 255)
-      return 255;
-    return (uint8_t)v;
+  auto blendChannel5 = [](uint8_t a8, uint8_t b8, int eva, int evb) -> uint8_t {
+    const int a5 = (int)(a8 >> 3);
+    const int b5 = (int)(b8 >> 3);
+    int out5 = (a5 * eva + b5 * evb) / 16;
+    if (out5 < 0)
+      out5 = 0;
+    if (out5 > 31)
+      out5 = 31;
+    return (uint8_t)(out5 << 3);
   };
 
   // Apply effect to each pixel on this scanline
@@ -2479,9 +2531,9 @@ void PPU::ApplyColorEffects() {
       const uint8_t ug = (under >> 8) & 0xFF;
       const uint8_t ub = under & 0xFF;
 
-      r = blendChannel(r, ur, eva, evb);
-      g = blendChannel(g, ug, eva, evb);
-      b = blendChannel(b, ub, eva, evb);
+      r = blendChannel5(r, ur, eva, evb);
+      g = blendChannel5(g, ug, eva, evb);
+      b = blendChannel5(b, ub, eva, evb);
     } else if (effectMode == 1) {
       if (!topIsFirstTarget) {
         continue;
@@ -2497,27 +2549,27 @@ void PPU::ApplyColorEffects() {
       const uint8_t ug = (under >> 8) & 0xFF;
       const uint8_t ub = under & 0xFF;
 
-      r = blendChannel(r, ur, eva, evb);
-      g = blendChannel(g, ug, eva, evb);
-      b = blendChannel(b, ub, eva, evb);
+      r = blendChannel5(r, ur, eva, evb);
+      g = blendChannel5(g, ug, eva, evb);
+      b = blendChannel5(b, ub, eva, evb);
     } else if (effectMode == 2) {
       if (!topIsFirstTarget) {
         continue;
       }
       // Brightness Increase (fade to white)
       // I = I + (31-I) * EVY / 16
-      r = clamp8((int)r + ((255 - (int)r) * evy / 16));
-      g = clamp8((int)g + ((255 - (int)g) * evy / 16));
-      b = clamp8((int)b + ((255 - (int)b) * evy / 16));
+      r = from5(to5(r) + ((31 - to5(r)) * evy / 16));
+      g = from5(to5(g) + ((31 - to5(g)) * evy / 16));
+      b = from5(to5(b) + ((31 - to5(b)) * evy / 16));
     } else if (effectMode == 3) {
       if (!topIsFirstTarget) {
         continue;
       }
       // Brightness Decrease (fade to black)
       // I = I - I * EVY / 16
-      r = clamp8((int)r - ((int)r * evy / 16));
-      g = clamp8((int)g - ((int)g * evy / 16));
-      b = clamp8((int)b - ((int)b * evy / 16));
+      r = from5(to5(r) - (to5(r) * evy / 16));
+      g = from5(to5(g) - (to5(g) * evy / 16));
+      b = from5(to5(b) - (to5(b) * evy / 16));
     }
 
     backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;

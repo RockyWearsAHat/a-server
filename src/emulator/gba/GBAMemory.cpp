@@ -11,7 +11,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace AIO::Emulator::GBA {
 
@@ -21,9 +24,9 @@ constexpr uint32_t kIrqHandlerOffset = 0x7FFCu;
 constexpr uint32_t kIrqHandlerDefault = 0x00003FF0u;
 
 inline bool IsIwramMappedAddress(uint32_t address) {
-  // IWRAM is 32KB physically, but is mirrored throughout the entire 0x03xxxxxx
-  // address region on real hardware. Many titles rely on this (intentionally
-  // or incidentally) when using computed jumps or pointers.
+  // IWRAM is 32KB at 0x03000000-0x03007FFF.
+  // On real hardware, the 0x03xxxxxx region aliases into IWRAM via address
+  // line decoding (mirroring within 0x03000000-0x03FFFFFF).
   return (address & 0xFF000000u) == 0x03000000u;
 }
 
@@ -47,8 +50,16 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
   return enabled;
 }
 
@@ -282,41 +293,63 @@ void GBAMemory::InitializeHLEBIOS() {
 
   // IRQ Trampoline
   // This trampoline is a minimal IRQ dispatcher suitable for DirectBoot,
-  // closely matching the behavior from the known-good d20cc15 commit, but
   // relocated to 0x3F00 to keep 0x188/0x194 free for VBlankIntrWait/IntrWait.
   //
   // Key behaviors:
   // - Save volatile regs on SP_irq
+  // - Switch to System mode so the user handler runs on the System stack
+  // - Preserve the interrupted System/User LR across the handler call
   // - Call user handler at [0x03FFFFFC] (mirror of 0x03007FFC)
-  // - Acknowledge/clear REG_IF *after* the user handler returns, using
-  //   the triggered mask stored at 0x03007FF4 by the CPU IRQ entry path
+  // - Switch back to IRQ mode
+  // - Acknowledge/clear REG_IF using the triggered mask at 0x03007FF4
   // - Restore regs and exception-return via SUBS PC, LR, #4
-  //
-  // This sequence has been validated against DKC/SMA2 behavior in the
-  // earlier accurate core and is preserved here to avoid regressions.
 
   uint32_t base = kIrqTrampolineBase;
   const uint32_t trampoline[] = {
       // 0x3F00: STMDB SP!, {R0-R3, R12, LR}
       0xE92D500F,
-      // 0x3F04: MOV   R0, #0x04000000
-      0xE3A00404,
-      // 0x3F08: ADD   LR, PC, #0
+      // 0x3F04: MOV   R2, #0x04000000
+      0xE3A02404,
+      // 0x3F08: MRS   R3, CPSR
+      0xE10F3000,
+      // 0x3F0C: BIC   R3, R3, #0x1F
+      0xE3C3301F,
+      // 0x3F10: ORR   R3, R3, #0x1F (SYS)
+      0xE383301F,
+      // 0x3F14: MSR   CPSR_c, R3
+      0xE129F003,
+      // 0x3F18: STMDB SP!, {LR}       ; preserve interrupted SYS/USR LR
+      0xE92D4000,
+      // 0x3F1C: ADD   LR, PC, #0      ; set return-to-trampoline address
       0xE28FE000,
-      // 0x3F0C: LDR   PC, [R0, #-4]   ; jump to [0x03FFFFFC] user handler
-      0xE510F004,
-      // 0x3F10: LDR   R1, [PC, #8]    ; &0x03007FF4 (literal)
-      0xE59F1008,
-      // 0x3F14: LDRH  R1, [R1]        ; triggered mask
+      // 0x3F20: LDR   PC, [R2, #-4]   ; jump to [0x03FFFFFC] user handler
+      0xE512F004,
+      // 0x3F24: LDMIA SP!, {LR}       ; restore interrupted SYS/USR LR
+      0xE8BD4000,
+      // 0x3F28: MRS   R3, CPSR
+      0xE10F3000,
+      // 0x3F2C: BIC   R3, R3, #0x1F
+      0xE3C3301F,
+      // 0x3F30: ORR   R3, R3, #0x12 (IRQ)
+      0xE3833012,
+      // 0x3F34: MSR   CPSR_c, R3
+      0xE129F003,
+      // 0x3F38: MOV   R2, #0x04000000
+      0xE3A02404,
+      // 0x3F3C: LDR   R1, [PC, #16]
+      0xE59F1010,
+      // 0x3F40: LDRH  R1, [R1]
       0xE1D110B0,
-      // 0x3F18: STRH  R1, [R0, #0x202]; REG_IF (write-1-to-clear)
-      0xE1C012B2,
-      // 0x3F1C: LDMIA SP!, {R0-R3, R12, LR}
+      // 0x3F44: ADD   R0, R2, #0x200
+      0xE2820F80,
+      // 0x3F48: STRH  R1, [R0, #2]
+      0xE1C010B2,
+      // 0x3F4C: LDMIA SP!, {R0-R3, R12, LR}
       0xE8BD500F,
-      // 0x3F20: SUBS  PC, LR, #4      ; exception-return from IRQ
+      // 0x3F50: SUBS  PC, LR, #4
       0xE25EF004,
-      // 0x3F24: literal 0x03007FF4
-      0x03007FF4};
+      // 0x3F54: literal 0x03007FF4
+      0x03007FF4u};
 
   for (size_t i = 0; i < sizeof(trampoline) / sizeof(uint32_t); ++i) {
     uint32_t instr = trampoline[i];
@@ -1414,6 +1447,34 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 
   uint16_t val = Read8(address) | (Read8(address + 1) << 8);
 
+  // DKC black-screen investigation: the title can spin in a Thumb loop polling
+  // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
+  // and where reads come from.
+  // Enable with: AIO_TRACE_DKC_WAITFLAG=1
+  if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu && region == 0x03 &&
+      ((address & ~1u) == 0x03000064u)) {
+    static uint16_t lastVal = 0xFFFFu;
+    static uint32_t repeats = 0;
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    if (val == lastVal) {
+      repeats++;
+      if (repeats == 1u || (repeats % 4096u) == 0u) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "DKC",
+            "WAITFLAG R16 addr=0x%08x val=0x%04x PC=0x%08x repeats=%u",
+            (unsigned)(address & ~1u), (unsigned)val, (unsigned)pc,
+            (unsigned)repeats);
+      }
+    } else {
+      repeats = 0;
+      lastVal = val;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DKC",
+          "WAITFLAG R16 addr=0x%08x val=0x%04x PC=0x%08x",
+          (unsigned)(address & ~1u), (unsigned)val, (unsigned)pc);
+    }
+  }
+
   // OG-DK / emulation-title investigation: trace VCOUNT polling loops.
   // These games often implement their own PPU timing by busy-waiting on
   // VCOUNT/DISPSTAT. If our VCOUNT model or IRQ timing is off, the loop
@@ -2108,8 +2169,15 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     // GBA VRAM byte-write quirks:
     // - BG VRAM (0x06000000-0x0600FFFF): 8-bit writes duplicate to both bytes
     //   of the addressed halfword on the 16-bit bus.
-    // - OBJ VRAM (0x06010000-0x06017FFF): 8-bit writes are ignored.
-    if (offset >= 0x10000u) {
+    // - OBJ VRAM: 8-bit writes are ignored.
+    //   * Modes 0-2: OBJ VRAM is 0x06010000-0x06017FFF.
+    //   * Bitmap modes 3-5: 0x06010000-0x06013FFF behaves as BG VRAM, while
+    //     OBJ VRAM is 0x06014000-0x06017FFF.
+    const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
+                                        (io_regs[IORegs::DISPCNT + 1] << 8));
+    const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
+    const uint32_t objVramStart = (bgMode <= 2) ? 0x10000u : 0x14000u;
+    if (offset >= objVramStart) {
       break;
     }
 
@@ -2266,6 +2334,19 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 }
 
 void GBAMemory::Write16(uint32_t address, uint16_t value) {
+  // DKC black-screen investigation: trace writes to the polled wait flag.
+  // Enable with: AIO_TRACE_DKC_WAITFLAG=1
+  if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu &&
+      ((address & ~1u) == 0x03000064u)) {
+    static int wLogs = 0;
+    if (wLogs++ < 400) {
+      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DKC",
+          "WAITFLAG W16 addr=0x%08x val=0x%04x PC=0x%08x",
+          (unsigned)(address & ~1u), (unsigned)value, (unsigned)pc);
+    }
+  }
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIwram = IsIwramMappedAddress(address);
   const uint32_t iwramOff = address & 0x7FFFu;
@@ -2543,11 +2624,39 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     address &= ~1u;
   }
 
-  // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
-  // The current emulator relies on the PPU tests and game behavior as a
-  // practical guide; stricter timing (based on
-  // ppuTimingScanline/ppuTimingCycle) previously caused valid game writes to be
-  // dropped, corrupting VRAM.
+  // Enforce timing-dependent write visibility for graphics memory.
+  // - During visible rendering (scanline<160 && cycle<960), VRAM/Palette writes
+  //   do not take effect. We queue them to apply at the next safe period.
+  // - OAM writes do not become visible during the visible period. HBlank writes
+  //   require DISPCNT bit5 (H-Blank Interval Free) during scanlines 0-159.
+  // - Forced blank always permits access.
+  if (region == 0x05 || region == 0x06 || region == 0x07) {
+    const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
+                                        (io_regs[IORegs::DISPCNT + 1] << 8));
+    const bool forcedBlank = (dispcnt & 0x0080u) != 0;
+    const bool inVisible =
+        ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
+    const bool inVBlank = ppuTimingValid && (ppuTimingScanline >= 160);
+    const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960);
+
+    if (!forcedBlank && inVisible) {
+      if (region == 0x05 || region == 0x06) {
+        deferredWrites.push_back(
+            {address, (uint8_t)(value & 0xFFu), (uint8_t)region});
+        deferredWrites.push_back(
+            {address + 1u, (uint8_t)((value >> 8) & 0xFFu), (uint8_t)region});
+      }
+      // OAM writes are ignored during the visible period.
+      return;
+    }
+
+    if (!forcedBlank && (region == 0x07) && !inVBlank && inHBlank &&
+        (ppuTimingScanline < 160) && ((dispcnt & 0x0020u) == 0)) {
+      // OAM writes during HBlank on visible scanlines require H-Blank Interval
+      // Free.
+      return;
+    }
+  }
 
   // Optional: trace CPU halfword writes into Palette RAM.
   // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
@@ -2943,6 +3052,36 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
   // Optionally align unaligned word stores to match HW behavior.
   if (region == 0x05 || region == 0x06 || region == 0x07) {
     address &= ~3u;
+  }
+
+  // Timing-dependent gating for graphics memory (see Write16).
+  if (region == 0x05 || region == 0x06 || region == 0x07) {
+    const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
+                                        (io_regs[IORegs::DISPCNT + 1] << 8));
+    const bool forcedBlank = (dispcnt & 0x0080u) != 0;
+    const bool inVisible =
+        ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
+    const bool inVBlank = ppuTimingValid && (ppuTimingScanline >= 160);
+    const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960);
+
+    if (!forcedBlank && inVisible) {
+      if (region == 0x05 || region == 0x06) {
+        deferredWrites.push_back(
+            {address + 0u, (uint8_t)(value & 0xFFu), (uint8_t)region});
+        deferredWrites.push_back(
+            {address + 1u, (uint8_t)((value >> 8) & 0xFFu), (uint8_t)region});
+        deferredWrites.push_back(
+            {address + 2u, (uint8_t)((value >> 16) & 0xFFu), (uint8_t)region});
+        deferredWrites.push_back(
+            {address + 3u, (uint8_t)((value >> 24) & 0xFFu), (uint8_t)region});
+      }
+      return;
+    }
+
+    if (!forcedBlank && (region == 0x07) && !inVBlank && inHBlank &&
+        (ppuTimingScanline < 160) && ((dispcnt & 0x0020u) == 0)) {
+      return;
+    }
   }
 
   // Optional: trace CPU word writes into Palette RAM.

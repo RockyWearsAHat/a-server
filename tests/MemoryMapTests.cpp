@@ -18,23 +18,20 @@ TEST(MemoryMapTest, IwramTopMirrorMapsToBase) {
   EXPECT_EQ(mem.Read32(kMirror), 0x0800012Cu);
 }
 
-TEST(MemoryMapTest, IwramDoesNotAliasArbitrary03RegionAddresses) {
+TEST(MemoryMapTest, IwramMirrorsAcross03RegionAddresses) {
   GBAMemory mem;
   mem.Reset();
 
-  constexpr uint32_t kIrqHandler = 0x03007FFCu;
-  constexpr uint32_t kUnmappedAliasLike =
-      0x03057FFCu; // NOT a real IWRAM mirror
+  // Pick a normal IWRAM location (avoid BIOS-managed slots like 0x03007FFC).
+  constexpr uint32_t kBase = 0x03001234u;
+  constexpr uint32_t kAlias = 0x03009234u; // Same low 15 bits (0x1234)
 
-  mem.Write32(kIrqHandler, 0x0800012Cu);
-  EXPECT_EQ(mem.Read32(kIrqHandler), 0x0800012Cu);
+  mem.Write32(kBase, 0x11112222u);
+  EXPECT_EQ(mem.Read32(kAlias), 0x11112222u);
 
-  // This write must not corrupt the IRQ handler slot.
-  mem.Write32(kUnmappedAliasLike, 0x33222223u);
-  EXPECT_EQ(mem.Read32(kIrqHandler), 0x0800012Cu);
-
-  // Reads from the unmapped address should not reflect IWRAM state.
-  EXPECT_NE(mem.Read32(kUnmappedAliasLike), mem.Read32(kIrqHandler));
+  mem.Write32(kAlias, 0x33222223u);
+  EXPECT_EQ(mem.Read32(kBase), 0x33222223u);
+  EXPECT_EQ(mem.Read32(kAlias), 0x33222223u);
 }
 
 TEST(MemoryMapTest, IrqHandlerWordWriteIsAtomicAndNotTorn) {
