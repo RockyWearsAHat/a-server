@@ -1,140 +1,148 @@
-# Plan: Fix Infinite Recursion Crash in DISPSTAT/VCOUNT Flush
+# Plan: Fix SemiTransparentOBJ_NoFirstTarget Test — OAM Initialization Bug
 
 **Date:** 2026-01-23  
-**Status:** ✅ COMPLETED  
-**Goal:** Fix infinite recursion introduced by FlushPendingPeripheralCycles() in Read16()
+**Status:** 🔴 NOT STARTED  
+**Goal:** Fix the failing `SemiTransparentOBJ_NoFirstTarget` test by initializing all OAM entries to disabled
 
 ---
 
-## Root Cause Analysis
+## Context
 
-The recent changes to improve timing accuracy introduced a **critical infinite recursion bug**:
+### Root Cause Analysis
 
-1. `GBAMemory::Read16()` was modified to call `FlushPendingPeripheralCycles()` when reading DISPSTAT/VCOUNT
-2. `FlushPendingPeripheralCycles()` calls `memory->AdvanceCycles()`
-3. `AdvanceCycles()` calls `PPU::Update()`
-4. `PPU::Update()` calls `memory.Read16(0x04000004)` to read DISPSTAT
-5. This triggers the flush again → **infinite recursion → stack overflow crash**
+The test `PPUBlendTest.SemiTransparentOBJ_NoFirstTarget` fails because:
 
-### Call Stack (from lldb):
+1. **Test trace output shows the problem:**
 
-```
-PPU::Update() → memory.Read16(DISPSTAT) → FlushPendingPeripheralCycles() → AdvanceCycles() → PPU::Update() → ...
-```
+   ```
+   [FADE_SEMITR] x=0 topLayer=4 underLayer=4 eva=8 evb=8 under=0xfff80000
+   ```
+
+   - `underLayer=4` (OBJ) when it should be `5` (backdrop)
+   - `under=0xfff80000` (red/OBJ color) when it should be green (backdrop)
+
+2. **OAM is not properly initialized.** The test only sets up sprite 0 but does NOT disable the other 127 sprites. The `PPUBlendTest` fixture's `SetUp()` also doesn't initialize OAM.
+
+3. **GBA OAM default state:** When OAM contains zeros (uninitialized):
+   - `attr0 = 0x0000`: Y=0, affine=0, disable=0 → **sprite ENABLED at Y=0**
+   - This means sprites 127→1 all render at scanline 0 with tile 0
+4. **RenderOBJ iteration order:** The loop goes `for (int i = 127; i >= 0; --i)`, so sprites 127→1 are drawn BEFORE sprite 0. When sprite 0 (the semi-transparent one) is drawn, `backBuffer` already contains pixels from sprites 127→1.
+
+5. **The "under" layer tracking is correct:** `RenderOBJ()` correctly saves `backBuffer[pixelIndex]` to `underColorBuffer` before overwriting. But since other OBJs already drew there, the "under" layer is OBJ (layer 4), not backdrop (layer 5).
+
+### The Fix
+
+The test must disable all 128 sprites before setting up the test sprite. This matches what the passing test `SemiTransparentObjBlendingIsGatedByObjWindowEffectsEnableBit` does.
 
 ---
 
-## Fix Strategy
+## Steps
 
-**Solution:** Add a `ReadIORegister16Internal()` method that reads IO registers directly without triggering the flush. The PPU should use this internal method when reading its own registers.
+### Step 1: Fix test by disabling all sprites before setup — `tests/PPUTests.cpp`
 
----
-
-## Step 1: Add ReadIORegister16Internal to GBAMemory
-
-**File:** [include/emulator/gba/GBAMemory.h](include/emulator/gba/GBAMemory.h)
-
-### 1.1 Add method declaration after WriteIORegisterInternal
+**Operation:** `REPLACE`
+**Anchor:** Lines 2302-2377 (the entire `SemiTransparentOBJ_NoFirstTarget` test)
 
 ```cpp
-// After line 81 (WriteIORegisterInternal declaration), add:
-  uint16_t ReadIORegister16Internal(uint32_t offset) const;
-```
+TEST_F(PPUBlendTest, SemiTransparentOBJ_NoFirstTarget) {
+  // Per GBATEK: Semi-transparent OBJs always blend, even when OBJ is NOT
+  // selected as first target in BLDCNT. The only requirement is that the
+  // underlying layer is in secondTarget.
+  //
+  // BLDCNT = 0x3F00: Mode 0, firstTarget=0x00 (none!), secondTarget=0x3F (all)
+  // This is what DKC uses for its logo fade.
 
----
+  // Enter Forced Blank to allow setup
+  memory.Write16(0x04000000u, 0x0080u);
 
-## Step 2: Implement ReadIORegister16Internal
-
-**File:** [src/emulator/gba/GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp)
-
-### 2.1 Add implementation near WriteIORegisterInternal
-
-```cpp
-uint16_t GBAMemory::ReadIORegister16Internal(uint32_t offset) const {
-  // Direct read from io_regs without triggering flush (for internal PPU use)
-  if (offset + 1 < io_regs.size()) {
-    return io_regs[offset] | (io_regs[offset + 1] << 8);
+  // CRITICAL: Disable ALL 128 sprites first!
+  // Uninitialized OAM (attr0=0) means sprites are enabled at Y=0.
+  // The RenderOBJ loop iterates 127→0, so any enabled sprite will draw
+  // before our test sprite and pollute the "under" layer tracking.
+  for (uint32_t spr = 0; spr < 128; ++spr) {
+    const uint32_t base = spr * 8u;
+    // attr0 bit 9 = 1 (with affine=0) disables the sprite
+    TestUtil::WriteOam16(memory, base + 0u, (uint16_t)(1u << 9));
+    TestUtil::WriteOam16(memory, base + 2u, 0u);
+    TestUtil::WriteOam16(memory, base + 4u, 0u);
   }
-  return 0;
+
+  // BLDCNT: Mode 0, firstTarget=0x00 (none), secondTarget=0x3F (all)
+  memory.Write16(0x04000050u, 0x3F00u);
+  // BLDALPHA: EVA=8, EVB=8 (50/50 blend)
+  memory.Write16(0x04000052u, 0x0808u);
+
+  // Mode 0 + OBJ enable (no BGs, so backdrop is the only under-layer)
+  memory.Write16(0x04000000u, 0x1000u);
+
+  // Backdrop = green (BGR555: 0x03E0)
+  memory.Write16(0x05000000u, 0x03E0u);
+
+  // OBJ palette index 1 = red (BGR555: 0x001F)
+  memory.Write16(0x05000200u + 2u, 0x001Fu);
+
+  // OBJ tile 0: fill row 0 with palette index 1 (4bpp: each byte = 0x11)
+  memory.Write16(0x06010000u + 0u, 0x1111u);
+  memory.Write16(0x06010000u + 2u, 0x1111u);
+
+  // Setup sprite 0: semi-transparent OBJ at (0,0), 8x8, 4bpp
+  // attr0: Y=0, objMode=1 (semi-transparent), bits 10-11 = 01
+  const uint16_t spr0_attr0 = (uint16_t)(0u | (1u << 10));
+  const uint16_t spr0_attr1 = 0u;
+  const uint16_t spr0_attr2 = 0u;
+  TestUtil::WriteOam16(memory, 0, spr0_attr0);
+  TestUtil::WriteOam16(memory, 2, spr0_attr1);
+  TestUtil::WriteOam16(memory, 4, spr0_attr2);
+
+  // Exit Forced Blank before rendering
+  memory.Write16(0x04000000u, 0x1000u);
+
+  ppu.Update(960);
+  ppu.SwapBuffers();
+
+  const auto fb = ppu.GetFramebuffer();
+  ASSERT_GE(fb.size(), (size_t)PPU::SCREEN_WIDTH);
+
+  uint32_t pixel = fb[0];
+  uint8_t r = (pixel >> 16) & 0xFF;
+  uint8_t g = (pixel >> 8) & 0xFF;
+  uint8_t b = pixel & 0xFF;
+
+  // Expected: blended color from red OBJ + green backdrop
+  // With EVA=8, EVB=8: out = (OBJ*8 + backdrop*8) / 16
+  // Red OBJ:    R=31, G=0,  B=0  (BGR555: 0x001F -> RGB888: 0xF8,0,0)
+  // Green BG:   R=0,  G=31, B=0  (BGR555: 0x03E0 -> RGB888: 0,0xF8,0)
+  // Blended 5-bit: R=15, G=15, B=0 -> RGB888: 0x78, 0x78, 0
+  EXPECT_GT(r, 0u) << "Red component should be present (from OBJ)";
+  EXPECT_GT(g, 0u) << "Green component should be present (from backdrop blend)";
+  EXPECT_EQ(b, 0u) << "Blue component should be zero";
 }
 ```
 
----
-
-## Step 3: Update PPU to use ReadIORegister16Internal
-
-**File:** [src/emulator/gba/PPU.cpp](src/emulator/gba/PPU.cpp)
-
-### 3.1 Replace memory.Read16(0x04000004) calls with ReadIORegister16Internal(0x04)
-
-All reads of DISPSTAT (0x04000004), VCOUNT (0x04000006), and IF (0x04000202) inside PPU::Update() must use the internal method:
-
-- `memory.Read16(0x04000004)` → `memory.ReadIORegister16Internal(0x04)`
-- `memory.Read16(0x04000006)` → `memory.ReadIORegister16Internal(0x06)`
-- `memory.Read16(0x04000202)` → `memory.ReadIORegister16Internal(0x202)`
-- `memory.Read16(0x04000200)` → `memory.ReadIORegister16Internal(0x200)` (IE)
-- `memory.Read16(0x04000208)` → `memory.ReadIORegister16Internal(0x208)` (IME)
-- `memory.Read16(0x03007FF8)` → Keep as-is (IWRAM, not IO)
+**Verify:** `./build/bin/PPUTests --gtest_filter='*SemiTransparentOBJ_NoFirstTarget*'`
 
 ---
 
-## Step 4: Verify Fix
+## Test Strategy
 
-### 4.1 Build
-
-```bash
-make build
-```
-
-### 4.2 Run tests
-
-```bash
-cd build && ctest --output-on-failure
-```
-
-### 4.3 Test SMA2
-
-```bash
-./build/bin/SMA2Harness
-```
-
-### 4.4 Test games in GUI
-
-```bash
-./build/bin/AIOServer SMA2.gba
-./build/bin/AIOServer DKC.gba
-./build/bin/AIOServer "Metroid - Zero Mission (USA).gba"
-```
+1. `make build` — compiles without errors
+2. `./build/bin/PPUTests --gtest_filter='*SemiTransparentOBJ_NoFirstTarget*'` — test passes
+3. `./build/bin/PPUTests --gtest_filter='*SemiTransparent*'` — all semi-transparent tests still pass
 
 ---
 
-## Files Affected
+## Documentation Updates
 
-| File                                                                 | Change                                                                                 |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| [include/emulator/gba/GBAMemory.h](include/emulator/gba/GBAMemory.h) | Add `ReadIORegister16Internal()` declaration                                           |
-| [src/emulator/gba/GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp)     | Add `ReadIORegister16Internal()` implementation                                        |
-| [src/emulator/gba/PPU.cpp](src/emulator/gba/PPU.cpp)                 | Replace `Read16()` with `ReadIORegister16Internal()` for IO register reads in Update() |
+No memory.md updates needed — this was a test setup bug, not a code bug.
 
 ---
 
-## Verification Criteria
+## Notes
 
-- [ ] Build succeeds
-- [ ] All tests pass (134+ tests)
-- [ ] SMA2Harness runs without crashing
-- [ ] SMA2, DKC, Metroid boot and run in GUI
+The PPU code change from the previous plan (removing `topIsFirstTarget` check for semi-transparent OBJs) was already applied and is correct. The test was failing due to improper OAM initialization, not a PPU logic bug.
 
 ---
 
-## Previous Issues (Still To Verify After Fix)
+## Handoff
 
-| Issue                     | Game  | Symptom          | Status                         |
-| ------------------------- | ----- | ---------------- | ------------------------------ |
-| **Massive Lag**           | SMA2  | Game runs slow   | 🔍 Verify after recursion fix  |
-| **Logo Fade Not Working** | DKC   | Logos don't fade | 🔍 Investigate after crash fix |
-| **Corrupted Mess**        | OG-DK | Display broken   | 🔍 Investigate after crash fix |
-
----
-
-**Ready for implementation!** Hand off to `@Implement` agent.
+Run `@Implement` to execute Step 1.

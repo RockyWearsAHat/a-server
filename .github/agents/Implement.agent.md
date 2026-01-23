@@ -165,6 +165,7 @@ Both must succeed before reporting completion.
 3. One fix attempt
 4. If unresolved: write a detailed bug entry to `.github/bugs.md` (include failing test name, reproduction steps, observed vs expected behavior, relevant logs/traces, and attempted fixes). Continue with remaining plan steps when possible and record all encountered issues in `.github/bugs.md`. After finishing all plan steps, report all open bugs together to the user and flag the plan as blocked on those bugs.
 ```
+
 ### Ambiguous Step
 
 ```

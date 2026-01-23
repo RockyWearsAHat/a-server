@@ -70,6 +70,15 @@ protected:
   void SetUp() override {
     memory.Write16(0x04000000, 0x0100); // DISPCNT: BG0 enable
     memory.Write16(0x05000000, 0x001F); // Backdrop = Red (31,0,0)
+
+    // Disable all sprites by default to avoid uninitialized OAM causing
+    // flakes in blend tests (tests set up sprites explicitly when needed).
+    for (uint32_t spr = 0; spr < 128; ++spr) {
+      const uint32_t base = spr * 8u;
+      TestUtil::WriteOam16(memory, base + 0u, (uint16_t)(1u << 9));
+      TestUtil::WriteOam16(memory, base + 2u, 0u);
+      TestUtil::WriteOam16(memory, base + 4u, 0u);
+    }
   }
 };
 
@@ -2300,61 +2309,75 @@ TEST(PPUTest, SemiTransparentObjBlendingIsGatedByObjWindowEffectsEnableBit) {
 }
 
 TEST_F(PPUBlendTest, SemiTransparentOBJ_NoFirstTarget) {
+  // Per GBATEK: Semi-transparent OBJs always blend, even when OBJ is NOT
+  // selected as first target in BLDCNT. The only requirement is that the
+  // underlying layer is in secondTarget.
+  //
   // BLDCNT = 0x3F00: Mode 0, firstTarget=0x00 (none!), secondTarget=0x3F (all)
-  memory.Write16(0x04000050, 0x3F00); // BLDCNT
-  memory.Write16(0x04000052, 0x0808); // BLDALPHA: EVA=8, EVB=8 (50/50 blend)
+  // This is what DKC uses for its logo fade.
 
-  // Mode 0, BG0 enable, OBJ enable, OBJWIN enable.
-  memory.Write16(0x04000000, (uint16_t)(0x0100u | 0x1000u | 0x8000u));
+  // Enter Forced Blank to allow setup
+  memory.Write16(0x04000000u, 0x0080u);
+  // Sanity check: DISPCNT should reflect forced-blank
+  ASSERT_EQ(memory.Read16(0x04000000u), 0x0080u);
 
-  // BG0 priority 0, charBase=1, screenBase=0
-  memory.Write16(0x04000008, (uint16_t)(0u | (1u << 2)));
-
-  // BG palette idx1 = red.
-  memory.Write16(0x05000002, 0x001F);
-  // OBJ palette idx1 = blue.
-  memory.Write16(0x05000200 + 2, 0x7C00);
-
-  // BG0: fill row 0 with tile 1, and tile 1 row 0 = red.
-  for (uint32_t tx = 0; tx < 32; ++tx) {
-    memory.Write16(0x06000000 + tx * 2u, 0x0001u);
+  // CRITICAL: Disable ALL 128 sprites first! (write Y=160 to move them
+  // off-screen)
+  for (uint32_t spr = 0; spr < 128; ++spr) {
+    const uint32_t base = spr * 8u;
+    // attr0 Y coordinate = 160 (off-screen) so sprite won't be drawn
+    TestUtil::WriteOam16(memory, base + 0u, (uint16_t)(160u));
+    TestUtil::WriteOam16(memory, base + 2u, 0u);
+    TestUtil::WriteOam16(memory, base + 4u, 0u);
   }
-  memory.Write16(0x06004000 + 1u * 32u + 0u, 0x1111u);
-  memory.Write16(0x06004000 + 1u * 32u + 2u, 0x1111u);
+  // Sanity checks: a few sampled OAM entries should show Y=160
+  EXPECT_EQ(memory.Read16(0x07000000u + (1u * 8u) + 0u), 160u);
+  EXPECT_EQ(memory.Read16(0x07000000u + (1u * 8u) + 2u), 0u);
+  EXPECT_EQ(memory.Read16(0x07000000u + (1u * 8u) + 4u), 0u);
 
-  // WINOUT: outside windows => BG0+OBJ enabled, effects DISABLED.
-  // OBJWIN region => BG0+OBJ enabled, effects ENABLED.
-  const uint16_t outside = (uint16_t)(0x0001u | 0x0010u); // BG0 + OBJ
-  const uint16_t objwin = (uint16_t)(0x0001u | 0x0010u | 0x0020u); // BG0 + OBJ + FX
-  memory.Write16(0x0400004A, (uint16_t)((objwin << 8) | outside));
+  // BLDCNT: Mode 0, firstTarget=0x00 (none), secondTarget=0x3F (all)
+  memory.Write16(0x04000050u, 0x3F00u);
+  // BLDALPHA: EVA=8, EVB=8 (50/50 blend)
+  memory.Write16(0x04000052u, 0x0808u);
 
-  // Minimal test using the backdrop as the underlying layer. We disable BG0
-  // to avoid BG setup complexity and verify semi-transparent OBJ blends with
-  // the backdrop even when OBJ is NOT set in BLDCNT firstTarget.
-  memory.Write16(0x04000050, 0x3F00); // BLDCNT: firstTarget=0, secondTarget=all
-  memory.Write16(0x04000052, 0x0808); // BLDALPHA: EVA=8, EVB=8
+  // Mode 0 + OBJ enable (no BGs, so backdrop is the only under-layer)
+  // Keep forced-blank bit set until OAM writes are complete.
+  memory.Write16(0x04000000u, 0x1080u);
+  // Sanity: DISPCNT should still have forced-blank set.
+  ASSERT_NE(memory.Read16(0x04000000u) & 0x0080u, 0u);
 
-  // Enable OBJ rendering only (mode 0 + OBJ enable)
-  memory.Write16(0x04000000u, 0x1100u);
-
-  // Backdrop = green
+  // Backdrop = green (BGR555: 0x03E0)
   memory.Write16(0x05000000u, 0x03E0u);
 
-  // OBJ palette idx1 = red.
+  // OBJ palette index 1 = red (BGR555: 0x001F)
   memory.Write16(0x05000200u + 2u, 0x001Fu);
-  // OBJ tile 0 row 0 = palette index 1
+
+  // OBJ tile 0: fill row 0 with palette index 1 (4bpp: each byte = 0x11)
   memory.Write16(0x06010000u + 0u, 0x1111u);
   memory.Write16(0x06010000u + 2u, 0x1111u);
 
-  // Setup semi-transparent sprite at (0,0)
-  const uint16_t spr0_attr0 = (uint16_t)(0u | (1u << 10)); // objMode=1
+  // Re-disable all sprites to ensure the disable writes took effect (Y=160
+  // off-screen)
+  for (uint32_t spr = 0; spr < 128; ++spr) {
+    const uint32_t base = spr * 8u;
+    TestUtil::WriteOam16(memory, base + 0u, (uint16_t)(160u));
+    TestUtil::WriteOam16(memory, base + 2u, 0u);
+    TestUtil::WriteOam16(memory, base + 4u, 0u);
+  }
+
+  // Sanity: keep forced-blank through OAM setup
+  ASSERT_NE(memory.Read16(0x04000000u) & 0x0080u, 0u);
+
+  // Setup sprite 0: semi-transparent OBJ at (0,0), 8x8, 4bpp
+  // attr0: Y=0, objMode=1 (semi-transparent), bits 10-11 = 01
+  const uint16_t spr0_attr0 = (uint16_t)(0u | (1u << 10));
   const uint16_t spr0_attr1 = 0u;
   const uint16_t spr0_attr2 = 0u;
   TestUtil::WriteOam16(memory, 0, spr0_attr0);
   TestUtil::WriteOam16(memory, 2, spr0_attr1);
   TestUtil::WriteOam16(memory, 4, spr0_attr2);
 
-  // Exit Forced Blank before rendering.
+  // Exit Forced Blank before rendering
   memory.Write16(0x04000000u, 0x1100u);
 
   ppu.Update(960);
@@ -2368,8 +2391,12 @@ TEST_F(PPUBlendTest, SemiTransparentOBJ_NoFirstTarget) {
   uint8_t g = (pixel >> 8) & 0xFF;
   uint8_t b = pixel & 0xFF;
 
-  // Expect a blended color (both R and G present), not pure red.
-  EXPECT_GT(r, 0u);
-  EXPECT_GT(g, 0u);
-  EXPECT_EQ(b, 0u);
+  // Expected: blended color from red OBJ + green backdrop
+  // With EVA=8, EVB=8: out = (OBJ*8 + backdrop*8) / 16
+  // Red OBJ:    R=31, G=0,  B=0  (BGR555: 0x001F -> RGB888: 0xF8,0,0)
+  // Green BG:   R=0,  G=31, B=0  (BGR555: 0x03E0 -> RGB888: 0,0xF8,0)
+  // Blended 5-bit: R=15, G=15, B=0 -> RGB888: 0x78, 0x78, 0
+  EXPECT_GT(r, 0u) << "Red component should be present (from OBJ)";
+  EXPECT_GT(g, 0u) << "Green component should be present (from backdrop blend)";
+  EXPECT_EQ(b, 0u) << "Blue component should be zero";
 }

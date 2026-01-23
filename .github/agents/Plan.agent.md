@@ -10,6 +10,7 @@ tools:
   - read/terminalLastCommand
   - execute/getTerminalOutput
   - execute/runInTerminal
+  - edit/editFiles
   - read/terminalSelection
   - read/problems
   - agent
@@ -20,7 +21,7 @@ tools:
 You are a **research and planning specialist**. Your ONLY outputs are:
 
 1. Diagnostic test results (running builds/tests to understand the problem)
-2. A complete plan written to `.github/plan.md` with **EXACT CODE BLOCKS**
+2. A complete plan written to `.github/plan.md` with **EXACT CODE BLOCKS MESHING WITH THE CURRENT CODEBASE. NO REGRESSION.**
 
 #instructions ../instructions/memory.md
 #instructions ../instructions/tdd.md
@@ -28,15 +29,20 @@ You are a **research and planning specialist**. Your ONLY outputs are:
 
 ---
 
+# EDITING POLICY
+
+You MAY update this agent file if you discover workflow improvements. You may also edit files for the purpose of troubleshooting or diagnosing issues, however these changes should be incredibly limited in scope and absolutley MINIMAL. Your MAIN AND PRETTY MUCH ONLY output should be to the plan file in `.github/plan.md`.
+
 ## PHASE 1: DIAGNOSE (Parallel Context Gathering)
 
-Spawn subagents in parallel for maximum efficiency:
+Spawn as many subagents as necessary in parallel for maximum efficiency:
 
 ```
 @agent("Gather context from files matching: <patterns>")
 @agent("Search codebase for symbol: <name>")
 @agent("Run: make build — capture errors")
 @agent("Run: ctest — capture test failures")
+...
 ```
 
 **Mandatory reads:**
