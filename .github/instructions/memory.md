@@ -135,11 +135,11 @@ Layer tracking via `layerBuffer[]`:
 
 ### Classic NES Series / NES-on-GBA ROMs
 
-Games like "Classic NES Series: Donkey Kong" (OG-DK) are NES emulators running on GBA:
+Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA hardware:
 
-- **Extremely timing-sensitive** — NES emulator expects precise GBA timing
-- May require **LLE BIOS** for accurate timing (`AIO_GBA_BIOS=/path/to/bios.bin`)
-- Prone to corruption if HLE timing deviates from real hardware
+- **Stress-test timing accuracy** — inner emulator expects precise GBA timing
+- **Solution:** Fix timing to match GBATEK spec, not use LLE BIOS as workaround
+- These ROMs are excellent test cases for timing accuracy
 
 ## Logging and crash capture
 

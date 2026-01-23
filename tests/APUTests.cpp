@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "emulator/gba/GBAMemory.h"
 #include "emulator/gba/APU.h"
+#include "emulator/gba/GBAMemory.h"
 #include "emulator/gba/IORegs.h"
 
 using namespace AIO::Emulator::GBA;
@@ -71,3 +71,94 @@ TEST(APUTest, MasterSoundEnableReflectsSOUNDCNT_X) {
   EXPECT_TRUE(apu.IsSoundEnabled());
 }
 
+TEST(APUTest, PSGSquareDutyAndFrequency) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  // Create a 8-sample period, duty 0 (1/8 high), volume max
+  apu.SetPSGChannelParams(0, 8, 0, 15);
+  auto s = apu.GeneratePSGSamples(0, 8);
+  ASSERT_EQ(s.size(), 8);
+  // only first sample high
+  int highCount = 0;
+  for (auto v : s)
+    if (v > 0)
+      ++highCount;
+  EXPECT_EQ(highCount, 1);
+
+  // Duty 2 should be half high
+  apu.SetPSGChannelParams(0, 8, 2, 15);
+  s = apu.GeneratePSGSamples(0, 8);
+  highCount = 0;
+  for (auto v : s)
+    if (v > 0)
+      ++highCount;
+  EXPECT_EQ(highCount, 4);
+}
+
+TEST(APUTest, PSGVolumeScaling) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  apu.SetPSGChannelParams(1, 4, 2, 15);
+  auto sMax = apu.GeneratePSGSamples(1, 4);
+
+  apu.SetPSGChannelParams(1, 4, 2, 7);
+  auto sHalf = apu.GeneratePSGSamples(1, 4);
+
+  // Expect magnitudes roughly proportional (allowing integer rounding)
+  int maxMag = 0;
+  for (auto v : sMax)
+    maxMag = std::max(maxMag, std::abs(v));
+  int halfMag = 0;
+  for (auto v : sHalf)
+    halfMag = std::max(halfMag, std::abs(v));
+  EXPECT_GT(maxMag, 0);
+  EXPECT_GT(halfMag, 0);
+  EXPECT_LT(halfMag, maxMag);
+}
+TEST(APUTest, PSGWavePlayback) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  std::array<uint8_t, 32> w;
+  for (int i = 0; i < 32; ++i)
+    w[i] = uint8_t(i % 16);
+  apu.SetPSGWaveRAM(w);
+  apu.SetPSGWaveParams(4, 0); // periodSamples=4, volume=0 (100%)
+  auto s = apu.GeneratePSGSamples(2, 8);
+  ASSERT_EQ(s.size(), 8);
+  // first 4 samples equal, next 4 samples equal and different from first
+  int firstEqual = 0;
+  for (int i = 0; i < 4; ++i)
+    if (s[i] == s[0])
+      ++firstEqual;
+  int secondEqual = 0;
+  for (int i = 4; i < 8; ++i)
+    if (s[i] == s[4])
+      ++secondEqual;
+  EXPECT_EQ(firstEqual, 4);
+  EXPECT_EQ(secondEqual, 4);
+  EXPECT_NE(s[0], s[4]);
+
+  // volume scaling: half volume should have smaller magnitude
+  apu.SetPSGWaveParams(4, 1); // 50%
+  auto sHalf = apu.GeneratePSGSamples(2, 4);
+  int magFull = 0, magHalf = 0;
+  for (auto v : s)
+    magFull = std::max(magFull, std::abs(v));
+  for (auto v : sHalf)
+    magHalf = std::max(magHalf, std::abs(v));
+  EXPECT_GT(magFull, 0);
+  EXPECT_GT(magHalf, 0);
+  EXPECT_LT(magHalf, magFull);
+}

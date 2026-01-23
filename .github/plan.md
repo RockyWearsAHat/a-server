@@ -1,63 +1,386 @@
 # Plan: Fix Critical Game Issues (SMA2 Lag, DKC Fade, OG-DK Corruption)
 
 **Date:** 2026-01-22  
-**Goal:** Fix three critical emulation issues: SMA2 performance lag, DKC intro logo fade not working, and OG-DK corruption/display issues.
+**Goal:** Fix three critical emulation issues through **spec-driven, documentation-first development** with comprehensive test coverage. NO LLE BIOS required — GBATEK + community docs provide complete hardware specification.
 
 ---
 
-## Context
+## Philosophy
 
-### Issues to Fix
+The GBA is a **25-year-old console with exhaustive documentation**:
 
-| Issue                     | Game  | Symptom                            | Likely Root Cause                                                                                 |
-| ------------------------- | ----- | ---------------------------------- | ------------------------------------------------------------------------------------------------- |
-| **Massive Lag**           | SMA2  | Game runs extremely slow           | Peripheral batching too aggressive, or cycle counting overhead                                    |
-| **Logo Fade Not Working** | DKC   | Logos don't fade in intro cutscene | PPU color effects (brightness increase/decrease) bug                                              |
-| **Corrupted Mess**        | OG-DK | Display completely broken          | ROM is likely a NES emulator (PocketNES) running on GBA; requires accurate timing/memory handling |
+- **GBATEK** — The definitive GBA hardware reference
+- **tonc** — Comprehensive GBA programming tutorial
+- **Fleroviux's docs** — Additional timing details
+- **Community test ROMs** — AGS, jsmolka's arm-tests, etc.
 
-### Technical Analysis
+**If our implementation matches the documentation 100%, games will work 100%.**
 
-#### 1. SMA2 Lag Issue
+The approach:
 
-**Hypothesis:** The peripheral batching system (`PERIPHERAL_BATCH_CYCLES = 64`) accumulates cycles before updating PPU/APU/Timers. This can:
+1. **Read the spec** (GBATEK) for the feature in question
+2. **Write tests** that verify spec-compliant behavior
+3. **Implement/fix** to pass the tests
+4. **Verify** with real games
 
-- Delay VBlank IRQ delivery, causing games to miss frames
-- Create timing drift between CPU execution and peripheral state
-- Cause the game loop to spin waiting for VBlank when it should have already fired
+---
 
-**Evidence:**
+## Issues to Fix
 
-- `GBA::Step()` batches peripheral updates: cycles accumulate in `pendingPeripheralCycles`
-- Only flushes when ≥64 cycles or CPU halted
-- If VBlank IRQ is delayed by batching, game's main loop spins longer than needed
+| Issue                     | Game  | Symptom                   | Approach                                                           |
+| ------------------------- | ----- | ------------------------- | ------------------------------------------------------------------ |
+| **Massive Lag**           | SMA2  | Game runs extremely slow  | Audit PPU/timer timing against GBATEK, write timing tests          |
+| **Logo Fade Not Working** | DKC   | Logos don't fade in intro | Audit BLDCNT/BLDY implementation against GBATEK, write blend tests |
+| **Corrupted Mess**        | OG-DK | Display completely broken | Identify failing subsystem via tracing, test against spec          |
 
-**Potential Fixes:**
+---
 
-1. Reduce `PERIPHERAL_BATCH_CYCLES` from 64 to 16 or lower
-2. Flush peripheral cycles before returning from any instruction that reads DISPSTAT/VCOUNT
-3. Ensure VBlank/HBlank IRQs fire at exact cycle boundaries
+## Phase 1: Fix SMA2 Lag (Timing Accuracy)
 
-#### 2. DKC Logo Fade Issue
+### GBATEK Reference: Display Timing
 
-**Hypothesis:** The PPU's `ApplyColorEffects()` function implements brightness increase (fade to white, mode 2) and brightness decrease (fade to black, mode 3), but something is wrong with:
+From GBATEK:
 
-- Target layer selection (BLDCNT bits 0-5 for first target)
-- Effect coefficient (BLDY bits 0-4)
-- The layer detection (`layerBuffer[]` tracking)
+```
+Horizontal Timing:
+  Visible     960 cycles (240 pixels × 4 cycles)
+  H-Blank     272 cycles (68 pixels × 4 cycles)
+  Total      1232 cycles per scanline
 
-**Evidence from PPU.cpp:**
+Vertical Timing:
+  Visible     160 scanlines
+  V-Blank      68 scanlines (160-227)
+  Total       228 scanlines per frame
+
+Frame Total: 1232 × 228 = 280,896 cycles per frame
+Frame Rate:  16.78MHz / 280,896 = ~59.727 Hz
+```
+
+### Step 1.1: Write PPU Timing Tests
+
+**File:** `tests/PPUTimingTests.cpp` (new or extend PPUTests.cpp)
 
 ```cpp
-} else if (effectMode == 2) {
-  if (!topIsFirstTarget) { continue; }  // Brightness Increase
-  r = from5(to5(r) + ((31 - to5(r)) * evy / 16));
-  ...
-} else if (effectMode == 3) {
-  if (!topIsFirstTarget) { continue; }  // Brightness Decrease
-  r = from5(to5(r) - (to5(r) * evy / 16));
-  ...
+#include <gtest/gtest.h>
+#include <emulator/gba/GBAMemory.h>
+#include <emulator/gba/PPU.h>
+
+using namespace AIO::Emulator::GBA;
+
+class PPUTimingTest : public ::testing::Test {
+protected:
+    GBAMemory memory;
+    PPU ppu{memory};
+};
+
+// GBATEK: HBlank starts at cycle 960 of each scanline
+TEST_F(PPUTimingTest, HBlankStartsAtCycle960) {
+    ppu.Update(959);
+    uint16_t dispstat = memory.Read16(0x04000004);
+    EXPECT_EQ(dispstat & 0x02, 0) << "HBlank flag should be clear before cycle 960";
+
+    ppu.Update(1);
+    dispstat = memory.Read16(0x04000004);
+    EXPECT_NE(dispstat & 0x02, 0) << "HBlank flag should be set at cycle 960";
+}
+
+// GBATEK: HBlank clears at start of next scanline
+TEST_F(PPUTimingTest, HBlankClearsAtScanlineEnd) {
+    ppu.Update(1232);
+    uint16_t dispstat = memory.Read16(0x04000004);
+    EXPECT_EQ(dispstat & 0x02, 0) << "HBlank flag should clear at scanline boundary";
+}
+
+// GBATEK: VBlank starts at scanline 160
+TEST_F(PPUTimingTest, VBlankStartsAtScanline160) {
+    ppu.Update(1232 * 160);
+    uint16_t dispstat = memory.Read16(0x04000004);
+    EXPECT_NE(dispstat & 0x01, 0) << "VBlank flag should be set at scanline 160";
+    EXPECT_EQ(memory.Read16(0x04000006), 160) << "VCOUNT should be 160";
+}
+
+// GBATEK: Frame wraps at scanline 228
+TEST_F(PPUTimingTest, FrameWrapsAtScanline228) {
+    ppu.Update(1232 * 228);
+    EXPECT_EQ(memory.Read16(0x04000006), 0) << "VCOUNT should wrap to 0";
+}
+
+// GBATEK: VBlank IRQ fires on rising edge
+TEST_F(PPUTimingTest, VBlankIRQFiresAtScanline160) {
+    memory.Write16(0x04000004, 0x0008); // Enable VBlank IRQ
+    ppu.Update(1232 * 160);
+    EXPECT_NE(memory.Read16(0x04000202) & 0x01, 0) << "VBlank IRQ should fire";
+}
+
+// Frame timing constant
+TEST_F(PPUTimingTest, FrameTotalCycles) {
+    EXPECT_EQ(1232 * 228, 280896) << "Frame must be exactly 280,896 cycles";
 }
 ```
+
+### Step 1.2: Audit Cycle Accumulation Bug
+
+**Problem:** `pendingPeripheralCycles` batching delays timing updates.
+
+**File:** [src/emulator/gba/GBA.cpp](src/emulator/gba/GBA.cpp)
+
+Current code:
+
+```cpp
+pendingPeripheralCycles += peripheralCycles;
+if (pendingPeripheralCycles >= PERIPHERAL_BATCH_CYCLES || cpu->IsHalted()) {
+    memory->AdvanceCycles(pendingPeripheralCycles);
+}
+```
+
+**Fix:** Flush cycles before reading timing-sensitive registers.
+
+Patch [GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp) `Read16()`:
+
+```cpp
+uint16_t GBAMemory::Read16(uint32_t address) {
+    if ((address & 0xFF000000) == 0x04000000) {
+        const uint32_t offset = address & 0x3FF;
+
+        // GBATEK: DISPSTAT/VCOUNT must reflect current PPU state
+        if (offset == 0x04 || offset == 0x06) {
+            if (gba) gba->FlushPendingPeripheralCycles();
+        }
+        // ... existing code ...
+    }
+}
+```
+
+Patch [GBA.h](include/emulator/gba/GBA.h):
+
+```cpp
+// Reduce batch size for better accuracy
+static constexpr int PERIPHERAL_BATCH_CYCLES = 4;
+```
+
+---
+
+## Phase 2: Fix DKC Fade (PPU Color Effects)
+
+### GBATEK Reference: Color Special Effects
+
+```
+4000050h - BLDCNT - Color Special Effects Selection (R/W)
+  Bit 0-5   First Target (BG0-3, OBJ, Backdrop)
+  Bit 6-7   Effect Mode:
+              0 = None
+              1 = Alpha Blend
+              2 = Brightness Increase (fade to white)
+              3 = Brightness Decrease (fade to black)
+  Bit 8-13  Second Target (for alpha blend only)
+
+4000054h - BLDY - Brightness Coefficient (W)
+  Bit 0-4   EVY (0-16, values >16 treated as 16)
+
+Formulas:
+  Brightness Increase: I = I + (31-I) * EVY / 16
+  Brightness Decrease: I = I - I * EVY / 16
+```
+
+### Step 2.1: Write Color Effect Tests
+
+**File:** `tests/PPUBlendTests.cpp`
+
+```cpp
+class PPUBlendTest : public ::testing::Test {
+protected:
+    GBAMemory memory;
+    PPU ppu{memory};
+
+    void SetUp() override {
+        memory.Write16(0x04000000, 0x0100); // DISPCNT: BG0 enable
+        memory.Write16(0x05000000, 0x001F); // Backdrop = Red (31,0,0)
+    }
+};
+
+// GBATEK: Mode 2 brightness increase
+TEST_F(PPUBlendTest, BrightnessIncrease_EVY16_FullWhite) {
+    // BLDCNT: Mode 2, Backdrop as first target (bit 5)
+    memory.Write16(0x04000050, 0x00A0); // 0b10100000
+    memory.Write16(0x04000054, 0x0010); // EVY = 16
+
+    ppu.Update(1232); // Render scanline 0
+    uint32_t pixel = ppu.GetFramebuffer()[0];
+
+    // Red (31,0,0) -> White (31,31,31) at EVY=16
+    uint8_t g = (pixel >> 8) & 0xFF;
+    uint8_t b = pixel & 0xFF;
+    EXPECT_GE(g, 248) << "G should be ~255 (full fade to white)";
+    EXPECT_GE(b, 248) << "B should be ~255 (full fade to white)";
+}
+
+// GBATEK: Mode 3 brightness decrease
+TEST_F(PPUBlendTest, BrightnessDecrease_EVY16_FullBlack) {
+    memory.Write16(0x04000050, 0x00E0); // Mode 3, Backdrop target
+    memory.Write16(0x04000054, 0x0010); // EVY = 16
+
+    ppu.Update(1232);
+    uint32_t pixel = ppu.GetFramebuffer()[0];
+
+    // Red (31,0,0) -> Black (0,0,0) at EVY=16
+    uint8_t r = (pixel >> 16) & 0xFF;
+    EXPECT_LE(r, 8) << "R should be ~0 (full fade to black)";
+}
+
+// GBATEK: EVY clamped at 16
+TEST_F(PPUBlendTest, EVYClampedAt16) {
+    memory.Write16(0x04000050, 0x00A0);
+    memory.Write16(0x04000054, 0x001F); // EVY = 31 (should clamp)
+
+    ppu.Update(1232);
+    // Result should be identical to EVY=16
+}
+
+// Effect only applies to first-target layers
+TEST_F(PPUBlendTest, EffectOnlyAppliesToFirstTarget) {
+    // Backdrop NOT set as first target
+    memory.Write16(0x04000050, 0x0080); // Mode 2, NO targets
+    memory.Write16(0x04000054, 0x0010);
+
+    ppu.Update(1232);
+    uint32_t pixel = ppu.GetFramebuffer()[0];
+
+    // Backdrop should NOT be affected (not a first target)
+    uint8_t g = (pixel >> 8) & 0xFF;
+    EXPECT_LE(g, 8) << "G should still be 0 (no fade applied)";
+}
+```
+
+### Step 2.2: Fix Implementation
+
+**Likely Bug:** `layerBuffer[]` not correctly set for backdrop pixels.
+
+Patch [PPU.cpp](src/emulator/gba/PPU.cpp) `DrawScanline()`:
+
+```cpp
+void PPU::DrawScanline() {
+    // Initialize ALL pixels to backdrop (layer 5) FIRST
+    for (int x = 0; x < SCREEN_WIDTH; x++) {
+        int idx = scanline * SCREEN_WIDTH + x;
+        layerBuffer[idx] = 5; // Backdrop = layer 5
+        uint16_t backdrop = memory.Read16(0x05000000);
+        backBuffer[idx] = BGR555ToARGB(backdrop);
+    }
+
+    // Then render BGs and OBJs, overwriting layerBuffer as needed
+    // ...
+}
+```
+
+---
+
+## Phase 3: Fix OG-DK Corruption
+
+### Step 3.1: Identify ROM and Failing Subsystem
+
+```bash
+# Check ROM header
+xxd -l 192 OG-DK.gba | head -20
+
+# Run with tracing to find first failure
+AIO_TRACE_GBA_SPAM=1 ./build/bin/AIOServer OG-DK.gba 2>&1 | head -500
+```
+
+### Step 3.2: Systematic Subsystem Testing
+
+Instead of guessing, test each subsystem against GBATEK:
+
+1. **CPU Tests** — Verify all ARM/Thumb instructions
+2. **Memory Tests** — Verify wait states, mirroring, open bus behavior
+3. **Timer Tests** — Verify prescalers, cascade, overflow IRQs
+4. **DMA Tests** — Verify all timing modes and priorities
+5. **BIOS SWI Tests** — Verify all software interrupts match spec
+
+```cpp
+// Example: Timer overflow test
+TEST_F(TimerTest, Timer0OverflowIRQ) {
+    memory.Write16(0x04000100, 0xFFFE); // Reload = 0xFFFE
+    memory.Write16(0x04000102, 0x00C0); // Enable, IRQ enable
+
+    // Timer overflows after 2 cycles
+    memory.AdvanceCycles(2);
+
+    EXPECT_NE(memory.Read16(0x04000202) & 0x08, 0) << "Timer 0 IRQ should fire";
+}
+```
+
+### Step 3.3: Common Issues for Complex ROMs
+
+OG-DK (if it's Classic NES Series) stresses:
+
+- Precise VBlank timing (inner emulator syncs to VBlank)
+- DMA timing accuracy
+- Timer-based audio
+- BIOS function accuracy
+
+Each can be tested and fixed independently.
+
+---
+
+## Files Affected
+
+### New Test Files
+
+| File                       | Purpose                          |
+| -------------------------- | -------------------------------- |
+| `tests/PPUTimingTests.cpp` | PPU timing accuracy per GBATEK   |
+| `tests/PPUBlendTests.cpp`  | Color effect accuracy per GBATEK |
+| `tests/TimerTests.cpp`     | Timer accuracy (if missing)      |
+
+### Modified Files
+
+| File                                            | Changes                                                |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| [GBA.h](include/emulator/gba/GBA.h)             | Reduce `PERIPHERAL_BATCH_CYCLES` to 4                  |
+| [GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp) | Flush cycles on DISPSTAT/VCOUNT reads                  |
+| [PPU.cpp](src/emulator/gba/PPU.cpp)             | Fix backdrop in `layerBuffer[]`, verify blend formulas |
+
+---
+
+## Verification Criteria
+
+- [ ] All new timing tests pass
+- [ ] All new blend tests pass
+- [ ] SMA2 runs at 60fps (no lag)
+- [ ] DKC logos fade smoothly
+- [ ] OG-DK displays correctly (or specific bug identified with test)
+- [ ] No regressions
+
+---
+
+## Summary
+
+**The solution is NOT "use LLE BIOS" — that's a cop-out.**
+
+The solution is:
+
+1. Read GBATEK for the exact spec
+2. Write tests that verify spec compliance
+3. Fix implementation to pass tests
+4. Repeat until perfect
+
+This is how proper emulators are built.
+
+---
+
+# Previous Plan (Archived)
+
+} else if (effectMode == 2) {
+if (!topIsFirstTarget) { continue; } // Brightness Increase
+r = from5(to5(r) + ((31 - to5(r)) _ evy / 16));
+...
+} else if (effectMode == 3) {
+if (!topIsFirstTarget) { continue; } // Brightness Decrease
+r = from5(to5(r) - (to5(r) _ evy / 16));
+...
+}
+
+````
 
 **Potential Fixes:**
 
@@ -109,7 +432,7 @@
      std::cout << "[PERF] Steps=" << stepCount
                << " pendingCycles=" << pendingPeripheralCycles << std::endl;
    }
-   ```
+````
 
 2. [ ] **Reduce Peripheral Batch Size**
    - Change `PERIPHERAL_BATCH_CYCLES` from 64 to 8 in [GBA.h](include/emulator/gba/GBA.h)

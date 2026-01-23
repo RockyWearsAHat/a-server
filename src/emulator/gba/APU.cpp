@@ -37,6 +37,12 @@ void APU::Reset() {
 
   soundcntH = 0;
   soundcntX = 0;
+
+  // Reset PSG channels
+  for (auto &ch : psgChannels)
+    ch.Reset();
+  // Reset Wave channel
+  waveChannel.Reset();
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
@@ -82,6 +88,60 @@ void APU::SetOutputSampleRate(float hz) {
     return;
   }
   outputSampleRate = hz;
+}
+
+void APU::SetPSGChannelParams(int channel, int periodSamples, int duty,
+                              int volume) {
+  if (channel < 0 || channel >= int(psgChannels.size()))
+    return;
+  auto &ch = psgChannels[channel];
+  ch.periodSamples = std::max(0, periodSamples);
+  ch.duty = duty & 3;
+  ch.volume = std::clamp(volume, 0, 15);
+  ch.pos = 0;
+  ch.enabled = (ch.periodSamples > 0 && ch.volume > 0);
+}
+
+std::vector<int16_t> APU::GeneratePSGSamples(int channel, int numSamples) {
+  std::vector<int16_t> out;
+  out.reserve(numSamples);
+  if (channel < 0)
+    return out;
+
+  // Square channels (0,1)
+  if (channel < int(psgChannels.size())) {
+    auto &ch = psgChannels[channel];
+    for (int i = 0; i < numSamples; ++i) {
+      out.push_back(ch.Sample());
+      if (ch.periodSamples > 0) {
+        ch.pos = (ch.pos + 1) % ch.periodSamples;
+      }
+    }
+    return out;
+  }
+
+  // Wave channel (2)
+  if (channel == 2) {
+    for (int i = 0; i < numSamples; ++i) {
+      out.push_back(waveChannel.Sample());
+      waveChannel.Advance();
+    }
+    return out;
+  }
+
+  return out;
+}
+
+void APU::SetPSGWaveRAM(const std::array<uint8_t, 32> &data) {
+  waveChannel.wave = data;
+}
+
+void APU::SetPSGWaveParams(int periodSamples, int volume) {
+  waveChannel.periodSamples = std::max(0, periodSamples);
+  waveChannel.volume = std::clamp(volume, 0, 3);
+  waveChannel.stepCounter = 0;
+  waveChannel.pos = 0;
+  waveChannel.enabled = (waveChannel.periodSamples > 0 && waveChannel.volume != 3);
 }
 
 void APU::OnTimerOverflow(int timer) {

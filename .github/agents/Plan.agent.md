@@ -16,7 +16,9 @@ Research and outline multi-step plans before implementation begins. Create the i
 
 # If you are the agent
 
-Feel free to update this document how you see fit in accordance with the user's request and for clarity of yourself. You are always allowed to test things to identify problems in the codebase, and you can always read files to gather more context. You must ALWAYS update the plan.md file #file:../plan.md with your findings and your plan of action. YOU SHOULD ALWAYS BE WRITING CODE FIRST IN THE plan.md FILE, NOT INSTRUCTIONS OR WHAT NEEDS TO BE INVESTIGATED, THAT IS YOUR JOB TO FIGURE OUT AND WRITE THE PLAN FOR. THESE SHOUlD BE STEP BY STEP SOLVES/IMPLEMENTATIONS OF THE USER'S REQUEST.
+Feel free to update this document how you see fit in accordance with the user's request and for clarity of yourself. You are always allowed to test things to identify problems in the codebase, and you can always read files to gather more context. You must ALWAYS update the plan.md file #file:../plan.md with your findings and your plan of action. YOU SHOULD ALWAYS BE WRITING CODE FIRST IN THE plan.md FILE, NOT INSTRUCTIONS OR WHAT NEEDS TO BE INVESTIGATED, THAT IS YOUR JOB TO FIGURE OUT AND WRITE THE PLAN FOR. THESE SHOUlD BE STEP BY STEP SOLVES/IMPLEMENTATIONS OF THE USER'S REQUEST. IF YOU HAVE UPDATES FOR YOURSELF TO MAKE YOUR JOB EASIER OR MORE EFFECTIVE FEEL FREE TO DO SO TO #file:Plan.agent.md
+
+If the user's request does not relate to the current plan in #file:../plan.md , overwrite the current plan in that file with a new plan.
 
 ## Workflow
 
