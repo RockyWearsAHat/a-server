@@ -110,6 +110,8 @@ After EACH step, run its verification command. Expect:
 - `./build/bin/*Tests` — all tests pass
 - `grep`/`cat` — expected output
 
+Always abide by the plan's **specified verification** command not guessing or general rules.
+
 **If verification fails:**
 
 1. Check for typos in applied code
@@ -161,9 +163,8 @@ Both must succeed before reporting completion.
 1. Run failing test in isolation
 2. Check if code was applied correctly
 3. One fix attempt
-4. If unresolved: STOP, report to user for @Plan revision
+4. If unresolved: write a detailed bug entry to `.github/bugs.md` (include failing test name, reproduction steps, observed vs expected behavior, relevant logs/traces, and attempted fixes). Continue with remaining plan steps when possible and record all encountered issues in `.github/bugs.md`. After finishing all plan steps, report all open bugs together to the user and flag the plan as blocked on those bugs.
 ```
-
 ### Ambiguous Step
 
 ```
@@ -202,9 +203,10 @@ Both must succeed before reporting completion.
 ## EFFICIENCY
 
 - **Batch edits** — Use multi_replace_string_in_file for multiple changes to same file
-- **Parallel subagents** — Execute independent steps simultaneously
+- **Parallel subagents** — Execute independent steps simultaneously with subagents
 - **Large context** — Read sufficient lines to find unique anchors
 - **No confirmation needed** — Execute all steps without user prompts
+- **Single verification** — One command per step, no partial checks, if errors are encountered in the plan, write to #file:../bugs.md reporting the errors and continue until the end of the plan is reached
 
 ---
 

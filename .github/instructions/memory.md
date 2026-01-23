@@ -131,8 +131,8 @@ Layer tracking via `layerBuffer[]`:
 
 **Known Issues:**
 
-- DKC intro fade: Verify `layerBuffer[]` correctly identifies backdrop pixels
-- Target selection: BLDCNT bits 0-5 select first target layers
+- ~~DKC intro fade: Verify `layerBuffer[]` correctly identifies backdrop pixels~~ FIXED
+- Target selection: BLDCNT bits 0-5 select first target layers (note: semi-transparent OBJs always blend and do NOT require OBJ in firstTarget; they only require the underlying layer to be selected in secondTarget)
 
 ### Classic NES Series / NES-on-GBA ROMs
 

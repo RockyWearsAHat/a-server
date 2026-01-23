@@ -3,6 +3,7 @@
 #include "emulator/gba/GBAMemory.h"
 #include "emulator/gba/PPU.h"
 #include "support/PPUTestHelper.h"
+#include <iostream>
 
 using namespace AIO::Emulator::GBA;
 namespace TestUtil = AIO::Emulator::GBA::Test;
@@ -2296,4 +2297,79 @@ TEST(PPUTest, SemiTransparentObjBlendingIsGatedByObjWindowEffectsEnableBit) {
   EXPECT_EQ(fb[1], TestUtil::ARGBFromBGR555(0x3C0Fu));
   // Outside OBJWIN => effects disabled => no blending; OBJ stays blue.
   EXPECT_EQ(fb[6], TestUtil::ARGBFromBGR555(0x7C00u));
+}
+
+TEST_F(PPUBlendTest, SemiTransparentOBJ_NoFirstTarget) {
+  // BLDCNT = 0x3F00: Mode 0, firstTarget=0x00 (none!), secondTarget=0x3F (all)
+  memory.Write16(0x04000050, 0x3F00); // BLDCNT
+  memory.Write16(0x04000052, 0x0808); // BLDALPHA: EVA=8, EVB=8 (50/50 blend)
+
+  // Mode 0, BG0 enable, OBJ enable, OBJWIN enable.
+  memory.Write16(0x04000000, (uint16_t)(0x0100u | 0x1000u | 0x8000u));
+
+  // BG0 priority 0, charBase=1, screenBase=0
+  memory.Write16(0x04000008, (uint16_t)(0u | (1u << 2)));
+
+  // BG palette idx1 = red.
+  memory.Write16(0x05000002, 0x001F);
+  // OBJ palette idx1 = blue.
+  memory.Write16(0x05000200 + 2, 0x7C00);
+
+  // BG0: fill row 0 with tile 1, and tile 1 row 0 = red.
+  for (uint32_t tx = 0; tx < 32; ++tx) {
+    memory.Write16(0x06000000 + tx * 2u, 0x0001u);
+  }
+  memory.Write16(0x06004000 + 1u * 32u + 0u, 0x1111u);
+  memory.Write16(0x06004000 + 1u * 32u + 2u, 0x1111u);
+
+  // WINOUT: outside windows => BG0+OBJ enabled, effects DISABLED.
+  // OBJWIN region => BG0+OBJ enabled, effects ENABLED.
+  const uint16_t outside = (uint16_t)(0x0001u | 0x0010u); // BG0 + OBJ
+  const uint16_t objwin = (uint16_t)(0x0001u | 0x0010u | 0x0020u); // BG0 + OBJ + FX
+  memory.Write16(0x0400004A, (uint16_t)((objwin << 8) | outside));
+
+  // Minimal test using the backdrop as the underlying layer. We disable BG0
+  // to avoid BG setup complexity and verify semi-transparent OBJ blends with
+  // the backdrop even when OBJ is NOT set in BLDCNT firstTarget.
+  memory.Write16(0x04000050, 0x3F00); // BLDCNT: firstTarget=0, secondTarget=all
+  memory.Write16(0x04000052, 0x0808); // BLDALPHA: EVA=8, EVB=8
+
+  // Enable OBJ rendering only (mode 0 + OBJ enable)
+  memory.Write16(0x04000000u, 0x1100u);
+
+  // Backdrop = green
+  memory.Write16(0x05000000u, 0x03E0u);
+
+  // OBJ palette idx1 = red.
+  memory.Write16(0x05000200u + 2u, 0x001Fu);
+  // OBJ tile 0 row 0 = palette index 1
+  memory.Write16(0x06010000u + 0u, 0x1111u);
+  memory.Write16(0x06010000u + 2u, 0x1111u);
+
+  // Setup semi-transparent sprite at (0,0)
+  const uint16_t spr0_attr0 = (uint16_t)(0u | (1u << 10)); // objMode=1
+  const uint16_t spr0_attr1 = 0u;
+  const uint16_t spr0_attr2 = 0u;
+  TestUtil::WriteOam16(memory, 0, spr0_attr0);
+  TestUtil::WriteOam16(memory, 2, spr0_attr1);
+  TestUtil::WriteOam16(memory, 4, spr0_attr2);
+
+  // Exit Forced Blank before rendering.
+  memory.Write16(0x04000000u, 0x1100u);
+
+  ppu.Update(960);
+  ppu.SwapBuffers();
+
+  const auto fb = ppu.GetFramebuffer();
+  ASSERT_GE(fb.size(), (size_t)PPU::SCREEN_WIDTH);
+
+  uint32_t pixel = fb[0];
+  uint8_t r = (pixel >> 16) & 0xFF;
+  uint8_t g = (pixel >> 8) & 0xFF;
+  uint8_t b = pixel & 0xFF;
+
+  // Expect a blended color (both R and G present), not pure red.
+  EXPECT_GT(r, 0u);
+  EXPECT_GT(g, 0u);
+  EXPECT_EQ(b, 0u);
 }

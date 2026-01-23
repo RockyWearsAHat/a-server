@@ -2622,12 +2622,10 @@ void PPU::ApplyColorEffects() {
     // For simplicity, let's assume the effect applies if the mode is brightness
 
     // Semi-transparent OBJ pixels always use alpha blending against the
-    // underlying pixel, regardless of the BLDCNT effect mode (as long as target
-    // bits allow it).
+    // underlying pixel, regardless of the BLDCNT effect mode. Per GBATEK,
+    // semi-transparent OBJs do NOT require the OBJ bit in firstTarget;
+    // they only require the underlying layer to be in secondTarget.
     if (topIsObjSemiTransparent) {
-      if (!topIsFirstTarget) {
-        continue;
-      }
       const bool underIsSecondTarget = ((secondTarget >> underLayer) & 1) != 0;
       if (!underIsSecondTarget) {
         continue;
@@ -2637,6 +2635,13 @@ void PPU::ApplyColorEffects() {
       const uint8_t ur = (under >> 16) & 0xFF;
       const uint8_t ug = (under >> 8) & 0xFF;
       const uint8_t ub = under & 0xFF;
+
+      if (TraceGbaSpam()) {
+        std::cout << "[FADE_SEMITR] x=" << x << " topLayer=" << (int)topLayer
+                  << " underLayer=" << (int)underLayer << " eva=" << eva
+                  << " evb=" << evb << " under=0x" << std::hex << under
+                  << std::dec << std::endl;
+      }
 
       r = blendChannel5(r, ur, eva, evb);
       g = blendChannel5(g, ug, eva, evb);
