@@ -9,7 +9,7 @@ This project’s correctness and maintainability depend on treating **documentat
 3. **Implement** until tests pass.
 4. **Refactor** while keeping tests green.
 
-If the documentation is incomplete, write the missing spec *before* writing tests.
+If the documentation is incomplete, write the missing spec _before_ writing tests.
 
 ## Why this matters here
 
@@ -59,7 +59,7 @@ If the documentation is incomplete, write the missing spec *before* writing test
 
 ## Trial-and-error policy
 
-Trial and error is allowed for *discovering* correct behavior, but it must end in:
+Trial and error is allowed for _discovering_ correct behavior, but it must end in:
 
 - a written rule in `docs/`
 - a test that enforces the rule

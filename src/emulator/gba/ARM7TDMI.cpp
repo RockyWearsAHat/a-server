@@ -54,13 +54,13 @@ inline bool EnvFlagCached(const char *name) {
 static void LogBranch([[maybe_unused]] uint32_t from,
                       [[maybe_unused]] uint32_t to) {
   static const bool traceBadBranch =
-    EnvTruthy(std::getenv("AIO_TRACE_BAD_BRANCH"));
+      EnvTruthy(std::getenv("AIO_TRACE_BAD_BRANCH"));
   // Branch logging is on an extremely hot path.
   // Keep all optional diagnostics behind cheap, one-time env checks.
   static const bool traceBranchDiags =
-    EnvTruthy(std::getenv("AIO_TRACE_BRANCH_DIAGS"));
+      EnvTruthy(std::getenv("AIO_TRACE_BRANCH_DIAGS"));
   static const bool traceSaveobjCall =
-    EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_CALL"));
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_CALL"));
 
   branchLog.push_back({from, to});
   if (branchLog.size() > 50)

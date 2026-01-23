@@ -1233,8 +1233,10 @@ int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
 }
 
 uint8_t GBAMemory::Read8(uint32_t address) {
-  static const bool traceSma2HeaderReads = EnvTruthy(std::getenv("AIO_TRACE_SMA2_HEADER_READS"));
-  static const bool traceDma3Reads = EnvTruthy(std::getenv("AIO_TRACE_DMA3_READS"));
+  static const bool traceSma2HeaderReads =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_HEADER_READS"));
+  static const bool traceDma3Reads =
+      EnvTruthy(std::getenv("AIO_TRACE_DMA3_READS"));
   static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
 
   uint8_t region = (address >> 24);
@@ -1299,8 +1301,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // DMA3 read trace (useful for save validation loops that poll DMA regs)
-    if (traceDma3Reads && offset >= 0xD4 &&
-        offset <= 0xDF) {
+    if (traceDma3Reads && offset >= 0xD4 && offset <= 0xDF) {
       static int dma3ReadLogs = 0;
       if (dma3ReadLogs < 400) {
         const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
@@ -1354,9 +1355,9 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
     static const bool traceDkcPalZero =
-      EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
+        EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
     static const bool tracePalWrites =
-      EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
+        EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
     if (offset < palette_ram.size())
       return palette_ram[offset];
     break;
@@ -1454,8 +1455,10 @@ uint16_t GBAMemory::Read16(uint32_t address) {
       EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
   static const bool traceSma2SaveobjRead =
       EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
-  static const bool traceDkcWaitflag = EnvTruthy(std::getenv("AIO_TRACE_DKC_WAITFLAG"));
-  static const bool traceOgdkVcount = EnvTruthy(std::getenv("AIO_TRACE_OGDK_VCOUNT"));
+  static const bool traceDkcWaitflag =
+      EnvTruthy(std::getenv("AIO_TRACE_DKC_WAITFLAG"));
+  static const bool traceOgdkVcount =
+      EnvTruthy(std::getenv("AIO_TRACE_OGDK_VCOUNT"));
   static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
   static const bool traceSma2EepDmaBufReads =
       EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
@@ -1541,8 +1544,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // VCOUNT/DISPSTAT. If our VCOUNT model or IRQ timing is off, the loop
   // behavior will look odd (e.g., racing through values or stalling).
   // Enable with: AIO_TRACE_OGDK_VCOUNT=1
-  if (traceOgdkVcount && cpu &&
-      (address & 0xFF000000u) == 0x04000000u) {
+  if (traceOgdkVcount && cpu && (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t offset = address & MemoryMap::IO_REG_MASK;
     if (offset == IORegs::VCOUNT) {
       static uint32_t logCount = 0;
@@ -1679,13 +1681,13 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
 
 uint32_t GBAMemory::Read32(uint32_t address) {
   static const bool traceIoUnaligned =
-    EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
-    EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
+      EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
+      EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
   static const bool traceSma2SaveobjRead =
-    EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
   static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
   static const bool traceSma2EepDmaBufReads =
-    EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
 
   // EEPROM Handling - 32-bit read performs two 16-bit reads for EEPROM-save
   // cartridges only.
@@ -1848,9 +1850,9 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
     static const bool traceDkcPalZero =
-      EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
+        EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
     static const bool tracePalWrites =
-      EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
+        EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
 
     // DKC diagnostic: log palette writes that set BG palette to 0 during the
     // observed problem window.
@@ -2750,13 +2752,12 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
         const uint32_t lo = (uint32_t)(value & 0xFFu);
         const uint32_t hi = (uint32_t)((value >> 8) & 0xFFu);
         const uint32_t off0 =
-            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK)
-                             : ([&]() {
-                                 uint32_t off = address & 0x1FFFFu;
-                                 if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
-                                   off -= 0x8000u;
-                                 return off;
-                               })();
+            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK) : ([&]() {
+              uint32_t off = address & 0x1FFFFu;
+              if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
+                off -= 0x8000u;
+              return off;
+            })();
         const uint32_t off1 = off0 + 1u;
         if (region == 0x05) {
           if (off0 < palette_shadow.size())
@@ -3154,8 +3155,8 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
       break;
     case IORegs::DISPSTAT:
       if (TraceGbaSpam()) {
-        std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value << std::dec
-                  << std::endl;
+        std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value
+                  << std::dec << std::endl;
       }
       break;
     case IORegs::VCOUNT:
@@ -3241,13 +3242,12 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         const uint8_t b2v = (uint8_t)((value >> 16) & 0xFFu);
         const uint8_t b3v = (uint8_t)((value >> 24) & 0xFFu);
         const uint32_t baseOff =
-            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK)
-                             : ([&]() {
-                                 uint32_t off = address & 0x1FFFFu;
-                                 if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
-                                   off -= 0x8000u;
-                                 return off;
-                               })();
+            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK) : ([&]() {
+              uint32_t off = address & 0x1FFFFu;
+              if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
+                off -= 0x8000u;
+              return off;
+            })();
         const uint32_t off0 = baseOff + 0u;
         const uint32_t off1 = baseOff + 1u;
         const uint32_t off2 = baseOff + 2u;
@@ -4528,35 +4528,36 @@ void GBAMemory::ApplyDeferredWrites() {
   }
 
   // Enable with: AIO_TRACE_DEFER_APPLY=1
-  static const bool traceDeferApply = EnvTruthy(std::getenv("AIO_TRACE_DEFER_APPLY"));
+  static const bool traceDeferApply =
+      EnvTruthy(std::getenv("AIO_TRACE_DEFER_APPLY"));
   if (traceDeferApply) {
     static int applyCount = 0;
     if (applyCount < 10) {
       applyCount++;
       AIO::Emulator::Common::Logger::Instance().LogFmt(
           AIO::Emulator::Common::LogLevel::Info, "DEFER",
-          "[APPLY_DEFERRED] palBlocks=%zu vramBlocks=%zu oamBlocks=%zu scanline=%d cycle=%d",
+          "[APPLY_DEFERRED] palBlocks=%zu vramBlocks=%zu oamBlocks=%zu "
+          "scanline=%d cycle=%d",
           palette_dirtyList.size(), vram_dirtyList.size(), oam_dirtyList.size(),
           ppuTimingScanline, ppuTimingCycle);
     }
   }
 
-  auto applyBlocks = [&](std::vector<uint8_t> &dst,
-                         const std::vector<uint8_t> &src,
-                         std::vector<uint8_t> &dirtyFlags,
-                         std::vector<uint32_t> &dirtyList) {
-    for (uint32_t block : dirtyList) {
-      const uint32_t start = block * kDeferredBlockSize;
-      if (start >= dst.size())
-        continue;
-      const uint32_t len = (uint32_t)std::min<size_t>(
-          (size_t)kDeferredBlockSize, dst.size() - (size_t)start);
-      std::memcpy(&dst[start], &src[start], (size_t)len);
-      if (block < dirtyFlags.size())
-        dirtyFlags[block] = 0;
-    }
-    dirtyList.clear();
-  };
+  auto applyBlocks =
+      [&](std::vector<uint8_t> &dst, const std::vector<uint8_t> &src,
+          std::vector<uint8_t> &dirtyFlags, std::vector<uint32_t> &dirtyList) {
+        for (uint32_t block : dirtyList) {
+          const uint32_t start = block * kDeferredBlockSize;
+          if (start >= dst.size())
+            continue;
+          const uint32_t len = (uint32_t)std::min<size_t>(
+              (size_t)kDeferredBlockSize, dst.size() - (size_t)start);
+          std::memcpy(&dst[start], &src[start], (size_t)len);
+          if (block < dirtyFlags.size())
+            dirtyFlags[block] = 0;
+        }
+        dirtyList.clear();
+      };
 
   applyBlocks(palette_ram, palette_shadow, palette_dirtyBlocks,
               palette_dirtyList);

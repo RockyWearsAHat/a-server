@@ -1,4 +1,361 @@
-# Plan: Make GBA Emulator 100% Functional
+# Plan: Fix Critical Game Issues (SMA2 Lag, DKC Fade, OG-DK Corruption)
+
+**Date:** 2026-01-22  
+**Goal:** Fix three critical emulation issues: SMA2 performance lag, DKC intro logo fade not working, and OG-DK corruption/display issues.
+
+---
+
+## Context
+
+### Issues to Fix
+
+| Issue                     | Game  | Symptom                            | Likely Root Cause                                                                                 |
+| ------------------------- | ----- | ---------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **Massive Lag**           | SMA2  | Game runs extremely slow           | Peripheral batching too aggressive, or cycle counting overhead                                    |
+| **Logo Fade Not Working** | DKC   | Logos don't fade in intro cutscene | PPU color effects (brightness increase/decrease) bug                                              |
+| **Corrupted Mess**        | OG-DK | Display completely broken          | ROM is likely a NES emulator (PocketNES) running on GBA; requires accurate timing/memory handling |
+
+### Technical Analysis
+
+#### 1. SMA2 Lag Issue
+
+**Hypothesis:** The peripheral batching system (`PERIPHERAL_BATCH_CYCLES = 64`) accumulates cycles before updating PPU/APU/Timers. This can:
+
+- Delay VBlank IRQ delivery, causing games to miss frames
+- Create timing drift between CPU execution and peripheral state
+- Cause the game loop to spin waiting for VBlank when it should have already fired
+
+**Evidence:**
+
+- `GBA::Step()` batches peripheral updates: cycles accumulate in `pendingPeripheralCycles`
+- Only flushes when ≥64 cycles or CPU halted
+- If VBlank IRQ is delayed by batching, game's main loop spins longer than needed
+
+**Potential Fixes:**
+
+1. Reduce `PERIPHERAL_BATCH_CYCLES` from 64 to 16 or lower
+2. Flush peripheral cycles before returning from any instruction that reads DISPSTAT/VCOUNT
+3. Ensure VBlank/HBlank IRQs fire at exact cycle boundaries
+
+#### 2. DKC Logo Fade Issue
+
+**Hypothesis:** The PPU's `ApplyColorEffects()` function implements brightness increase (fade to white, mode 2) and brightness decrease (fade to black, mode 3), but something is wrong with:
+
+- Target layer selection (BLDCNT bits 0-5 for first target)
+- Effect coefficient (BLDY bits 0-4)
+- The layer detection (`layerBuffer[]` tracking)
+
+**Evidence from PPU.cpp:**
+
+```cpp
+} else if (effectMode == 2) {
+  if (!topIsFirstTarget) { continue; }  // Brightness Increase
+  r = from5(to5(r) + ((31 - to5(r)) * evy / 16));
+  ...
+} else if (effectMode == 3) {
+  if (!topIsFirstTarget) { continue; }  // Brightness Decrease
+  r = from5(to5(r) - (to5(r) * evy / 16));
+  ...
+}
+```
+
+**Potential Fixes:**
+
+1. Verify `layerBuffer[]` correctly tracks which layer each pixel came from
+2. Check if backdrop (color 0) is being treated as a first target
+3. Verify BLDCNT register reads are returning correct values during intro
+4. Add tracing to see what BLDCNT/BLDY values DKC sets during the fade
+
+#### 3. OG-DK Corruption Issue
+
+**Hypothesis:** OG-DK is likely "Classic NES Series: Donkey Kong" or a PocketNES-style ROM that runs an NES emulator on GBA hardware. These ROMs:
+
+- Are extremely timing-sensitive (NES emulator on GBA needs precise timing)
+- Often use non-standard memory layouts
+- May use undocumented hardware behavior
+
+**Potential Fixes:**
+
+1. First, identify what OG-DK actually is (check ROM header)
+2. If it's an NES-on-GBA emulator, fix timing accuracy issues
+3. Check for memory region access patterns that differ from normal games
+4. May require BIOS timing improvements
+
+---
+
+## Steps
+
+### Phase 1: Diagnose & Fix SMA2 Lag
+
+1. [ ] **Add Performance Tracing**
+   - Add timing measurement to GBA::Step() to identify where time is spent
+   - Log how often peripheral batching flushes vs how often it accumulates
+   - Command: `AIO_TRACE_PERF=1 ./build/bin/AIOServer SMA2.gba`
+
+   Patch into [GBA.cpp](src/emulator/gba/GBA.cpp):
+
+   ```cpp
+   // At top of Step():
+   static uint64_t stepCount = 0;
+   static uint64_t totalCpuTime = 0;
+   static uint64_t totalPpuTime = 0;
+   auto stepStart = std::chrono::high_resolution_clock::now();
+
+   // ... existing code ...
+
+   // After peripheral update:
+   auto stepEnd = std::chrono::high_resolution_clock::now();
+   if (EnvFlagCached("AIO_TRACE_PERF") && ++stepCount % 1000000 == 0) {
+     std::cout << "[PERF] Steps=" << stepCount
+               << " pendingCycles=" << pendingPeripheralCycles << std::endl;
+   }
+   ```
+
+2. [ ] **Reduce Peripheral Batch Size**
+   - Change `PERIPHERAL_BATCH_CYCLES` from 64 to 8 in [GBA.h](include/emulator/gba/GBA.h)
+   - This trades some performance for better timing accuracy
+
+   Patch into [GBA.h](include/emulator/gba/GBA.h#L88):
+
+   ```cpp
+   // OLD: static constexpr int PERIPHERAL_BATCH_CYCLES = 64;
+   static constexpr int PERIPHERAL_BATCH_CYCLES = 8;
+   ```
+
+3. [ ] **Flush Cycles on DISPSTAT/VCOUNT Reads**
+   - When game reads DISPSTAT (0x04000004) or VCOUNT (0x04000006), flush pending cycles first
+   - This ensures the game sees accurate VBlank/HBlank state
+
+   Patch into [GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp) in `Read16()` for IO region:
+
+   ```cpp
+   case 0x04: // DISPSTAT
+   case 0x06: // VCOUNT
+     // Flush pending peripheral cycles before reading timing-sensitive registers
+     if (auto* gba = GetGBA()) {
+       gba->FlushPendingPeripheralCycles();
+     }
+     break;
+   ```
+
+4. [ ] **Verify Frame Timing**
+   - Ensure 280,896 cycles per frame (1232 cycles × 228 scanlines)
+   - Log actual cycles between VBlank IRQs
+   - If frames are taking too long, the game appears slow
+
+5. [ ] **Test SMA2 After Fixes**
+   - Run SMA2 and verify lag is gone
+   - Ensure no regression in other games
+   - Check frame rate is stable 60fps
+
+### Phase 2: Diagnose & Fix DKC Fade Issue
+
+6. [ ] **Add BLDCNT/BLDY Tracing**
+   - Log every write to blend registers during DKC intro
+   - Command: `AIO_TRACE_PPU_IO_WRITES=1 ./build/bin/AIOServer DKC.gba`
+
+   The existing tracing in GBAMemory.cpp should capture this. Check output for:
+   - BLDCNT (0x04000050) writes - should see mode 2 or 3 being set
+   - BLDY (0x04000054) writes - should see EVY coefficient changing over time
+
+7. [ ] **Fix Layer Buffer Tracking**
+   - In `DrawScanline()`, ensure `layerBuffer[]` correctly identifies each pixel's source layer
+   - Backdrop pixels (when no BG/OBJ covers them) should be layer 5
+
+   Verify in [PPU.cpp](src/emulator/gba/PPU.cpp) `DrawScanline()`:
+
+   ```cpp
+   // After rendering all layers, backdrop pixels should have layerBuffer[x] = 5
+   // Check if this is being set correctly
+   ```
+
+8. [ ] **Verify First Target Selection**
+   - BLDCNT bits 0-5 select first target layers (BG0-3, OBJ, Backdrop)
+   - During fade, bit 5 (backdrop) should be set if fading the background
+   - Bit 0-3 (BG0-3) should be set for background layers
+
+   Add diagnostic in [PPU.cpp](src/emulator/gba/PPU.cpp) `ApplyColorEffects()`:
+
+   ```cpp
+   static int fadeLogCount = 0;
+   if (effectMode == 2 || effectMode == 3) {
+     if (fadeLogCount < 100) {
+       fadeLogCount++;
+       std::cout << "[FADE] mode=" << effectMode
+                 << " evy=" << evy
+                 << " firstTarget=0x" << std::hex << (int)firstTarget
+                 << " scanline=" << std::dec << scanline << std::endl;
+     }
+   }
+   ```
+
+9. [ ] **Fix Backdrop Handling in Color Effects**
+   - If DKC fades the backdrop and all BGs together, ensure backdrop (layer 5) is included
+   - The `layerBuffer[]` may not be setting layer 5 for backdrop pixels
+
+   Patch into [PPU.cpp](src/emulator/gba/PPU.cpp) in `ApplyColorEffects()`:
+
+   ```cpp
+   // After getting topLayer:
+   const uint8_t topLayer = layerBuffer[pixelIndex] <= 5 ? layerBuffer[pixelIndex] : 5;
+
+   // If pixel is backdrop (no layer rendered), set layer to 5
+   // Verify backdrop pixels have layerBuffer[] = 5, not some other value
+   ```
+
+10. [ ] **Test DKC Fade After Fixes**
+    - Run DKC and watch intro cutscene
+    - Logos should fade in/out smoothly
+    - Verify no regression in other games' color effects
+
+### Phase 3: Diagnose & Fix OG-DK Corruption
+
+11. [ ] **Identify OG-DK ROM Type**
+    - Check ROM header to identify what OG-DK actually is
+    - Command: `xxd OG-DK.gba | head -20`
+    - Look for "NINTENDO" header and game code
+
+    If it's "Classic NES Series: Donkey Kong":
+    - Game code should be "FDKE" (USA) or similar
+    - Uses Nintendo's NES emulator core on GBA
+
+12. [ ] **Enable Detailed Memory Tracing**
+    - OG-DK corruption likely caused by memory access issues
+    - Command: `AIO_TRACE_GBA_SPAM=1 ./build/bin/AIOServer OG-DK.gba 2>&1 | head -1000`
+    - Look for:
+      - Invalid memory accesses (0xFFFFFFFF patterns)
+      - Unexpected PC values
+      - Stack underflow/overflow
+
+13. [ ] **Check for Timing-Sensitive Code**
+    - Classic NES Series games are notorious for tight timing requirements
+    - The NES emulator running on GBA expects precise VBlank timing
+    - Our HLE BIOS may not provide accurate enough timing
+
+    Test with LLE BIOS:
+
+    ```bash
+    AIO_GBA_BIOS=/path/to/gba_bios.bin ./build/bin/AIOServer OG-DK.gba
+    ```
+
+14. [ ] **Fix Common NES-on-GBA Issues**
+    - These games often use:
+      - Precise HBlank timing for scanline effects
+      - Specific DMA patterns
+      - Timer-based audio
+
+    Potential fixes if LLE BIOS helps:
+    - Improve HLE BIOS timing accuracy
+    - Add cycle-accurate HBlank callback
+
+15. [ ] **Test OG-DK After Fixes**
+    - If LLE BIOS works, document requirement
+    - If still broken, may need deeper investigation into NES emulator requirements
+
+---
+
+## Files Affected
+
+### Primary Files to Modify
+
+| File                                            | Changes                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------ |
+| [GBA.h](include/emulator/gba/GBA.h)             | Reduce PERIPHERAL_BATCH_CYCLES                               |
+| [GBA.cpp](src/emulator/gba/GBA.cpp)             | Add performance tracing, expose FlushPendingPeripheralCycles |
+| [GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp) | Flush cycles on DISPSTAT/VCOUNT reads                        |
+| [PPU.cpp](src/emulator/gba/PPU.cpp)             | Fix layer buffer tracking, add fade diagnostics              |
+
+### Documentation to Update
+
+| File                                        | Updates                               |
+| ------------------------------------------- | ------------------------------------- |
+| [memory.md](.github/instructions/memory.md) | Document peripheral batching behavior |
+| [Compatibility.md](docs/Compatibility.md)   | Update OG-DK requirements             |
+
+---
+
+## Test Strategy
+
+1. **SMA2 Lag Test**
+   - Run SMA2 for 60 seconds
+   - Count frames rendered (should be ~3600)
+   - Measure wall-clock time (should be ~60 seconds)
+   - Pass criteria: ≤5% timing deviation
+
+2. **DKC Fade Test**
+   - Boot DKC and watch intro
+   - Verify Rare/Nintendo logos fade in and out
+   - Capture screenshots at fade midpoint
+   - Pass criteria: Visible gradient, not instant on/off
+
+3. **OG-DK Test**
+   - Boot OG-DK with LLE BIOS
+   - Verify title screen displays correctly
+   - Play through first level
+   - Pass criteria: Playable without visual corruption
+
+4. **Regression Tests**
+   - Run existing test suite: `make test`
+   - Verify SMA2, DKC (with LLE BIOS), and other games still work
+   - No performance regression (maintain 60fps)
+
+---
+
+## Verification Criteria
+
+- [ ] SMA2 runs at full speed (60fps, no perceived lag)
+- [ ] DKC logos fade correctly in intro cutscene
+- [ ] OG-DK displays correctly (or documented as requiring LLE BIOS)
+- [ ] All existing tests pass
+- [ ] No regression in other games
+
+---
+
+## Risks / Unknowns
+
+1. **OG-DK ROM Unknown** — May be a homebrew, modified ROM, or specific regional variant
+2. **Performance Tradeoff** — Reducing batch size improves accuracy but may impact performance
+3. **DKC Custom Audio** — Even with fade fixed, DKC may still need LLE BIOS for audio driver
+4. **Layer Tracking Complexity** — PPU layer buffer may need significant refactoring
+
+---
+
+## Memory.md Updates
+
+After implementing these fixes, update `.github/instructions/memory.md` with:
+
+```markdown
+## Peripheral Batching
+
+The GBA core batches peripheral updates for performance:
+
+- `PERIPHERAL_BATCH_CYCLES` controls batch size (default: 8 cycles)
+- Smaller values = more accurate timing, slightly lower performance
+- Cycles are flushed early when reading DISPSTAT/VCOUNT for timing accuracy
+
+## PPU Color Effects
+
+The PPU supports four blending modes:
+
+- Mode 0: None
+- Mode 1: Alpha blend (two layers)
+- Mode 2: Brightness increase (fade to white)
+- Mode 3: Brightness decrease (fade to black)
+
+Layer tracking via `layerBuffer[]`:
+
+- 0-3: BG0-BG3
+- 4: OBJ (sprites)
+- 5: Backdrop (no layer)
+```
+
+---
+
+**Ready for implementation!** Hand off to `@Implement` agent.
+
+---
+
+# Previous Plan: Make GBA Emulator 100% Functional
 
 **Date:** 2026-01-22  
 **Goal:** Transform the AIO GBA emulator from ~90% to 100% game compatibility by implementing missing features, fixing known issues, and ensuring all major game categories work correctly.

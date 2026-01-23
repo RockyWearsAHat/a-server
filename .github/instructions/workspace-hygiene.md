@@ -1,6 +1,6 @@
 # Workspace Hygiene (Artifacts, Cleanup, and When)
 
-This repo generates a lot of *regeneratable* build/test/debug output. Keeping the workspace clean improves signal-to-noise and reduces accidental commits.
+This repo generates a lot of _regeneratable_ build/test/debug output. Keeping the workspace clean improves signal-to-noise and reduces accidental commits.
 
 ## What is an artifact?
 
@@ -13,7 +13,7 @@ Common examples:
 - Editor backups: `*.bak`, `*.swp`, `*.tmp`, `*.orig`
 - Diagnostics: `dumps*` folders, `*.ppm` frame dumps
 
-## What is *not* automatically deleted?
+## What is _not_ automatically deleted?
 
 These may be needed for reproduction or comparison:
 

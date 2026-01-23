@@ -12,14 +12,11 @@ tools:
 
 # Plan Agent — AIO Entertainment System
 
-Research and outline multi-step plans before implementation begins.
+Research and outline multi-step plans before implementation begins. Create the implementation steps and code in the plan.md file #file:../plan.md
 
-## When to use
+# If you are the agent
 
-- Complex feature requiring multiple steps or touching multiple subsystems
-- Debugging strategy needed for a tricky issue
-- Architecture decision required (new subsystem, major refactor)
-- Unclear scope or approach — need to explore first
+Feel free to update this document how you see fit in accordance with the user's request and for clarity of yourself. You are always allowed to test things to identify problems in the codebase, and you can always read files to gather more context. You must ALWAYS update the plan.md file #file:../plan.md with your findings and your plan of action. YOU SHOULD ALWAYS BE WRITING CODE FIRST IN THE plan.md FILE, NOT INSTRUCTIONS OR WHAT NEEDS TO BE INVESTIGATED, THAT IS YOUR JOB TO FIGURE OUT AND WRITE THE PLAN FOR. THESE SHOUlD BE STEP BY STEP SOLVES/IMPLEMENTATIONS OF THE USER'S REQUEST.
 
 ## Workflow
 
@@ -27,9 +24,9 @@ Research and outline multi-step plans before implementation begins.
 2. **Read existing docs** under `docs/` and `.github/instructions/`
 3. **Read `.github/instructions/memory.md`** for codebase overview
 4. **Identify affected subsystems** and files
-5. **Write a comprehensive plan to `.github/plan.md`** — this is REQUIRED
-6. **List risks, unknowns, and open questions**
-7. Hand off to **Implement agent** (`@Implement`) for execution
+5. **Write a comprehensive plan to `.github/plan.md`**
+6. **Include test strategy** and verification criteria (if applicable)
+7. Report back to user & hand off to **Implement agent** (`@Implement`) for execution
 
 ## CRITICAL: Always write to plan.md
 
@@ -51,7 +48,7 @@ Every plan MUST be written to `.github/plan.md` with:
 
 When writing to `.github/plan.md`, use this structure:
 
-```
+````
 # Plan: [Feature/Bug Name]
 
 ## Goal
@@ -60,26 +57,17 @@ One-sentence description of what we're trying to achieve.
 ## Context
 What exists today, what's broken, or what's missing.
 
-## Steps
-1. [ ] Step one (specific, actionable)
-2. [ ] Step two
+## Step(s)
+1. [ ] Patch codeblock ```cpp // example code ``` into ../path/to/file.cpp
+2. [ ] Overwrite ../path/to/another_file.cpp with: ```cpp // example code ```
 3. [ ] ...
 
 ## Files affected
-- `path/to/file.cpp` — what changes
+- #file:../path/to/file.cpp
 - ...
 
-## Test strategy
-- What tests to add/update
-- How to verify correctness
-
-## Risks / Unknowns
-- Item one
-- ...
-
-## Open questions for user
-- Question one?
-```
+# Repeat goal context steps & files affected until goal is reached, if necessary write the next Plan as well if necessary to meet the user's request. Always write complete actionable steps to mesh with our current context, if context is missing, use search/codebase or web/fetch to gather more context. Be sure to ALWAYS UPDATE #file:../instructions/memory.md WITH NEW UNDERSTANDING OF THE CODEBASE AND WRITE THESE DOCUMENTATION UPDATES INTO THE PLAN.
+````
 
 ## Boundaries
 
@@ -90,4 +78,4 @@ What exists today, what's broken, or what's missing.
 
 ## Output
 
-Deliver a clear, actionable plan in `.github/plan.md` that the Implement agent can execute step-by-step.
+Deliver a clear, actionable plan in `.github/plan.md` that the Implement agent can easily execute step-by-step.

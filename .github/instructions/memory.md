@@ -13,7 +13,6 @@ AIO is a Qt6-based front-end hosting multiple emulator cores (notably a GBA emul
 ## Top-level layout
 
 - `src/` — production source
-
   - `src/emulator/` — emulator cores
     - `src/emulator/gba/` — Game Boy Advance core
     - `src/emulator/switch/` — Switch-related code (implementation varies)
@@ -102,6 +101,46 @@ The `tests/` folder contains the primary correctness harness:
 
 Guideline: tests should mirror **documentation/spec**, not the current implementation.
 
+## Timing & Performance
+
+### Peripheral Batching
+
+The GBA core batches peripheral updates for performance optimization:
+
+- `PERIPHERAL_BATCH_CYCLES` in `GBA.h` controls batch size (default: 64 cycles)
+- Cycles accumulate in `pendingPeripheralCycles` until threshold or CPU halt
+- **Tradeoff:** Larger batches = better performance, but can delay IRQ delivery
+- **Known Issue:** If batch is too large, games waiting on VBlank/HBlank may appear laggy
+- Cycles should be flushed when reading timing-sensitive registers (DISPSTAT, VCOUNT)
+
+### PPU Color Effects
+
+The PPU supports four blending modes (BLDCNT bits 6-7):
+
+- **Mode 0:** None (no blending)
+- **Mode 1:** Alpha blend between two layers (uses BLDALPHA EVA/EVB)
+- **Mode 2:** Brightness increase / fade to white (uses BLDY EVY)
+- **Mode 3:** Brightness decrease / fade to black (uses BLDY EVY)
+
+Layer tracking via `layerBuffer[]`:
+
+- 0-3: BG0-BG3
+- 4: OBJ (sprites)
+- 5: Backdrop (when no layer covers pixel)
+
+**Known Issues:**
+
+- DKC intro fade: Verify `layerBuffer[]` correctly identifies backdrop pixels
+- Target selection: BLDCNT bits 0-5 select first target layers
+
+### Classic NES Series / NES-on-GBA ROMs
+
+Games like "Classic NES Series: Donkey Kong" (OG-DK) are NES emulators running on GBA:
+
+- **Extremely timing-sensitive** — NES emulator expects precise GBA timing
+- May require **LLE BIOS** for accurate timing (`AIO_GBA_BIOS=/path/to/bios.bin`)
+- Prone to corruption if HLE timing deviates from real hardware
+
 ## Logging and crash capture
 
 - Default log target is `debug.log` at repo root.
@@ -110,6 +149,9 @@ Guideline: tests should mirror **documentation/spec**, not the current implement
   - `AIO_LOG_MIRROR=1` mirror to stdout/stderr
   - `AIO_LOG_APPEND=1` append instead of truncating
   - `AIO_LOG_LEVEL=debug|info|warn|error|fatal`
+  - `AIO_TRACE_PPU_IO_WRITES=1` trace PPU register writes (BLDCNT, BLDY, etc.)
+  - `AIO_TRACE_GBA_SPAM=1` verbose CPU/PPU tracing
+  - `AIO_GBA_BIOS=/path/to/bios.bin` use LLE BIOS instead of HLE
 
 ## Workspace hygiene
 
@@ -127,5 +169,5 @@ Whenever you change behavior, update _at least_:
 
 ## Changelog (curated)
 
-- 2026-01-22: Added NAS/streaming/GUI subsystem sections to memory.md.
+- 2026-01-22: Added timing/performance section documenting peripheral batching, PPU color effects, and NES-on-GBA ROM requirements.- 2026-01-22: Added NAS/streaming/GUI subsystem sections to memory.md.
 - 2026-01-22: Instruction suite moved into `.github/instructions/` and cleanup policy made safe-by-default.
