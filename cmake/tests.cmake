@@ -84,6 +84,21 @@ set_target_properties(MemoryMapTests PROPERTIES
 )
 target_link_libraries(MemoryMapTests PRIVATE GTest::gtest_main GBAEmulator)
 
+# GBA timing/light smoke tests
+add_executable(GbaTests ${PROJECT_ROOT}/tests/GbaTimingTests.cpp)
+set_target_properties(GbaTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GbaTests"
+)
+target_link_libraries(GbaTests PRIVATE GTest::gtest_main GBAEmulator)
+
+if(EXISTS "${CMAKE_BINARY_DIR}/bin/GbaTests")
+  add_test(NAME GbaTests COMMAND "${CMAKE_BINARY_DIR}/bin/GbaTests" --gtest_filter="*")
+  set_tests_properties(GbaTests PROPERTIES TIMEOUT 60)
+else()
+  # Fall back to discovery if GoogleTest discovery is available later
+endif()
+
 if(EXISTS "${PROJECT_ROOT}/tests/APUTests.cpp")
   add_executable(APUTests ${PROJECT_ROOT}/tests/APUTests.cpp)
   set_target_properties(APUTests PROPERTIES

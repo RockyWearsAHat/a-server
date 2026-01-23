@@ -65,7 +65,6 @@ uint32_t PPU::ApplyBrightnessDecrease(uint32_t colorARGB, int evyRaw) {
   return 0xFF000000u | (rr << 16) | (gg << 8) | bb;
 }
 
-
 namespace {
 std::atomic<uint64_t> g_ppuInstanceCounter{1};
 
@@ -335,7 +334,8 @@ void PPU::Update(int cycles) {
 
       // Hardware enters HBlank on every scanline (including VBlank).
       // Set DISPSTAT first so any HBlank-triggered work sees the flag.
-      uint16_t dispstat = memory.Read16(0x04000004);
+      // Use ReadIORegister16Internal to avoid infinite recursion with flush.
+      uint16_t dispstat = memory.ReadIORegister16Internal(0x04);
       dispstat |= 2; // HBlank flag (Bit 1)
       memory.WriteIORegisterInternal(0x04, dispstat);
 
@@ -345,7 +345,7 @@ void PPU::Update(int cycles) {
 
       // Trigger HBlank IRQ if enabled in DISPSTAT.
       if (dispstat & 0x10) { // HBlank IRQ Enable (Bit 4)
-        uint16_t if_reg = memory.Read16(0x04000202);
+        uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
         if_reg |= 2; // HBlank IRQ bit (Bit 1)
         // IF is write-1-to-clear when written by the CPU.
         // When an interrupt occurs, hardware sets IF bits.
@@ -364,7 +364,7 @@ void PPU::Update(int cycles) {
       bool triggerVBlankDMA = false;
 
       // Clear DISPSTAT HBlank Flag
-      uint16_t dispstat = memory.Read16(0x04000004);
+      uint16_t dispstat = memory.ReadIORegister16Internal(0x04);
       dispstat &= ~2;
       memory.WriteIORegisterInternal(0x04, dispstat);
 
@@ -379,7 +379,7 @@ void PPU::Update(int cycles) {
         // DKC diagnostic: Log DISPCNT during problem frames
         if ((frameCount >= 2195 && frameCount <= 2205) ||
             (frameCount >= 2400 && frameCount <= 2415)) {
-          uint16_t dispcnt = memory.Read16(0x04000000);
+          uint16_t dispcnt = memory.ReadIORegister16Internal(0x00);
           bool forcedBlank = (dispcnt >> 7) & 1;
           uint8_t bgMode = dispcnt & 0x7;
           bool displayBG0 = (dispcnt >> 8) & 1;
@@ -422,7 +422,7 @@ void PPU::Update(int cycles) {
       memory.SetPpuTimingState(scanline, cycleCounter);
 
       // Update DISPSTAT VBlank flag
-      dispstat = memory.Read16(0x04000004);
+      dispstat = memory.ReadIORegister16Internal(0x04);
       bool isVBlank = (scanline >= 160 && scanline <= 227);
 
       bool wasVBlank = prevVBlankState;
@@ -471,7 +471,7 @@ void PPU::Update(int cycles) {
             bg3y_internal |= 0xF0000000;
 
           if (dispstat & 0x8) { // VBlank IRQ Enable
-            uint16_t if_reg = memory.Read16(0x04000202) | 1;
+            uint16_t if_reg = memory.ReadIORegister16Internal(0x202) | 1;
             memory.WriteIORegisterInternal(0x202, if_reg);
 
             // Also set BIOS_IF for IntrWait/VBlankIntrWait
@@ -504,7 +504,7 @@ void PPU::Update(int cycles) {
       if (scanline == vcountSetting) {
         dispstat |= 4;
         if (dispstat & 0x20) { // VCount IRQ Enable
-          uint16_t if_reg = memory.Read16(0x04000202);
+          uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
           if_reg |= 4;
           memory.WriteIORegisterInternal(0x202, if_reg);
         }
@@ -581,9 +581,9 @@ void PPU::DrawScanline() {
       const uint16_t bg3vofs = ReadRegister(0x1E);
       const uint16_t dispstat = ReadRegister(0x04);
       const uint16_t vcount = ReadRegister(0x06);
-      const uint16_t ie = memory.Read16(0x04000200);
-      const uint16_t if_reg = memory.Read16(0x04000202);
-      const uint16_t ime = memory.Read16(0x04000208);
+      const uint16_t ie = memory.ReadIORegister16Internal(0x200);
+      const uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
+      const uint16_t ime = memory.ReadIORegister16Internal(0x208);
       const uint16_t bios_if = memory.Read16(0x03007FF8);
 
       std::cout << "[PPU_FRAME] frameCount=" << fc << " logLine=" << linesLogged
@@ -2504,14 +2504,16 @@ void PPU::ApplyColorEffects() {
   if (evy > 16)
     evy = 16;
 
-  // Limited diagnostics to help track down fade issues (enable with AIO_TRACE_GBA_SPAM)
+  // Limited diagnostics to help track down fade issues (enable with
+  // AIO_TRACE_GBA_SPAM)
   if (TraceGbaSpam() && (effectMode == 2 || effectMode == 3)) {
     static int fadeLogCount = 0;
     if (fadeLogCount < 100) {
       fadeLogCount++;
       std::cout << "[FADE] frame=" << frameCount << " scanline=" << scanline
                 << " bldcnt=0x" << std::hex << bldcnt << std::dec
-                << " bldy_raw=" << evyRaw << " bldy_clamped=" << evy << " mode=" << effectMode << std::endl;
+                << " bldy_raw=" << evyRaw << " bldy_clamped=" << evy
+                << " mode=" << effectMode << std::endl;
     }
   }
 
@@ -2592,7 +2594,8 @@ void PPU::ApplyColorEffects() {
     const bool topIsObjSemiTransparent =
         (topLayer == 4) && (objSemiTransparentBuffer[pixelIndex] != 0);
 
-    // Diagnostic: log first pixel's topLayer and current RGB when tracing enabled
+    // Diagnostic: log first pixel's topLayer and current RGB when tracing
+    // enabled
     if (TraceGbaSpam() && x == 0 && scanline == 0) {
       uint32_t color0 = backBuffer[pixelIndex];
       std::cout << "[FADEPIX] x=" << x << " scanline=" << scanline
@@ -2664,13 +2667,15 @@ void PPU::ApplyColorEffects() {
       // I = I + (31-I) * EVY / 16
       if (TraceGbaSpam()) {
         std::cout << "[FADEAPPLY] topFirst=" << topIsFirstTarget
-                  << " before RGB=(" << (int)r << "," << (int)g << "," << (int)b << ")\n";
+                  << " before RGB=(" << (int)r << "," << (int)g << "," << (int)b
+                  << ")\n";
       }
       r = from5(to5(r) + ((31 - to5(r)) * evy / 16));
       g = from5(to5(g) + ((31 - to5(g)) * evy / 16));
       b = from5(to5(b) + ((31 - to5(b)) * evy / 16));
       if (TraceGbaSpam()) {
-        std::cout << "[FADEAPPLY] after RGB=(" << (int)r << "," << (int)g << "," << (int)b << ")\n";
+        std::cout << "[FADEAPPLY] after RGB=(" << (int)r << "," << (int)g << ","
+                  << (int)b << ")\n";
       }
     } else if (effectMode == 3) {
       if (!topIsFirstTarget) {

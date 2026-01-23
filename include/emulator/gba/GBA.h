@@ -85,7 +85,7 @@ private:
   // Performance: batch peripheral updates instead of updating PPU/APU/Timers
   // every single CPU instruction.
   int pendingPeripheralCycles = 0;
-  static constexpr int PERIPHERAL_BATCH_CYCLES = 64;
+  static constexpr int PERIPHERAL_BATCH_CYCLES = 8;
 
   std::atomic<uint64_t> totalCyclesExecuted{0};
 };

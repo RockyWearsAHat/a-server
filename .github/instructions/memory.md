@@ -107,11 +107,12 @@ Guideline: tests should mirror **documentation/spec**, not the current implement
 
 The GBA core batches peripheral updates for performance optimization:
 
-- `PERIPHERAL_BATCH_CYCLES` in `GBA.h` controls batch size (default: 64 cycles)
+- `PERIPHERAL_BATCH_CYCLES` in `GBA.h` controls batch size (now: 8 cycles, was 64)
 - Cycles accumulate in `pendingPeripheralCycles` until threshold or CPU halt
-- **Tradeoff:** Larger batches = better performance, but can delay IRQ delivery
-- **Known Issue:** If batch is too large, games waiting on VBlank/HBlank may appear laggy
-- Cycles should be flushed when reading timing-sensitive registers (DISPSTAT, VCOUNT)
+- Cycles are flushed early when reading timing-sensitive registers (DISPSTAT, VCOUNT) — implemented by calling `FlushPendingPeripheralCycles()` in `GBAMemory::Read16()`
+- **IMPORTANT:** PPU::Update() must use `ReadIORegister16Internal()` (not `Read16()`) to read IO registers to avoid infinite recursion with the flush mechanism
+- **Rationale:** 8 cycles provides sufficient granularity while keeping performance acceptable. This change fixes SMA2 lag caused by stale DISPSTAT/VCOUNT reads.
+- **Tradeoff:** Larger batches are still an option for performance, but 8 is a safe default to avoid timing-sensitive regressions
 
 ### PPU Color Effects
 

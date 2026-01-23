@@ -18,7 +18,8 @@ protected:
 TEST_F(PPUTimingTest, HBlankStartsAtCycle960) {
   ppu.Update(959);
   uint16_t dispstat = memory.Read16(0x04000004);
-  EXPECT_EQ(dispstat & 0x02, 0) << "HBlank flag should be clear before cycle 960";
+  EXPECT_EQ(dispstat & 0x02, 0)
+      << "HBlank flag should be clear before cycle 960";
 
   ppu.Update(1);
   dispstat = memory.Read16(0x04000004);
@@ -29,7 +30,8 @@ TEST_F(PPUTimingTest, HBlankStartsAtCycle960) {
 TEST_F(PPUTimingTest, HBlankClearsAtScanlineEnd) {
   ppu.Update(1232);
   uint16_t dispstat = memory.Read16(0x04000004);
-  EXPECT_EQ(dispstat & 0x02, 0) << "HBlank flag should clear at scanline boundary";
+  EXPECT_EQ(dispstat & 0x02, 0)
+      << "HBlank flag should clear at scanline boundary";
 }
 
 // GBATEK: VBlank starts at scanline 160

@@ -10,6 +10,7 @@ namespace AIO::Emulator::GBA {
 class APU;      // Forward declaration
 class PPU;      // Forward declaration
 class ARM7TDMI; // Forward declaration
+class GBA;      // Forward declaration (for timing flush callbacks)
 
 class GBAMemory {
 public:
@@ -37,6 +38,8 @@ public:
   void SetPPU(PPU *ppuPtr) { ppu = ppuPtr; }
   // CPU connection for debug
   void SetCPU(ARM7TDMI *cpuPtr) { cpu = cpuPtr; }
+  // GBA connection for timing flush callbacks
+  void SetGBA(GBA *g) { gba = g; }
 
   // Debug/Test helper
   void WriteROM(uint32_t address, uint8_t value) {
@@ -76,6 +79,9 @@ public:
 
   // Internal IO Write (Bypasses Read-Only checks)
   void WriteIORegisterInternal(uint32_t offset, uint16_t value);
+
+  // Internal IO Read (Bypasses flush logic - for PPU internal use)
+  uint16_t ReadIORegister16Internal(uint32_t offset) const;
 
   // Callback for IO Writes (Used by PPU to track Affine Registers)
   using IOWriteCallback = void (*)(void *context, uint32_t offset,
@@ -284,6 +290,7 @@ private:
   APU *apu = nullptr;      // APU pointer for sound callbacks
   PPU *ppu = nullptr;      // PPU pointer for DMA updates
   ARM7TDMI *cpu = nullptr; // CPU pointer for debug
+  GBA *gba = nullptr;      // GBA pointer for timing flush callbacks
 
   // Track last Game Pak access to approximate sequential waitstate timing
   // (WAITCNT). This is intentionally lightweight (no full bus prefetch

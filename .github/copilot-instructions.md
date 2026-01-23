@@ -10,16 +10,19 @@ This file is intentionally short. The detailed, structured guidance lives in `.g
 
 ## Agents
 
-- **`@Plan`** — Research and create comprehensive plans. Always writes to `.github/plan.md`.
-- **`@Implement`** — Execute plans. Always reads `.github/plan.md` and completes EVERY step.
+- **`@Plan`** — Diagnose → Write EXACT CODE to `.github/plan.md`. Never implements directly.
+- **`@Implement`** — Execute `.github/plan.md` step-by-step. Never improvises or interprets.
+
+**Workflow:** User request → `@Plan` (diagnose + write code plan) → `@Implement` (execute exactly)
 
 ## Golden Rules
 
 1. **Documentation-first TDD**: update docs/spec → write tests that mirror the docs → implement.
-2. **Spec-driven emulation**: prefer GBATEK + project docs over “what other emulators do”.
+2. **Spec-driven emulation**: prefer GBATEK + project docs over "what other emulators do".
 3. **No hacks**: game-specific fixes only if they replicate real hardware/BIOS behavior.
 4. **Keep code clean**: small diffs, clear names, consistent style, and documentation updates.
 5. **Clean only after user verification**: once the user confirms the issue is solved, clean workspace artifacts.
+6. **Plans contain CODE**: `@Plan` writes exact code blocks, not prose. `@Implement` copy-pastes.
 
 ## Canonical Docs (read first)
 

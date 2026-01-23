@@ -4,6 +4,7 @@
 #include <emulator/common/Logger.h>
 #include <emulator/gba/APU.h>
 #include <emulator/gba/ARM7TDMI.h>
+#include <emulator/gba/GBA.h>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/GameDB.h>
 #include <emulator/gba/IORegs.h>
@@ -1491,6 +1492,16 @@ uint16_t GBAMemory::Read16(uint32_t address) {
     address &= ~1u;
   }
 
+  // Flush pending peripheral cycles for timing-sensitive reads (GBATEK
+  // compliance)
+  if (region == 0x04) {
+    const uint32_t offset = address & 0x3FFu;
+    // DISPSTAT (0x004) and VCOUNT (0x006) require up-to-date PPU state
+    if ((offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT) && gba) {
+      gba->FlushPendingPeripheralCycles();
+    }
+  }
+
   // SMA2 investigation: trace reads of the save/validator object pointer.
   // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
   if (traceSma2SaveobjRead) {
@@ -1947,8 +1958,8 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
                                           (io_regs[IORegs::DISPCNT + 1] << 8));
       const bool forcedBlank = (dispcnt & 0x0080u) != 0;
-      const bool inVisible = ppuTimingValid && (ppuTimingScanline < 160) &&
-                             (ppuTimingCycle < 960);
+      const bool inVisible =
+          ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
       const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960) &&
                             (ppuTimingScanline < 160);
       const bool hBlankIntervalFree = (dispcnt & 0x0020u) != 0;
@@ -1961,8 +1972,8 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
                 AIO::Emulator::Common::LogLevel::Info, "OAM",
                 "OAM CPU W8 BLOCKED addr=0x%08x val=0x%02x PC=0x%08x "
                 "scanline=%d cycle=%d",
-                (unsigned)address, (unsigned)value, (unsigned)pc2, ppuTimingScanline,
-                ppuTimingCycle);
+                (unsigned)address, (unsigned)value, (unsigned)pc2,
+                ppuTimingScanline, ppuTimingCycle);
           }
           // Block write silently.
           break;
@@ -1974,8 +1985,8 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
                 AIO::Emulator::Common::LogLevel::Info, "OAM",
                 "OAM CPU W8 BLOCKED HBLANK addr=0x%08x val=0x%02x PC=0x%08x "
                 "scanline=%d cycle=%d",
-                (unsigned)address, (unsigned)value, (unsigned)pc2, ppuTimingScanline,
-                ppuTimingCycle);
+                (unsigned)address, (unsigned)value, (unsigned)pc2,
+                ppuTimingScanline, ppuTimingCycle);
           }
           // Block write during HBlank when H-Blank Interval Free is disabled.
           break;
@@ -2791,12 +2802,11 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES") && (region == 0x07)) {
       AIO::Emulator::Common::Logger::Instance().LogFmt(
           AIO::Emulator::Common::LogLevel::Info, "OAM",
-          "OAM WRITE CHECK region=0x%02x forcedBlank=%d inVisible=%d inHBlank=%d inVBlank=%d scanline=%d cycle=%d",
-          (unsigned)region, (int)forcedBlank, (int)inVisible, (int)inHBlank, (int)inVBlank,
-          ppuTimingScanline, ppuTimingCycle);
+          "OAM WRITE CHECK region=0x%02x forcedBlank=%d inVisible=%d "
+          "inHBlank=%d inVBlank=%d scanline=%d cycle=%d",
+          (unsigned)region, (int)forcedBlank, (int)inVisible, (int)inHBlank,
+          (int)inVBlank, ppuTimingScanline, ppuTimingCycle);
     }
-
-
 
     if (!forcedBlank && inVisible) {
       if (region == 0x05 || region == 0x06) {
@@ -2855,8 +2865,8 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
               AIO::Emulator::Common::LogLevel::Info, "OAM",
               "OAM CPU W16 BLOCKED addr=0x%08x val=0x%04x PC=0x%08x "
               "scanline=%d cycle=%d",
-              (unsigned)address, (unsigned)value, (unsigned)pc2, ppuTimingScanline,
-              ppuTimingCycle);
+              (unsigned)address, (unsigned)value, (unsigned)pc2,
+              ppuTimingScanline, ppuTimingCycle);
         }
         return;
       }
@@ -3527,6 +3537,15 @@ void GBAMemory::WriteIORegisterInternal(uint32_t offset, uint16_t value) {
     io_regs[offset] = value & 0xFF;
     io_regs[offset + 1] = (value >> 8) & 0xFF;
   }
+}
+
+uint16_t GBAMemory::ReadIORegister16Internal(uint32_t offset) const {
+  // Direct read from io_regs without triggering flush (for internal PPU use).
+  // This avoids infinite recursion when PPU::Update() reads DISPSTAT/VCOUNT.
+  if (offset + 1 < io_regs.size()) {
+    return io_regs[offset] | (io_regs[offset + 1] << 8);
+  }
+  return 0;
 }
 
 void GBAMemory::CheckDMA(int timing) {
