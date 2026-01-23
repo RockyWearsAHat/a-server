@@ -172,6 +172,11 @@ Most games using simple direct sound will work fine with current implementation.
 # Check for FIFO writes in log
 ```
 
+### Test PSG (Square/Wave/Noise channels)
+
+- Unit tests: `./build/bin/APUTests` — covers FIFO behavior, FIFO resets, and master enable. Run locally and ensure all `APUTests` pass.
+- Quick manual test: run a game that exercises PSG (choose a simple homebrew or test ROM) in headless mode and watch for PCM output or FIFO activity.
+
 ### Test M4A Games
 
 ```bash

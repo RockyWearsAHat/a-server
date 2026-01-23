@@ -187,15 +187,22 @@ private:
   int ppuTimingScanline = 0;
   int ppuTimingCycle = 0;
 
-  // Deferred write queue for graphics memory (palette/VRAM/OAM)
-  // Writes during unsafe timing (VISIBLE period) are queued and applied at
-  // HBlank/VBlank
-  struct DeferredWrite {
-    uint32_t address;
-    uint8_t value;
-    uint8_t region; // 5=palette, 6=VRAM, 7=OAM
-  };
-  std::vector<DeferredWrite> deferredWrites;
+  // Deferred write buffering for graphics memory.
+  // During VISIBLE, palette/VRAM writes are not immediately visible; we record
+  // them into shadow buffers and later apply (by block) during a safe period.
+  static constexpr uint32_t kDeferredBlockSize = 32u;
+
+  std::vector<uint8_t> palette_shadow;
+  std::vector<uint8_t> vram_shadow;
+  std::vector<uint8_t> oam_shadow;
+
+  std::vector<uint8_t> palette_dirtyBlocks; // 0/1 per block
+  std::vector<uint8_t> vram_dirtyBlocks;    // 0/1 per block
+  std::vector<uint8_t> oam_dirtyBlocks;     // 0/1 per block
+
+  std::vector<uint32_t> palette_dirtyList; // block indices
+  std::vector<uint32_t> vram_dirtyList;    // block indices
+  std::vector<uint32_t> oam_dirtyList;     // block indices
 
   // Internal DMA address registers (shadow registers for repeat DMAs)
   uint32_t dmaInternalSrc[4] = {0};

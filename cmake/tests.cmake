@@ -84,6 +84,42 @@ set_target_properties(MemoryMapTests PROPERTIES
 )
 target_link_libraries(MemoryMapTests PRIVATE GTest::gtest_main GBAEmulator)
 
+if(EXISTS "${PROJECT_ROOT}/tests/APUTests.cpp")
+  add_executable(APUTests ${PROJECT_ROOT}/tests/APUTests.cpp)
+  set_target_properties(APUTests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/APUTests"
+  )
+  target_link_libraries(APUTests PRIVATE GTest::gtest_main GBAEmulator)
+
+  include(GoogleTest)
+  if(EXISTS "${CMAKE_BINARY_DIR}/bin/APUTests")
+    gtest_discover_tests(APUTests
+      TEST_EXECUTABLE "${CMAKE_BINARY_DIR}/bin/APUTests"
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+      TEST_DISCOVERY_TIMEOUT 60
+      DISCOVERY_MODE PRE_TEST
+    )
+  else()
+    # Fall back to default discovery logic (CMake will try to infer path)
+    gtest_discover_tests(APUTests
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+      TEST_DISCOVERY_TIMEOUT 60
+      DISCOVERY_MODE PRE_TEST
+    )
+  endif()
+
+  # As a robust fallback (handles weird output dir resolution), add a simple
+  # CTest entry that runs the binary directly if it exists in the build bin
+  # directory. This ensures CTest will list/run the tests even when discovery
+  # plumbing has trouble.
+  if(EXISTS "${CMAKE_BINARY_DIR}/bin/APUTests")
+    add_test(NAME APUTests COMMAND "${CMAKE_BINARY_DIR}/bin/APUTests" --gtest_filter="*")
+    set_tests_properties(APUTests PROPERTIES TIMEOUT 60)
+  endif()
+else()
+  message(WARNING "tests/APUTests.cpp not found; skipping APUTests target.")
+endif()
 
 # Headless SMA2 investigation harness (not a unit test).
 add_executable(SMA2Harness ${PROJECT_ROOT}/test_sma2_10s.cpp)

@@ -53,13 +53,22 @@ inline bool EnvFlagCached(const char *name) {
 
 static void LogBranch([[maybe_unused]] uint32_t from,
                       [[maybe_unused]] uint32_t to) {
+  static const bool traceBadBranch =
+    EnvTruthy(std::getenv("AIO_TRACE_BAD_BRANCH"));
+  // Branch logging is on an extremely hot path.
+  // Keep all optional diagnostics behind cheap, one-time env checks.
+  static const bool traceBranchDiags =
+    EnvTruthy(std::getenv("AIO_TRACE_BRANCH_DIAGS"));
+  static const bool traceSaveobjCall =
+    EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_CALL"));
+
   branchLog.push_back({from, to});
   if (branchLog.size() > 50)
     branchLog.pop_front();
 
   // SMA2 investigation: detect when the game branches to the save/validator
   // object entry. Enable with: AIO_TRACE_SMA2_SAVEOBJ_CALL=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_CALL")) {
+  if (traceSaveobjCall) {
     const uint32_t masked = to & ~1u;
     if (masked >= 0x08177900u && masked <= 0x08177A50u) {
       uint32_t instr = 0;
@@ -85,38 +94,46 @@ static void LogBranch([[maybe_unused]] uint32_t from,
         "PC CORRUPTION (looks like opcode): 0x%08x -> 0x%08x", from, to);
   }
 
-  // Log branches beyond actual ROM size (4MB = 0x08000000 + 0x400000 =
-  // 0x08400000)
-  if (to >= 0x08400000 && to < 0x0E000000) {
-    uint32_t instr = 0;
-    if (g_memoryForLog) {
-      instr = g_thumbModeForLog ? g_memoryForLog->ReadInstruction16(from & ~1)
-                                : g_memoryForLog->ReadInstruction32(from & ~3);
+  // Optional branch diagnostics (very noisy). Enable with:
+  //   AIO_TRACE_BRANCH_DIAGS=1
+  if (traceBranchDiags) {
+    // Historically this was hard-coded to 4MB and can be wildly wrong.
+    // Keep it opt-in.
+    if (to >= 0x08400000 && to < 0x0E000000) {
+      uint32_t instr = 0;
+      if (g_memoryForLog) {
+        instr = g_thumbModeForLog
+                    ? g_memoryForLog->ReadInstruction16(from & ~1)
+                    : g_memoryForLog->ReadInstruction32(from & ~3);
+      }
+      Logger::Instance().LogFmt(
+          LogLevel::Error, "CPU",
+          "BRANCH BEYOND ROM (heuristic): from=0x%08x to=0x%08x instr=0x%08x "
+          "thumbMode=%d",
+          from, to, instr, g_thumbModeForLog);
     }
-    Logger::Instance().LogFmt(
-        LogLevel::Error, "CPU",
-        "BRANCH BEYOND ROM: from=0x%08x to=0x%08x instr=0x%08x thumbMode=%d",
-        from, to, instr, g_thumbModeForLog);
-  }
 
-  // Log branches to data regions (lookup table areas)
-  if ((to >= 0x08125C00 && to < 0x08127000)) {
-    uint32_t instr = 0;
-    if (g_memoryForLog) {
-      instr = g_thumbModeForLog ? g_memoryForLog->ReadInstruction16(from & ~1)
-                                : g_memoryForLog->ReadInstruction32(from & ~3);
+    // Log branches to data regions (lookup table areas)
+    if ((to >= 0x08125C00 && to < 0x08127000)) {
+      uint32_t instr = 0;
+      if (g_memoryForLog) {
+        instr = g_thumbModeForLog
+                    ? g_memoryForLog->ReadInstruction16(from & ~1)
+                    : g_memoryForLog->ReadInstruction32(from & ~3);
+      }
+      Logger::Instance().LogFmt(
+          LogLevel::Error, "CPU",
+          "BRANCH TO DATA SECTION: from=0x%08x to=0x%08x instr=0x%08x "
+          "thumbMode=%d",
+          from, to, instr, g_thumbModeForLog);
     }
-    Logger::Instance().LogFmt(LogLevel::Error, "CPU",
-                              "BRANCH TO DATA SECTION: from=0x%08x to=0x%08x "
-                              "instr=0x%08x thumbMode=%d",
-                              from, to, instr, g_thumbModeForLog);
   }
 
   bool valid = (to >= 0x08000000 && to < 0x0E000000) ||
                (to >= 0x03000000 && to < 0x04000000) ||
                (to >= 0x02000000 && to < 0x03000000) || (to < 0x4000) ||
                ((to & 0xFFFFFF00) == 0xFFFFFF00);
-  if (!valid) {
+  if (!valid && traceBadBranch) {
     Logger::Instance().LogFmt(LogLevel::Error, "CPU",
                               "BAD BRANCH TO INVALID MEMORY: 0x%08x -> 0x%08x",
                               from, to);
@@ -196,6 +213,10 @@ static bool g_reportedFirstR11NonZero = false;
 
 static void RecordR11Write(uint32_t instrAddr, bool thumb, uint32_t instruction,
                            uint32_t oldVal, uint32_t newVal) {
+  static const bool traceR11FirstZero =
+      EnvTruthy(std::getenv("AIO_TRACE_R11_FIRSTZERO"));
+  if (!traceR11FirstZero)
+    return;
   if (oldVal == newVal)
     return;
 
@@ -992,7 +1013,8 @@ void ARM7TDMI::Step() {
   //   LDR R0, [R12, R0, LSL #4]
   // R0 is expected to be a small table index. When it is unexpectedly large,
   // dump additional context so we can trace where the bad index comes from.
-  if (pc == 0x3003308) {
+  // Enable with: AIO_TRACE_CPU_CRASH=1
+  if (crashTraceRequested && pc == 0x3003308) {
     const uint32_t index = registers[0];
     if (index > 20) {
       const uint32_t base = registers[12];
@@ -2534,7 +2556,9 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
           val += 4; // PC store quirk? Usually PC+12
 
         // DEBUG: Trace ARM STM to 0x3001500
-        if ((currentAddr >> 24) == 0x03 && (currentAddr & 0x7FFF) >= 0x1500 &&
+        // Enable with: AIO_TRACE_ARM_STM_3001500=1
+        if (EnvFlagCached("AIO_TRACE_ARM_STM_3001500") &&
+            (currentAddr >> 24) == 0x03 && (currentAddr & 0x7FFF) >= 0x1500 &&
             (currentAddr & 0x7FFF) < 0x1510) {
           std::cout << "[ARM STM] PC=0x" << std::hex << (registers[15] - 8)
                     << " [0x" << currentAddr << "] <- R" << std::dec << i
@@ -2781,21 +2805,10 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
 
     const uint32_t handler = memory.Read32(0x03007FFCu);
     if (handler == 0) {
-      // No handler installed; just return.
-      break;
+      // No handler installed; perform an immediate BIOS-style return.
+      registers[15] = 0x000001A0;
+      return;
     }
-
-    IrqContext ctx{};
-    ctx.r0 = registers[0];
-    ctx.r1 = registers[1];
-    ctx.r2 = registers[2];
-    ctx.r3 = registers[3];
-    ctx.r12 = registers[12];
-    ctx.lr = registers[14];
-    ctx.pc = registers[15];
-    ctx.cpsr = cpsr;
-    ctx.thumbMode = thumbMode;
-    irqStack.push_back(ctx);
 
     // Real BIOS trampoline executes the user handler in System mode (not IRQ
     // mode) so it uses the user/system banked SP/LR. Many games rely on this.

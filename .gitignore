@@ -12,8 +12,15 @@ debug.log
 *log*.txt
 *log*.md
 
+# Diagnostics outputs (regeneratable)
+dumps*/
+*.ppm
+
 # Local environment secrets
 .env
+
+# Local Python venv
+.venv/
 
 # Emulator runtime files
 *.sav
@@ -28,6 +35,10 @@ debug.log
 
 # macOS
 .DS_Store
+
+# Local scratch / Copilot artifacts
+wip_local_changes.patch
+untitled:*
 
 
 _worktrees/

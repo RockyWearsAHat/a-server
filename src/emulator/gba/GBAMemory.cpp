@@ -63,7 +63,11 @@ inline bool EnvFlagCached(const char *name) {
   return enabled;
 }
 
-bool TraceGbaSpam() { return EnvFlagCached("AIO_TRACE_GBA_SPAM"); }
+// Hot-path trace gate: must be extremely cheap when disabled.
+bool TraceGbaSpam() {
+  static const bool enabled = EnvTruthy(std::getenv("AIO_TRACE_GBA_SPAM"));
+  return enabled;
+}
 
 inline bool IsPpuIoOffset(uint32_t offAligned) {
   switch (offAligned) {
@@ -97,7 +101,8 @@ inline bool IsPpuIoOffset(uint32_t offAligned) {
 }
 
 inline void TracePpuIoWrite8(uint32_t address, uint8_t value, uint32_t pc) {
-  if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES"))
+  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
+  if (!trace)
     return;
   if ((address & 0xFF000000u) != 0x04000000u)
     return;
@@ -123,7 +128,8 @@ inline void TracePpuIoWrite8(uint32_t address, uint8_t value, uint32_t pc) {
 }
 
 inline void TracePpuIoWrite16(uint32_t address, uint16_t value, uint32_t pc) {
-  if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES"))
+  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
+  if (!trace)
     return;
   if ((address & 0xFF000000u) != 0x04000000u)
     return;
@@ -149,7 +155,8 @@ inline void TracePpuIoWrite16(uint32_t address, uint16_t value, uint32_t pc) {
 }
 
 inline void TracePpuIoWrite32(uint32_t address, uint32_t value, uint32_t pc) {
-  if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES"))
+  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
+  if (!trace)
     return;
   if ((address & 0xFF000000u) != 0x04000000u)
     return;
@@ -185,6 +192,26 @@ GBAMemory::GBAMemory() {
   palette_ram.resize(MemoryMap::PALETTE_SIZE);
   vram.resize(MemoryMap::VRAM_SIZE);
   oam.resize(MemoryMap::OAM_SIZE);
+
+  // Shadow buffers for timing-gated graphics writes.
+  palette_shadow = palette_ram;
+  vram_shadow = vram;
+  oam_shadow = oam;
+
+  const uint32_t palBlocks =
+      (uint32_t)((palette_ram.size() + kDeferredBlockSize - 1u) /
+                 kDeferredBlockSize);
+  const uint32_t vramBlocks =
+      (uint32_t)((vram.size() + kDeferredBlockSize - 1u) / kDeferredBlockSize);
+  const uint32_t oamBlocks =
+      (uint32_t)((oam.size() + kDeferredBlockSize - 1u) / kDeferredBlockSize);
+  palette_dirtyBlocks.assign(palBlocks, 0);
+  vram_dirtyBlocks.assign(vramBlocks, 0);
+  oam_dirtyBlocks.assign(oamBlocks, 0);
+
+  palette_dirtyList.reserve(palBlocks);
+  vram_dirtyList.reserve(vramBlocks);
+  oam_dirtyList.reserve(oamBlocks);
   // ROM and SRAM sizes depend on the loaded game, but we can set defaults
   rom.resize(MemoryMap::ROM_MAX_SIZE);
   sram.resize(SaveTypes::SRAM_SIZE);
@@ -434,6 +461,21 @@ void GBAMemory::Reset() {
   std::fill(palette_ram.begin(), palette_ram.end(), 0);
   std::fill(vram.begin(), vram.end(), 0);
   std::fill(oam.begin(), oam.end(), 0);
+
+  // Keep deferred-write shadow state coherent after reset.
+  if (!palette_shadow.empty())
+    palette_shadow = palette_ram;
+  if (!vram_shadow.empty())
+    vram_shadow = vram;
+  if (!oam_shadow.empty())
+    oam_shadow = oam;
+
+  std::fill(palette_dirtyBlocks.begin(), palette_dirtyBlocks.end(), 0);
+  std::fill(vram_dirtyBlocks.begin(), vram_dirtyBlocks.end(), 0);
+  std::fill(oam_dirtyBlocks.begin(), oam_dirtyBlocks.end(), 0);
+  palette_dirtyList.clear();
+  vram_dirtyList.clear();
+  oam_dirtyList.clear();
 
   // Initialize KEYINPUT to 0x03FF (All Released)
   if (io_regs.size() > 0x131) {
@@ -1191,6 +1233,10 @@ int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
 }
 
 uint8_t GBAMemory::Read8(uint32_t address) {
+  static const bool traceSma2HeaderReads = EnvTruthy(std::getenv("AIO_TRACE_SMA2_HEADER_READS"));
+  static const bool traceDma3Reads = EnvTruthy(std::getenv("AIO_TRACE_DMA3_READS"));
+  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+
   uint8_t region = (address >> 24);
   switch (region) {
   case 0x00: // BIOS (GBATEK: 0x00000000-0x00003FFF)
@@ -1219,7 +1265,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     const uint8_t v = wram_board[off];
     // SMA2 investigation: trace reads of the 8-byte header staging area.
     // Enable with: AIO_TRACE_SMA2_HEADER_READS=1
-    if (EnvFlagCached("AIO_TRACE_SMA2_HEADER_READS") && cpu) {
+    if (traceSma2HeaderReads && cpu) {
       if (off >= 0x03C0u && off < 0x03C8u) {
         static int hdrReads = 0;
         if (hdrReads < 400) {
@@ -1253,7 +1299,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // DMA3 read trace (useful for save validation loops that poll DMA regs)
-    if (EnvFlagCached("AIO_TRACE_DMA3_READS") && offset >= 0xD4 &&
+    if (traceDma3Reads && offset >= 0xD4 &&
         offset <= 0xDF) {
       static int dma3ReadLogs = 0;
       if (dma3ReadLogs < 400) {
@@ -1269,7 +1315,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     // Generic IO polling trace (8-bit). Useful for diagnosing games stuck in
     // init loops while DISPCNT remains forced blank.
     // Enable with: AIO_TRACE_IO_POLL=1
-    if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu) {
+    if (traceIoPoll && cpu) {
       const uint32_t pc = (uint32_t)cpu->GetRegister(15);
       if (pc >= 0x03000000u && pc < 0x03008000u) {
         static uint32_t lastOffset8 = 0xFFFFFFFFu;
@@ -1306,6 +1352,11 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   case 0x05: // Palette RAM (GBATEK: 0x05000000-0x050003FF)
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
+
+    static const bool traceDkcPalZero =
+      EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
+    static const bool tracePalWrites =
+      EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
     if (offset < palette_ram.size())
       return palette_ram[offset];
     break;
@@ -1338,7 +1389,8 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     // Universal ROM Mirroring (max 32MB space, mirrored every rom.size())
     uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
     if (!rom.empty()) {
-      return rom[offset % rom.size()];
+      // `rom` is sized to the 32MB addressable window; avoid modulo.
+      return rom[offset];
     }
     break;
   }
@@ -1357,7 +1409,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     // Non-EEPROM cart: treat as ROM mirror (same behavior as 0x08-0x0C).
     const uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
     if (!rom.empty()) {
-      return rom[offset % rom.size()];
+      return rom[offset];
     }
     break;
   }
@@ -1397,6 +1449,17 @@ uint8_t GBAMemory::Read8(uint32_t address) {
 }
 
 uint16_t GBAMemory::Read16(uint32_t address) {
+  static const bool traceIoUnaligned =
+      EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
+      EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
+  static const bool traceSma2SaveobjRead =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
+  static const bool traceDkcWaitflag = EnvTruthy(std::getenv("AIO_TRACE_DKC_WAITFLAG"));
+  static const bool traceOgdkVcount = EnvTruthy(std::getenv("AIO_TRACE_OGDK_VCOUNT"));
+  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceSma2EepDmaBufReads =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
+
   // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
   if (region == 0x0D && (!hasSRAM && !isFlash)) {
@@ -1406,8 +1469,6 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // Diagnostics: detect unaligned IO halfword reads.
   // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
   // AIO_TRACE_IO_ODD_HALFWORD=1)
-  const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") ||
-                                EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
   if (traceIoUnaligned && region == 0x04 && (address & 1u)) {
     static int unalignedIoRead16Logs = 0;
     if (unalignedIoRead16Logs < 400) {
@@ -1429,7 +1490,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 
   // SMA2 investigation: trace reads of the save/validator object pointer.
   // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_READ")) {
+  if (traceSma2SaveobjRead) {
     if ((address & 0xFFFFFFFCu) == 0x03007BC8u) {
       static int readLogs16 = 0;
       if (readLogs16 < 400) {
@@ -1451,7 +1512,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
   // and where reads come from.
   // Enable with: AIO_TRACE_DKC_WAITFLAG=1
-  if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu && region == 0x03 &&
+  if (traceDkcWaitflag && cpu && region == 0x03 &&
       ((address & ~1u) == 0x03000064u)) {
     static uint16_t lastVal = 0xFFFFu;
     static uint32_t repeats = 0;
@@ -1480,7 +1541,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // VCOUNT/DISPSTAT. If our VCOUNT model or IRQ timing is off, the loop
   // behavior will look odd (e.g., racing through values or stalling).
   // Enable with: AIO_TRACE_OGDK_VCOUNT=1
-  if (EnvFlagCached("AIO_TRACE_OGDK_VCOUNT") && cpu &&
+  if (traceOgdkVcount && cpu &&
       (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t offset = address & MemoryMap::IO_REG_MASK;
     if (offset == IORegs::VCOUNT) {
@@ -1500,7 +1561,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // Trace tight IO polling loops (diagnostic for "stuck in forced blank").
   // Enable with: AIO_TRACE_IO_POLL=1
   // This is intentionally very low-volume (change-triggered + periodic).
-  if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu && region == 0x04 &&
+  if (traceIoPoll && cpu && region == 0x04 &&
       (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t pc = (uint32_t)cpu->GetRegister(15);
     // Many titles run hot loops from IWRAM; focus there to keep signal high.
@@ -1534,7 +1595,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1 This helps confirm
   // whether the game is actually consuming the expected 0xFFFE/0xFFFF bitstream
   // halfwords after DMA completes.
-  if (EnvFlagCached("AIO_TRACE_SMA2_EEPDMA_BUF_READS") && cpu) {
+  if (traceSma2EepDmaBufReads && cpu) {
     if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
       static int eepBufR16 = 0;
       if (eepBufR16 < 1200) {
@@ -1568,9 +1629,10 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
     uint32_t offset = address & 0x01FFFFFF;
     if (!rom.empty()) {
-      // Handle wrapping if needed, though usually not for code
-      uint8_t b0 = rom[offset % rom.size()];
-      uint8_t b1 = rom[(offset + 1) % rom.size()];
+      // ROM space is 0x02000000 bytes max; `rom` is sized to that window.
+      // Avoid modulo in the instruction-fetch hot path.
+      uint8_t b0 = rom[offset];
+      uint8_t b1 = rom[offset + 1u];
       return b0 | (b1 << 8);
     }
   }
@@ -1582,8 +1644,10 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       uint8_t b0 = wram_chip[offset];
       uint8_t b1 = wram_chip[offset + 1];
       uint16_t result = b0 | (b1 << 8);
-      // Debug: log fetches from suspect address
-      if (address == 0x03002e40 && result == 0x0000) {
+      // Debug: log fetches from suspect address (disabled by default)
+      // Enable with: AIO_TRACE_IWRAM_FETCH=1
+      if (EnvTruthy(std::getenv("AIO_TRACE_IWRAM_FETCH")) &&
+          address == 0x03002e40 && result == 0x0000) {
         fprintf(stderr,
                 "[DEBUG] ReadInstruction16(0x%08x) offset=0x%04x b0=0x%02x "
                 "b1=0x%02x result=0x%04x\n",
@@ -1592,10 +1656,13 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       return result;
     }
     // If we get here, something is very wrong
-    fprintf(stderr,
-            "[ERROR] ReadInstruction16(0x%08x) offset=0x%04x exceeds "
-            "wram_chip.size()=%zu\n",
-            address, offset, wram_chip.size());
+    // Keep this behind a flag to avoid I/O stalls if it triggers frequently.
+    if (EnvTruthy(std::getenv("AIO_TRACE_IWRAM_FETCH"))) {
+      fprintf(stderr,
+              "[ERROR] ReadInstruction16(0x%08x) offset=0x%04x exceeds "
+              "wram_chip.size()=%zu\n",
+              address, offset, wram_chip.size());
+    }
   }
   // Handle EWRAM instruction fetch
   else if ((address & 0xFF000000u) == 0x02000000u) {
@@ -1611,6 +1678,15 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
 }
 
 uint32_t GBAMemory::Read32(uint32_t address) {
+  static const bool traceIoUnaligned =
+    EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
+    EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
+  static const bool traceSma2SaveobjRead =
+    EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
+  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceSma2EepDmaBufReads =
+    EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
+
   // EEPROM Handling - 32-bit read performs two 16-bit reads for EEPROM-save
   // cartridges only.
   uint8_t region = (address >> 24);
@@ -1623,8 +1699,6 @@ uint32_t GBAMemory::Read32(uint32_t address) {
   // Diagnostics: detect unaligned IO word reads.
   // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
   // AIO_TRACE_IO_ODD_HALFWORD=1)
-  const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") ||
-                                EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
   if (traceIoUnaligned && region == 0x04 && (address & 3u)) {
     static int unalignedIoRead32Logs = 0;
     if (unalignedIoRead32Logs < 400) {
@@ -1644,7 +1718,7 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   // SMA2 investigation: trace reads of the save/validator object pointer.
   // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_READ")) {
+  if (traceSma2SaveobjRead) {
     if (address == 0x03007BC8u) {
       static int readLogs32 = 0;
       if (readLogs32 < 400) {
@@ -1666,7 +1740,7 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   // Trace tight IO polling loops via 32-bit reads.
   // Enable with: AIO_TRACE_IO_POLL=1
-  if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu && region == 0x04 &&
+  if (traceIoPoll && cpu && region == 0x04 &&
       (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t pc = (uint32_t)cpu->GetRegister(15);
     if (pc >= 0x03000000u && pc < 0x03008000u) {
@@ -1698,7 +1772,7 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   // SMA2 investigation: trace 32-bit reads from the EEPROM DMA destination
   // buffers in IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_EEPDMA_BUF_READS") && cpu) {
+  if (traceSma2EepDmaBufReads && cpu) {
     if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
       static int eepBufR32 = 0;
       if (eepBufR32 < 800) {
@@ -1732,10 +1806,11 @@ uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
     uint32_t offset = address & 0x01FFFFFF;
     if (!rom.empty()) {
-      uint8_t b0 = rom[offset % rom.size()];
-      uint8_t b1 = rom[(offset + 1) % rom.size()];
-      uint8_t b2 = rom[(offset + 2) % rom.size()];
-      uint8_t b3 = rom[(offset + 3) % rom.size()];
+      // Avoid modulo in the instruction-fetch hot path.
+      uint8_t b0 = rom[offset];
+      uint8_t b1 = rom[offset + 1u];
+      uint8_t b2 = rom[offset + 2u];
+      uint8_t b3 = rom[offset + 3u];
       return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
   }
@@ -1772,10 +1847,16 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
-    // DKC diagnostic: Log palette writes that set BG palette to 0 during
-    // problem window
+    static const bool traceDkcPalZero =
+      EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
+    static const bool tracePalWrites =
+      EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
+
+    // DKC diagnostic: log palette writes that set BG palette to 0 during the
+    // observed problem window.
     const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
-    if (frame >= 2200 && frame <= 2395 && offset < 32 && value == 0) {
+    if (traceDkcPalZero && frame >= 2200 && frame <= 2395 && offset < 32 &&
+        value == 0) {
       std::cout << "[DKC_DIAG] Frame " << frame
                 << " PALETTE ZERO WRITE: offset=0x" << std::hex << offset
                 << " (BG palette index " << std::dec << (offset / 2) << ")"
@@ -1783,24 +1864,31 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
                 << std::dec << std::endl;
     }
 
-    // Log ALL palette writes to understand the pattern
-    static int palWriteCount = 0;
-    if (palWriteCount < 500) {
-      palWriteCount++;
-      const char *state =
-          ppuTimingValid
-              ? (ppuTimingScanline >= 160
-                     ? "VBLANK"
-                     : (ppuTimingCycle >= 960 ? "HBLANK" : "VISIBLE"))
-              : "NO_TIMING";
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "PAL_WRITE",
-          "frame=%d offset=0x%03x val=0x%02x state=%s scanline=%d", frame,
-          offset, value, state, ppuTimingScanline);
+    // Log palette writes only when explicitly enabled (this is extremely
+    // high-volume and will tank performance if left on).
+    if (tracePalWrites) {
+      static int palWriteCount = 0;
+      if (palWriteCount < 500) {
+        palWriteCount++;
+        const char *state =
+            ppuTimingValid
+                ? (ppuTimingScanline >= 160
+                       ? "VBLANK"
+                       : (ppuTimingCycle >= 960 ? "HBLANK" : "VISIBLE"))
+                : "NO_TIMING";
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "PAL_WRITE",
+            "frame=%d offset=0x%03x val=0x%02x state=%s scanline=%d", frame,
+            offset, value, state, ppuTimingScanline);
+      }
     }
 
-    if (offset < palette_ram.size())
+    if (offset < palette_ram.size()) {
       palette_ram[offset] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (offset < palette_shadow.size())
+        palette_shadow[offset] = value;
+    }
     break;
   }
   case 0x06: // VRAM (GBATEK: 0x06000000-0x06017FFF)
@@ -1839,15 +1927,23 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       }
     }
 
-    if (offset < vram.size())
+    if (offset < vram.size()) {
       vram[offset] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (offset < vram_shadow.size())
+        vram_shadow[offset] = value;
+    }
     break;
   }
   case 0x07: // OAM (GBATEK: 0x07000000-0x070003FF)
   {
     uint32_t offset = address & MemoryMap::OAM_MASK;
-    if (offset < oam.size())
+    if (offset < oam.size()) {
       oam[offset] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (offset < oam_shadow.size())
+        oam_shadow[offset] = value;
+    }
     break;
   }
   }
@@ -2109,8 +2205,9 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           std::cout << std::dec << std::endl;
         }
 
-        // DEBUG: Trace DMA setup when dst is around 0x3001500
-        {
+        // DEBUG: Trace DMA setup when dst/src is around 0x3001500
+        // Enable with: AIO_TRACE_DMA_3001500=1
+        if (EnvFlagCached("AIO_TRACE_DMA_3001500")) {
           uint16_t ctrl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
           uint16_t cnt = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
           uint32_t dst = dmaInternalDst[dmaChannel];
@@ -2156,6 +2253,11 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < palette_ram.size()) {
       palette_ram[alignedOffset] = value;
       palette_ram[alignedOffset + 1] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (alignedOffset + 1 < palette_shadow.size()) {
+        palette_shadow[alignedOffset] = value;
+        palette_shadow[alignedOffset + 1] = value;
+      }
     }
     break;
   }
@@ -2185,6 +2287,11 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < vram.size()) {
       vram[alignedOffset] = value;
       vram[alignedOffset + 1] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (alignedOffset + 1 < vram_shadow.size()) {
+        vram_shadow[alignedOffset] = value;
+        vram_shadow[alignedOffset + 1] = value;
+      }
     }
     break;
   }
@@ -2625,10 +2732,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   }
 
   // Enforce timing-dependent write visibility for graphics memory.
-  // - During visible rendering (scanline<160 && cycle<960), VRAM/Palette writes
-  //   do not take effect. We queue them to apply at the next safe period.
-  // - OAM writes do not become visible during the visible period. HBlank writes
-  //   require DISPCNT bit5 (H-Blank Interval Free) during scanlines 0-159.
+  // - During visible rendering (scanline<160 && cycle<960), VRAM/Palette/OAM
+  //   writes do not take effect. We queue them to apply at the next safe
+  //   period (HBlank/VBlank).
   // - Forced blank always permits access.
   if (region == 0x05 || region == 0x06 || region == 0x07) {
     const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
@@ -2641,19 +2747,71 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 
     if (!forcedBlank && inVisible) {
       if (region == 0x05 || region == 0x06) {
-        deferredWrites.push_back(
-            {address, (uint8_t)(value & 0xFFu), (uint8_t)region});
-        deferredWrites.push_back(
-            {address + 1u, (uint8_t)((value >> 8) & 0xFFu), (uint8_t)region});
-      }
-      // OAM writes are ignored during the visible period.
-      return;
-    }
+        const uint32_t lo = (uint32_t)(value & 0xFFu);
+        const uint32_t hi = (uint32_t)((value >> 8) & 0xFFu);
+        const uint32_t off0 =
+            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK)
+                             : ([&]() {
+                                 uint32_t off = address & 0x1FFFFu;
+                                 if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
+                                   off -= 0x8000u;
+                                 return off;
+                               })();
+        const uint32_t off1 = off0 + 1u;
+        if (region == 0x05) {
+          if (off0 < palette_shadow.size())
+            palette_shadow[off0] = (uint8_t)lo;
+          if (off1 < palette_shadow.size())
+            palette_shadow[off1] = (uint8_t)hi;
+          const uint32_t b0 = off0 / kDeferredBlockSize;
+          if (b0 < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b0]) {
+            palette_dirtyBlocks[b0] = 1;
+            palette_dirtyList.push_back(b0);
+          }
+          const uint32_t b1 = off1 / kDeferredBlockSize;
+          if (b1 < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b1]) {
+            palette_dirtyBlocks[b1] = 1;
+            palette_dirtyList.push_back(b1);
+          }
+        } else {
+          if (off0 < vram_shadow.size())
+            vram_shadow[off0] = (uint8_t)lo;
+          if (off1 < vram_shadow.size())
+            vram_shadow[off1] = (uint8_t)hi;
+          const uint32_t b0 = off0 / kDeferredBlockSize;
+          if (b0 < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b0]) {
+            vram_dirtyBlocks[b0] = 1;
+            vram_dirtyList.push_back(b0);
+          }
+          const uint32_t b1 = off1 / kDeferredBlockSize;
+          if (b1 < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b1]) {
+            vram_dirtyBlocks[b1] = 1;
+            vram_dirtyList.push_back(b1);
+          }
+        }
+      } else {
+        // OAM writes are deferred during the visible period.
+        const uint32_t lo = (uint32_t)(value & 0xFFu);
+        const uint32_t hi = (uint32_t)((value >> 8) & 0xFFu);
+        const uint32_t off0 = (address & MemoryMap::OAM_MASK);
+        const uint32_t off1 = off0 + 1u;
 
-    if (!forcedBlank && (region == 0x07) && !inVBlank && inHBlank &&
-        (ppuTimingScanline < 160) && ((dispcnt & 0x0020u) == 0)) {
-      // OAM writes during HBlank on visible scanlines require H-Blank Interval
-      // Free.
+        if (off0 < oam_shadow.size())
+          oam_shadow[off0] = (uint8_t)lo;
+        if (off1 < oam_shadow.size())
+          oam_shadow[off1] = (uint8_t)hi;
+
+        const uint32_t b0 = off0 / kDeferredBlockSize;
+        if (b0 < oam_dirtyBlocks.size() && !oam_dirtyBlocks[b0]) {
+          oam_dirtyBlocks[b0] = 1;
+          oam_dirtyList.push_back(b0);
+        }
+        const uint32_t b1 = off1 / kDeferredBlockSize;
+        if (b1 < oam_dirtyBlocks.size() && !oam_dirtyBlocks[b1]) {
+          oam_dirtyBlocks[b1] = 1;
+          oam_dirtyList.push_back(b1);
+        }
+      }
       return;
     }
   }
@@ -2989,28 +3147,40 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     uint32_t offset = address & MemoryMap::IO_REG_MASK;
     switch (offset) {
     case IORegs::DISPCNT:
-      std::cout << "[IO] DISPCNT write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] DISPCNT write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::DISPSTAT:
-      std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::VCOUNT:
-      std::cout << "[IO] VCOUNT write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] VCOUNT write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::IE:
-      std::cout << "[IO] IE write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] IE write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::IF:
-      std::cout << "[IO] IF write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] IF write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::IME:
-      std::cout << "[IO] IME write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] IME write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     default:
       break;
@@ -3066,20 +3236,88 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
 
     if (!forcedBlank && inVisible) {
       if (region == 0x05 || region == 0x06) {
-        deferredWrites.push_back(
-            {address + 0u, (uint8_t)(value & 0xFFu), (uint8_t)region});
-        deferredWrites.push_back(
-            {address + 1u, (uint8_t)((value >> 8) & 0xFFu), (uint8_t)region});
-        deferredWrites.push_back(
-            {address + 2u, (uint8_t)((value >> 16) & 0xFFu), (uint8_t)region});
-        deferredWrites.push_back(
-            {address + 3u, (uint8_t)((value >> 24) & 0xFFu), (uint8_t)region});
-      }
-      return;
-    }
+        const uint8_t b0v = (uint8_t)(value & 0xFFu);
+        const uint8_t b1v = (uint8_t)((value >> 8) & 0xFFu);
+        const uint8_t b2v = (uint8_t)((value >> 16) & 0xFFu);
+        const uint8_t b3v = (uint8_t)((value >> 24) & 0xFFu);
+        const uint32_t baseOff =
+            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK)
+                             : ([&]() {
+                                 uint32_t off = address & 0x1FFFFu;
+                                 if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
+                                   off -= 0x8000u;
+                                 return off;
+                               })();
+        const uint32_t off0 = baseOff + 0u;
+        const uint32_t off1 = baseOff + 1u;
+        const uint32_t off2 = baseOff + 2u;
+        const uint32_t off3 = baseOff + 3u;
+        if (region == 0x05) {
+          if (off0 < palette_shadow.size())
+            palette_shadow[off0] = b0v;
+          if (off1 < palette_shadow.size())
+            palette_shadow[off1] = b1v;
+          if (off2 < palette_shadow.size())
+            palette_shadow[off2] = b2v;
+          if (off3 < palette_shadow.size())
+            palette_shadow[off3] = b3v;
+          const uint32_t blockFirst = off0 / kDeferredBlockSize;
+          const uint32_t blockLast = off3 / kDeferredBlockSize;
+          for (uint32_t b = blockFirst; b <= blockLast; b++) {
+            if (b < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b]) {
+              palette_dirtyBlocks[b] = 1;
+              palette_dirtyList.push_back(b);
+            }
+          }
+        } else {
+          if (off0 < vram_shadow.size())
+            vram_shadow[off0] = b0v;
+          if (off1 < vram_shadow.size())
+            vram_shadow[off1] = b1v;
+          if (off2 < vram_shadow.size())
+            vram_shadow[off2] = b2v;
+          if (off3 < vram_shadow.size())
+            vram_shadow[off3] = b3v;
+          const uint32_t blockFirst = off0 / kDeferredBlockSize;
+          const uint32_t blockLast = off3 / kDeferredBlockSize;
+          for (uint32_t b = blockFirst; b <= blockLast; b++) {
+            if (b < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b]) {
+              vram_dirtyBlocks[b] = 1;
+              vram_dirtyList.push_back(b);
+            }
+          }
+        }
+      } else {
+        // OAM writes are deferred during the visible period.
+        const uint8_t b0v = (uint8_t)(value & 0xFFu);
+        const uint8_t b1v = (uint8_t)((value >> 8) & 0xFFu);
+        const uint8_t b2v = (uint8_t)((value >> 16) & 0xFFu);
+        const uint8_t b3v = (uint8_t)((value >> 24) & 0xFFu);
 
-    if (!forcedBlank && (region == 0x07) && !inVBlank && inHBlank &&
-        (ppuTimingScanline < 160) && ((dispcnt & 0x0020u) == 0)) {
+        const uint32_t baseOff = (address & MemoryMap::OAM_MASK);
+        const uint32_t off0 = baseOff + 0u;
+        const uint32_t off1 = baseOff + 1u;
+        const uint32_t off2 = baseOff + 2u;
+        const uint32_t off3 = baseOff + 3u;
+
+        if (off0 < oam_shadow.size())
+          oam_shadow[off0] = b0v;
+        if (off1 < oam_shadow.size())
+          oam_shadow[off1] = b1v;
+        if (off2 < oam_shadow.size())
+          oam_shadow[off2] = b2v;
+        if (off3 < oam_shadow.size())
+          oam_shadow[off3] = b3v;
+
+        const uint32_t blockFirst = off0 / kDeferredBlockSize;
+        const uint32_t blockLast = off3 / kDeferredBlockSize;
+        for (uint32_t b = blockFirst; b <= blockLast; b++) {
+          if (b < oam_dirtyBlocks.size() && !oam_dirtyBlocks[b]) {
+            oam_dirtyBlocks[b] = 1;
+            oam_dirtyList.push_back(b);
+          }
+        }
+      }
       return;
     }
   }
@@ -4284,41 +4522,46 @@ void GBAMemory::AdvanceCycles(int cycles) {
 }
 
 void GBAMemory::ApplyDeferredWrites() {
-  if (deferredWrites.empty())
+  if (palette_dirtyList.empty() && vram_dirtyList.empty() &&
+      oam_dirtyList.empty()) {
     return;
-
-  static int applyCount = 0;
-  if (applyCount < 10) {
-    applyCount++;
-    AIO::Emulator::Common::Logger::Instance().LogFmt(
-        AIO::Emulator::Common::LogLevel::Info, "DEFER",
-        "[APPLY_DEFERRED] count=%zu scanline=%d cycle=%d",
-        deferredWrites.size(), ppuTimingScanline, ppuTimingCycle);
   }
 
-  for (const auto &write : deferredWrites) {
-    uint32_t offset;
-    switch (write.region) {
-    case 0x05: // Palette
-      offset = write.address & MemoryMap::PALETTE_MASK;
-      if (offset < palette_ram.size())
-        palette_ram[offset] = write.value;
-      break;
-    case 0x06: // VRAM
-      offset = write.address & 0x1FFFFu;
-      if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
-        offset -= 0x8000u;
-      if (offset < vram.size())
-        vram[offset] = write.value;
-      break;
-    case 0x07: // OAM
-      offset = write.address & MemoryMap::OAM_MASK;
-      if (offset < oam.size())
-        oam[offset] = write.value;
-      break;
+  // Enable with: AIO_TRACE_DEFER_APPLY=1
+  static const bool traceDeferApply = EnvTruthy(std::getenv("AIO_TRACE_DEFER_APPLY"));
+  if (traceDeferApply) {
+    static int applyCount = 0;
+    if (applyCount < 10) {
+      applyCount++;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DEFER",
+          "[APPLY_DEFERRED] palBlocks=%zu vramBlocks=%zu oamBlocks=%zu scanline=%d cycle=%d",
+          palette_dirtyList.size(), vram_dirtyList.size(), oam_dirtyList.size(),
+          ppuTimingScanline, ppuTimingCycle);
     }
   }
-  deferredWrites.clear();
+
+  auto applyBlocks = [&](std::vector<uint8_t> &dst,
+                         const std::vector<uint8_t> &src,
+                         std::vector<uint8_t> &dirtyFlags,
+                         std::vector<uint32_t> &dirtyList) {
+    for (uint32_t block : dirtyList) {
+      const uint32_t start = block * kDeferredBlockSize;
+      if (start >= dst.size())
+        continue;
+      const uint32_t len = (uint32_t)std::min<size_t>(
+          (size_t)kDeferredBlockSize, dst.size() - (size_t)start);
+      std::memcpy(&dst[start], &src[start], (size_t)len);
+      if (block < dirtyFlags.size())
+        dirtyFlags[block] = 0;
+    }
+    dirtyList.clear();
+  };
+
+  applyBlocks(palette_ram, palette_shadow, palette_dirtyBlocks,
+              palette_dirtyList);
+  applyBlocks(vram, vram_shadow, vram_dirtyBlocks, vram_dirtyList);
+  applyBlocks(oam, oam_shadow, oam_dirtyBlocks, oam_dirtyList);
 }
 
 uint16_t GBAMemory::GetTimerReload(int timerIdx) const {

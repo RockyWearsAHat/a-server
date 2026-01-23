@@ -919,13 +919,18 @@ void PPU::RenderOBJ() {
   // OAM is at 0x07000000 (1KB)
   // 128 Sprites, 8 bytes each
 
-  // Debug: Log when sprite rendering occurs
-  static int renderObjCalls = 0;
-  if (renderObjCalls < 10) {
-    renderObjCalls++;
-    AIO::Emulator::Common::Logger::Instance().LogFmt(
-        AIO::Emulator::Common::LogLevel::Info, "PPU",
-        "[RenderOBJ_CALLED] frame=%llu scanline=%d", frameCount, scanline);
+  // Debug: Log when sprite rendering occurs.
+  // Enable with: AIO_TRACE_PPU_RENDEROBJ_CALLED=1
+  static const bool renderObjCalledTrace =
+      EnvTruthy(std::getenv("AIO_TRACE_PPU_RENDEROBJ_CALLED"));
+  if (renderObjCalledTrace) {
+    static int renderObjCalls = 0;
+    if (renderObjCalls < 10) {
+      renderObjCalls++;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "PPU",
+          "[RenderOBJ_CALLED] frame=%llu scanline=%d", frameCount, scanline);
+    }
   }
 
   // Optional: per-frame OBJ rendering stats to diagnose "sprites disappeared"
