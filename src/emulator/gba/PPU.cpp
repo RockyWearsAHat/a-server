@@ -15,6 +15,57 @@
 
 namespace AIO::Emulator::GBA {
 
+uint32_t PPU::ApplyBrightnessIncrease(uint32_t colorARGB, int evyRaw) {
+  int evy = evyRaw & 0x1F;
+  if (evy > 16)
+    evy = 16;
+
+  auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
+  auto from5 = [](int v5) -> uint8_t {
+    if (v5 < 0)
+      v5 = 0;
+    if (v5 > 31)
+      v5 = 31;
+    return (uint8_t)(v5 << 3);
+  };
+
+  uint8_t r = (colorARGB >> 16) & 0xFF;
+  uint8_t g = (colorARGB >> 8) & 0xFF;
+  uint8_t b = colorARGB & 0xFF;
+
+  uint8_t rr = from5(to5(r) + ((31 - to5(r)) * evy / 16));
+  uint8_t gg = from5(to5(g) + ((31 - to5(g)) * evy / 16));
+  uint8_t bb = from5(to5(b) + ((31 - to5(b)) * evy / 16));
+
+  return 0xFF000000u | (rr << 16) | (gg << 8) | bb;
+}
+
+uint32_t PPU::ApplyBrightnessDecrease(uint32_t colorARGB, int evyRaw) {
+  int evy = evyRaw & 0x1F;
+  if (evy > 16)
+    evy = 16;
+
+  auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
+  auto from5 = [](int v5) -> uint8_t {
+    if (v5 < 0)
+      v5 = 0;
+    if (v5 > 31)
+      v5 = 31;
+    return (uint8_t)(v5 << 3);
+  };
+
+  uint8_t r = (colorARGB >> 16) & 0xFF;
+  uint8_t g = (colorARGB >> 8) & 0xFF;
+  uint8_t b = colorARGB & 0xFF;
+
+  uint8_t rr = from5(to5(r) - (to5(r) * evy / 16));
+  uint8_t gg = from5(to5(g) - (to5(g) * evy / 16));
+  uint8_t bb = from5(to5(b) - (to5(b) * evy / 16));
+
+  return 0xFF000000u | (rr << 16) | (gg << 8) | bb;
+}
+
+
 namespace {
 std::atomic<uint64_t> g_ppuInstanceCounter{1};
 
@@ -2050,6 +2101,10 @@ const std::vector<uint32_t> &PPU::GetFramebuffer() const {
 void PPU::SwapBuffers() {
   std::lock_guard<std::mutex> lock(bufferMutex);
   std::swap(frontBuffer, backBuffer);
+  if (TraceGbaSpam()) {
+    std::cout << "[SWAP] frame=" << frameCount << " front0=0x" << std::hex
+              << frontBuffer[0] << std::dec << std::endl;
+  }
 
   // DKC diagnostic: Log around problem frames + OAM analysis
   if (frameCount >= 1655 && frameCount <= 1665) {
@@ -2444,9 +2499,21 @@ void PPU::ApplyColorEffects() {
   int effectMode = (bldcnt >> 6) & 0x3;
 
   // Get the brightness coefficient (0-16, higher = more effect)
-  int evy = bldy & 0x1F;
+  int evyRaw = bldy & 0x1F;
+  int evy = evyRaw;
   if (evy > 16)
     evy = 16;
+
+  // Limited diagnostics to help track down fade issues (enable with AIO_TRACE_GBA_SPAM)
+  if (TraceGbaSpam() && (effectMode == 2 || effectMode == 3)) {
+    static int fadeLogCount = 0;
+    if (fadeLogCount < 100) {
+      fadeLogCount++;
+      std::cout << "[FADE] frame=" << frameCount << " scanline=" << scanline
+                << " bldcnt=0x" << std::hex << bldcnt << std::dec
+                << " bldy_raw=" << evyRaw << " bldy_clamped=" << evy << " mode=" << effectMode << std::endl;
+    }
+  }
 
   // For alpha blending (mode 1)
   int eva = bldalpha & 0x1F;        // First target coefficient
@@ -2461,6 +2528,12 @@ void PPU::ApplyColorEffects() {
   // Second target layers (bits 8-13 of BLDCNT)
   uint8_t secondTarget = (bldcnt >> 8) & 0x3F;
 
+  if (TraceGbaSpam()) {
+    std::cout << "[FADE] firstTarget=0x" << std::hex << (int)firstTarget
+              << " secondTarget=0x" << (int)secondTarget << std::dec
+              << std::endl;
+  }
+
   auto to5 = [](uint8_t v8) -> int {
     // Our pipeline expands BGR555 -> 8-bit via <<3, so >>3 recovers the exact
     // 5-bit channel.
@@ -2472,6 +2545,23 @@ void PPU::ApplyColorEffects() {
     if (v5 > 31)
       v5 = 31;
     return (uint8_t)(v5 << 3);
+  };
+
+  // Public testing helpers (declared in PPU.h)
+  auto applyBrightnessIncrease = [&](uint8_t r, uint8_t g, uint8_t b, int evy) {
+    auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
+    int rr = from5(to5(r) + ((31 - to5(r)) * evy / 16));
+    int gg = from5(to5(g) + ((31 - to5(g)) * evy / 16));
+    int bb = from5(to5(b) + ((31 - to5(b)) * evy / 16));
+    return (uint32_t)((rr << 16) | (gg << 8) | bb);
+  };
+
+  auto applyBrightnessDecrease = [&](uint8_t r, uint8_t g, uint8_t b, int evy) {
+    auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
+    int rr = from5(to5(r) - (to5(r) * evy / 16));
+    int gg = from5(to5(g) - (to5(g) * evy / 16));
+    int bb = from5(to5(b) - (to5(b) * evy / 16));
+    return (uint32_t)((rr << 16) | (gg << 8) | bb);
   };
 
   auto blendChannel5 = [](uint8_t a8, uint8_t b8, int eva, int evb) -> uint8_t {
@@ -2501,6 +2591,15 @@ void PPU::ApplyColorEffects() {
 
     const bool topIsObjSemiTransparent =
         (topLayer == 4) && (objSemiTransparentBuffer[pixelIndex] != 0);
+
+    // Diagnostic: log first pixel's topLayer and current RGB when tracing enabled
+    if (TraceGbaSpam() && x == 0 && scanline == 0) {
+      uint32_t color0 = backBuffer[pixelIndex];
+      std::cout << "[FADEPIX] x=" << x << " scanline=" << scanline
+                << " topLayer=" << (int)topLayer
+                << " topFirst=" << (((firstTarget >> topLayer) & 1) != 0)
+                << " color=0x" << std::hex << color0 << std::dec << std::endl;
+    }
 
     // Respect BLDCNT target selection.
     const bool topIsFirstTarget = ((firstTarget >> topLayer) & 1) != 0;
@@ -2563,9 +2662,16 @@ void PPU::ApplyColorEffects() {
       }
       // Brightness Increase (fade to white)
       // I = I + (31-I) * EVY / 16
+      if (TraceGbaSpam()) {
+        std::cout << "[FADEAPPLY] topFirst=" << topIsFirstTarget
+                  << " before RGB=(" << (int)r << "," << (int)g << "," << (int)b << ")\n";
+      }
       r = from5(to5(r) + ((31 - to5(r)) * evy / 16));
       g = from5(to5(g) + ((31 - to5(g)) * evy / 16));
       b = from5(to5(b) + ((31 - to5(b)) * evy / 16));
+      if (TraceGbaSpam()) {
+        std::cout << "[FADEAPPLY] after RGB=(" << (int)r << "," << (int)g << "," << (int)b << ")\n";
+      }
     } else if (effectMode == 3) {
       if (!topIsFirstTarget) {
         continue;

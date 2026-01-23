@@ -26,17 +26,18 @@ inline void WriteOam16(GBAMemory &mem, uint32_t oamByteOffset, uint16_t value) {
   mem.Write16(0x07000000u + oamByteOffset, value);
 }
 
-// Writes a single byte into VRAM by using a halfword write (avoids region-specific
-// byte-write behavior).
+// Writes a single byte into VRAM by using a halfword write (avoids
+// region-specific byte-write behavior).
 inline void WriteVramPackedByteViaHalfword(GBAMemory &mem, uint32_t address,
-                                          uint8_t value) {
+                                           uint8_t value) {
   const uint32_t aligned = address & ~1u;
   const uint16_t cur = mem.Read16(aligned);
   uint16_t next = cur;
   if ((address & 1u) == 0u) {
     next = static_cast<uint16_t>((cur & 0xFF00u) | value);
   } else {
-    next = static_cast<uint16_t>((cur & 0x00FFu) | (static_cast<uint16_t>(value) << 8));
+    next = static_cast<uint16_t>((cur & 0x00FFu) |
+                                 (static_cast<uint16_t>(value) << 8));
   }
   mem.Write16(aligned, next);
 }
@@ -55,7 +56,8 @@ inline void RenderToScanlineHBlank(PPU &ppu, int scanline) {
     if (scanline >= prev) {
       cycles = (scanline - prev) * kCyclesPerScanline;
     } else {
-      // Tests in this suite should be monotonic; if not, just render forward by 0.
+      // Tests in this suite should be monotonic; if not, just render forward by
+      // 0.
       cycles = 0;
     }
   }
@@ -72,9 +74,11 @@ inline uint32_t GetPixel(const PPU &ppu, int x, int y) {
   if (x < 0 || y < 0 || x >= PPU::SCREEN_WIDTH || y >= PPU::SCREEN_HEIGHT) {
     return 0;
   }
-  const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(PPU::SCREEN_WIDTH) +
-                     static_cast<size_t>(x);
-  if (idx >= fb.size()) return 0;
+  const size_t idx =
+      static_cast<size_t>(y) * static_cast<size_t>(PPU::SCREEN_WIDTH) +
+      static_cast<size_t>(x);
+  if (idx >= fb.size())
+    return 0;
   return fb[idx];
 }
 

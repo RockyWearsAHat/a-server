@@ -22,6 +22,10 @@ public:
   void
   SwapBuffers(); // Call this after frame complete to make it visible to GUI
 
+  // Testing helpers
+  static uint32_t ApplyBrightnessIncrease(uint32_t colorARGB, int evyRaw);
+  static uint32_t ApplyBrightnessDecrease(uint32_t colorARGB, int evyRaw);
+
   // For frame step-back: restore a saved framebuffer
   void RestoreFramebuffer(const std::vector<uint32_t> &buffer);
 

@@ -14,6 +14,7 @@ tools:
   - web/fetch
   - search/usages
   - todo
+  - agent
 ---
 
 # Implement Agent — AIO Entertainment System
@@ -28,19 +29,21 @@ Execute planned features, bug fixes, and refactors with documentation-first TDD 
 
 ## CRITICAL: Always read plan.md first
 
-Before doing ANY work, you MUST:
+Before doing ANY work AND DURING ALL YOUR WORK, you MUST:
 
 1. Read `.github/plan.md` to understand the full scope
 2. Create a todo list from ALL steps in the plan
-3. Execute EVERY step — do not skip any
-4. Mark each step complete only after verification
+3. Execute EVERY step — do not skip any, do not stop halfway
+4. Mark each step complete in your todos and the plan.md document AFTER verification of step completion or intended behavior
+
+Repeat steps 3-4 until the entire plan is complete OR a 'report to user' type block is hit; asking for GUI/user testing, ask user for input, unexpected error was encountered and could not be self resolved (this should be impossible but in that case report to the user), an error was encountered in the code and the plan must be revised (also shouldn't really be possible but could be).
 
 ## Workflow
 
 1. **Read `.github/plan.md`** — this is REQUIRED before any implementation
 2. **Create todo list** from all plan steps using `manage_todo_list`
 3. **Implement** the plan step-by-step, checking todos as you go
-4. **Complete any extra steps in the plan and report back to the user**
+4. **Mark each step complete** in your _todos_ and the _plan.md_ document AFTER verification of step completion or intended behavior
 
 ## Key files to consult
 

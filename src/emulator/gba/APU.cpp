@@ -43,6 +43,8 @@ void APU::Reset() {
     ch.Reset();
   // Reset Wave channel
   waveChannel.Reset();
+  // Reset Noise channel
+  noiseChannel.Reset();
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
@@ -129,6 +131,15 @@ std::vector<int16_t> APU::GeneratePSGSamples(int channel, int numSamples) {
     return out;
   }
 
+  // Noise channel (3)
+  if (channel == 3) {
+    for (int i = 0; i < numSamples; ++i) {
+      out.push_back(noiseChannel.Sample());
+      noiseChannel.Advance();
+    }
+    return out;
+  }
+
   return out;
 }
 
@@ -141,7 +152,18 @@ void APU::SetPSGWaveParams(int periodSamples, int volume) {
   waveChannel.volume = std::clamp(volume, 0, 3);
   waveChannel.stepCounter = 0;
   waveChannel.pos = 0;
-  waveChannel.enabled = (waveChannel.periodSamples > 0 && waveChannel.volume != 3);
+  waveChannel.enabled =
+      (waveChannel.periodSamples > 0 && waveChannel.volume != 3);
+}
+
+void APU::SetPSGNoiseParams(int periodSamples, bool shortMode, int volume) {
+  noiseChannel.periodSamples = std::max(0, periodSamples);
+  noiseChannel.shortMode = shortMode;
+  noiseChannel.volume = std::clamp(volume, 0, 15);
+  noiseChannel.stepCounter = 0;
+  noiseChannel.lfsr = 0x7FFF;
+  noiseChannel.enabled =
+      (noiseChannel.periodSamples > 0 && noiseChannel.volume > 0);
 }
 
 void APU::OnTimerOverflow(int timer) {

@@ -1941,6 +1941,47 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   {
     uint32_t offset = address & MemoryMap::OAM_MASK;
     if (offset < oam.size()) {
+      // Enforce visibility rules: writes to OAM during the visible period are
+      // blocked. HBlank writes are only allowed when H-Blank Interval Free is
+      // enabled (DISPCNT bit 5). Forced blank allows all writes.
+      const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
+                                          (io_regs[IORegs::DISPCNT + 1] << 8));
+      const bool forcedBlank = (dispcnt & 0x0080u) != 0;
+      const bool inVisible = ppuTimingValid && (ppuTimingScanline < 160) &&
+                             (ppuTimingCycle < 960);
+      const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960) &&
+                            (ppuTimingScanline < 160);
+      const bool hBlankIntervalFree = (dispcnt & 0x0020u) != 0;
+
+      if (!forcedBlank) {
+        if (inVisible) {
+          if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
+            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OAM",
+                "OAM CPU W8 BLOCKED addr=0x%08x val=0x%02x PC=0x%08x "
+                "scanline=%d cycle=%d",
+                (unsigned)address, (unsigned)value, (unsigned)pc2, ppuTimingScanline,
+                ppuTimingCycle);
+          }
+          // Block write silently.
+          break;
+        }
+        if (inHBlank && !hBlankIntervalFree) {
+          if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
+            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OAM",
+                "OAM CPU W8 BLOCKED HBLANK addr=0x%08x val=0x%02x PC=0x%08x "
+                "scanline=%d cycle=%d",
+                (unsigned)address, (unsigned)value, (unsigned)pc2, ppuTimingScanline,
+                ppuTimingCycle);
+          }
+          // Block write during HBlank when H-Blank Interval Free is disabled.
+          break;
+        }
+      }
+
       oam[offset] = value;
       // Keep shadow coherent for later deferred apply.
       if (offset < oam_shadow.size())
@@ -2747,6 +2788,16 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     const bool inVBlank = ppuTimingValid && (ppuTimingScanline >= 160);
     const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960);
 
+    if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES") && (region == 0x07)) {
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "OAM",
+          "OAM WRITE CHECK region=0x%02x forcedBlank=%d inVisible=%d inHBlank=%d inVBlank=%d scanline=%d cycle=%d",
+          (unsigned)region, (int)forcedBlank, (int)inVisible, (int)inHBlank, (int)inVBlank,
+          ppuTimingScanline, ppuTimingCycle);
+    }
+
+
+
     if (!forcedBlank && inVisible) {
       if (region == 0x05 || region == 0x06) {
         const uint32_t lo = (uint32_t)(value & 0xFFu);
@@ -2791,27 +2842,23 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
           }
         }
       } else {
-        // OAM writes are deferred during the visible period.
-        const uint32_t lo = (uint32_t)(value & 0xFFu);
-        const uint32_t hi = (uint32_t)((value >> 8) & 0xFFu);
-        const uint32_t off0 = (address & MemoryMap::OAM_MASK);
-        const uint32_t off1 = off0 + 1u;
-
-        if (off0 < oam_shadow.size())
-          oam_shadow[off0] = (uint8_t)lo;
-        if (off1 < oam_shadow.size())
-          oam_shadow[off1] = (uint8_t)hi;
-
-        const uint32_t b0 = off0 / kDeferredBlockSize;
-        if (b0 < oam_dirtyBlocks.size() && !oam_dirtyBlocks[b0]) {
-          oam_dirtyBlocks[b0] = 1;
-          oam_dirtyList.push_back(b0);
+        // OAM writes during the visible period are BLOCKED on real hardware.
+        // Previously we deferred OAM writes like palette/VRAM; that caused
+        // writes performed during visible to become visible in the next
+        // scanline (applied at HBlank). Hardware instead blocks these writes
+        // so they do not affect rendering until a safe window (HBlank with
+        // H-Blank Interval Free or VBlank) permits them.
+        // We therefore ignore OAM halfword writes during the visible period.
+        if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
+          const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "OAM",
+              "OAM CPU W16 BLOCKED addr=0x%08x val=0x%04x PC=0x%08x "
+              "scanline=%d cycle=%d",
+              (unsigned)address, (unsigned)value, (unsigned)pc2, ppuTimingScanline,
+              ppuTimingCycle);
         }
-        const uint32_t b1 = off1 / kDeferredBlockSize;
-        if (b1 < oam_dirtyBlocks.size() && !oam_dirtyBlocks[b1]) {
-          oam_dirtyBlocks[b1] = 1;
-          oam_dirtyList.push_back(b1);
-        }
+        return;
       }
       return;
     }
@@ -3288,35 +3335,12 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
           }
         }
       } else {
-        // OAM writes are deferred during the visible period.
-        const uint8_t b0v = (uint8_t)(value & 0xFFu);
-        const uint8_t b1v = (uint8_t)((value >> 8) & 0xFFu);
-        const uint8_t b2v = (uint8_t)((value >> 16) & 0xFFu);
-        const uint8_t b3v = (uint8_t)((value >> 24) & 0xFFu);
-
-        const uint32_t baseOff = (address & MemoryMap::OAM_MASK);
-        const uint32_t off0 = baseOff + 0u;
-        const uint32_t off1 = baseOff + 1u;
-        const uint32_t off2 = baseOff + 2u;
-        const uint32_t off3 = baseOff + 3u;
-
-        if (off0 < oam_shadow.size())
-          oam_shadow[off0] = b0v;
-        if (off1 < oam_shadow.size())
-          oam_shadow[off1] = b1v;
-        if (off2 < oam_shadow.size())
-          oam_shadow[off2] = b2v;
-        if (off3 < oam_shadow.size())
-          oam_shadow[off3] = b3v;
-
-        const uint32_t blockFirst = off0 / kDeferredBlockSize;
-        const uint32_t blockLast = off3 / kDeferredBlockSize;
-        for (uint32_t b = blockFirst; b <= blockLast; b++) {
-          if (b < oam_dirtyBlocks.size() && !oam_dirtyBlocks[b]) {
-            oam_dirtyBlocks[b] = 1;
-            oam_dirtyList.push_back(b);
-          }
-        }
+        // OAM writes during the visible period are BLOCKED on real hardware.
+        // Previously we deferred OAM writes (like palette/VRAM); that caused
+        // writes performed during visible to become visible at the next
+        // scanline (applied at HBlank). Hardware instead blocks these writes
+        // so they do not affect rendering until a safe window permits them.
+        return;
       }
       return;
     }

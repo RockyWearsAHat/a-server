@@ -162,3 +162,65 @@ TEST(APUTest, PSGWavePlayback) {
   EXPECT_GT(magHalf, 0);
   EXPECT_LT(magHalf, magFull);
 }
+
+TEST(APUTest, PSGNoiseModesDiffer) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  // Very fast toggling to exercise LFSR steps
+  apu.SetPSGNoiseParams(1, false, 15);
+  auto seqNormal = apu.GeneratePSGSamples(3, 32);
+  apu.SetPSGNoiseParams(1, true, 15);
+  auto seqShort = apu.GeneratePSGSamples(3, 32);
+  // Sequences should not be identical
+  bool equal = true;
+  for (int i = 0; i < 32; ++i) {
+    if (seqNormal[i] != seqShort[i]) {
+      equal = false;
+      break;
+    }
+  }
+  EXPECT_FALSE(equal);
+}
+
+TEST(APUTest, PSGNoiseVolumeScaling) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.SetPSGNoiseParams(1, false, 15);
+  auto sFull = apu.GeneratePSGSamples(3, 16);
+  apu.SetPSGNoiseParams(1, false, 7);
+  auto sHalf = apu.GeneratePSGSamples(3, 16);
+  int maxFull = 0;
+  int maxHalf = 0;
+  for (auto v : sFull)
+    maxFull = std::max(maxFull, std::abs(v));
+  for (auto v : sHalf)
+    maxHalf = std::max(maxHalf, std::abs(v));
+  EXPECT_GT(maxFull, 0);
+  EXPECT_GT(maxHalf, 0);
+  EXPECT_LT(maxHalf, maxFull);
+}
+
+TEST(APUTest, PSGNoiseProducesBothPolarities) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.SetPSGNoiseParams(1, false, 15);
+  auto s = apu.GeneratePSGSamples(3, 64);
+  int pos = 0, neg = 0;
+  for (auto v : s) {
+    if (v > 0)
+      ++pos;
+    else if (v < 0)
+      ++neg;
+  }
+  EXPECT_GT(pos, 0);
+  EXPECT_GT(neg, 0);
+}

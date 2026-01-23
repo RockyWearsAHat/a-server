@@ -8,6 +8,12 @@ tools:
   - search/usages
   - search
   - edit/editFiles
+  - read/terminalLastCommand
+  - execute/getTerminalOutput
+  - execute/runInTerminal
+  - read/terminalLastCommand
+  - read/terminalSelection
+  - read/problems
 ---
 
 # Plan Agent — AIO Entertainment System

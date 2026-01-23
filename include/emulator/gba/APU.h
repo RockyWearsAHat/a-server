@@ -38,12 +38,15 @@ public:
 
   // PSG helpers
   // Configure square-wave PSG channel parameters (channel 0 or 1)
-  void SetPSGChannelParams(int channel, int periodSamples, int duty, int volume);
+  void SetPSGChannelParams(int channel, int periodSamples, int duty,
+                           int volume);
   // Generate raw PSG samples for testing/verification (mono)
   std::vector<int16_t> GeneratePSGSamples(int channel, int numSamples);
   // Wave channel helpers
   void SetPSGWaveRAM(const std::array<uint8_t, 32> &data);
   void SetPSGWaveParams(int periodSamples, int volume);
+  // Noise channel helpers
+  void SetPSGNoiseParams(int periodSamples, bool shortMode, int volume);
 
   // FIFO fill levels (for sound DMA request logic)
   int GetFifoACount() const { return fifoA_Count; }
@@ -182,6 +185,53 @@ private:
   };
 
   WaveChannel waveChannel;
+
+  // Noise channel (channel 4)
+  struct NoiseChannel {
+    uint16_t lfsr = 0x7FFF; // 15-bit LFSR initial state
+    int periodSamples = 0;  // number of output samples per LFSR step
+    int stepCounter = 0;
+    bool shortMode = false; // 7-bit mode when true
+    int volume = 0;         // 0..15
+    bool enabled = false;
+
+    void Reset() {
+      lfsr = 0x7FFF;
+      periodSamples = 0;
+      stepCounter = 0;
+      shortMode = false;
+      volume = 0;
+      enabled = false;
+    }
+
+    int16_t Sample() const {
+      if (!enabled || periodSamples <= 0)
+        return 0;
+      // Use bit0 as output: 0 -> +, 1 -> -
+      int sign = (lfsr & 1) ? -1 : 1;
+      return int16_t(sign * (volume / 15.0f) * 30000);
+    }
+
+    void Advance() {
+      if (periodSamples <= 0)
+        return;
+      stepCounter++;
+      if (stepCounter >= periodSamples) {
+        stepCounter = 0;
+        // LFSR feedback: newbit = bit0 XOR bit1
+        uint16_t bit0 = lfsr & 1;
+        uint16_t bit1 = (lfsr >> 1) & 1;
+        uint16_t newbit = bit0 ^ bit1;
+        lfsr = (lfsr >> 1) | (newbit << 14);
+        if (shortMode) {
+          // In short mode also set bit 6 to newbit
+          lfsr = (lfsr & ~(1 << 6)) | (newbit << 6);
+        }
+      }
+    }
+  };
+
+  NoiseChannel noiseChannel;
 
   // Sample rate conversion
   float sampleAccumulator = 0.0f;

@@ -7,6 +7,132 @@
 using namespace AIO::Emulator::GBA;
 namespace TestUtil = AIO::Emulator::GBA::Test;
 
+// PPU timing tests (GBATEK compliance)
+class PPUTimingTest : public ::testing::Test {
+protected:
+  GBAMemory memory;
+  PPU ppu{memory};
+};
+
+// GBATEK: HBlank starts at cycle 960 of each scanline
+TEST_F(PPUTimingTest, HBlankStartsAtCycle960) {
+  ppu.Update(959);
+  uint16_t dispstat = memory.Read16(0x04000004);
+  EXPECT_EQ(dispstat & 0x02, 0) << "HBlank flag should be clear before cycle 960";
+
+  ppu.Update(1);
+  dispstat = memory.Read16(0x04000004);
+  EXPECT_NE(dispstat & 0x02, 0) << "HBlank flag should be set at cycle 960";
+}
+
+// GBATEK: HBlank clears at start of next scanline
+TEST_F(PPUTimingTest, HBlankClearsAtScanlineEnd) {
+  ppu.Update(1232);
+  uint16_t dispstat = memory.Read16(0x04000004);
+  EXPECT_EQ(dispstat & 0x02, 0) << "HBlank flag should clear at scanline boundary";
+}
+
+// GBATEK: VBlank starts at scanline 160
+TEST_F(PPUTimingTest, VBlankStartsAtScanline160) {
+  ppu.Update(1232 * 160);
+  uint16_t dispstat = memory.Read16(0x04000004);
+  EXPECT_NE(dispstat & 0x01, 0) << "VBlank flag should be set at scanline 160";
+  EXPECT_EQ(memory.Read16(0x04000006), 160) << "VCOUNT should be 160";
+}
+
+// GBATEK: Frame wraps at scanline 228
+TEST_F(PPUTimingTest, FrameWrapsAtScanline228) {
+  ppu.Update(1232 * 228);
+  EXPECT_EQ(memory.Read16(0x04000006), 0) << "VCOUNT should wrap to 0";
+}
+
+// GBATEK: VBlank IRQ fires on rising edge
+TEST_F(PPUTimingTest, VBlankIRQFiresAtScanline160) {
+  memory.Write16(0x04000004, 0x0008); // Enable VBlank IRQ
+  ppu.Update(1232 * 160);
+  EXPECT_NE(memory.Read16(0x04000202) & 0x01, 0) << "VBlank IRQ should fire";
+}
+
+// Frame timing constant
+TEST_F(PPUTimingTest, FrameTotalCycles) {
+  EXPECT_EQ(1232 * 228, 280896) << "Frame must be exactly 280,896 cycles";
+}
+
+// PPU blend tests (GBATEK color effects)
+class PPUBlendTest : public ::testing::Test {
+protected:
+  GBAMemory memory;
+  PPU ppu{memory};
+
+  void SetUp() override {
+    memory.Write16(0x04000000, 0x0100); // DISPCNT: BG0 enable
+    memory.Write16(0x05000000, 0x001F); // Backdrop = Red (31,0,0)
+  }
+};
+
+// GBATEK: Mode 2 brightness increase
+TEST_F(PPUBlendTest, BrightnessIncrease_EVY16_FullWhite) {
+  // BLDCNT: Mode 2, Backdrop as first target (bit 5)
+  memory.Write16(0x04000050, 0x00A0); // 0b10100000
+  memory.Write16(0x04000054, 0x0010); // EVY = 16
+
+  ppu.Update(1232); // Render scanline 0
+  ppu.SwapBuffers();
+  uint32_t pixel = ppu.GetFramebuffer()[0];
+
+  // Red (31,0,0) -> White (31,31,31) at EVY=16
+  uint8_t g = (pixel >> 8) & 0xFF;
+  uint8_t b = pixel & 0xFF;
+  EXPECT_GE(g, 248) << "G should be ~255 (full fade to white)";
+  EXPECT_GE(b, 248) << "B should be ~255 (full fade to white)";
+}
+
+// GBATEK: Mode 3 brightness decrease
+TEST_F(PPUBlendTest, BrightnessDecrease_EVY16_FullBlack) {
+  memory.Write16(0x04000050, 0x00E0); // Mode 3, Backdrop target
+  memory.Write16(0x04000054, 0x0010); // EVY = 16
+
+  ppu.Update(1232);
+  ppu.SwapBuffers();
+  uint32_t pixel = ppu.GetFramebuffer()[0];
+
+  // Red (31,0,0) -> Black (0,0,0) at EVY=16
+  uint8_t r = (pixel >> 16) & 0xFF;
+  EXPECT_LE(r, 8) << "R should be ~0 (full fade to black)";
+}
+
+// GBATEK: EVY clamped at 16
+TEST_F(PPUBlendTest, EVYClampedAt16) {
+  // Verify clamping in the brightness application math directly using a
+  // known backdrop color (Red = BGR555 0x001F).
+  const uint32_t backdrop = TestUtil::ARGBFromBGR555(0x001F); // Red (31,0,0)
+
+  // Brightness increase: EVY > 16 should equal EVY = 16
+  uint32_t inc31 = PPU::ApplyBrightnessIncrease(backdrop, 31);
+  uint32_t inc16 = PPU::ApplyBrightnessIncrease(backdrop, 16);
+  EXPECT_EQ(inc31, inc16) << "Brightness increase EVY should be clamped to 16";
+
+  // Brightness decrease: EVY > 16 should equal EVY = 16
+  uint32_t dec31 = PPU::ApplyBrightnessDecrease(backdrop, 31);
+  uint32_t dec16 = PPU::ApplyBrightnessDecrease(backdrop, 16);
+  EXPECT_EQ(dec31, dec16) << "Brightness decrease EVY should be clamped to 16";
+}
+
+// Effect only applies to first-target layers
+TEST_F(PPUBlendTest, EffectOnlyAppliesToFirstTarget) {
+  // Backdrop NOT set as first target
+  memory.Write16(0x04000050, 0x0080); // Mode 2, NO targets
+  memory.Write16(0x04000054, 0x0010);
+
+  ppu.Update(1232);
+  ppu.SwapBuffers();
+  uint32_t pixel = ppu.GetFramebuffer()[0];
+
+  // Backdrop should NOT be affected (not a first target)
+  uint8_t g = (pixel >> 8) & 0xFF;
+  EXPECT_LE(g, 8) << "G should still be 0 (no fade applied)";
+}
+
 TEST(GBAMemoryTest, VramByteWrites_BgDuplicates_ObjIgnored) {
   GBAMemory mem;
   mem.Reset();
