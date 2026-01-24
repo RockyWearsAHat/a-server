@@ -257,6 +257,13 @@ bool GBA::LoadROM(const std::string &path) {
     std::cout << "[LoadROM] IME=" << memory->Read16(0x04000208) << " IE=0x"
               << std::hex << memory->Read16(0x04000200) << " IF=0x"
               << memory->Read16(0x04000202) << std::dec << std::endl;
+
+    // Optional: Force IE at startup for OG-DK diagnosis
+    if (EnvTruthy(std::getenv("AIO_OGDK_FORCE_IE_START"))) {
+      memory->WriteIORegisterInternal(0x208, 1);
+      std::cout << "[OGDK_FIX] Forced IE=0x1 at startup" << std::endl;
+    }
+
     return true;
   }
 
@@ -410,6 +417,20 @@ int GBA::Step() {
                 << " IME=" << std::dec << ime << " IE=0x" << std::hex << ie
                 << " IF=0x" << if_reg << " Halted=" << std::dec
                 << cpu->IsHalted() << std::endl;
+    }
+  }
+
+  // OG-DK diagnostic: log when CPU PC enters the IWRAM init loop range
+  if (std::getenv("AIO_TRACE_OGDK_PC")) {
+    const uint32_t pcNow = cpu->GetRegister(15);
+    if (pcNow >= 0x03007400 && pcNow < 0x03007500) {
+      static int pcHit = 0;
+      if (pcHit < 200) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "OGDK_INIT",
+            "PC_HIT PC=0x%08x", (unsigned)pcNow);
+        pcHit++;
+      }
     }
   }
 

@@ -42,6 +42,10 @@ static void HeadlessCrashQuit(const char *logPath) {
 }
 
 int main(int argc, char *argv[]) {
+  // DEBUG: Verify stderr output works
+  fprintf(stderr, "[DEBUG_MAIN] main() started\n");
+  fflush(stderr);
+
   // NOTE: Do not enable std::unitbuf here.
   // We redirect std::cout/std::cerr through LoggerLineStreamBuf (see
   // src/common/Logging.cpp), and unitbuf forces a sync() on every insertion

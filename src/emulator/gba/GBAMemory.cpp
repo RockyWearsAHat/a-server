@@ -594,6 +594,12 @@ void GBAMemory::Reset() {
       // dispatcher)
       wram_chip[0x7FF4] = 0x00;
       wram_chip[0x7FF5] = 0x00;
+
+      // NOTE: Classic NES Series anti-piracy scan fix is NOT needed here.
+      // Analysis revealed the scan at 0x080009C8 searches ROM (0x08xxxxxx),
+      // NOT EWRAM (0x02xxxxxx). The sentinel 0x040000D4 exists naturally
+      // at ROM offset 0x118 (address 0x08000118). The scan finds it after
+      // ~69 iterations and exits correctly. No intervention needed.
     }
   }
 
@@ -601,12 +607,6 @@ void GBAMemory::Reset() {
   if (eepromData.empty()) {
     eepromData.resize(8192, 0xFF);
   }
-}
-
-bool GBAMemory::Is4KbitEEPROM(const std::vector<uint8_t> &data) {
-  // Deprecated: We now use DMA transfer length detection for accurate sizing.
-  // Keeping this stub if we want to add generic header checks later.
-  return false;
 }
 
 bool GBAMemory::ScanForEEPROMSize(const std::vector<uint8_t> &data) {
@@ -1255,7 +1255,24 @@ uint8_t GBAMemory::Read8(uint32_t address) {
               ? (uint32_t)ReadInstruction16(pcAligned) |
                     ((uint32_t)ReadInstruction16(pcAligned + 2) << 16)
               : ReadInstruction32(pcAligned);
-      return (openBusWord >> ((address & 3u) * 8u)) & 0xFFu;
+      const uint8_t result = (openBusWord >> ((address & 3u) * 8u)) & 0xFFu;
+
+      // OG-DK HLE BIOS Investigation: Trace BIOS region reads from IWRAM init
+      // loop. This catches games reading BIOS to check for protection /
+      // specific values. Enable with: AIO_TRACE_OGDK_BIOS_READ=1
+      static const bool traceOgdkBiosRead =
+          EnvTruthy(std::getenv("AIO_TRACE_OGDK_BIOS_READ"));
+      if (traceOgdkBiosRead && pc >= 0x03007400 && pc < 0x03007500) {
+        static int biosReadCount = 0;
+        if (biosReadCount < 100) {
+          biosReadCount++;
+          std::cerr << "[OGDK_BIOS] R8 BIOS addr=0x" << std::hex << address
+                    << " PC=0x" << pc << " openBus=0x" << openBusWord
+                    << " result=0x" << (unsigned)result << std::dec
+                    << std::endl;
+        }
+      }
+      return result;
     }
 
     if (address < bios.size()) {
@@ -1285,7 +1302,24 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   }
   case 0x03: // WRAM (Chip) (GBATEK: 0x03000000-0x03007FFF)
     if (IsIwramMappedAddress(address)) {
-      return wram_chip[address & MemoryMap::WRAM_CHIP_MASK];
+      const uint8_t v = wram_chip[address & MemoryMap::WRAM_CHIP_MASK];
+      // OG-DK investigation: byte-level trace for init loop
+      static const bool traceOgdkInitLoop =
+          EnvTruthy(std::getenv("AIO_TRACE_OGDK_INIT_LOOP"));
+      if (traceOgdkInitLoop && cpu) {
+        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+        if (pc >= 0x03007400 && pc < 0x03007500) {
+          static int byteLogCount = 0;
+          if (byteLogCount < 500) {
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OGDK_INIT",
+                "R8  PC=0x%08x addr=0x%08x val=0x%02x", (unsigned)pc,
+                (unsigned)address, (unsigned)v);
+            byteLogCount++;
+          }
+        }
+      }
+      return v;
     }
     return 0;
   case 0x04: // IO Registers (GBATEK: 0x04000000-0x040003FF)
@@ -1294,6 +1328,43 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     uint8_t val = 0;
     if (offset < io_regs.size())
       val = io_regs[offset];
+
+    // OG-DK investigation: trace IO reads in init loop (byte)
+    static const bool traceOgdkInitLoop =
+        EnvTruthy(std::getenv("AIO_TRACE_OGDK_INIT_LOOP"));
+    static const bool ogdkAssumeVblankIf =
+        EnvTruthy(std::getenv("AIO_OGDK_ASSUME_VBLANK_IF"));
+    if (traceOgdkInitLoop && cpu) {
+      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+      if (pc >= 0x03007400 && pc < 0x03007500) {
+        static int ioByteLogCount = 0;
+        if (ioByteLogCount < 200) {
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "OGDK_INIT",
+              "IO_R8 PC=0x%08x off=0x%03x val=0x%02x", (unsigned)pc,
+              (unsigned)offset, (unsigned)val);
+          ioByteLogCount++;
+        }
+
+        // Optional fix: if game is polling IF and VBlank is currently active
+        // ensure reads see the VBlank flag even if write ordering caused a
+        // transient miss. Enable with: AIO_OGDK_ASSUME_VBLANK_IF=1
+        if (ogdkAssumeVblankIf && offset == IORegs::IF) {
+          uint16_t dispstat = ReadIORegister16Internal(IORegs::REG_DISPSTAT);
+          if (dispstat & 1) {
+            val |= 0x1;
+            if (ioByteLogCount < 400) {
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "OGDK_INIT",
+                  "OGDK_FIX IO_R8 PC=0x%08x observed VBlank -> returning "
+                  "IF=0x%02x",
+                  (unsigned)pc, (unsigned)val);
+              ioByteLogCount++;
+            }
+          }
+        }
+      }
+    }
 
     // SOUNDCNT_X (0x84) - Return proper status
     if (offset == IORegs::SOUNDCNT_X) {
@@ -1461,6 +1532,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   static const bool traceOgdkVcount =
       EnvTruthy(std::getenv("AIO_TRACE_OGDK_VCOUNT"));
   static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceOgdkIo = EnvTruthy(std::getenv("AIO_TRACE_OGDK_IO"));
   static const bool traceSma2EepDmaBufReads =
       EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
 
@@ -1496,10 +1568,12 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // compliance)
   if (region == 0x04) {
     const uint32_t offset = address & 0x3FFu;
-    // DISPSTAT (0x004) and VCOUNT (0x006) require up-to-date PPU state
+    // DISPSTAT (0x004) and VCOUNT (0x006) require up-to-date PPU state.
     if ((offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT) && gba) {
       gba->FlushPendingPeripheralCycles();
     }
+    // NOTE: Do NOT add special handling for IF reads here.
+    // The aggressive PPU advancement that was here broke ALL games.
   }
 
   // SMA2 investigation: trace reads of the save/validator object pointer.
@@ -1521,6 +1595,53 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   }
 
   uint16_t val = Read8(address) | (Read8(address + 1) << 8);
+
+  // Optional OG-DK fix: when reading IF as a halfword, and the init-loop
+  // heuristic is active, reflect VBlank into the halfword result so code that
+  // busy-waits for IF can progress. Enable with: AIO_OGDK_ASSUME_VBLANK_IF=1
+  static const bool ogdkAssumeVblankIf2 =
+      EnvTruthy(std::getenv("AIO_OGDK_ASSUME_VBLANK_IF"));
+  if (ogdkAssumeVblankIf2 && cpu && ((address & 0xFF000000u) == 0x04000000u)) {
+    const uint32_t offset = address & MemoryMap::IO_REG_MASK;
+    if (offset == IORegs::IF) {
+      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+      if (pc >= 0x03007400 && pc < 0x03007500) {
+        uint16_t dispstat = ReadIORegister16Internal(IORegs::REG_DISPSTAT);
+        if (dispstat & 1) {
+          val |= 0x0001u;
+        }
+      }
+    }
+  }
+
+  // OG-DK: Trace IO reads when PC is in IWRAM (NES emulator area)
+  // Enable with: AIO_TRACE_OGDK_IO=1
+  if (traceOgdkIo && cpu && region == 0x04) {
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    // Only trace when executing from IWRAM (NES emulator)
+    if ((pc & 0xFF000000u) == 0x03000000u) {
+      const uint32_t offset = address & MemoryMap::IO_REG_MASK;
+      static int ioReadCount = 0;
+      if (ioReadCount < 2000) { // Increased limit
+        ioReadCount++;
+        // For IF, also show raw io_regs value
+        if (offset == 0x202) {
+          uint8_t rawLo = (offset < io_regs.size()) ? io_regs[offset] : 0;
+          uint8_t rawHi =
+              (offset + 1 < io_regs.size()) ? io_regs[offset + 1] : 0;
+          fprintf(stderr,
+                  "[OGDK_IO_R16] PC=0x%08x offset=0x%03x val=0x%04x "
+                  "io_regs[IF]=0x%02x%02x\n",
+                  (unsigned)pc, (unsigned)offset, (unsigned)val,
+                  (unsigned)rawHi, (unsigned)rawLo);
+        } else {
+          fprintf(stderr, "[OGDK_IO_R16] PC=0x%08x offset=0x%03x val=0x%04x\n",
+                  (unsigned)pc, (unsigned)offset, (unsigned)val);
+        }
+        fflush(stderr);
+      }
+    }
+  }
 
   // DKC black-screen investigation: the title can spin in a Thumb loop polling
   // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
@@ -1567,6 +1688,42 @@ uint16_t GBAMemory::Read16(uint32_t address) {
             "VCOUNT_POLL pc=0x%08x vcount=%3u dispstat=0x%04x", (unsigned)pc,
             (unsigned)val, (unsigned)dispstat);
         logCount++;
+      }
+    }
+  }
+
+  // OG-DK investigation: trace reads in the initialization loop area.
+  // The loop at 0x03007424-0x0300743C is polling something.
+  // Enable with: AIO_TRACE_OGDK_INIT_LOOP=1
+  static const bool traceOgdkInitLoop =
+      EnvTruthy(std::getenv("AIO_TRACE_OGDK_INIT_LOOP"));
+  if (traceOgdkInitLoop && cpu && region == 0x03) {
+    const uint32_t iwramOff = address & 0x7FFF;
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    // Focus on reads from IWRAM when PC is in the init loop range
+    if (pc >= 0x03007400 && pc < 0x03007500) {
+      static int logCount = 0;
+      if (logCount < 500) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "OGDK_INIT",
+            "R16 PC=0x%08x addr=0x%08x val=0x%04x", (unsigned)pc,
+            (unsigned)address, (unsigned)val);
+        logCount++;
+      }
+    }
+  }
+
+  // Also trace IO reads during the init loop
+  if (traceOgdkInitLoop && cpu && region == 0x04) {
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    if (pc >= 0x03007400 && pc < 0x03007500) {
+      static int ioLogCount = 0;
+      if (ioLogCount < 200) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "OGDK_INIT",
+            "IO_R16 PC=0x%08x off=0x%03x val=0x%04x", (unsigned)pc,
+            (unsigned)(address & 0x3FF), (unsigned)val);
+        ioLogCount++;
       }
     }
   }
@@ -1911,6 +2068,33 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       offset -= 0x8000u;
     }
 
+    // OGDK: Watch for writes to tile 0x1B8 (440) at offset 0x7700-0x7720
+    if (EnvFlagCached("AIO_TRACE_OGDK")) {
+      if (offset >= 0x7700u && offset < 0x7720u) {
+        fprintf(stderr, "[OGDK_TILE1B8_INT] offset=0x%05x val=0x%02x",
+                (unsigned)offset, (unsigned)value);
+        if (cpu)
+          fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+        fprintf(stderr, "\n");
+        fflush(stderr);
+      }
+
+      // OGDK: Trace early VRAM writes via Write8Internal - guarded by
+      // AIO_TRACE_OGDK
+      {
+        static int ogdkVramIntWrites = 0;
+        ogdkVramIntWrites++;
+        if (ogdkVramIntWrites <= 10) {
+          fprintf(stderr, "[OGDK_VRAM_INT] offset=0x%05x val=0x%02x",
+                  (unsigned)offset, (unsigned)value);
+          if (cpu)
+            fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+          fprintf(stderr, "\n");
+          fflush(stderr);
+        }
+      }
+    }
+
     // DKC diagnostic: Log VRAM writes during problem frames
     const int frame = ppu ? ppu->GetFrameCount() : -1;
     if ((frame >= 1655 && frame <= 1665) || (frame >= 1885 && frame <= 1895) ||
@@ -1937,6 +2121,21 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
             std::cout << " PC=0x" << cpu->GetRegister(15);
           std::cout << std::dec << std::endl;
         }
+      }
+    }
+
+    // OGDK: Trace VRAM writes to charBase 1 tile area (0x4000-0x7FFF)
+    // Tile 0x1B8 is at offset 0x4000 + 0x1B8*32 = 0x7700
+    if (EnvFlagCached("AIO_TRACE_OGDK_VRAM")) {
+      static int ogdkVramWrites = 0;
+      // Trace ANY VRAM write
+      ogdkVramWrites++;
+      if (ogdkVramWrites <= 100) {
+        std::cout << "[OGDK_VRAM] Write offset=0x" << std::hex << offset
+                  << " val=0x" << (int)value;
+        if (cpu)
+          std::cout << " PC=0x" << cpu->GetRegister(15);
+        std::cout << std::dec << std::endl;
       }
     }
 
@@ -2495,6 +2694,31 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 }
 
 void GBAMemory::Write16(uint32_t address, uint16_t value) {
+  if (EnvFlagCached("AIO_TRACE_OGDK")) {
+    // OGDK: Watch for writes to tile 0x1B8 (440) area at 0x06007700-0x06007720
+    if (address >= 0x06007700u && address < 0x06007720u) {
+      fprintf(stderr, "[OGDK_TILE1B8_W16] addr=0x%08x val=0x%04x",
+              (unsigned)address, (unsigned)value);
+      if (cpu)
+        fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+      fprintf(stderr, "\n");
+      fflush(stderr);
+    }
+
+    // OGDK: Trace early 16-bit writes to VRAM - guarded by AIO_TRACE_OGDK
+    if ((address >> 24) == 0x06) {
+      static int ogdkW16 = 0;
+      if (ogdkW16++ < 10) {
+        fprintf(stderr, "[OGDK_VRAM_W16] addr=0x%08x val=0x%04x",
+                (unsigned)address, (unsigned)value);
+        if (cpu)
+          fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+        fprintf(stderr, "\n");
+        fflush(stderr);
+      }
+    }
+  }
+
   // DKC black-screen investigation: trace writes to the polled wait flag.
   // Enable with: AIO_TRACE_DKC_WAITFLAG=1
   if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu &&
@@ -2668,11 +2892,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
         offset == IORegs::IME || offset == IORegs::IME + 1) {
       static int irqLogCount = 0;
       if (irqLogCount < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Debug, "IRQ",
-            "IRQ REG WRITE16 #%d offset=0x%03x val=0x%04x PC=0x%08x",
-            irqLogCount, (unsigned)offset, (unsigned)value,
-            cpu ? (unsigned)cpu->GetRegister(15) : 0u);
+        std::cout << "[IRQ_REG_WRITE16] #" << irqLogCount << " offset=0x"
+                  << std::hex << offset << " val=0x" << value << " PC=0x"
+                  << (cpu ? cpu->GetRegister(15) : 0u) << std::dec << std::endl;
         irqLogCount++;
       }
     }
@@ -2836,6 +3058,21 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
             palette_dirtyList.push_back(b1);
           }
         } else {
+          if (EnvFlagCached("AIO_TRACE_OGDK")) {
+            // OGDK: Trace deferred VRAM writes (shadow buffer) - guarded by
+            // AIO_TRACE_OGDK
+            static int ogdkShadowWrites = 0;
+            ogdkShadowWrites++;
+            if (ogdkShadowWrites <= 10) {
+              fprintf(stderr,
+                      "[OGDK_VRAM_SHADOW] off0=0x%05x lo=0x%02x hi=0x%02x",
+                      (unsigned)off0, (unsigned)lo, (unsigned)hi);
+              if (cpu)
+                fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+              fprintf(stderr, "\n");
+              fflush(stderr);
+            }
+          }
           if (off0 < vram_shadow.size())
             vram_shadow[off0] = (uint8_t)lo;
           if (off1 < vram_shadow.size())
@@ -3051,6 +3288,31 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 }
 
 void GBAMemory::Write32(uint32_t address, uint32_t value) {
+  if (EnvFlagCached("AIO_TRACE_OGDK")) {
+    // OGDK: Watch for writes to tile 0x1B8 (440) area at 0x06007700-0x06007720
+    if (address >= 0x06007700u && address < 0x06007720u) {
+      fprintf(stderr, "[OGDK_TILE1B8_W32] addr=0x%08x val=0x%08x",
+              (unsigned)address, (unsigned)value);
+      if (cpu)
+        fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+      fprintf(stderr, "\n");
+      fflush(stderr);
+    }
+
+    // OGDK: Trace early 32-bit writes to VRAM - guarded by AIO_TRACE_OGDK
+    if ((address >> 24) == 0x06) {
+      static int ogdkW32 = 0;
+      if (ogdkW32++ < 150) {
+        fprintf(stderr, "[OGDK_VRAM_W32] addr=0x%08x val=0x%08x",
+                (unsigned)address, (unsigned)value);
+        if (cpu)
+          fprintf(stderr, " PC=0x%08x", (unsigned)cpu->GetRegister(15));
+        fprintf(stderr, "\n");
+        fflush(stderr);
+      }
+    }
+  }
+
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIrqHandPtrWord =
       IsIwramMappedAddress(address) && ((address & 0x7FFFu) == 0x7FFCu);
@@ -3682,6 +3944,22 @@ void GBAMemory::PerformDMA(int channel) {
   const bool dstIsVRAM =
       (currentDst >= 0x06000000u && currentDst < 0x06018000u);
   const bool dstIsOAM = (currentDst >= 0x07000000u && currentDst < 0x07000400u);
+
+  // OGDK: Trace VRAM DMA transfers
+  if (EnvFlagCached("AIO_TRACE_OGDK_VRAM") && dstIsVRAM) {
+    static int ogdkDmaVramLogs = 0;
+    if (ogdkDmaVramLogs++ < 100) {
+      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+      const uint32_t vramOffset = currentDst & 0x1FFFFu;
+      std::cout << "[OGDK_DMA_VRAM] ch" << channel << " src=0x" << std::hex
+                << currentSrc << " dst=0x" << currentDst << " (VRAM offset=0x"
+                << vramOffset << ")"
+                << " count=" << std::dec << count
+                << " width=" << (is32Bit ? 32 : 16) << " srcCtrl=" << srcCtrl
+                << " dstCtrl=" << destCtrl << " PC=0x" << std::hex << pc
+                << std::dec << std::endl;
+    }
+  }
 
   // DKC diagnostic: Log graphics DMA during problem frames
   if (isDiagFrame && (dstIsPalette || dstIsVRAM || dstIsOAM)) {

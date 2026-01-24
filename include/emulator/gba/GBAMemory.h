@@ -83,6 +83,15 @@ public:
   // Internal IO Read (Bypasses flush logic - for PPU internal use)
   uint16_t ReadIORegister16Internal(uint32_t offset) const;
 
+  // Fast interrupt register reads (for CheckInterrupts hot path)
+  // Returns IME, IE, IF without going through full Read16 machinery.
+  inline void ReadInterruptRegs(uint16_t &ime, uint16_t &ie,
+                                uint16_t &if_reg) const {
+    ime = static_cast<uint16_t>(io_regs[0x208] | (io_regs[0x209] << 8));
+    ie = static_cast<uint16_t>(io_regs[0x200] | (io_regs[0x201] << 8));
+    if_reg = static_cast<uint16_t>(io_regs[0x202] | (io_regs[0x203] << 8));
+  }
+
   // Callback for IO Writes (Used by PPU to track Affine Registers)
   using IOWriteCallback = void (*)(void *context, uint32_t offset,
                                    uint16_t value);

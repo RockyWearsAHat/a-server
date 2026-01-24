@@ -439,6 +439,15 @@ void PPU::Update(int cycles) {
 
         // Trigger VBlank IRQ on rising edge
         if (!wasVBlank) {
+          // Trace rising edge for debugging
+          static const bool traceVBlankEdge =
+              std::getenv("AIO_TRACE_OGDK_VBLANK") != nullptr;
+          if (traceVBlankEdge) {
+            fprintf(stderr, "[OGDK_VBLANK_EDGE] Frame=%d scanline=%d\n",
+                    frameCount, scanline);
+            fflush(stderr);
+          }
+
           // Apply any deferred palette writes now that we're in VBlank
           // This ensures palette is stable for entire previous frame
           memory.ApplyDeferredWrites();
@@ -470,19 +479,65 @@ void PPU::Update(int cycles) {
           if (bg3y_internal & 0x08000000)
             bg3y_internal |= 0xF0000000;
 
-          if (dispstat & 0x8) { // VBlank IRQ Enable
-            uint16_t if_reg = memory.ReadIORegister16Internal(0x202) | 1;
+          // Ensure IF and BIOS_IF are set on VBlank rising edge.
+          // Hardware makes IRQ flags visible even if IME/IE are not set; games
+          // may poll IF directly.
+          {
+            uint16_t if_reg_before = memory.ReadIORegister16Internal(0x202);
+            uint16_t if_reg = if_reg_before | 1;
             memory.WriteIORegisterInternal(0x202, if_reg);
+            uint16_t if_reg_after = memory.ReadIORegister16Internal(0x202);
+
+            static const bool traceVBlankIF =
+                std::getenv("AIO_TRACE_OGDK_VBLANK") != nullptr;
+            if (traceVBlankIF) {
+              fprintf(stderr,
+                      "[OGDK_VBLANK_IF] Frame=%d IF_before=0x%04x "
+                      "IF_written=0x%04x IF_after=0x%04x\n",
+                      frameCount, (unsigned)if_reg_before, (unsigned)if_reg,
+                      (unsigned)if_reg_after);
+              fflush(stderr);
+            }
 
             // Also set BIOS_IF for IntrWait/VBlankIntrWait
             uint16_t biosIF = memory.Read16(0x03007FF8) | 1;
             memory.Write16(0x03007FF8, biosIF);
 
-            if (TraceGbaSpam()) {
+            // Optional diagnostic trace for VBlank visibility
+            if (EnvTruthy(std::getenv("AIO_TRACE_OGDK_VBLANK"))) {
+              uint16_t curIF = memory.ReadIORegister16Internal(0x202);
+              uint16_t curBiosIF = memory.Read16(0x03007FF8);
+              std::cout << "[OGDK_VBLANK] Frame=" << frameCount
+                        << " Scanline=" << scanline << " DISPSTAT=0x"
+                        << std::hex << dispstat << std::dec << " IF=0x"
+                        << std::hex << curIF << std::dec << " BIOS_IF=0x"
+                        << std::hex << curBiosIF << std::dec << std::endl;
+            }
+
+            // Keep the noisy per-second log gated on VBlank IRQ enable
+            if (TraceGbaSpam() && (dispstat & 0x8)) {
               static int vblankCount = 0;
               if (++vblankCount % 60 == 0) { // Log every 60 frames = 1 second
                 std::cout << "[PPU] VBlank #" << vblankCount
                           << " Frame=" << frameCount << std::endl;
+              }
+            }
+
+            // Optional: Force IE VBlank bit for OG-DK diagnosis
+            // IE is at offset 0x200, IME is at 0x208
+            static const bool forceIE =
+                std::getenv("AIO_OGDK_FORCE_IE") != nullptr;
+            if (forceIE) {
+              // Enable VBlank interrupt in IE (bit 0)
+              uint16_t ie_reg = memory.ReadIORegister16Internal(0x200) | 1;
+              memory.WriteIORegisterInternal(0x200, ie_reg);
+              // Also ensure IME=1
+              memory.WriteIORegisterInternal(0x208, 1);
+              static int forceIECount = 0;
+              if (forceIECount++ < 5) {
+                fprintf(stderr, "[OGDK_FORCE_IE] Frame=%d IE=0x%04x IME=1\n",
+                        frameCount, (unsigned)ie_reg);
+                fflush(stderr);
               }
             }
           }
@@ -525,11 +580,197 @@ void PPU::DrawScanline() {
   uint16_t dispcnt = ReadRegister(0x00);
   int mode = dispcnt & 0x7;
 
+  // OG-DK diagnostic: periodically log PPU state and VRAM
+  static const bool traceOgdk = EnvTruthy(std::getenv("AIO_TRACE_OGDK_PPU"));
+  if (traceOgdk && scanline == 0) {
+    static int drawScanlineTrace = 0;
+    if (drawScanlineTrace < 20) {
+      drawScanlineTrace++;
+      const uint16_t bg0cnt = ReadRegister(0x08);
+      const bool forcedBlank = (dispcnt >> 7) & 1;
+      fprintf(
+          stderr,
+          "[OGDK_DRAW] frame=%u DISPCNT=0x%04x mode=%d forcedBlank=%d cnt=%d\n",
+          (unsigned)frameCount, (unsigned)dispcnt, mode, forcedBlank ? 1 : 0,
+          drawScanlineTrace);
+      fflush(stderr);
+    }
+  }
+  if (traceOgdk && scanline == 0 && frameCount > 0 &&
+      (frameCount == 60 || frameCount == 120 || frameCount == 180)) {
+    const uint16_t bg0cnt = ReadRegister(0x08);
+    const uint16_t bg0hofs = ReadRegister(0x10);
+    const uint16_t bg0vofs = ReadRegister(0x12);
+    const bool forcedBlank = (dispcnt >> 7) & 1;
+
+    // Check interrupt-related registers
+    const uint16_t dispstat = ReadRegister(0x04);
+    const uint16_t ie = memory.Read16(0x04000200);
+    const uint16_t ime = memory.Read16(0x04000208);
+
+    fprintf(
+        stderr,
+        "[OGDK_PPU] frame=%u DISPCNT=0x%04x mode=%d forcedBlank=%d "
+        "BG0CNT=0x%04x "
+        "BG0HOFS=0x%03x BG0VOFS=0x%03x DISPSTAT=0x%04x IE=0x%04x IME=0x%04x\n",
+        (unsigned)frameCount, (unsigned)dispcnt, mode, forcedBlank ? 1 : 0,
+        (unsigned)bg0cnt, (unsigned)bg0hofs, (unsigned)bg0vofs,
+        (unsigned)dispstat, (unsigned)ie, (unsigned)ime);
+
+    // Dump a sample of VRAM content at map base and tile base
+    // BG0CNT: charBase = (bg0cnt >> 2) & 3, screenBase = (bg0cnt >> 8) & 0x1F
+    int charBase = (bg0cnt >> 2) & 0x3;
+    int screenBase = (bg0cnt >> 8) & 0x1F;
+    int screenSize = (bg0cnt >> 14) & 0x3;
+    uint32_t mapAddr = 0x06000000 + screenBase * 2048;
+    uint32_t tileAddr = 0x06000000 + charBase * 16384;
+
+    const uint8_t *vram = memory.GetVRAMData();
+    // Dump first few map entries (row 0)
+    fprintf(stderr, "[OGDK_PPU] MapBase=0x%06x TileBase=0x%06x screenSize=%d\n",
+            (unsigned)mapAddr, (unsigned)tileAddr, screenSize);
+    fprintf(stderr, "[OGDK_PPU] Map row 0 (first 8 entries): ");
+    for (int i = 0; i < 8; i++) {
+      uint32_t off = (mapAddr - 0x06000000) + i * 2;
+      uint16_t entry = vram[off] | (vram[off + 1] << 8);
+      fprintf(stderr, "%04x ", (unsigned)entry);
+    }
+    fprintf(stderr, "\n");
+
+    // Also dump map row 24 (y=192 / 8 = 24) since VOFS=0xC0
+    // For screenSize=2 (32x64), row 24 is in the first block (rows 0-31)
+    fprintf(stderr, "[OGDK_PPU] Map row 24 (VOFS offset, first 8 entries): ");
+    uint32_t row24Offset =
+        24 * 32 * 2; // 24 rows * 32 tiles/row * 2 bytes/entry
+    for (int i = 0; i < 8; i++) {
+      uint32_t off = (mapAddr - 0x06000000) + row24Offset + i * 2;
+      uint16_t entry = vram[off] | (vram[off + 1] << 8);
+      fprintf(stderr, "%04x ", (unsigned)entry);
+    }
+    fprintf(stderr, "\n");
+
+    // Dump first few bytes of tile data (tile 0)
+    fprintf(stderr, "[OGDK_PPU] First 32 tile bytes (tile 0) at charBase: ");
+    for (int i = 0; i < 32; i++) {
+      uint32_t off = (tileAddr - 0x06000000) + i;
+      fprintf(stderr, "%02x ", (unsigned)vram[off]);
+    }
+    fprintf(stderr, "\n");
+
+    // Check tile 0x1B8 (440) - this is what row 24 uses
+    fprintf(stderr, "[OGDK_PPU] Tile 0x1B8 (440) bytes at offset 0x%04x: ",
+            (unsigned)(0x1B8 * 32));
+    uint32_t tile1b8Off = 0x1B8 * 32; // 4bpp = 32 bytes per tile
+    uint32_t absoluteAddr = tileAddr + tile1b8Off;
+    fprintf(stderr, "(addr 0x%06x) ", (unsigned)absoluteAddr);
+    for (int i = 0; i < 32; i++) {
+      uint32_t off = (tileAddr - 0x06000000) + tile1b8Off + i;
+      if (off < 0x18000) { // Within VRAM
+        fprintf(stderr, "%02x ", (unsigned)vram[off]);
+      } else {
+        fprintf(stderr, "XX ");
+      }
+    }
+    fprintf(stderr, "\n");
+
+    // Scan all VRAM from charBase to charBase+16KB looking for non-zero data
+    int nonZeroCount = 0;
+    int lastNonZeroOff = -1;
+    for (int i = 0; i < 16384; i++) {
+      uint32_t off = (tileAddr - 0x06000000) + i;
+      if (off < 0x18000 && vram[off] != 0) {
+        nonZeroCount++;
+        lastNonZeroOff = i;
+      }
+    }
+    fprintf(stderr,
+            "[OGDK_PPU] CharBase region non-zero bytes: %d, last non-zero "
+            "offset: 0x%x\n",
+            nonZeroCount, lastNonZeroOff);
+
+    // Also check what's at VRAM 0x0000-0x4000 (charBase 0)
+    int charBase0NonZero = 0;
+    for (int i = 0; i < 16384; i++) {
+      if (vram[i] != 0)
+        charBase0NonZero++;
+    }
+    fprintf(stderr,
+            "[OGDK_PPU] CharBase 0 (0x0000-0x3FFF) non-zero bytes: %d\n",
+            charBase0NonZero);
+
+    // Dump a few bytes around offset 0x3700 to see what's actually there
+    fprintf(stderr, "[OGDK_PPU] CharBase1 bytes 0x3700-0x3720: ");
+    for (int i = 0; i < 32; i++) {
+      uint32_t off = (tileAddr - 0x06000000) + 0x3700 + i;
+      if (off < 0x18000) {
+        fprintf(stderr, "%02x ", (unsigned)vram[off]);
+      }
+    }
+    fprintf(stderr, "\n");
+
+    // Try charBase 0 at same offset
+    fprintf(stderr, "[OGDK_PPU] CharBase0 bytes 0x3700-0x3720: ");
+    for (int i = 0; i < 32; i++) {
+      if (0x3700 + i < 0x18000) {
+        fprintf(stderr, "%02x ", (unsigned)vram[0x3700 + i]);
+      }
+    }
+    fprintf(stderr, "\n");
+
+    // Find which tiles have data in charBase 1
+    fprintf(stderr, "[OGDK_PPU] Non-zero tiles in CharBase1 (first 512): ");
+    int tilesWithData = 0;
+    int lastTileWithData = -1;
+    int emptyTilesNear440 = 0;
+    for (int t = 0; t < 512; t++) {
+      bool hasData = false;
+      for (int b = 0; b < 32; b++) {
+        uint32_t off = (tileAddr - 0x06000000) + t * 32 + b;
+        if (vram[off] != 0) {
+          hasData = true;
+          break;
+        }
+      }
+      if (hasData) {
+        tilesWithData++;
+        lastTileWithData = t;
+      } else if (t >= 435 && t <= 450) {
+        fprintf(stderr, "empty%d ", t);
+      }
+    }
+    fprintf(stderr, "%d tiles with data, last: %d (0x%x)\n", tilesWithData,
+            lastTileWithData, lastTileWithData);
+
+    // Dump ALL map rows from 24 to 30 (visible NES display area)
+    fprintf(stderr, "[OGDK_PPU] Map rows 24-30 (visible NES area):\n");
+    for (int row = 24; row <= 30; row++) {
+      fprintf(stderr, "  Row %d: ", row);
+      uint32_t rowOff = row * 32 * 2;
+      for (int i = 0; i < 32; i++) {
+        uint32_t off = (mapAddr - 0x06000000) + rowOff + i * 2;
+        uint16_t entry = vram[off] | (vram[off + 1] << 8);
+        fprintf(stderr, "%03x ", (unsigned)(entry & 0x3FF)); // tile index only
+      }
+      fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+
+    fflush(stderr);
+  }
+
   // Optional: per-frame PPU state trace (minimal volume, scanline 0 only).
   // Enable with: AIO_TRACE_PPU_FRAMESTATE=1
   if (scanline == 0) {
     static const bool traceFrameState =
         EnvTruthy(std::getenv("AIO_TRACE_PPU_FRAMESTATE"));
+
+    // OG-DK debug: check if traceFrameState is unexpectedly true
+    if (traceOgdk && frameCount < 5) {
+      fprintf(stderr, "[OGDK_FRAMESTATECHECK] frame=%u traceFrameState=%d\n",
+              (unsigned)frameCount, traceFrameState ? 1 : 0);
+      fflush(stderr);
+    }
+
     if (traceFrameState) {
       static bool initialized = false;
       static int startFrame = 0;
@@ -733,6 +974,17 @@ void PPU::DrawScanline() {
     }
   }
 
+  // OG-DK: trace right after scanline==0 block
+  if (traceOgdk && scanline == 0) {
+    static int afterScanline0Cnt = 0;
+    if (afterScanline0Cnt < 20) {
+      afterScanline0Cnt++;
+      fprintf(stderr, "[OGDK_AFTERSCAN0] frame=%u cnt=%d\n",
+              (unsigned)frameCount, afterScanline0Cnt);
+      fflush(stderr);
+    }
+  }
+
   BuildObjWindowMaskForScanline();
 
   // Fetch Backdrop Color (Palette Index 0)
@@ -795,6 +1047,17 @@ void PPU::DrawScanline() {
   // Reset priority buffer for this scanline (4 = backdrop, lowest priority)
   std::fill(priorityBuffer.begin() + scanline * SCREEN_WIDTH,
             priorityBuffer.begin() + (scanline + 1) * SCREEN_WIDTH, (uint8_t)4);
+
+  // OG-DK: trace right before mode switch
+  if (traceOgdk && scanline == 0) {
+    static int preModeCnt = 0;
+    if (preModeCnt < 20) {
+      preModeCnt++;
+      fprintf(stderr, "[OGDK_PREMODE] frame=%u mode=%d cnt=%d\n",
+              (unsigned)frameCount, mode, preModeCnt);
+      fflush(stderr);
+    }
+  }
 
   if (mode == 0) {
     RenderMode0();
@@ -1819,6 +2082,20 @@ void PPU::RenderMode1() {
 void PPU::RenderMode0() {
   // Mode 0: Tiled, BG0-BG3
   uint16_t dispcnt = ReadRegister(0x00);
+
+  // OG-DK diagnostic: trace which BGs are enabled
+  static const bool traceOgdk = EnvTruthy(std::getenv("AIO_TRACE_OGDK_PPU"));
+  if (traceOgdk && scanline == 0) {
+    static int mode0TraceCount = 0;
+    if (mode0TraceCount < 20) {
+      mode0TraceCount++;
+      fprintf(stderr,
+              "[OGDK_MODE0] frame=%u DISPCNT=0x%04x BG_EN=0x%x cnt=%d\n",
+              (unsigned)frameCount, (unsigned)dispcnt,
+              (unsigned)((dispcnt >> 8) & 0xF), mode0TraceCount);
+      fflush(stderr);
+    }
+  }
 
   if (TraceGbaSpam()) {
     static int renderMode0Count = 0;
