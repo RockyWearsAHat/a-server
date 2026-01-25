@@ -10,7 +10,6 @@ namespace AIO::Emulator::GBA {
 class APU;      // Forward declaration
 class PPU;      // Forward declaration
 class ARM7TDMI; // Forward declaration
-class GBA;      // Forward declaration (for timing flush callbacks)
 
 class GBAMemory {
 public:
@@ -38,8 +37,8 @@ public:
   void SetPPU(PPU *ppuPtr) { ppu = ppuPtr; }
   // CPU connection for debug
   void SetCPU(ARM7TDMI *cpuPtr) { cpu = cpuPtr; }
-  // GBA connection for timing flush callbacks
-  void SetGBA(GBA *g) { gba = g; }
+  // GBA connection (stub for compatibility with newer tests)
+  void SetGBA(class GBA * /*unused*/) {}
 
   // Debug/Test helper
   void WriteROM(uint32_t address, uint8_t value) {
@@ -79,9 +78,6 @@ public:
 
   // Internal IO Write (Bypasses Read-Only checks)
   void WriteIORegisterInternal(uint32_t offset, uint16_t value);
-
-  // Internal IO Read (Bypasses flush logic - for PPU internal use)
-  uint16_t ReadIORegister16Internal(uint32_t offset) const;
 
   // Callback for IO Writes (Used by PPU to track Affine Registers)
   using IOWriteCallback = void (*)(void *context, uint32_t offset,
@@ -193,22 +189,15 @@ private:
   int ppuTimingScanline = 0;
   int ppuTimingCycle = 0;
 
-  // Deferred write buffering for graphics memory.
-  // During VISIBLE, palette/VRAM writes are not immediately visible; we record
-  // them into shadow buffers and later apply (by block) during a safe period.
-  static constexpr uint32_t kDeferredBlockSize = 32u;
-
-  std::vector<uint8_t> palette_shadow;
-  std::vector<uint8_t> vram_shadow;
-  std::vector<uint8_t> oam_shadow;
-
-  std::vector<uint8_t> palette_dirtyBlocks; // 0/1 per block
-  std::vector<uint8_t> vram_dirtyBlocks;    // 0/1 per block
-  std::vector<uint8_t> oam_dirtyBlocks;     // 0/1 per block
-
-  std::vector<uint32_t> palette_dirtyList; // block indices
-  std::vector<uint32_t> vram_dirtyList;    // block indices
-  std::vector<uint32_t> oam_dirtyList;     // block indices
+  // Deferred write queue for graphics memory (palette/VRAM/OAM)
+  // Writes during unsafe timing (VISIBLE period) are queued and applied at
+  // HBlank/VBlank
+  struct DeferredWrite {
+    uint32_t address;
+    uint8_t value;
+    uint8_t region; // 5=palette, 6=VRAM, 7=OAM
+  };
+  std::vector<DeferredWrite> deferredWrites;
 
   // Internal DMA address registers (shadow registers for repeat DMAs)
   uint32_t dmaInternalSrc[4] = {0};
@@ -290,7 +279,6 @@ private:
   APU *apu = nullptr;      // APU pointer for sound callbacks
   PPU *ppu = nullptr;      // PPU pointer for DMA updates
   ARM7TDMI *cpu = nullptr; // CPU pointer for debug
-  GBA *gba = nullptr;      // GBA pointer for timing flush callbacks
 
   // Track last Game Pak access to approximate sequential waitstate timing
   // (WAITCNT). This is intentionally lightweight (no full bus prefetch

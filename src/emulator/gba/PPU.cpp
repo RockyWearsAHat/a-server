@@ -7,19 +7,16 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
 #include <set>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
 
+// Static brightness adjustment helpers for blending (stub implementations)
 uint32_t PPU::ApplyBrightnessIncrease(uint32_t colorARGB, int evyRaw) {
   int evy = evyRaw & 0x1F;
   if (evy > 16)
     evy = 16;
-
   auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
   auto from5 = [](int v5) -> uint8_t {
     if (v5 < 0)
@@ -28,15 +25,12 @@ uint32_t PPU::ApplyBrightnessIncrease(uint32_t colorARGB, int evyRaw) {
       v5 = 31;
     return (uint8_t)(v5 << 3);
   };
-
   uint8_t r = (colorARGB >> 16) & 0xFF;
   uint8_t g = (colorARGB >> 8) & 0xFF;
   uint8_t b = colorARGB & 0xFF;
-
   uint8_t rr = from5(to5(r) + ((31 - to5(r)) * evy / 16));
   uint8_t gg = from5(to5(g) + ((31 - to5(g)) * evy / 16));
   uint8_t bb = from5(to5(b) + ((31 - to5(b)) * evy / 16));
-
   return 0xFF000000u | (rr << 16) | (gg << 8) | bb;
 }
 
@@ -44,7 +38,6 @@ uint32_t PPU::ApplyBrightnessDecrease(uint32_t colorARGB, int evyRaw) {
   int evy = evyRaw & 0x1F;
   if (evy > 16)
     evy = 16;
-
   auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
   auto from5 = [](int v5) -> uint8_t {
     if (v5 < 0)
@@ -53,15 +46,12 @@ uint32_t PPU::ApplyBrightnessDecrease(uint32_t colorARGB, int evyRaw) {
       v5 = 31;
     return (uint8_t)(v5 << 3);
   };
-
   uint8_t r = (colorARGB >> 16) & 0xFF;
   uint8_t g = (colorARGB >> 8) & 0xFF;
   uint8_t b = colorARGB & 0xFF;
-
   uint8_t rr = from5(to5(r) - (to5(r) * evy / 16));
   uint8_t gg = from5(to5(g) - (to5(g) * evy / 16));
   uint8_t bb = from5(to5(b) - (to5(b) * evy / 16));
-
   return 0xFF000000u | (rr << 16) | (gg << 8) | bb;
 }
 
@@ -83,16 +73,8 @@ inline int EnvInt(const char *name, int defaultValue) {
   return std::atoi(v);
 }
 
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  static std::mutex cacheMutex;
-  std::lock_guard<std::mutex> lock(cacheMutex);
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  const bool enabled = EnvTruthy(std::getenv(name));
-  cache.emplace(name, enabled);
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
   return enabled;
 }
 
@@ -334,18 +316,13 @@ void PPU::Update(int cycles) {
 
       // Hardware enters HBlank on every scanline (including VBlank).
       // Set DISPSTAT first so any HBlank-triggered work sees the flag.
-      // Use ReadIORegister16Internal to avoid infinite recursion with flush.
-      uint16_t dispstat = memory.ReadIORegister16Internal(0x04);
+      uint16_t dispstat = memory.Read16(0x04000004);
       dispstat |= 2; // HBlank flag (Bit 1)
       memory.WriteIORegisterInternal(0x04, dispstat);
 
-      // Apply any palette/VRAM writes that were queued during the visible
-      // period so they become visible at the next safe window.
-      memory.ApplyDeferredWrites();
-
       // Trigger HBlank IRQ if enabled in DISPSTAT.
       if (dispstat & 0x10) { // HBlank IRQ Enable (Bit 4)
-        uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
+        uint16_t if_reg = memory.Read16(0x04000202);
         if_reg |= 2; // HBlank IRQ bit (Bit 1)
         // IF is write-1-to-clear when written by the CPU.
         // When an interrupt occurs, hardware sets IF bits.
@@ -364,7 +341,7 @@ void PPU::Update(int cycles) {
       bool triggerVBlankDMA = false;
 
       // Clear DISPSTAT HBlank Flag
-      uint16_t dispstat = memory.ReadIORegister16Internal(0x04);
+      uint16_t dispstat = memory.Read16(0x04000004);
       dispstat &= ~2;
       memory.WriteIORegisterInternal(0x04, dispstat);
 
@@ -379,7 +356,7 @@ void PPU::Update(int cycles) {
         // DKC diagnostic: Log DISPCNT during problem frames
         if ((frameCount >= 2195 && frameCount <= 2205) ||
             (frameCount >= 2400 && frameCount <= 2415)) {
-          uint16_t dispcnt = memory.ReadIORegister16Internal(0x00);
+          uint16_t dispcnt = memory.Read16(0x04000000);
           bool forcedBlank = (dispcnt >> 7) & 1;
           uint8_t bgMode = dispcnt & 0x7;
           bool displayBG0 = (dispcnt >> 8) & 1;
@@ -422,7 +399,7 @@ void PPU::Update(int cycles) {
       memory.SetPpuTimingState(scanline, cycleCounter);
 
       // Update DISPSTAT VBlank flag
-      dispstat = memory.ReadIORegister16Internal(0x04);
+      dispstat = memory.Read16(0x04000004);
       bool isVBlank = (scanline >= 160 && scanline <= 227);
 
       bool wasVBlank = prevVBlankState;
@@ -471,7 +448,7 @@ void PPU::Update(int cycles) {
             bg3y_internal |= 0xF0000000;
 
           if (dispstat & 0x8) { // VBlank IRQ Enable
-            uint16_t if_reg = memory.ReadIORegister16Internal(0x202) | 1;
+            uint16_t if_reg = memory.Read16(0x04000202) | 1;
             memory.WriteIORegisterInternal(0x202, if_reg);
 
             // Also set BIOS_IF for IntrWait/VBlankIntrWait
@@ -504,7 +481,7 @@ void PPU::Update(int cycles) {
       if (scanline == vcountSetting) {
         dispstat |= 4;
         if (dispstat & 0x20) { // VCount IRQ Enable
-          uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
+          uint16_t if_reg = memory.Read16(0x04000202);
           if_reg |= 4;
           memory.WriteIORegisterInternal(0x202, if_reg);
         }
@@ -579,24 +556,14 @@ void PPU::DrawScanline() {
       const uint16_t bg2vofs = ReadRegister(0x1A);
       const uint16_t bg3hofs = ReadRegister(0x1C);
       const uint16_t bg3vofs = ReadRegister(0x1E);
-      const uint16_t dispstat = ReadRegister(0x04);
-      const uint16_t vcount = ReadRegister(0x06);
-      const uint16_t ie = memory.ReadIORegister16Internal(0x200);
-      const uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
-      const uint16_t ime = memory.ReadIORegister16Internal(0x208);
-      const uint16_t bios_if = memory.Read16(0x03007FF8);
 
       std::cout << "[PPU_FRAME] frameCount=" << fc << " logLine=" << linesLogged
                 << " DISPCNT=0x" << std::hex << dispcnt << " mode=" << std::dec
                 << mode << " BG_EN=0x" << std::hex << ((dispcnt >> 8) & 0xF)
                 << " OBJ_EN=" << (((dispcnt >> 12) & 1) ? 1 : 0) << " WIN=0x"
                 << (((dispcnt >> 13) & 0x7) | (((dispcnt >> 15) & 1) << 3))
-                << " DISPSTAT=0x" << std::hex << dispstat
-                << " VCOUNT=" << std::dec << (unsigned)vcount
-                << " IME=" << (unsigned)ime << " IE=0x" << std::hex << ie
-                << " IF=0x" << if_reg << " BIOS_IF=0x" << bios_if << " BG0=0x"
-                << bg0cnt << " BG1=0x" << bg1cnt << " BG2=0x" << bg2cnt
-                << " BG3=0x" << bg3cnt << " BG0HOFS=0x" << bg0hofs
+                << " BG0=0x" << bg0cnt << " BG1=0x" << bg1cnt << " BG2=0x"
+                << bg2cnt << " BG3=0x" << bg3cnt << " BG0HOFS=0x" << bg0hofs
                 << " BG0VOFS=0x" << bg0vofs << " BG1HOFS=0x" << bg1hofs
                 << " BG1VOFS=0x" << bg1vofs << " BG2HOFS=0x" << bg2hofs
                 << " BG2VOFS=0x" << bg2vofs << " BG3HOFS=0x" << bg3hofs
@@ -970,18 +937,13 @@ void PPU::RenderOBJ() {
   // OAM is at 0x07000000 (1KB)
   // 128 Sprites, 8 bytes each
 
-  // Debug: Log when sprite rendering occurs.
-  // Enable with: AIO_TRACE_PPU_RENDEROBJ_CALLED=1
-  static const bool renderObjCalledTrace =
-      EnvTruthy(std::getenv("AIO_TRACE_PPU_RENDEROBJ_CALLED"));
-  if (renderObjCalledTrace) {
-    static int renderObjCalls = 0;
-    if (renderObjCalls < 10) {
-      renderObjCalls++;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "PPU",
-          "[RenderOBJ_CALLED] frame=%llu scanline=%d", frameCount, scanline);
-    }
+  // Debug: Log when sprite rendering occurs
+  static int renderObjCalls = 0;
+  if (renderObjCalls < 10) {
+    renderObjCalls++;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "PPU",
+        "[RenderOBJ_CALLED] frame=%llu scanline=%d", frameCount, scanline);
   }
 
   // Optional: per-frame OBJ rendering stats to diagnose "sprites disappeared"
@@ -1878,10 +1840,6 @@ void PPU::RenderMode0() {
 }
 
 void PPU::RenderBackground(int bgIndex) {
-  const uint16_t dispcnt = ReadRegister(0x00);
-  const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
-  const bool wrapBgVram = (bgMode <= 2);
-
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
   uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
   uint16_t bgvofs = ReadRegister(0x12 + (bgIndex * 4)) & 0x01FF;
@@ -1971,9 +1929,10 @@ void PPU::RenderBackground(int bgIndex) {
       blockOffset = blockX * 2048;
       break;
     case 2: // 32x64, two vertical blocks
-      // GBATEK: for ScreenSize=2 (32x64 tiles), the second vertical screen
-      // block is screen base + 2 (not +1) => +0x1000 bytes.
-      blockOffset = blockY * 4096;
+      // For ScreenSize=2 (32x64 tiles), the second vertical
+      // screen block starts at screen base + 1 (not +2), i.e.
+      // +0x800 bytes per 32x32 block.
+      blockOffset = blockY * 2048;
       break;
     case 3: // 64x64, four blocks
       blockOffset = blockX * 2048 + blockY * 4096;
@@ -1983,11 +1942,7 @@ void PPU::RenderBackground(int bgIndex) {
     // Fetch Tile Map Entry
     // Each screen block is 32x32 entries (2KB = 2048 bytes)
     uint32_t mapAddr = mapBase + blockOffset + (ty * 32 + tx) * 2;
-    uint32_t mapOffset = mapAddr - 0x06000000u;
-    if (wrapBgVram) {
-      mapOffset &= 0xFFFFu;
-    }
-    uint16_t tileEntry = ReadVram16(vramData, vramSize, mapOffset);
+    uint16_t tileEntry = ReadVram16(vramData, vramSize, mapAddr - 0x06000000u);
 
     int tileIndex = tileEntry & 0x3FF;
     bool hFlip = (tileEntry >> 10) & 1;
@@ -2010,11 +1965,7 @@ void PPU::RenderBackground(int bgIndex) {
       // 4bpp (16 colors)
       // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
       tileAddr = tileBase + (tileIndex * 32) + (inTileY * 4) + (inTileX / 2);
-      uint32_t tileOffset = tileAddr - 0x06000000u;
-      if (wrapBgVram) {
-        tileOffset &= 0xFFFFu;
-      }
-      tileByte = ReadVram8(vramData, vramSize, tileOffset);
+      tileByte = ReadVram8(vramData, vramSize, tileAddr - 0x06000000u);
 
       bool useHighNibble = (inTileX & 1) != 0;
       if (PpuSwap4bppNibbles()) {
@@ -2025,11 +1976,7 @@ void PPU::RenderBackground(int bgIndex) {
       // 8bpp (256 colors)
       // 64 bytes per tile
       tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
-      uint32_t tileOffset = tileAddr - 0x06000000u;
-      if (wrapBgVram) {
-        tileOffset &= 0xFFFFu;
-      }
-      tileByte = ReadVram8(vramData, vramSize, tileOffset);
+      tileByte = ReadVram8(vramData, vramSize, tileAddr - 0x06000000u);
       colorIndex = tileByte;
     }
 
@@ -2101,10 +2048,6 @@ const std::vector<uint32_t> &PPU::GetFramebuffer() const {
 void PPU::SwapBuffers() {
   std::lock_guard<std::mutex> lock(bufferMutex);
   std::swap(frontBuffer, backBuffer);
-  if (TraceGbaSpam()) {
-    std::cout << "[SWAP] frame=" << frameCount << " front0=0x" << std::hex
-              << frontBuffer[0] << std::dec << std::endl;
-  }
 
   // DKC diagnostic: Log around problem frames + OAM analysis
   if (frameCount >= 1655 && frameCount <= 1665) {
@@ -2347,11 +2290,6 @@ void PPU::BuildObjWindowMaskForScanline() {
 
     const int shape = (attr0 >> 14) & 0x3;
     const int size = (attr1 >> 14) & 0x3;
-
-    // GBATEK: OBJ shape=3 is prohibited.
-    if (shape == 3) {
-      continue;
-    }
     const int width = sizes[shape][size][0];
     const int height = sizes[shape][size][1];
 
@@ -2499,23 +2437,9 @@ void PPU::ApplyColorEffects() {
   int effectMode = (bldcnt >> 6) & 0x3;
 
   // Get the brightness coefficient (0-16, higher = more effect)
-  int evyRaw = bldy & 0x1F;
-  int evy = evyRaw;
+  int evy = bldy & 0x1F;
   if (evy > 16)
     evy = 16;
-
-  // Limited diagnostics to help track down fade issues (enable with
-  // AIO_TRACE_GBA_SPAM)
-  if (TraceGbaSpam() && (effectMode == 2 || effectMode == 3)) {
-    static int fadeLogCount = 0;
-    if (fadeLogCount < 100) {
-      fadeLogCount++;
-      std::cout << "[FADE] frame=" << frameCount << " scanline=" << scanline
-                << " bldcnt=0x" << std::hex << bldcnt << std::dec
-                << " bldy_raw=" << evyRaw << " bldy_clamped=" << evy
-                << " mode=" << effectMode << std::endl;
-    }
-  }
 
   // For alpha blending (mode 1)
   int eva = bldalpha & 0x1F;        // First target coefficient
@@ -2530,51 +2454,21 @@ void PPU::ApplyColorEffects() {
   // Second target layers (bits 8-13 of BLDCNT)
   uint8_t secondTarget = (bldcnt >> 8) & 0x3F;
 
-  if (TraceGbaSpam()) {
-    std::cout << "[FADE] firstTarget=0x" << std::hex << (int)firstTarget
-              << " secondTarget=0x" << (int)secondTarget << std::dec
-              << std::endl;
-  }
-
-  auto to5 = [](uint8_t v8) -> int {
-    // Our pipeline expands BGR555 -> 8-bit via <<3, so >>3 recovers the exact
-    // 5-bit channel.
-    return (int)(v8 >> 3);
-  };
-  auto from5 = [](int v5) -> uint8_t {
-    if (v5 < 0)
-      v5 = 0;
-    if (v5 > 31)
-      v5 = 31;
-    return (uint8_t)(v5 << 3);
+  auto blendChannel = [](uint8_t a, uint8_t b, int eva, int evb) -> uint8_t {
+    int out = (a * eva + b * evb) / 16;
+    if (out < 0)
+      out = 0;
+    if (out > 255)
+      out = 255;
+    return (uint8_t)out;
   };
 
-  // Public testing helpers (declared in PPU.h)
-  auto applyBrightnessIncrease = [&](uint8_t r, uint8_t g, uint8_t b, int evy) {
-    auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
-    int rr = from5(to5(r) + ((31 - to5(r)) * evy / 16));
-    int gg = from5(to5(g) + ((31 - to5(g)) * evy / 16));
-    int bb = from5(to5(b) + ((31 - to5(b)) * evy / 16));
-    return (uint32_t)((rr << 16) | (gg << 8) | bb);
-  };
-
-  auto applyBrightnessDecrease = [&](uint8_t r, uint8_t g, uint8_t b, int evy) {
-    auto to5 = [](uint8_t v8) -> int { return (int)(v8 >> 3); };
-    int rr = from5(to5(r) - (to5(r) * evy / 16));
-    int gg = from5(to5(g) - (to5(g) * evy / 16));
-    int bb = from5(to5(b) - (to5(b) * evy / 16));
-    return (uint32_t)((rr << 16) | (gg << 8) | bb);
-  };
-
-  auto blendChannel5 = [](uint8_t a8, uint8_t b8, int eva, int evb) -> uint8_t {
-    const int a5 = (int)(a8 >> 3);
-    const int b5 = (int)(b8 >> 3);
-    int out5 = (a5 * eva + b5 * evb) / 16;
-    if (out5 < 0)
-      out5 = 0;
-    if (out5 > 31)
-      out5 = 31;
-    return (uint8_t)(out5 << 3);
+  auto clamp8 = [](int v) -> uint8_t {
+    if (v < 0)
+      return 0;
+    if (v > 255)
+      return 255;
+    return (uint8_t)v;
   };
 
   // Apply effect to each pixel on this scanline
@@ -2594,16 +2488,6 @@ void PPU::ApplyColorEffects() {
     const bool topIsObjSemiTransparent =
         (topLayer == 4) && (objSemiTransparentBuffer[pixelIndex] != 0);
 
-    // Diagnostic: log first pixel's topLayer and current RGB when tracing
-    // enabled
-    if (TraceGbaSpam() && x == 0 && scanline == 0) {
-      uint32_t color0 = backBuffer[pixelIndex];
-      std::cout << "[FADEPIX] x=" << x << " scanline=" << scanline
-                << " topLayer=" << (int)topLayer
-                << " topFirst=" << (((firstTarget >> topLayer) & 1) != 0)
-                << " color=0x" << std::hex << color0 << std::dec << std::endl;
-    }
-
     // Respect BLDCNT target selection.
     const bool topIsFirstTarget = ((firstTarget >> topLayer) & 1) != 0;
 
@@ -2622,10 +2506,12 @@ void PPU::ApplyColorEffects() {
     // For simplicity, let's assume the effect applies if the mode is brightness
 
     // Semi-transparent OBJ pixels always use alpha blending against the
-    // underlying pixel, regardless of the BLDCNT effect mode. Per GBATEK,
-    // semi-transparent OBJs do NOT require the OBJ bit in firstTarget;
-    // they only require the underlying layer to be in secondTarget.
+    // underlying pixel, regardless of the BLDCNT effect mode (as long as target
+    // bits allow it).
     if (topIsObjSemiTransparent) {
+      if (!topIsFirstTarget) {
+        continue;
+      }
       const bool underIsSecondTarget = ((secondTarget >> underLayer) & 1) != 0;
       if (!underIsSecondTarget) {
         continue;
@@ -2636,16 +2522,9 @@ void PPU::ApplyColorEffects() {
       const uint8_t ug = (under >> 8) & 0xFF;
       const uint8_t ub = under & 0xFF;
 
-      if (TraceGbaSpam()) {
-        std::cout << "[FADE_SEMITR] x=" << x << " topLayer=" << (int)topLayer
-                  << " underLayer=" << (int)underLayer << " eva=" << eva
-                  << " evb=" << evb << " under=0x" << std::hex << under
-                  << std::dec << std::endl;
-      }
-
-      r = blendChannel5(r, ur, eva, evb);
-      g = blendChannel5(g, ug, eva, evb);
-      b = blendChannel5(b, ub, eva, evb);
+      r = blendChannel(r, ur, eva, evb);
+      g = blendChannel(g, ug, eva, evb);
+      b = blendChannel(b, ub, eva, evb);
     } else if (effectMode == 1) {
       if (!topIsFirstTarget) {
         continue;
@@ -2661,36 +2540,27 @@ void PPU::ApplyColorEffects() {
       const uint8_t ug = (under >> 8) & 0xFF;
       const uint8_t ub = under & 0xFF;
 
-      r = blendChannel5(r, ur, eva, evb);
-      g = blendChannel5(g, ug, eva, evb);
-      b = blendChannel5(b, ub, eva, evb);
+      r = blendChannel(r, ur, eva, evb);
+      g = blendChannel(g, ug, eva, evb);
+      b = blendChannel(b, ub, eva, evb);
     } else if (effectMode == 2) {
       if (!topIsFirstTarget) {
         continue;
       }
       // Brightness Increase (fade to white)
       // I = I + (31-I) * EVY / 16
-      if (TraceGbaSpam()) {
-        std::cout << "[FADEAPPLY] topFirst=" << topIsFirstTarget
-                  << " before RGB=(" << (int)r << "," << (int)g << "," << (int)b
-                  << ")\n";
-      }
-      r = from5(to5(r) + ((31 - to5(r)) * evy / 16));
-      g = from5(to5(g) + ((31 - to5(g)) * evy / 16));
-      b = from5(to5(b) + ((31 - to5(b)) * evy / 16));
-      if (TraceGbaSpam()) {
-        std::cout << "[FADEAPPLY] after RGB=(" << (int)r << "," << (int)g << ","
-                  << (int)b << ")\n";
-      }
+      r = clamp8((int)r + ((255 - (int)r) * evy / 16));
+      g = clamp8((int)g + ((255 - (int)g) * evy / 16));
+      b = clamp8((int)b + ((255 - (int)b) * evy / 16));
     } else if (effectMode == 3) {
       if (!topIsFirstTarget) {
         continue;
       }
       // Brightness Decrease (fade to black)
       // I = I - I * EVY / 16
-      r = from5(to5(r) - (to5(r) * evy / 16));
-      g = from5(to5(g) - (to5(g) * evy / 16));
-      b = from5(to5(b) - (to5(b) * evy / 16));
+      r = clamp8((int)r - ((int)r * evy / 16));
+      g = clamp8((int)g - ((int)g * evy / 16));
+      b = clamp8((int)b - ((int)b * evy / 16));
     }
 
     backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
