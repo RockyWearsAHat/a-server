@@ -362,11 +362,15 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     registers[Register::LR] = r14_irq;
     spsr = spsr_irq;
 
-    // Safety check: IRQ stack should never be 0
-    if (registers[Register::SP] == 0) {
-      if (kEnableHeavyCpuTraces) {
-        std::cerr << "[FATAL] IRQ stack corrupted! r13_irq=0x" << std::hex
-                  << r13_irq << " Re-initializing to 0x03007FA0 PC=0x"
+    // Safety check: IRQ stack should be in valid IWRAM range
+    // (0x03007F00-0x03008000) If corrupted, reset to default to prevent
+    // cascading crashes
+    if (registers[Register::SP] == 0 || registers[Register::SP] < 0x03007F00 ||
+        registers[Register::SP] > 0x03008000) {
+      static int corruptionLogs = 0;
+      if (corruptionLogs++ < 50) {
+        std::cerr << "[IRQ_STACK_CORRUPT] r13_irq=0x" << std::hex << r13_irq
+                  << " (invalid!) Re-initializing to 0x03007FA0 PC=0x"
                   << registers[15] << std::dec << std::endl;
       }
       r13_irq = 0x03007FA0;
@@ -387,6 +391,18 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     registers[Register::SP] = r13_svc;
     registers[Register::LR] = r14_svc;
     spsr = spsr_svc;
+    break;
+  default:
+    // UNDEFINED, ABORT, FIQ modes - rarely used by GBA games
+    // Log a warning but preserve current SP/LR to avoid corruption
+    {
+      static int unknownModeLogs = 0;
+      if (unknownModeLogs++ < 20) {
+        std::cerr << "[MODE_SWITCH_UNKNOWN] Switching to mode 0x" << std::hex
+                  << newMode << " PC=0x" << registers[15] << " SP=0x"
+                  << registers[13] << std::dec << std::endl;
+      }
+    }
     break;
   }
 
@@ -523,6 +539,14 @@ void ARM7TDMI::CheckInterrupts() {
       std::cerr << "[IRQ SETUP] After PC assignment: PC=0x" << std::hex
                 << registers[Register::PC] << " SP=0x"
                 << registers[Register::SP] << std::dec << std::endl;
+    }
+
+    // Stack guard: detect IRQ stack corruption at entry
+    if (registers[Register::SP] < 0x03007F00 ||
+        registers[Register::SP] > 0x03008000) {
+      std::cerr << "[IRQ_STACK_GUARD] SP_irq=0x" << std::hex
+                << registers[Register::SP] << " corrupted at IRQ entry! PC=0x"
+                << registers[15] << std::dec << std::endl;
     }
   }
 }

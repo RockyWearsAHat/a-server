@@ -1,187 +1,250 @@
-# Plan: Fix HLE BIOS IRQ Trampoline Re-entry Bug
+# Plan: Fix GBA Emulation Issues (OG-DK, Metroid Zero Mission, DKC)
 
-**Status:** 🔴 NOT STARTED
-**Goal:** Fix OG-DK crash caused by unbounded IRQ re-entry stack overflow
+**Status:** � DIAGNOSTICS REQUIRED
+**Goal:** Fix corrupted visuals/audio in OG-DK, corrupted audio in Metroid Zero Mission, and missing birds in DKC title screen
 
 ---
 
 ## Context
 
-### Root Cause Analysis
+### Test Suite Status: ✅ ALL 137 TESTS PASS
 
-OG-DK (Classic NES Series: Donkey Kong) crashes ~1.6 seconds after boot with:
+The unit test suite is fully passing. The issues are **runtime-only** and require diagnostic investigation.
 
-- Undefined instruction exceptions at IWRAM (0x03008xxx)
-- Stack overflow: SP decreases from 0x03007200 to 0x03005718 without recovering
-- Final crash: corrupt PC (0xd1012800)
+### Issue Summary
 
-**Root cause:** The HLE BIOS IRQ trampoline enables nested IRQs (clears CPSR.I) BEFORE acknowledging IF. This causes immediate re-entry if IF is still pending, creating an infinite IRQ loop that overflows the stack.
+| Game                 | Symptom                       | Likely Area       | Diagnostic Approach                                                     |
+| -------------------- | ----------------------------- | ----------------- | ----------------------------------------------------------------------- |
+| OG-DK                | Corrupted visuals AND audio   | Timing/IRQ/Memory | Crash log shows PC=0xD1012800 (invalid); IRQ stack corruption suspected |
+| Metroid Zero Mission | Corrupted audio               | APU FIFO timing   | Monitor FIFO underflows with AIO_TRACE_AUDIO_STATS=1                    |
+| DKC                  | Birds missing on title screen | OBJ rendering/OAM | Trace OAM state at title screen; check sprite visibility                |
 
-### Current trampoline flow (broken):
+### Crash Log Analysis (crash_log.txt)
 
 ```
-0x3F00: Save regs to SP_irq
-0x3F0C: BIC R3, R3, #0x9F  ← Clears mode bits AND I flag
-0x3F14: MSR CPSR_c, R3     ← IRQs now ENABLED, IF still pending → immediate re-entry!
-...
-0x3F40: LDRH R1, [0x03007FF4]  ← Read BIOS_IF (but too late)
-0x3F48: STRH R1, [0x04000202]  ← Acknowledge IF (but too late)
+PC: 0xD1012800          <- INVALID ADDRESS (should be in ROM/RAM regions)
+SP: 0x7CFF7FFB          <- GARBAGE (should be ~0x03007F00)
+BranchLog (last 4):
+  0x00000018 -> 0x00003F00   (IRQ vector -> BIOS trampoline)
+  0x00003F20 -> 0x030056A4   (BIOS return -> user IRQ handler)
+  0x0300842C -> 0x03019DD4   (game code call)
+  0x03019FDC -> 0xD1012800   (jump to CORRUPTED address)
 ```
 
-### Fix: Acknowledge IF BEFORE enabling nested IRQs
+**Key Observations:**
 
-Per GBATEK, the real BIOS:
+1. CPU gets stuck looping at `0x03005710` (IWRAM) for thousands of iterations
+2. Eventually takes an IRQ, handles it, then jumps to garbage address
+3. Stack pointer is completely corrupted (0x7CFF7FFB)
 
-1. Captures triggered IRQs (IE & IF)
-2. Acknowledges those bits in IF (writes them back)
-3. THEN switches to System mode with IRQs enabled
+**Root Cause Hypothesis:** IRQ stack overflow or memory corruption during interrupt handling
 
 ---
 
 ## Steps
 
-### Step 1: Rewrite HLE BIOS IRQ trampoline — `src/emulator/gba/GBAMemory.cpp`
+### Step 1: Add IRQ Stack Guard Diagnostic — `src/emulator/gba/ARM7TDMI.cpp`
 
-**Operation:** `REPLACE`
-**Anchor:** The `const uint32_t trampoline[]` array definition
+**Purpose:** Detect stack corruption BEFORE it causes a crash
 
-Replace the trampoline with a corrected version that acknowledges IF BEFORE switching to System mode:
+**Operation:** `INSERT_AFTER`
+**Anchor:** In `ARM7TDMI::Step()`, after `CheckInterrupts();` (~line 806)
 
 ```cpp
-  uint32_t base = kIrqTrampolineBase;
-  const uint32_t trampoline[] = {
-      // === PHASE 1: IRQ entry (IRQ mode, I=1) ===
-      // 0x3F00: STMDB SP!, {R0-R3, R12, LR}  ; save volatile regs
-      0xE92D500F,
-
-      // === PHASE 2: Read and acknowledge IF BEFORE enabling nested IRQs ===
-      // 0x3F04: MOV   R2, #0x04000000       ; IO base
-      0xE3A02404,
-      // 0x3F08: ADD   R0, R2, #0x200        ; R0 = 0x04000200 (REG_IE/IF base)
-      0xE2820F80,
-      // 0x3F0C: LDRH  R1, [R0, #0]          ; R1 = IE
-      0xE1D010B0,
-      // 0x3F10: LDRH  R3, [R0, #2]          ; R3 = IF
-      0xE1D030B2,
-      // 0x3F14: AND   R1, R1, R3            ; R1 = triggered = IE & IF
-      0xE0011003,
-      // 0x3F18: STRH  R1, [R0, #2]          ; ACK IF (write triggered bits back)
-      0xE1C010B2,
-      // 0x3F1C: LDR   R0, [PC, #64]         ; R0 = literal 0x03007FF8 (BIOS_IF addr)
-      0xE59F0040,
-      // 0x3F20: STRH  R1, [R0]              ; Store to BIOS_IF for user handler
-      0xE1C010B0,
-
-      // === PHASE 3: Switch to System mode with IRQs enabled ===
-      // 0x3F24: MRS   R3, CPSR
-      0xE10F3000,
-      // 0x3F28: BIC   R3, R3, #0x9F         ; clear mode bits AND I flag
-      0xE3C3309F,
-      // 0x3F2C: ORR   R3, R3, #0x1F         ; SYS mode
-      0xE383301F,
-      // 0x3F30: MSR   CPSR_c, R3            ; Now in SYS mode, IRQs enabled
-      0xE129F003,
-
-      // === PHASE 4: Call user handler ===
-      // 0x3F34: STMDB SP!, {LR}             ; preserve interrupted SYS/USR LR
-      0xE92D4000,
-      // 0x3F38: LDR   R0, [PC, #36]         ; R0 = literal 0x03FFFFFC (handler ptr mirror)
-      0xE59F0024,
-      // 0x3F3C: LDR   R0, [R0]              ; R0 = user handler address
-      0xE5900000,
-      // 0x3F40: ADD   LR, PC, #0            ; LR = return address (0x3F48)
-      0xE28FE000,
-      // 0x3F44: BX    R0                    ; call user handler (ARM or Thumb)
-      0xE12FFF10,
-      // 0x3F48: LDMIA SP!, {LR}             ; restore interrupted SYS/USR LR
-      0xE8BD4000,
-
-      // === PHASE 5: Return to IRQ mode ===
-      // 0x3F4C: MRS   R3, CPSR
-      0xE10F3000,
-      // 0x3F50: BIC   R3, R3, #0x9F         ; clear mode and I flag
-      0xE3C3309F,
-      // 0x3F54: ORR   R3, R3, #0x92         ; IRQ mode + I=1
-      0xE3833092,
-      // 0x3F58: MSR   CPSR_c, R3            ; Back in IRQ mode, IRQs masked
-      0xE129F003,
-
-      // === PHASE 6: Return from exception ===
-      // 0x3F5C: LDMIA SP!, {R0-R3, R12, LR} ; restore regs
-      0xE8BD500F,
-      // 0x3F60: SUBS  PC, LR, #4            ; return (restores CPSR from SPSR)
-      0xE25EF004,
-
-      // === Literals ===
-      // 0x3F64: 0x03007FF8 (BIOS_IF)
-      0x03007FF8u,
-      // 0x3F68: 0x03FFFFFC (handler pointer mirror)
-      0x03FFFFFCu,
-  };
+  // Stack guard: detect IRQ stack corruption early
+  if ((cpsr & 0x1F) == 0x12) { // IRQ mode
+    const uint32_t sp_irq = registers[13];
+    // IRQ stack should be in range 0x03007FA0-0x03007FFF
+    if (sp_irq < 0x03007F00 || sp_irq > 0x03008000) {
+      std::cerr << "[IRQ_STACK_GUARD] SP_irq=0x" << std::hex << sp_irq
+                << " out of range! PC=0x" << registers[15] << std::dec << std::endl;
+    }
+  }
 ```
 
-**Verify:** `make build && ./build/bin/BIOSTests --gtest_filter='BIOSTest.*'`
+**Verify:** `make build && AIO_TRACE_GBA_SPAM=1 ./build/bin/AIOServer` with OG-DK ROM
 
 ---
 
-### Step 2: Add HLE BIOS undefined exception handler — `src/emulator/gba/GBAMemory.cpp`
+### Step 2: Add Audio Stats Diagnostic — Already exists via environment variable
 
-**Operation:** `INSERT_AFTER`
-**Anchor:** After the trampoline installation loop (after `for (size_t i = 0; ...`)
+**No code change needed.** Use:
 
-Add an infinite loop at vector 0x04 for undefined instruction exceptions:
-
-```cpp
-  // Undefined Instruction Exception handler at vector 0x04
-  // Install an infinite loop so the emulator halts cleanly on undefined
-  // instructions rather than sliding through NOPs and corrupting state.
-  // Real BIOS has: B 0x04 (infinite loop)
-  // Opcode: 0xEAFFFFFE = B #-8 (branches to itself)
-  bios[0x04] = 0xFE;
-  bios[0x05] = 0xFF;
-  bios[0x06] = 0xFF;
-  bios[0x07] = 0xEA;
+```bash
+AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer
 ```
 
-**Verify:** Undefined instruction at IWRAM should halt CPU at 0x04 instead of crashing
+Look for:
+
+- `fifoAUnderflow/s` or `fifoBUnderflow/s` > 0 indicates timing issue
+- `ringUnderrunSamples/s` > 0 indicates emulation too slow
+- `upsample` ratio should be stable around 1.4-2.5
+
+---
+
+### Step 3: Investigate DKC OAM State — Add OAM dump at title screen
+
+**Operation:** `INSERT_AFTER`
+**Anchor:** In PPU::RenderOBJ(), after the `if (scanline == 0)` trace block (around line 1050)
+
+Add a diagnostic to dump OAM entries when environment variable is set:
+
+```cpp
+  // DKC Birds diagnostic: dump OAM state at specific frames
+  static const bool dumpOAM = (std::getenv("AIO_DUMP_OAM") != nullptr);
+  if (dumpOAM && scanline == 0) {
+    static int oamDumpCount = 0;
+    if (oamDumpCount < 10 && frameCount >= 300 && frameCount <= 310) {
+      oamDumpCount++;
+      std::cout << "[OAM_DUMP Frame " << frameCount << "]" << std::endl;
+      for (int i = 0; i < 128; ++i) {
+        uint32_t oamBase = 0x07000000 + i * 8;
+        uint16_t attr0 = memory.Read16(oamBase);
+        uint16_t attr1 = memory.Read16(oamBase + 2);
+        uint16_t attr2 = memory.Read16(oamBase + 4);
+
+        int y = attr0 & 0xFF;
+        int objMode = (attr0 >> 8) & 3;
+        int shape = (attr0 >> 14) & 3;
+        int x = attr1 & 0x1FF;
+        int size = (attr1 >> 14) & 3;
+        int tileNum = attr2 & 0x3FF;
+        int priority = (attr2 >> 10) & 3;
+
+        // Only dump non-hidden sprites
+        if (objMode != 2 && tileNum != 0) {
+          std::cout << "  OBJ[" << i << "] x=" << x << " y=" << y
+                    << " tile=" << tileNum << " pri=" << priority
+                    << " mode=" << objMode << std::endl;
+        }
+      }
+    }
+  }
+```
+
+**Verify:** `AIO_DUMP_OAM=1 ./build/bin/AIOServer` with DKC ROM, check if bird sprites appear in dump
+
+---
+
+### Step 4: Check Timer Cascade Behavior — `src/emulator/gba/GBAMemory.cpp`
+
+**Analysis Required:** Timer cascade (bit 2 of TMxCNT_H) behavior may affect audio timing.
+
+Search for timer cascade handling in `UpdateTimers()`:
+
+```bash
+grep -n "cascade\|count-up" src/emulator/gba/GBAMemory.cpp
+```
+
+If cascade is implemented incorrectly, Timer 0 overflow might not properly trigger Timer 1, affecting sound FIFOs that use Timer 1.
+
+**Expected behavior (GBATEK):**
+
+- When TMxCNT_H bit 2 = 1, timer increments when PREVIOUS timer overflows, not on prescaler
+- Cascaded timer ignores prescaler setting
+
+---
+
+### Step 5: Verify BIOS IRQ Handler Address — Check `0x03007FFC` writes
+
+The crash shows the CPU jumping to garbage after IRQ. The user IRQ handler is read from `0x03007FFC` (mirrored at `0x03FFFFFC`).
+
+**Diagnostic:** Add trace for writes to IRQ handler address:
+
+**Operation:** `INSERT_AFTER`  
+**Anchor:** In `GBAMemory::Write32()` around the IWRAM write handling
+
+```cpp
+  // Trace writes to IRQ handler address
+  if ((address & 0x03FFFFF8) == 0x03007FF8) {
+    const uint32_t pc = cpu ? cpu->GetRegister(15) : 0;
+    std::cerr << "[IRQ_HANDLER_WRITE] addr=0x" << std::hex << address
+              << " val=0x" << value << " PC=0x" << pc << std::dec << std::endl;
+  }
+```
+
+This will show if the IRQ handler address is being corrupted.
+
+---
+
+## Runtime Diagnostic Commands
+
+### OG-DK (Corrupted visuals + audio)
+
+```bash
+# Full diagnostic run
+AIO_TRACE_GBA_SPAM=1 AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer 2>&1 | tee ogdk_diag.log
+
+# Check for stack corruption
+grep -E "SP_irq|IRQ_HANDLER_WRITE|IRQ_STACK_GUARD" ogdk_diag.log
+```
+
+### Metroid Zero Mission (Corrupted audio)
+
+```bash
+# Audio-focused diagnostic
+AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer 2>&1 | tee metroid_audio.log
+
+# Check for FIFO issues
+grep -E "fifo.*Underflow|upsample|ringUnder" metroid_audio.log
+```
+
+### DKC (Missing birds)
+
+```bash
+# OAM diagnostic at title screen (wait ~5 seconds after boot)
+AIO_DUMP_OAM=1 ./build/bin/AIOServer 2>&1 | tee dkc_oam.log
+
+# Check what sprites are present
+grep -E "OBJ\[" dkc_oam.log | head -50
+```
 
 ---
 
 ## Test Strategy
 
-1. `make build` — compiles without errors
-2. `./build/bin/BIOSTests` — BIOS tests pass (esp. IRQReturnRestoresThumbState)
-3. Run OG-DK headless for 5 seconds:
-   ```bash
-   timeout 10 ./build/bin/AIOServer --headless --rom "OG-DK.gba" --headless-max-ms 5000 --headless-dump-ppm /tmp/ogdk.ppm --headless-dump-ms 4500
-   ```
-
-   - Should NOT crash with "Invalid PC"
-   - Should NOT show stack overflow (SP should stay near 0x03007xxx)
-   - PPM should show game graphics (not 98% black)
+1. `make build` — compiles without errors ✅ (verified)
+2. `cd build && ctest --output-on-failure` — all 137 tests pass ✅ (verified)
+3. **Diagnostic runs required** — see commands above for each game
+4. **Post-diagnostic:** Write specific code fixes based on findings
 
 ---
 
 ## Documentation Updates
 
-### Append to `.github/instructions/memory.md` under "### IRQ Entry Semantics":
-
-```markdown
-### HLE BIOS IRQ Trampoline
-
-The HLE BIOS IRQ trampoline at 0x3F00 follows real BIOS semantics:
-
-1. **Acknowledge IF early**: Read IE & IF, write triggered bits back to IF, store to BIOS_IF (0x03007FF8)
-2. **Then enable nested IRQs**: Switch to System mode with CPSR.I=0
-3. **Call user handler**: Via pointer at 0x03FFFFFC (mirror of 0x03007FFC)
-4. **Return to IRQ mode**: Re-mask IRQs (CPSR.I=1)
-5. **Exception return**: SUBS PC, LR, #4 restores CPSR from SPSR
-
-This ordering prevents IRQ re-entry storms when IF has pending bits.
-```
+No memory.md updates until specific fixes are identified and implemented.
 
 ---
 
 ## Handoff
 
-Run `@Implement` to execute all steps.
+**This plan requires DIAGNOSTIC DATA before implementation.**
+
+Current state:
+
+- ✅ Tests pass (137/137)
+- ✅ Build succeeds
+- ⏳ Runtime issues need investigation
+
+**Next steps for `@Implement`:**
+
+1. **DO NOT** implement the diagnostic code insertions yet
+2. **RUN** the emulator with each problematic ROM and collect diagnostic output:
+
+   ```bash
+   # OG-DK
+   AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer
+   # Load OG-DK.gba, play for 10 seconds, note any crashes/corruption
+
+   # Metroid Zero Mission
+   AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer
+   # Load Metroid - Zero Mission (USA).gba, play for 30 seconds
+
+   # DKC
+   ./build/bin/AIOServer
+   # Load DKC.gba, wait at title screen, screenshot and note if birds appear
+   ```
+
+3. **REPORT** findings back to `@Plan` for specific fixes
+
+The diagnostic instrumentation (Steps 1, 3, 5) can be added if initial runs don't reveal the issue.
