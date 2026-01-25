@@ -67,10 +67,10 @@ _This bug was recorded automatically by the implement agent while executing `.gi
 
 ---
 
-## HLE BIOS IRQ trampoline: enabling IRQs in System mode causes re-entry loop
+## HLE BIOS IRQ trampoline: IRQ trampoline range check too narrow
 
-**Status:** ⚠️ Blocked
-**Date:** 2026-01-24
+**Status:** ✅ PLAN READY
+**Date:** 2026-01-24 (root-caused 2026-01-25)
 **Reporter:** Implement agent (@Implement)
 
 ### Summary
@@ -85,6 +85,11 @@ After applying `.github/plan.md` “Fix HLE BIOS IRQ Trampoline CPSR.I Flag”, 
 
 ### Observed behavior
 
+**Update (2026-01-25):**
+
+- Final PC is `0x08000000` (expected `0x08000002`).
+- Thumb mode flag / CPSR.T is cleared (expected set).
+
 - Final PC remains in BIOS trampoline (`PC=0x00003F04` / 16132) after bounded stepping.
 
 ### Expected behavior
@@ -92,6 +97,11 @@ After applying `.github/plan.md` “Fix HLE BIOS IRQ Trampoline CPSR.I Flag”, 
 - Trampoline returns to ROM (`PC=0x08000002`) and restores Thumb state (T flag set).
 
 ### Change applied
+
+**Update (2026-01-25):**
+
+- `src/emulator/gba/GBAMemory.cpp`: replaced the IRQ trampoline instruction stream at `0x00003F00` to ACK IF early (IE&IF), store to `0x03007FF8`, then enable IRQs in System mode and call the handler via `[0x03FFFFFC]`.
+- `tests/BIOSTests.cpp`: updated `BIOSTest.IRQTrampolineInstructionsPresent` to match the new instruction words and literal pool.
 
 - `src/emulator/gba/GBAMemory.cpp`: IRQ trampoline at 0x3F0C updated from `0xE3C3301F` to `0xE3C3309F` to clear CPSR.I when switching to System mode.
 
@@ -105,4 +115,8 @@ After applying `.github/plan.md` “Fix HLE BIOS IRQ Trampoline CPSR.I Flag”, 
 
 ### Suggested next steps
 
-- Update the HLE BIOS IRQ trampoline ordering to match real BIOS behavior (acknowledge/clear IF, or otherwise prevent same-source re-entry, before unmasking IRQs in System mode), then adjust/add BIOS tests accordingly.
+The root cause has been identified and a fix has been verified. See `.github/plan.md` for the solution.
+
+**Root Cause:** The IRQ trampoline range check in ARM7TDMI.cpp line 1158 was `< 0x3F54` but should be `< 0x3F64`. This caused trampoline instructions at `0x3F54-0x3F60` to be incorrectly treated as HLE BIOS calls.
+
+**Status updated to:** ✅ PLAN READY

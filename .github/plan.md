@@ -1,7 +1,7 @@
-# Plan: Fix HLE BIOS IRQ Trampoline Re-entry Bug
+# Plan: Revert Broken IRQ Trampoline and Fix HLE IRQ Flow
 
-**Status:** 🔴 NOT STARTED
-**Goal:** Fix OG-DK crash caused by unbounded IRQ re-entry stack overflow
+**Status:** 🔴 NOT STARTED  
+**Goal:** Fix SMA2/Metroid/OG-DK regressions by reverting to the working trampoline
 
 ---
 
@@ -9,179 +9,105 @@
 
 ### Root Cause Analysis
 
-OG-DK (Classic NES Series: Donkey Kong) crashes ~1.6 seconds after boot with:
+The commit 909dc34 rewrote the HLE BIOS IRQ trampoline with these changes:
 
-- Undefined instruction exceptions at IWRAM (0x03008xxx)
-- Stack overflow: SP decreases from 0x03007200 to 0x03005718 without recovering
-- Final crash: corrupt PC (0xd1012800)
+1. Switch from IRQ mode to System mode before calling user handler
+2. Acknowledge IF early and write to BIOS_IF (0x03007FF8)
+3. Added System/User LR preservation
 
-**Root cause:** The HLE BIOS IRQ trampoline enables nested IRQs (clears CPSR.I) BEFORE acknowledging IF. This causes immediate re-entry if IF is still pending, creating an infinite IRQ loop that overflows the stack.
+This **broke** SMA2, Metroid Zero Mission, **OG-DK (Classic NES Series: Donkey Kong)**, and other games that were previously working.
 
-### Current trampoline flow (broken):
+**The bug:** The new trampoline reads IE & IF at entry and writes to BIOS_IF. But the HLE CPU CheckInterrupts() already:
 
-```
-0x3F00: Save regs to SP_irq
-0x3F0C: BIC R3, R3, #0x9F  ← Clears mode bits AND I flag
-0x3F14: MSR CPSR_c, R3     ← IRQs now ENABLED, IF still pending → immediate re-entry!
-...
-0x3F40: LDRH R1, [0x03007FF4]  ← Read BIOS_IF (but too late)
-0x3F48: STRH R1, [0x04000202]  ← Acknowledge IF (but too late)
-```
+1. Calculates triggered = IE & IF
+2. Writes triggered bits to BIOS_IF (0x03007FF8)
+3. **Clears IF** to prevent re-entry
 
-### Fix: Acknowledge IF BEFORE enabling nested IRQs
+When the trampoline then reads IF, it gets **0** (already cleared), ANDs with IE to get **0**, and writes **0** to BIOS_IF destroying the value the HLE CPU wrote!
 
-Per GBATEK, the real BIOS:
+Games using IntrWait/VBlankIntrWait poll BIOS_IF waiting for their IRQ bit. With BIOS_IF = 0, they spin forever causing black screen.
 
-1. Captures triggered IRQs (IE & IF)
-2. Acknowledges those bits in IF (writes them back)
-3. THEN switches to System mode with IRQs enabled
+**Evidence:**
+
+- SMA2 stuck at PC=0x0800052E in a spin loop (LDRH r0,[r2]; AND r0,r1; CMP r0,#0; BEQ)
+- This is an IntrWait-style loop waiting for (BIOS_IF & mask) != 0
+- After SWI 0x01 (RegisterRamReset), the game never progresses
+- **OG-DK** crashes with Invalid PC (0xD1012800 or 0x0404EE5C) - the new trampoline's System mode switch corrupts the game's IRQ handler expectations. Verified: OG-DK works in "lastgood" worktree (pre-909dc34).
+
+### The Working Design
+
+The **old trampoline** (before 909dc34) worked correctly because:
+
+1. HLE CPU CheckInterrupts() writes to BIOS_IF and clears IF
+2. HLE CPU writes triggered bits to 0x03007FF4 as backup
+3. Trampoline does NOT touch BIOS_IF at entry
+4. Trampoline calls user handler
+5. After handler returns, trampoline reads from 0x03007FF4 and writes to IF (acknowledging)
+
+This flow ensures BIOS_IF is set by the HLE CPU and never overwritten.
 
 ---
 
 ## Steps
 
-### Step 1: Rewrite HLE BIOS IRQ trampoline — `src/emulator/gba/GBAMemory.cpp`
+### Step 1: Revert IRQ trampoline to working version
 
-**Operation:** `REPLACE`
-**Anchor:** The `const uint32_t trampoline[]` array definition
+**File:** src/emulator/gba/GBAMemory.cpp
+**Operation:** REPLACE
+**Anchor:** The trampoline array in InitializeHLEBIOS() (lines 336-410)
 
-Replace the trampoline with a corrected version that acknowledges IF BEFORE switching to System mode:
+Replace the entire trampoline[] array with the old version from commit 39404c6.
 
-```cpp
-  uint32_t base = kIrqTrampolineBase;
-  const uint32_t trampoline[] = {
-      // === PHASE 1: IRQ entry (IRQ mode, I=1) ===
-      // 0x3F00: STMDB SP!, {R0-R3, R12, LR}  ; save volatile regs
-      0xE92D500F,
-
-      // === PHASE 2: Read and acknowledge IF BEFORE enabling nested IRQs ===
-      // 0x3F04: MOV   R2, #0x04000000       ; IO base
-      0xE3A02404,
-      // 0x3F08: ADD   R0, R2, #0x200        ; R0 = 0x04000200 (REG_IE/IF base)
-      0xE2820F80,
-      // 0x3F0C: LDRH  R1, [R0, #0]          ; R1 = IE
-      0xE1D010B0,
-      // 0x3F10: LDRH  R3, [R0, #2]          ; R3 = IF
-      0xE1D030B2,
-      // 0x3F14: AND   R1, R1, R3            ; R1 = triggered = IE & IF
-      0xE0011003,
-      // 0x3F18: STRH  R1, [R0, #2]          ; ACK IF (write triggered bits back)
-      0xE1C010B2,
-      // 0x3F1C: LDR   R0, [PC, #64]         ; R0 = literal 0x03007FF8 (BIOS_IF addr)
-      0xE59F0040,
-      // 0x3F20: STRH  R1, [R0]              ; Store to BIOS_IF for user handler
-      0xE1C010B0,
-
-      // === PHASE 3: Switch to System mode with IRQs enabled ===
-      // 0x3F24: MRS   R3, CPSR
-      0xE10F3000,
-      // 0x3F28: BIC   R3, R3, #0x9F         ; clear mode bits AND I flag
-      0xE3C3309F,
-      // 0x3F2C: ORR   R3, R3, #0x1F         ; SYS mode
-      0xE383301F,
-      // 0x3F30: MSR   CPSR_c, R3            ; Now in SYS mode, IRQs enabled
-      0xE129F003,
-
-      // === PHASE 4: Call user handler ===
-      // 0x3F34: STMDB SP!, {LR}             ; preserve interrupted SYS/USR LR
-      0xE92D4000,
-      // 0x3F38: LDR   R0, [PC, #36]         ; R0 = literal 0x03FFFFFC (handler ptr mirror)
-      0xE59F0024,
-      // 0x3F3C: LDR   R0, [R0]              ; R0 = user handler address
-      0xE5900000,
-      // 0x3F40: ADD   LR, PC, #0            ; LR = return address (0x3F48)
-      0xE28FE000,
-      // 0x3F44: BX    R0                    ; call user handler (ARM or Thumb)
-      0xE12FFF10,
-      // 0x3F48: LDMIA SP!, {LR}             ; restore interrupted SYS/USR LR
-      0xE8BD4000,
-
-      // === PHASE 5: Return to IRQ mode ===
-      // 0x3F4C: MRS   R3, CPSR
-      0xE10F3000,
-      // 0x3F50: BIC   R3, R3, #0x9F         ; clear mode and I flag
-      0xE3C3309F,
-      // 0x3F54: ORR   R3, R3, #0x92         ; IRQ mode + I=1
-      0xE3833092,
-      // 0x3F58: MSR   CPSR_c, R3            ; Back in IRQ mode, IRQs masked
-      0xE129F003,
-
-      // === PHASE 6: Return from exception ===
-      // 0x3F5C: LDMIA SP!, {R0-R3, R12, LR} ; restore regs
-      0xE8BD500F,
-      // 0x3F60: SUBS  PC, LR, #4            ; return (restores CPSR from SPSR)
-      0xE25EF004,
-
-      // === Literals ===
-      // 0x3F64: 0x03007FF8 (BIOS_IF)
-      0x03007FF8u,
-      // 0x3F68: 0x03FFFFFC (handler pointer mirror)
-      0x03FFFFFCu,
-  };
-```
-
-**Verify:** `make build && ./build/bin/BIOSTests --gtest_filter='BIOSTest.*'`
+**Verify:** make build
 
 ---
 
-### Step 2: Add HLE BIOS undefined exception handler — `src/emulator/gba/GBAMemory.cpp`
+### Step 2: Revert IRQ trampoline range check
 
-**Operation:** `INSERT_AFTER`
-**Anchor:** After the trampoline installation loop (after `for (size_t i = 0; ...`)
+**File:** src/emulator/gba/ARM7TDMI.cpp
+**Operation:** REPLACE  
+**Anchor:** The inIrqTrampoline check (around line 1157)
 
-Add an infinite loop at vector 0x04 for undefined instruction exceptions:
+Change range from 0x3F64 back to 0x3F58.
 
-```cpp
-  // Undefined Instruction Exception handler at vector 0x04
-  // Install an infinite loop so the emulator halts cleanly on undefined
-  // instructions rather than sliding through NOPs and corrupting state.
-  // Real BIOS has: B 0x04 (infinite loop)
-  // Opcode: 0xEAFFFFFE = B #-8 (branches to itself)
-  bios[0x04] = 0xFE;
-  bios[0x05] = 0xFF;
-  bios[0x06] = 0xFF;
-  bios[0x07] = 0xEA;
-```
+**Verify:** make build
 
-**Verify:** Undefined instruction at IWRAM should halt CPU at 0x04 instead of crashing
+---
+
+### Step 3: Revert BIOSTests to match old trampoline
+
+**File:** tests/BIOSTests.cpp
+**Operation:** REPLACE
+**Anchor:** The IRQTrampolineInstructionsPresent test
+
+See tests/BIOSTests.cpp in commit 39404c6 for the expected instruction values.
+
+**Verify:** make build && ./build/bin/BIOSTests
+
+---
+
+### Step 4: Remove undefined exception handler at vector 0x04
+
+**File:** src/emulator/gba/GBAMemory.cpp
+**Operation:** DELETE
+**Anchor:** After the trampoline installation loop (around line 414)
+
+Delete the block that installs infinite loop at vector 0x04.
+
+**Verify:** make build
 
 ---
 
 ## Test Strategy
 
-1. `make build` — compiles without errors
-2. `./build/bin/BIOSTests` — BIOS tests pass (esp. IRQReturnRestoresThumbState)
-3. Run OG-DK headless for 5 seconds:
-   ```bash
-   timeout 10 ./build/bin/AIOServer --headless --rom "OG-DK.gba" --headless-max-ms 5000 --headless-dump-ppm /tmp/ogdk.ppm --headless-dump-ms 4500
-   ```
-
-   - Should NOT crash with "Invalid PC"
-   - Should NOT show stack overflow (SP should stay near 0x03007xxx)
-   - PPM should show game graphics (not 98% black)
-
----
-
-## Documentation Updates
-
-### Append to `.github/instructions/memory.md` under "### IRQ Entry Semantics":
-
-```markdown
-### HLE BIOS IRQ Trampoline
-
-The HLE BIOS IRQ trampoline at 0x3F00 follows real BIOS semantics:
-
-1. **Acknowledge IF early**: Read IE & IF, write triggered bits back to IF, store to BIOS_IF (0x03007FF8)
-2. **Then enable nested IRQs**: Switch to System mode with CPSR.I=0
-3. **Call user handler**: Via pointer at 0x03FFFFFC (mirror of 0x03007FFC)
-4. **Return to IRQ mode**: Re-mask IRQs (CPSR.I=1)
-5. **Exception return**: SUBS PC, LR, #4 restores CPSR from SPSR
-
-This ordering prevents IRQ re-entry storms when IF has pending bits.
-```
+1. make build - compiles without errors
+2. ./build/bin/BIOSTests - all BIOS tests pass
+3. Test SMA2: Non-black frame expected
+4. Test Metroid Zero Mission: Non-black frame expected
+5. Test OG-DK (Classic NES Series: Donkey Kong): No crash, game should render graphics
 
 ---
 
 ## Handoff
 
-Run `@Implement` to execute all steps.
+Run @Implement to execute all steps.
