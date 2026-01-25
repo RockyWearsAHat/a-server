@@ -142,6 +142,14 @@ Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA ha
 - **Solution:** Fix timing to match GBATEK spec, not use LLE BIOS as workaround
 - These ROMs are excellent test cases for timing accuracy
 
+### IRQ Entry Semantics
+
+The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupts`) to prevent immediate re-entry when the HLE BIOS trampoline enables CPSR.I=0 for nested interrupts. This matches real GBA BIOS atomicity semantics:          
+- Triggered bits (IE & IF) are captured
+- IF is cleared for those bits
+- Trampoline runs with nested IRQs enabled but same-source blocked
+- User handler can re-enable specific IRQs by clearing IF for them
+
 ## Logging and crash capture
 
 - Default log target is `debug.log` at repo root.
@@ -152,6 +160,7 @@ Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA ha
   - `AIO_LOG_LEVEL=debug|info|warn|error|fatal`
   - `AIO_TRACE_PPU_IO_WRITES=1` trace PPU register writes (BLDCNT, BLDY, etc.)
   - `AIO_TRACE_GBA_SPAM=1` verbose CPU/PPU tracing
+  - `AIO_TRACE_IE_WRITES=1` trace IE register writes (PC, old/new value, LR) — useful for OG-DK interrupt debugging
   - `AIO_GBA_BIOS=/path/to/bios.bin` use LLE BIOS instead of HLE
 
 ## Workspace hygiene

@@ -1,0 +1,13 @@
+# OG-DK input test - press START and A to try starting the game
+# Format: <time_ms> <KEY> <DOWN|UP>
+
+500 START DOWN
+600 START UP
+1000 A DOWN
+1100 A UP
+1500 START DOWN
+1600 START UP
+2000 A DOWN
+2100 A UP
+2500 A DOWN
+2600 A UP

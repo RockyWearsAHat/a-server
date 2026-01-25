@@ -1,7 +1,7 @@
 ---
 name: implement
-description: "Execute plans from plan.md with documentation-first TDD discipline."
-model: Raptor mini (Preview) (copilot)
+description: "Execute plans from plan.md with unriavled speed and adherence to steps of plan (accuracy)."
+model: GPT-5.2
 tools:
   - edit/editFiles
   - search/codebase

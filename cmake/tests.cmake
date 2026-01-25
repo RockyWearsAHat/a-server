@@ -137,12 +137,16 @@ else()
 endif()
 
 # Headless SMA2 investigation harness (not a unit test).
-add_executable(SMA2Harness ${PROJECT_ROOT}/test_sma2_10s.cpp)
-set_target_properties(SMA2Harness PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
-  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SMA2Harness"
-)
-target_link_libraries(SMA2Harness PRIVATE GBAEmulator)
+if(EXISTS "${PROJECT_ROOT}/test_sma2_10s.cpp")
+  add_executable(SMA2Harness ${PROJECT_ROOT}/test_sma2_10s.cpp)
+  set_target_properties(SMA2Harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SMA2Harness"
+  )
+  target_link_libraries(SMA2Harness PRIVATE GBAEmulator)
+else()
+  message(WARNING "test_sma2_10s.cpp not found; skipping SMA2Harness target.")
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(CPUTests

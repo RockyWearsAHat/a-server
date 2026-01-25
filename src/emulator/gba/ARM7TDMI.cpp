@@ -499,6 +499,11 @@ void ARM7TDMI::CheckInterrupts() {
                       registers[13]);
     memory.Write16(0x03007FF8, (uint16_t)(biosIF | triggered));
 
+    // Clear triggered IRQ bits from IF to prevent re-entry when CPSR.I clears.
+    // Real BIOS atomically captures and clears IF at entry; HLE trampoline
+    // enables IRQs before calling user handler, so we must clear IF here.
+    memory.Write16(IORegs::REG_IF, triggered);
+
     // std::cout << "[IRQ ENTRY] Triggered=0x" << std::hex << triggered << "
     // BIOS_IF updated=0x" << (biosIF | triggered) << std::dec << std::endl;
 
@@ -1761,15 +1766,10 @@ void ARM7TDMI::Decode(uint32_t instruction) {
   // Software Interrupt: xxxx 1111 xxxx xxxx xxxx xxxx xxxx xxxx
   else if ((instruction & ARMInstructionFormat::SWI_MASK) ==
            ARMInstructionFormat::SWI_PATTERN) {
-    // ARM SWI has a 24-bit immediate.
-    // Commercial ROMs commonly encode the SWI number in the *upper* byte of
-    // the immediate (e.g. 0xEF110000 for SWI 0x11), while others use the more
-    // conventional low-byte encoding (e.g. 0xEF000011).
-    const uint32_t imm24 = (instruction & 0x00FFFFFFu);
-    uint32_t swi = (imm24 & 0xFFu);
-    if (swi == 0u) {
-      swi = ((imm24 >> 16) & 0xFFu);
-    }
+    // ARM SWI has a 24-bit immediate. Per GBATEK, the GBA BIOS extracts
+    // bits [23:16] as the SWI function number (NOT bits [7:0]).
+    // Example: 0xEF110000 → SWI 0x11 (LZ77UnCompWram)
+    const uint32_t swi = (instruction >> 16) & 0xFFu;
     ExecuteSWI(swi);
   } else {
     std::cout << "Unknown Instruction: 0x" << std::hex << instruction
@@ -2970,6 +2970,9 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   // When we HLE a BIOS routine, we skip the real instruction stream, so we
   // must charge some time explicitly.
   constexpr int kSwiOverheadCycles = 32;
+  AIO::Emulator::Common::Logger::Instance().LogFmt(
+      AIO::Emulator::Common::LogLevel::Info, "BIOS",
+      "ExecuteSWI comment=0x%02x", (unsigned)comment);
 
   switch (comment) {
   case 0x00: // SoftReset

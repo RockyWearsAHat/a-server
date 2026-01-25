@@ -43,7 +43,7 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   EXPECT_EQ(mem.Read32(base + 0x00), 0xE92D500Fu); // STMDB SP!, {R0-R3,R12,LR}
   EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A02404u); // MOV   R2, #0x04000000
   EXPECT_EQ(mem.Read32(base + 0x08), 0xE10F3000u); // MRS   R3, CPSR
-  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
+  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE3C3309Fu); // BIC   R3, R3, #0x9F
   EXPECT_EQ(mem.Read32(base + 0x10), 0xE383301Fu); // ORR   R3, R3, #0x1F (SYS)
   EXPECT_EQ(mem.Read32(base + 0x14), 0xE129F003u); // MSR   CPSR_c, R3
 
@@ -243,6 +243,17 @@ TEST(BIOSTest, IRQReturnRestoresThumbState) {
 
   ARM7TDMI cpu(mem);
   mem.SetCPU(&cpu);
+
+  // Install a minimal IRQ handler in IWRAM that returns immediately.
+  // Note: IF is cleared at IRQ entry by the emulator (matching real BIOS),
+  // so the handler doesn't need to acknowledge IF to prevent re-entry.
+  constexpr uint32_t kHandlerAddr = 0x03001000u;
+  mem.Write32(kHandlerAddr + 0x00, 0xE3A02404u); // MOV   R2, #0x04000000
+  mem.Write32(kHandlerAddr + 0x04, 0xE2820F80u); // ADD   R0, R2, #0x200
+  mem.Write32(kHandlerAddr + 0x08, 0xE3A01001u); // MOV   R1, #1
+  mem.Write32(kHandlerAddr + 0x0C, 0xE1C010B2u); // STRH  R1, [R0, #2] (IF)
+  mem.Write32(kHandlerAddr + 0x10, 0xE12FFF1Eu); // BX    LR
+  mem.Write32(0x03007FFCu, kHandlerAddr);
 
   // Two simple Thumb instructions at ROM base:
   // 0x08000000: MOVS r0, #0

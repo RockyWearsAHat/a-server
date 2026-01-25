@@ -182,8 +182,8 @@ TEST_F(CPUTest, SWI_CpuFastSet_FixedFill_ARM) {
   cpu.SetRegister(2, (8u /*word count (must be multiple of 8)*/ & 0x1FFFFF) |
                          (1u << 24)); // fixed source
 
-  // ARM SWI 0x0C: 0xEF00000C
-  RunInstr(0xEF00000C);
+  // ARM SWI 0x0C: 0xEF0C0000 (upper-byte encoding per GBATEK)
+  RunInstr(0xEF0C0000);
 
   for (int i = 0; i < 8; ++i) {
     EXPECT_EQ(memory.Read32(dst + (uint32_t)i * 4), 0x01010101u);

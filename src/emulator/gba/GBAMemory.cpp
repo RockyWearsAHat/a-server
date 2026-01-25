@@ -340,8 +340,8 @@ void GBAMemory::InitializeHLEBIOS() {
       0xE3A02404,
       // 0x3F08: MRS   R3, CPSR
       0xE10F3000,
-      // 0x3F0C: BIC   R3, R3, #0x1F
-      0xE3C3301F,
+      // 0x3F0C: BIC   R3, R3, #0x9F  (clear mode bits AND I flag)
+      0xE3C3309F,
       // 0x3F10: ORR   R3, R3, #0x1F (SYS)
       0xE383301F,
       // 0x3F14: MSR   CPSR_c, R3
@@ -1522,6 +1522,21 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 
   uint16_t val = Read8(address) | (Read8(address + 1) << 8);
 
+  // OG-DK investigation: trace reads of IE to understand what the title reads
+  // before writing back during IRQ acknowledge.
+  if (region == 0x04 && (address & 0xFF000000u) == 0x04000000u) {
+    const uint32_t offset = address & 0x3FFu;
+    // In Read16, after handling IO region:
+    if (offset == IORegs::IE && EnvFlagCached("AIO_TRACE_IE_READS")) {
+      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+      if (pc >= 0x03005600u && pc < 0x03005800u) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "IE_TRACE",
+            "IE READ16: val=0x%04x PC=0x%08x", (unsigned)val, (unsigned)pc);
+      }
+    }
+  }
+
   // DKC black-screen investigation: the title can spin in a Thumb loop polling
   // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
   // and where reads come from.
@@ -1750,6 +1765,20 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   uint32_t val = Read8(address) | (Read8(address + 1) << 8) |
                  (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
+
+  // OG-DK investigation: trace reads of IE|IF (word reads) to understand what
+  // the title reads before writing back during IRQ acknowledge.
+  if (region == 0x04 && (address & 0xFF000000u) == 0x04000000u) {
+    const uint32_t offset = address & 0x3FFu;
+    if (offset == IORegs::IE && EnvFlagCached("AIO_TRACE_IE_READS")) {
+      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+      if (pc >= 0x03005600u && pc < 0x03005800u) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "IE_TRACE",
+            "IE READ32: val=0x%08x PC=0x%08x", (unsigned)val, (unsigned)pc);
+      }
+    }
+  }
 
   // Trace tight IO polling loops via 32-bit reads.
   // Enable with: AIO_TRACE_IO_POLL=1
@@ -2626,6 +2655,21 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       return;
     }
 
+    // OG-DK debug: Trace IE (Interrupt Enable) register writes.
+    // Enable with: AIO_TRACE_IE_WRITES=1
+    // Captures PC, old value, new value, and LR for stack context.
+    if (offset == IORegs::IE && EnvFlagCached("AIO_TRACE_IE_WRITES")) {
+      const uint16_t oldIE =
+          (uint16_t)(io_regs[IORegs::IE] | (io_regs[IORegs::IE + 1] << 8));
+      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+      const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "IE_TRACE",
+          "IE WRITE16: old=0x%04x new=0x%04x PC=0x%08x LR=0x%08x%s",
+          (unsigned)oldIE, (unsigned)value, (unsigned)pc, (unsigned)lr,
+          (value == 0 && oldIE != 0) ? " [CLEARED!]" : "");
+    }
+
     if (EnvFlagCached("AIO_TRACE_WAITCNT") && (offset == 0x204)) {
       static uint32_t lastPc = 0xFFFFFFFFu;
       static uint16_t lastVal = 0xFFFFu;
@@ -3086,6 +3130,42 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
   if ((address & 0xFF000000u) == 0x04000000u) {
     const uint32_t offset = address & 0x3FFu;
     if (offset == IORegs::IE) {
+      // Some titles (notably Classic NES Series: Donkey Kong / OG-DK) ACK IRQs
+      // by writing IF bits in the upper halfword via a 32-bit store to
+      // 0x04000200 (IE|IF). On hardware, this does not appear to clear IE.
+      // Preserve IE when low16 is 0 and high16 contains an IF clear mask.
+      if (((value >> 16) != 0u) && ((value & 0xFFFFu) == 0u)) {
+        const uint16_t currentIE =
+            (uint16_t)(io_regs[IORegs::IE] | (io_regs[IORegs::IE + 1] << 8));
+        if (EnvFlagCached("AIO_TRACE_IE_WRITES")) {
+          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+          const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "IE_TRACE",
+              "IE WRITE32 ACKONLY: preserve=0x%04x IF_clr=0x%04x PC=0x%08x "
+              "LR=0x%08x",
+              (unsigned)currentIE, (unsigned)(value >> 16), (unsigned)pc,
+              (unsigned)lr);
+        }
+        Write16(0x04000200u, currentIE);
+        Write16(0x04000202u, (uint16_t)(value >> 16));
+        return;
+      }
+
+      // OG-DK debug: Log 32-bit writes that target IE+IF pair
+      if (EnvFlagCached("AIO_TRACE_IE_WRITES")) {
+        const uint16_t oldIE =
+            (uint16_t)(io_regs[IORegs::IE] | (io_regs[IORegs::IE + 1] << 8));
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "IE_TRACE",
+            "IE WRITE32: old=0x%04x new_low16=0x%04x (IF_clr=0x%04x) PC=0x%08x "
+            "LR=0x%08x%s",
+            (unsigned)oldIE, (unsigned)(value & 0xFFFFu),
+            (unsigned)(value >> 16), (unsigned)pc, (unsigned)lr,
+            ((value & 0xFFFF) == 0 && oldIE != 0) ? " [CLEARED!]" : "");
+      }
       Write16(0x04000200u, (uint16_t)(value & 0xFFFFu));
       Write16(0x04000202u, (uint16_t)(value >> 16));
       return;

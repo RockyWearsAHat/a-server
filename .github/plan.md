@@ -1,138 +1,132 @@
-# Plan: DKC Title Screen Birds Analysis
+# Plan: Fix IRQ Re-entry Loop Caused by CPSR.I Clearing
 
-**Date:** 2026-01-23  
-**Status:** ✅ INVESTIGATED - BIRDS RENDER CORRECTLY  
-**Goal:** Investigate missing bird sprites on DKC title screen/menu
-
----
-
-## Investigation Summary
-
-### User Report
-
-User reported "no birds on the title screen/menu of DKC" - birds appear in mGBA but not in our emulator.
-
-### Diagnostic Process
-
-1. **OAM/Sprite Analysis:**
-   - Found sky sprites (y<50) ARE defined in OAM at title screen frames (400+)
-   - Sprites 27, 28, 30, 31, 32 at x=208-239, y=0-16
-   - Sprite properties: tile=0xd0-0xd1, palette=4, priority=0, mode=0 (normal)
-
-2. **Pixel Rendering Trace:**
-   Added `[BIRD_DRAW]` diagnostic - **confirmed birds ARE being drawn**:
-
-   ```
-   [BIRD_DRAW] frame=400 spr=28 x=216 y=8 ci=9 pal=4 RGB=(56,96,80)
-   [BIRD_DRAW] frame=400 spr=28 x=225 y=8 ci=2 pal=4 RGB=(88,168,72)
-   ```
-
-   Colors are distinctly GREEN (G=80-168), not sky blue.
-
-3. **Framebuffer Verification:**
-   Dumped frame at 6.7 seconds (frame ~400) and analyzed pixel data:
-   ```
-   x=216 y=8 RGB=(56,96,80)   ← GREEN bird pixel
-   x=225 y=8 RGB=(88,168,72)  ← GREEN bird pixel
-   x=216 y=9 RGB=(56,120,64)  ← GREEN bird pixel
-   x=220 y=9 RGB=(56,96,80)   ← GREEN bird pixel
-   ```
-   **Birds ARE present in the final framebuffer with correct colors!**
-
-### Root Cause
-
-**PPU is working correctly.** The birds ARE being rendered. Possible explanations for user not seeing them:
-
-1. **Timing mismatch**: User may be looking at a different frame range
-2. **Old build**: User may be running an older version of the emulator
-3. **Display scaling**: Qt display might be cropping/scaling the top of screen
-4. **Different ROM**: ROM version differences
-
-### Recommendation
-
-1. **Rebuild emulator** from latest code: `make build`
-2. **Run GUI version** and wait ~7-8 seconds for title screen to settle
-3. **Look at x=208-240, y=7-20 region** (right side of sky, top area)
-4. **Verify ROM**: Should be game code A5NE (RAREDKC1)
+**Status:** 🔴 NOT STARTED  
+**Goal:** Prevent IRQ re-entry loop while still allowing nested interrupts in user handlers
 
 ---
 
-## Evidence
+## Context
 
-### Frame Dump Analysis
+### Background
 
-- Frame dumped at 6.7 seconds (headless-dump-ms 6700)
-- 240x160 PPM image written successfully
-- Green pixels confirmed at bird sprite locations (x=216-239, y=7-16)
+- **Original issue**: OG-DK needed CPSR.I=0 in System mode for nested timer interrupts
+- **Applied fix** (plan.md rev 1): Changed `BIC R3, R3, #0x1F` to `BIC R3, R3, #0x9F` to clear I flag
+- **New issue**: Test `BIOSTest.IRQReturnRestoresThumbState` fails - CPU loops in trampoline
 
-### Trace Output
+### Root Cause Analysis
 
-420 `[SKY_SPR]` traces showing sprites processed at frames 400-700.
-100 `[BIRD_DRAW]` traces showing pixel writes to backBuffer.
+The HLE BIOS IRQ trampoline flow:
 
-**Status: Closed - Rendering Verified**
-memory.Write16(0x06010000u + 2u, 0x1111u);
+1. **IRQ Entry** (ARM7TDMI.cpp): Save CPSR to `spsr_irq`, jump to trampoline
+2. **0x3F00-0x3F08**: Push regs, prepare for mode switch
+3. **0x3F0C-0x3F14**: `BIC R3, R3, #0x9F` + `ORR R3, R3, #0x1F` + `MSR CPSR_c, R3`
+   - This clears CPSR.I and switches to System mode
+   - **PROBLEM**: IF is still pending, so immediate IRQ re-entry before handler runs
+4. Handler never runs, CPU loops forever
 
-// Setup sprite 0: semi-transparent OBJ at (0,0), 8x8, 4bpp
-// attr0: Y=0, objMode=1 (semi-transparent), bits 10-11 = 01
-const uint16_t spr0_attr0 = (uint16_t)(0u | (1u << 10));
-const uint16_t spr0_attr1 = 0u;
-const uint16_t spr0_attr2 = 0u;
-TestUtil::WriteOam16(memory, 0, spr0_attr0);
-TestUtil::WriteOam16(memory, 2, spr0_attr1);
-TestUtil::WriteOam16(memory, 4, spr0_attr2);
-
-// Exit Forced Blank before rendering
-memory.Write16(0x04000000u, 0x1000u);
-
-ppu.Update(960);
-ppu.SwapBuffers();
-
-const auto fb = ppu.GetFramebuffer();
-ASSERT_GE(fb.size(), (size_t)PPU::SCREEN_WIDTH);
-
-uint32_t pixel = fb[0];
-uint8_t r = (pixel >> 16) & 0xFF;
-uint8_t g = (pixel >> 8) & 0xFF;
-uint8_t b = pixel & 0xFF;
-
-// Expected: blended color from red OBJ + green backdrop
-// With EVA=8, EVB=8: out = (OBJ*8 + backdrop*8) / 16
-// Red OBJ: R=31, G=0, B=0 (BGR555: 0x001F -> RGB888: 0xF8,0,0)
-// Green BG: R=0, G=31, B=0 (BGR555: 0x03E0 -> RGB888: 0,0xF8,0)
-// Blended 5-bit: R=15, G=15, B=0 -> RGB888: 0x78, 0x78, 0
-EXPECT_GT(r, 0u) << "Red component should be present (from OBJ)";
-EXPECT_GT(g, 0u) << "Green component should be present (from backdrop blend)";
-EXPECT_EQ(b, 0u) << "Blue component should be zero";
-}
+### Evidence from Test
 
 ```
+Expected: PC=0x08000002, Thumb=true
+Actual:   PC=16132 (0x3F04), Thumb=false
+```
 
-**Verify:** `./build/bin/PPUTests --gtest_filter='*SemiTransparentOBJ_NoFirstTarget*'`
+CPU is stuck looping in the trampoline due to immediate re-entry.
+
+### Solution
+
+**Clear IF bits at IRQ entry** (in ARM7TDMI::CheckInterrupts) before jumping to trampoline.
+
+This matches real GBA BIOS behavior where triggered IRQs are atomically captured and cleared on entry, preventing same-source re-entry when CPSR.I is cleared.
+
+The trampoline's existing IF clear at 0x3F48 (using 0x03007FF4 triggered mask) becomes a secondary acknowledgment for any IRQs that fired during the handler.
+
+---
+
+## Steps
+
+### Step 1: Clear IF at IRQ entry - `src/emulator/gba/ARM7TDMI.cpp`
+
+**Operation:** INSERT_AFTER  
+**Anchor:** Line 500 (after `memory.Write16(0x03007FF8, ...)`)
+
+Find this code block:
+
+```cpp
+    memory.Write16(0x03007FF8, (uint16_t)(biosIF | triggered));
+
+    // std::cout << "[IRQ ENTRY] Triggered=0x" << std::hex << triggered << "
+```
+
+Insert BEFORE the commented-out line:
+
+```cpp
+    memory.Write16(0x03007FF8, (uint16_t)(biosIF | triggered));
+
+    // Clear triggered IRQ bits from IF to prevent re-entry when CPSR.I clears.
+    // Real BIOS atomically captures and clears IF at entry; HLE trampoline
+    // enables IRQs before calling user handler, so we must clear IF here.
+    memory.Write16(IORegs::REG_IF, triggered);
+
+    // std::cout << "[IRQ ENTRY] Triggered=0x" << std::hex << triggered << "
+```
+
+**Verify:** `make build && ./build/bin/BIOSTests --gtest_filter='BIOSTest.IRQReturnRestoresThumbState'`
+
+---
+
+### Step 2: Update test expectation comment - `tests/BIOSTests.cpp`
+
+**Operation:** REPLACE  
+**Anchor:** Lines 247-250
+
+Find:
+
+```cpp
+  // Install a minimal IRQ handler in IWRAM that acknowledges IF and returns.
+  // This matches how real games/libc handlers behave; with System mode IRQs
+  // enabled, the pending IF bit must be cleared to avoid immediate re-entry.
+  constexpr uint32_t kHandlerAddr = 0x03001000u;
+```
+
+Replace with:
+
+```cpp
+  // Install a minimal IRQ handler in IWRAM that returns immediately.
+  // Note: IF is cleared at IRQ entry by the emulator (matching real BIOS),
+  // so the handler doesn't need to acknowledge IF to prevent re-entry.
+  constexpr uint32_t kHandlerAddr = 0x03001000u;
+```
+
+**Verify:** Comment is accurate and doesn't affect test behavior.
 
 ---
 
 ## Test Strategy
 
-1. `make build` — compiles without errors
-2. `./build/bin/PPUTests --gtest_filter='*SemiTransparentOBJ_NoFirstTarget*'` — test passes
-3. `./build/bin/PPUTests --gtest_filter='*SemiTransparent*'` — all semi-transparent tests still pass
+1. `make build` - compiles without errors
+2. `cd build/generated/cmake && ctest --output-on-failure` - all 135 tests pass
+3. OG-DK manual test (if available) - verify nested timer IRQs still work
 
 ---
 
 ## Documentation Updates
 
-No memory.md updates needed — this was a test setup bug, not a code bug.
+### Append to `.github/instructions/memory.md` (after Timing and Performance section):
 
----
+```markdown
+### IRQ Entry Semantics
 
-## Notes
+The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupts`) to prevent immediate re-entry when the HLE BIOS trampoline enables CPSR.I=0 for nested interrupts. This matches real GBA BIOS atomicity semantics:
 
-The PPU code change from the previous plan (removing `topIsFirstTarget` check for semi-transparent OBJs) was already applied and is correct. The test was failing due to improper OAM initialization, not a PPU logic bug.
+- Triggered bits (IE & IF) are captured
+- IF is cleared for those bits
+- Trampoline runs with nested IRQs enabled but same-source blocked
+- User handler can re-enable specific IRQs by clearing IF for them
+```
 
 ---
 
 ## Handoff
 
-Run `@Implement` to execute Step 1.
-```
+Run `@Implement` to execute all steps.

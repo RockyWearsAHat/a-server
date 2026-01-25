@@ -155,6 +155,14 @@ int main(int argc, char *argv[]) {
   std::string logPath = parser.value(logOption).toStdString();
   bool exitOnCrash = parser.isSet(exitOnCrashOption);
   bool headless = parser.isSet(headlessOption);
+  int headlessMaxMs = 0;
+  if (headless) {
+    bool okMs = false;
+    const int maxMs = parser.value(headlessMaxMsOption).toInt(&okMs);
+    if (okMs && maxMs > 0) {
+      headlessMaxMs = maxMs;
+    }
+  }
   const bool nasEnabled = true;
 
   // Determinism: input scripts should run against emulated time in headless
@@ -258,17 +266,15 @@ int main(int argc, char *argv[]) {
     }
 
     // In headless mode, optionally quit after a bounded duration.
-    if (headless) {
-      bool okMs = false;
-      const int maxMs = parser.value(headlessMaxMsOption).toInt(&okMs);
-      if (okMs && maxMs > 0) {
-        QTimer::singleShot(maxMs, [maxMs]() {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "main",
-              "Headless max time reached (%d ms), exiting...", maxMs);
-          QCoreApplication::quit();
-        });
-      }
+    // For ROM runs, start counting after the ROM finishes loading so the
+    // requested window is available for deterministic log capture.
+    if (headless && headlessMaxMs > 0 && !parser.isSet(romOption)) {
+      QTimer::singleShot(headlessMaxMs, [headlessMaxMs]() {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "main",
+            "Headless max time reached (%d ms), exiting...", headlessMaxMs);
+        QCoreApplication::quit();
+      });
     }
 
     // Periodic check for quit request set by signal handler
@@ -331,6 +337,15 @@ int main(int argc, char *argv[]) {
       AIO::Emulator::Common::Logger::Instance().Log(
           AIO::Emulator::Common::LogLevel::Info, "main",
           "window.LoadROM() returned");
+
+      if (headless && headlessMaxMs > 0) {
+        QTimer::singleShot(headlessMaxMs, [headlessMaxMs]() {
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "main",
+              "Headless max time reached (%d ms), exiting...", headlessMaxMs);
+          QCoreApplication::quit();
+        });
+      }
 
       if (headless && parser.isSet(headlessDumpPpmOption)) {
         const QString dumpPath = parser.value(headlessDumpPpmOption);
