@@ -124,6 +124,7 @@ private:
   void SetZN(uint32_t result);
   bool CheckCondition(uint32_t cond);
   void CheckInterrupts();
+  void TriggerUndefinedException(uint32_t instruction);
   void SwitchMode(uint32_t newMode);
 
   long long instructionCount = 0;
@@ -131,6 +132,7 @@ private:
   // Banked Registers storage
   uint32_t r13_svc, r14_svc, spsr_svc;
   uint32_t r13_irq, r14_irq, spsr_irq;
+  uint32_t r13_und, r14_und, spsr_und;
   uint32_t r13_usr, r14_usr; // User/System share these
   // We can ignore FIQ/Abort/Undef for now as they are rarely used in standard
   // GBA games

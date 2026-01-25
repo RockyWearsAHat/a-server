@@ -144,7 +144,8 @@ Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA ha
 
 ### IRQ Entry Semantics
 
-The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupts`) to prevent immediate re-entry when the HLE BIOS trampoline enables CPSR.I=0 for nested interrupts. This matches real GBA BIOS atomicity semantics:          
+The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupts`) to prevent immediate re-entry when the HLE BIOS trampoline enables CPSR.I=0 for nested interrupts. This matches real GBA BIOS atomicity semantics:
+
 - Triggered bits (IE & IF) are captured
 - IF is cleared for those bits
 - Trampoline runs with nested IRQs enabled but same-source blocked

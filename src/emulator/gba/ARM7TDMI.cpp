@@ -307,6 +307,9 @@ void ARM7TDMI::Reset() {
   r13_irq = 0x03007FA0;
   r14_irq = 0;
   spsr_irq = 0;
+  r13_und = 0x03007F40;
+  r14_und = 0;
+  spsr_und = 0;
   r13_usr = 0x03007F00;
   r14_usr = 0;
 
@@ -369,6 +372,11 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     r14_svc = registers[Register::LR];
     spsr_svc = spsr;
     break;
+  case CPUMode::UNDEFINED:
+    r13_und = registers[Register::SP];
+    r14_und = registers[Register::LR];
+    spsr_und = spsr;
+    break;
   }
 
   // Load new registers from bank
@@ -420,9 +428,43 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     registers[Register::LR] = r14_svc;
     spsr = spsr_svc;
     break;
+  case CPUMode::UNDEFINED:
+    registers[Register::SP] = r13_und;
+    registers[Register::LR] = r14_und;
+    spsr = spsr_und;
+    break;
   }
 
   SetCPUMode(cpsr, newMode);
+}
+
+void ARM7TDMI::TriggerUndefinedException(uint32_t instruction) {
+  const uint32_t oldCpsr = cpsr;
+
+  Logger::Instance().LogFmt(
+      LogLevel::Error, "CPU",
+      "UNDEFINED: pc=0x%08x instr=0x%08x mode=%c CPSR=0x%08x",
+      (unsigned)currentInstrAddr, (unsigned)instruction, thumbMode ? 'T' : 'A',
+      (unsigned)oldCpsr);
+
+  // Undefined instruction exception entry.
+  // Save CPSR to SPSR_und, switch to UND mode, set LR, and jump to vector 0x04.
+  const uint32_t returnAddr = currentInstrAddr + (thumbMode ? 2u : 4u);
+
+  // IMPORTANT: SwitchMode() keys off current CPSR mode to decide which bank
+  // to save. Switch banks *before* overwriting CPSR, otherwise the bank swap
+  // is skipped.
+  SwitchMode(CPUMode::UNDEFINED);
+
+  spsr = oldCpsr;
+
+  // Exceptions run in ARM state with IRQs masked.
+  thumbMode = false;
+  SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
+  SetCPSRFlag(cpsr, CPSR::FLAG_I, true);
+
+  registers[Register::LR] = returnAddr;
+  registers[Register::PC] = ExceptionVector::UNDEFINED;
 }
 
 void ARM7TDMI::CheckInterrupts() {
@@ -1772,9 +1814,7 @@ void ARM7TDMI::Decode(uint32_t instruction) {
     const uint32_t swi = (instruction >> 16) & 0xFFu;
     ExecuteSWI(swi);
   } else {
-    std::cout << "Unknown Instruction: 0x" << std::hex << instruction
-              << " at PC=" << (registers[15] - 4)
-              << " Mode=" << (thumbMode ? "Thumb" : "ARM") << std::endl;
+    TriggerUndefinedException(instruction);
   }
 }
 
