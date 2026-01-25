@@ -177,3 +177,46 @@ You MAY update this agent file if you discover workflow improvements that:
 - Increase planning speed
 - Improve plan accuracy
 - Reduce Implement agent confusion
+
+## TESTING
+
+Test runs always output to #file:../../debug.log unless otherwise specified
+
+alexwaldmann@Alexs-MacBook-Pro AIO Server % cd "/Users/alexwaldmann/Desktop/AIO Server" && ./build/bin/AIOServer --help  
+Usage: ./build/bin/AIOServer [options]
+AIO Entertainment System - Multi-console emulator
+
+Options:
+-h, --help Displays help on commandline options.
+--help-all Displays help, including generic Qt
+options.
+-v, --version Displays version information.
+-r, --rom <rom-path> ROM file to load directly on startup
+-l, --log-file <log-path> Log file path (default: debug.log)
+-e, --exit-on-crash Exit immediately on crash (for
+automated testing)
+--headless Run without GUI (requires --rom)
+--headless-max-ms <ms> In --headless mode, automatically
+quit after N milliseconds (useful for
+deterministic log capture)
+--headless-dump-ppm <path> In --headless mode, dump the current
+framebuffer to a binary PPM (P6)
+--headless-dump-ms <ms> In --headless mode, dump framebuffer
+after N milliseconds (default: 2000)
+--headless-assert-nonblack In --headless mode, exit non-zero if
+dumped frame is entirely black
+--input-script <path> Optional input playback script
+(applies during emulator runtime).
+Format per line: <time_ms> <KEY>
+<DOWN|UP>
+--nas-root <path> Root directory to serve via NAS
+(default: ~/AIO_NAS)
+--nas-port <port> NAS server port (default: 8080)
+--nas-token <token> Optional bearer token to require for
+all NAS requests
+-d, --debug Enable interactive CPU debugger
+(terminal controls)
+-b, --br, --breakpoint <address> Add breakpoint address (hex, can
+repeat)
+--bs, --brs, --breakpoints <addresses> Add multiple breakpoint addresses
+(comma or JSON list)

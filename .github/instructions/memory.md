@@ -170,5 +170,30 @@ Whenever you change behavior, update _at least_:
 
 ## Changelog (curated)
 
-- 2026-01-22: Added timing/performance section documenting peripheral batching, PPU color effects, and NES-on-GBA ROM requirements.- 2026-01-22: Added NAS/streaming/GUI subsystem sections to memory.md.
+### Classic NES Series Backdrop Fix (2026-01-24)
+
+Classic NES Series games (OG-DK, etc.) store the NES universal background color at GBA palette **entry 9** (offset 0x12) but clear entry 0 every frame. The PPU now falls back to entry 9 when entry 0 is black:
+
+```cpp
+// In PPU::DrawScanline(), after reading backdropColor from 0x05000000:
+if (backdropColor == 0x0000) {
+  uint16_t entry9 = memory.Read16(0x05000012);
+  if (entry9 != 0x0000) backdropColor = entry9;
+}
+```
+
+This fix is transparent to normal games (which set entry 0 directly).
+
+### ARM vs Thumb SWI Comment Extraction
+
+Per GBATEK, the GBA BIOS extracts SWI function numbers differently by mode:
+
+- **Thumb mode:** bits [7:0] of the 16-bit instruction
+- **ARM mode:** bits [23:16] of the 32-bit instruction
+
+Classic NES Series games (OG-DK, etc.) use ARM mode for their bootstrap SWI calls.
+
+- 2026-01-24: Classic NES Series backdrop fix (entry 9 fallback when entry 0 is black).
+- 2026-01-22: Added timing/performance section documenting peripheral batching, PPU color effects, and NES-on-GBA ROM requirements.
+- 2026-01-22: Added NAS/streaming/GUI subsystem sections to memory.md.
 - 2026-01-22: Instruction suite moved into `.github/instructions/` and cleanup policy made safe-by-default.
