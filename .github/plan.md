@@ -1,63 +1,265 @@
-# Plan: DKC Title Screen Birds Analysis
+# Plan: Fix SMA2 Performance Regression (EnvFlagCached Mutex Overhead)
 
-**Date:** 2026-01-23  
-**Status:** ✅ INVESTIGATED - BIRDS RENDER CORRECTLY  
-**Goal:** Investigate missing bird sprites on DKC title screen/menu
-
----
-
-## Investigation Summary
-
-### User Report
-
-User reported "no birds on the title screen/menu of DKC" - birds appear in mGBA but not in our emulator.
-
-### Diagnostic Process
-
-1. **OAM/Sprite Analysis:**
-   - Found sky sprites (y<50) ARE defined in OAM at title screen frames (400+)
-   - Sprites 27, 28, 30, 31, 32 at x=208-239, y=0-16
-   - Sprite properties: tile=0xd0-0xd1, palette=4, priority=0, mode=0 (normal)
-
-2. **Pixel Rendering Trace:**
-   Added `[BIRD_DRAW]` diagnostic - **confirmed birds ARE being drawn**:
-
-   ```
-   [BIRD_DRAW] frame=400 spr=28 x=216 y=8 ci=9 pal=4 RGB=(56,96,80)
-   [BIRD_DRAW] frame=400 spr=28 x=225 y=8 ci=2 pal=4 RGB=(88,168,72)
-   ```
-
-   Colors are distinctly GREEN (G=80-168), not sky blue.
-
-3. **Framebuffer Verification:**
-   Dumped frame at 6.7 seconds (frame ~400) and analyzed pixel data:
-   ```
-   x=216 y=8 RGB=(56,96,80)   ← GREEN bird pixel
-   x=225 y=8 RGB=(88,168,72)  ← GREEN bird pixel
-   x=216 y=9 RGB=(56,120,64)  ← GREEN bird pixel
-   x=220 y=9 RGB=(56,96,80)   ← GREEN bird pixel
-   ```
-   **Birds ARE present in the final framebuffer with correct colors!**
-
-### Root Cause
-
-**PPU is working correctly.** The birds ARE being rendered. Possible explanations for user not seeing them:
-
-1. **Timing mismatch**: User may be looking at a different frame range
-2. **Old build**: User may be running an older version of the emulator
-3. **Display scaling**: Qt display might be cropping/scaling the top of screen
-4. **Different ROM**: ROM version differences
-
-### Recommendation
-
-1. **Rebuild emulator** from latest code: `make build`
-2. **Run GUI version** and wait ~7-8 seconds for title screen to settle
-3. **Look at x=208-240, y=7-20 region** (right side of sky, top area)
-4. **Verify ROM**: Should be game code A5NE (RAREDKC1)
+**Status:** 🔴 NOT STARTED
+**Goal:** Restore SMA2 boot performance to match commit 31b507b (~2s to title screen vs current ~10s)
 
 ---
 
-## Evidence
+## Context
+
+### Root Cause Analysis
+
+The `EnvFlagCached()` function was changed from a **static-local one-time evaluation** to a **mutex-protected hash map lookup** on every call:
+
+**OLD (31b507b - fast):**
+```cpp
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));  // Computed ONCE per template instantiation
+  return enabled;
+}
+```
+
+**NEW (HEAD - slow):**
+```cpp
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);  // LOCK EVERY CALL
+  auto it = cache.find(name);  // HASH MAP LOOKUP EVERY CALL
+  // ...
+}
+```
+
+This is called on **hot paths** (every instruction cycle in some cases), causing a ~5x performance regression.
+
+### Evidence
+
+| Commit    | SMA2 at 2s dump | SMA2 at 10s dump |
+|-----------|-----------------|------------------|
+| 31b507b   | 14 colors, 96%  | N/A              |
+| HEAD      | 2 colors, 0.78% | 20 colors        |
+
+The game eventually renders correctly, but takes ~5x longer to reach the same state.
+
+---
+
+## Steps
+
+### Step 1: Revert EnvFlagCached in ARM7TDMI.cpp — `src/emulator/gba/ARM7TDMI.cpp`
+
+**Operation:** `REPLACE`
+**Anchor:**
+```cpp
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
+  return enabled;
+}
+```
+
+```cpp
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
+  return enabled;
+}
+```
+
+**Verify:** `make build && timeout 10s ./build/bin/AIOServer --headless --rom SMA2.gba --headless-max-ms 4000 --headless-dump-ppm /tmp/test.ppm --headless-dump-ms 2000 && python3 -c "...count colors..."`
+
+---
+
+### Step 2: Revert EnvFlagCached in GBAMemory.cpp — `src/emulator/gba/GBAMemory.cpp`
+
+**Operation:** `REPLACE`
+**Anchor:**
+```cpp
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
+  return enabled;
+}
+```
+
+```cpp
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
+  return enabled;
+}
+```
+
+**Verify:** Build succeeds
+
+---
+
+### Step 3: Revert EnvFlagCached in PPU.cpp — `src/emulator/gba/PPU.cpp`
+
+**Operation:** `REPLACE`
+**Anchor:**
+```cpp
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
+  return enabled;
+}
+```
+
+```cpp
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
+  return enabled;
+}
+```
+
+**Verify:** Build succeeds
+
+---
+
+### Step 4: Revert EnvFlagCached in GBA.cpp — `src/emulator/gba/GBA.cpp`
+
+**Operation:** `REPLACE`
+**Anchor:**
+```cpp
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
+  return enabled;
+}
+```
+
+```cpp
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
+  return enabled;
+}
+```
+
+**Verify:** Build succeeds
+
+---
+
+### Step 5: Remove unused mutex/unordered_map includes (if safe)
+
+Review each file after reverting. The `<mutex>`, `<unordered_map>`, and `<string>` includes may have been added solely for the new EnvFlagCached implementation. If no other code in the file uses these headers, they can be removed to clean up.
+
+**Files to check:**
+- `src/emulator/gba/ARM7TDMI.cpp`
+- `src/emulator/gba/GBAMemory.cpp`
+- `src/emulator/gba/PPU.cpp`
+- `src/emulator/gba/GBA.cpp`
+
+**Verify:** Build succeeds
+
+---
+
+## Test Strategy
+
+1. `make build` — compiles without errors
+2. `timeout 10s ./build/bin/AIOServer --headless --rom SMA2.gba --headless-max-ms 4000 --headless-dump-ppm /tmp/sma2_test.ppm --headless-dump-ms 2000` — SMA2 should show 13+ colors within 2 seconds
+3. `./build/bin/SMA2Harness SMA2.gba` — harness passes
+4. `cd build/generated/cmake && ctest --output-on-failure` — all tests pass
+5. Verify other games still work: DKC, MMBN, MZM
+
+---
+
+## Documentation Updates
+
+No memory.md changes needed - this is a performance fix, not an architecture change.
+
+---
+
+## Handoff
+
+Run `@Implement` to execute all steps.
+
+**Operation:** `REPLACE`
+**Anchor:**
+```cpp
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  static std::mutex cacheMutex;
+  std::lock_guard<std::mutex> lock(cacheMutex);
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  const bool enabled = EnvTruthy(std::getenv(name));
+  cache.emplace(name, enabled);
+  return enabled;
+}
+```
+
+```cpp
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
+  return enabled;
+}
+```
+
+**Verify:** Build succeeds
+
+---
+
+### Step 5: Remove unused includes — All affected files
+
+**Operation:** `DELETE` (after reverting)
+
+Remove the now-unused includes that were added for the mutex/unordered_map approach:
+- `#include <mutex>`
+- `#include <unordered_map>`
+- `#include <string>` (if only used for this)
+
+**Note:** Only remove if no other code in the file uses these headers.
+
+**Verify:** Build succeeds
+
+---
+
+## Test Strategy
+
+1. `make build` — compiles without errors
+2. `timeout 10s ./build/bin/AIOServer --headless --rom SMA2.gba --headless-max-ms 4000 --headless-dump-ppm /tmp/sma2_test.ppm --headless-dump-ms 2000` — SMA2 should show 13+ colors within 2 seconds
+3. `./build/bin/SMA2Harness SMA2.gba` — harness passes
+4. `cd build/generated/cmake && ctest --output-on-failure` — all tests pass
+
+---
+
+## Documentation Updates
+
+No memory.md changes needed - this is a performance fix, not an architecture change.
+
+---
+
+## Handoff
+
+Run `@Implement` to execute all steps.
 
 ### Frame Dump Analysis
 

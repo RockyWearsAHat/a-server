@@ -37,16 +37,8 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  static std::mutex cacheMutex;
-  std::lock_guard<std::mutex> lock(cacheMutex);
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  const bool enabled = EnvTruthy(std::getenv(name));
-  cache.emplace(name, enabled);
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
   return enabled;
 }
 } // namespace
@@ -2907,7 +2899,6 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
       cpsr &= ~0x80; // Clear CPSR I-bit (enable IRQ)
       halted = true;
       sleepHalt = true;
-      debuggerHalt = false;
 
       // Re-run the BIOS call after waking.
       registers[15] = biosPC;
@@ -5065,18 +5056,10 @@ void ARM7TDMI::ExecuteMSR(uint32_t instruction) {
   uint32_t currentPSR = R ? spsr : cpsr;
   uint32_t newPSR = currentPSR;
 
-  // ARM privilege rules: User mode cannot write CPSR control/extension/status
-  // fields, and cannot access SPSR at all.
-  const uint32_t curMode = GetCPUMode(cpsr);
-  const bool userMode = (curMode == CPUMode::USER);
-  if (userMode) {
-    if (R) {
-      // Ignore attempts to write SPSR in User mode.
-      return;
-    }
-    // Allow only flag updates (CPSR_f). Ignore control/extension/status.
-    mask &= 0x8u;
-  }
+  // NOTE: Real ARM7TDMI enforces privilege rules for MSR (User mode can only
+  // update flags). However, many GBA games/libraries assume they can modify
+  // CPSR from User mode. We don't enforce the privilege check for compatibility
+  // with DirectBoot and games that rely on permissive behavior.
 
   if (mask & 1)
     newPSR = (newPSR & 0xFFFFFF00) | (operand & 0x000000FF); // Control

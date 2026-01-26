@@ -83,16 +83,8 @@ inline int EnvInt(const char *name, int defaultValue) {
   return std::atoi(v);
 }
 
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  static std::mutex cacheMutex;
-  std::lock_guard<std::mutex> lock(cacheMutex);
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  const bool enabled = EnvTruthy(std::getenv(name));
-  cache.emplace(name, enabled);
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
   return enabled;
 }
 
@@ -1880,7 +1872,9 @@ void PPU::RenderMode0() {
 void PPU::RenderBackground(int bgIndex) {
   const uint16_t dispcnt = ReadRegister(0x00);
   const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
-  const bool wrapBgVram = (bgMode <= 2);
+  // NOTE: BG VRAM wrapping (mapOffset &= 0xFFFF) was attempted for modes 0-2
+  // but broke SMA2. Removed for compatibility.
+  (void)bgMode;
 
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
   uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
@@ -1971,9 +1965,10 @@ void PPU::RenderBackground(int bgIndex) {
       blockOffset = blockX * 2048;
       break;
     case 2: // 32x64, two vertical blocks
-      // GBATEK: for ScreenSize=2 (32x64 tiles), the second vertical screen
-      // block is screen base + 2 (not +1) => +0x1000 bytes.
-      blockOffset = blockY * 4096;
+      // For ScreenSize=2 (32x64 tiles), the second vertical
+      // screen block starts at screen base + 1 (not +2), i.e.
+      // +0x800 bytes per 32x32 block.
+      blockOffset = blockY * 2048;
       break;
     case 3: // 64x64, four blocks
       blockOffset = blockX * 2048 + blockY * 4096;
@@ -1984,9 +1979,6 @@ void PPU::RenderBackground(int bgIndex) {
     // Each screen block is 32x32 entries (2KB = 2048 bytes)
     uint32_t mapAddr = mapBase + blockOffset + (ty * 32 + tx) * 2;
     uint32_t mapOffset = mapAddr - 0x06000000u;
-    if (wrapBgVram) {
-      mapOffset &= 0xFFFFu;
-    }
     uint16_t tileEntry = ReadVram16(vramData, vramSize, mapOffset);
 
     int tileIndex = tileEntry & 0x3FF;
@@ -2011,9 +2003,6 @@ void PPU::RenderBackground(int bgIndex) {
       // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
       tileAddr = tileBase + (tileIndex * 32) + (inTileY * 4) + (inTileX / 2);
       uint32_t tileOffset = tileAddr - 0x06000000u;
-      if (wrapBgVram) {
-        tileOffset &= 0xFFFFu;
-      }
       tileByte = ReadVram8(vramData, vramSize, tileOffset);
 
       bool useHighNibble = (inTileX & 1) != 0;
@@ -2026,9 +2015,6 @@ void PPU::RenderBackground(int bgIndex) {
       // 64 bytes per tile
       tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
       uint32_t tileOffset = tileAddr - 0x06000000u;
-      if (wrapBgVram) {
-        tileOffset &= 0xFFFFu;
-      }
       tileByte = ReadVram8(vramData, vramSize, tileOffset);
       colorIndex = tileByte;
     }

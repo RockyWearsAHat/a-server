@@ -51,16 +51,8 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  static std::mutex cacheMutex;
-  std::lock_guard<std::mutex> lock(cacheMutex);
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  const bool enabled = EnvTruthy(std::getenv(name));
-  cache.emplace(name, enabled);
+template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
+  static const bool enabled = EnvTruthy(std::getenv(name));
   return enabled;
 }
 
@@ -2761,105 +2753,10 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     address &= ~1u;
   }
 
-  // Enforce timing-dependent write visibility for graphics memory.
-  // - During visible rendering (scanline<160 && cycle<960), VRAM/Palette/OAM
-  //   writes do not take effect. We queue them to apply at the next safe
-  //   period (HBlank/VBlank).
-  // - Forced blank always permits access.
-  if (region == 0x05 || region == 0x06 || region == 0x07) {
-    const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
-                                        (io_regs[IORegs::DISPCNT + 1] << 8));
-    const bool forcedBlank = (dispcnt & 0x0080u) != 0;
-    const bool inVisible =
-        ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
-    const bool inVBlank = ppuTimingValid && (ppuTimingScanline >= 160);
-    const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960);
-
-    if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES") && (region == 0x07)) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "OAM",
-          "OAM WRITE CHECK region=0x%02x forcedBlank=%d inVisible=%d "
-          "inHBlank=%d inVBlank=%d scanline=%d cycle=%d",
-          (unsigned)region, (int)forcedBlank, (int)inVisible, (int)inHBlank,
-          (int)inVBlank, ppuTimingScanline, ppuTimingCycle);
-    }
-
-    if (!forcedBlank && inVisible) {
-      if (region == 0x05 || region == 0x06) {
-        const uint32_t lo = (uint32_t)(value & 0xFFu);
-        const uint32_t hi = (uint32_t)((value >> 8) & 0xFFu);
-        const uint32_t off0 =
-            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK) : ([&]() {
-              uint32_t off = address & 0x1FFFFu;
-              if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
-                off -= 0x8000u;
-              return off;
-            })();
-        const uint32_t off1 = off0 + 1u;
-        if (region == 0x05) {
-          // Write to both shadow AND real palette RAM for immediate visibility.
-          // True hardware defers, but many games assume immediate writes work.
-          if (off0 < palette_shadow.size())
-            palette_shadow[off0] = (uint8_t)lo;
-          if (off1 < palette_shadow.size())
-            palette_shadow[off1] = (uint8_t)hi;
-          if (off0 < palette_ram.size())
-            palette_ram[off0] = (uint8_t)lo;
-          if (off1 < palette_ram.size())
-            palette_ram[off1] = (uint8_t)hi;
-          const uint32_t b0 = off0 / kDeferredBlockSize;
-          if (b0 < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b0]) {
-            palette_dirtyBlocks[b0] = 1;
-            palette_dirtyList.push_back(b0);
-          }
-          const uint32_t b1 = off1 / kDeferredBlockSize;
-          if (b1 < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b1]) {
-            palette_dirtyBlocks[b1] = 1;
-            palette_dirtyList.push_back(b1);
-          }
-        } else {
-          // Write to both shadow AND real VRAM for immediate visibility.
-          if (off0 < vram_shadow.size())
-            vram_shadow[off0] = (uint8_t)lo;
-          if (off1 < vram_shadow.size())
-            vram_shadow[off1] = (uint8_t)hi;
-          if (off0 < vram.size())
-            vram[off0] = (uint8_t)lo;
-          if (off1 < vram.size())
-            vram[off1] = (uint8_t)hi;
-          const uint32_t b0 = off0 / kDeferredBlockSize;
-          if (b0 < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b0]) {
-            vram_dirtyBlocks[b0] = 1;
-            vram_dirtyList.push_back(b0);
-          }
-          const uint32_t b1 = off1 / kDeferredBlockSize;
-          if (b1 < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b1]) {
-            vram_dirtyBlocks[b1] = 1;
-            vram_dirtyList.push_back(b1);
-          }
-        }
-      } else {
-        // OAM writes during the visible period are BLOCKED on real hardware.
-        // Previously we deferred OAM writes like palette/VRAM; that caused
-        // writes performed during visible to become visible in the next
-        // scanline (applied at HBlank). Hardware instead blocks these writes
-        // so they do not affect rendering until a safe window (HBlank with
-        // H-Blank Interval Free or VBlank) permits them.
-        // We therefore ignore OAM halfword writes during the visible period.
-        if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
-          const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "OAM",
-              "OAM CPU W16 BLOCKED addr=0x%08x val=0x%04x PC=0x%08x "
-              "scanline=%d cycle=%d",
-              (unsigned)address, (unsigned)value, (unsigned)pc2,
-              ppuTimingScanline, ppuTimingCycle);
-        }
-        return;
-      }
-      return;
-    }
-  }
+  // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
+  // The current emulator relies on the PPU tests and game behavior as a
+  // practical guide; stricter timing (based on ppuTimingScanline/ppuTimingCycle)
+  // previously caused valid game writes to be dropped, corrupting VRAM.
 
   // Optional: trace CPU halfword writes into Palette RAM.
   // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
@@ -3269,97 +3166,8 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     address &= ~3u;
   }
 
-  // Timing-dependent gating for graphics memory (see Write16).
-  if (region == 0x05 || region == 0x06 || region == 0x07) {
-    const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
-                                        (io_regs[IORegs::DISPCNT + 1] << 8));
-    const bool forcedBlank = (dispcnt & 0x0080u) != 0;
-    const bool inVisible =
-        ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
-    const bool inVBlank = ppuTimingValid && (ppuTimingScanline >= 160);
-    const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960);
-
-    if (!forcedBlank && inVisible) {
-      if (region == 0x05 || region == 0x06) {
-        const uint8_t b0v = (uint8_t)(value & 0xFFu);
-        const uint8_t b1v = (uint8_t)((value >> 8) & 0xFFu);
-        const uint8_t b2v = (uint8_t)((value >> 16) & 0xFFu);
-        const uint8_t b3v = (uint8_t)((value >> 24) & 0xFFu);
-        const uint32_t baseOff =
-            (region == 0x05) ? (address & MemoryMap::PALETTE_MASK) : ([&]() {
-              uint32_t off = address & 0x1FFFFu;
-              if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
-                off -= 0x8000u;
-              return off;
-            })();
-        const uint32_t off0 = baseOff + 0u;
-        const uint32_t off1 = baseOff + 1u;
-        const uint32_t off2 = baseOff + 2u;
-        const uint32_t off3 = baseOff + 3u;
-        if (region == 0x05) {
-          // Write to both shadow AND real palette RAM for immediate visibility.
-          if (off0 < palette_shadow.size())
-            palette_shadow[off0] = b0v;
-          if (off1 < palette_shadow.size())
-            palette_shadow[off1] = b1v;
-          if (off2 < palette_shadow.size())
-            palette_shadow[off2] = b2v;
-          if (off3 < palette_shadow.size())
-            palette_shadow[off3] = b3v;
-          if (off0 < palette_ram.size())
-            palette_ram[off0] = b0v;
-          if (off1 < palette_ram.size())
-            palette_ram[off1] = b1v;
-          if (off2 < palette_ram.size())
-            palette_ram[off2] = b2v;
-          if (off3 < palette_ram.size())
-            palette_ram[off3] = b3v;
-          const uint32_t blockFirst = off0 / kDeferredBlockSize;
-          const uint32_t blockLast = off3 / kDeferredBlockSize;
-          for (uint32_t b = blockFirst; b <= blockLast; b++) {
-            if (b < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b]) {
-              palette_dirtyBlocks[b] = 1;
-              palette_dirtyList.push_back(b);
-            }
-          }
-        } else {
-          // Write to both shadow AND real VRAM for immediate visibility.
-          if (off0 < vram_shadow.size())
-            vram_shadow[off0] = b0v;
-          if (off1 < vram_shadow.size())
-            vram_shadow[off1] = b1v;
-          if (off2 < vram_shadow.size())
-            vram_shadow[off2] = b2v;
-          if (off3 < vram_shadow.size())
-            vram_shadow[off3] = b3v;
-          if (off0 < vram.size())
-            vram[off0] = b0v;
-          if (off1 < vram.size())
-            vram[off1] = b1v;
-          if (off2 < vram.size())
-            vram[off2] = b2v;
-          if (off3 < vram.size())
-            vram[off3] = b3v;
-          const uint32_t blockFirst = off0 / kDeferredBlockSize;
-          const uint32_t blockLast = off3 / kDeferredBlockSize;
-          for (uint32_t b = blockFirst; b <= blockLast; b++) {
-            if (b < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b]) {
-              vram_dirtyBlocks[b] = 1;
-              vram_dirtyList.push_back(b);
-            }
-          }
-        }
-      } else {
-        // OAM writes during the visible period are BLOCKED on real hardware.
-        // Previously we deferred OAM writes (like palette/VRAM); that caused
-        // writes performed during visible to become visible at the next
-        // scanline (applied at HBlank). Hardware instead blocks these writes
-        // so they do not affect rendering until a safe window permits them.
-        return;
-      }
-      return;
-    }
-  }
+  // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
+  // (Same as Write16 - see comment there.)
 
   // Optional: trace CPU word writes into Palette RAM.
   // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
