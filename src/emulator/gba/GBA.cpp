@@ -346,6 +346,16 @@ void GBA::ConfigureBootStateFromMetadata(const ROMMetadata &metadata) {
   }
   std::cout << std::endl;
 
+  // Detect Classic NES Series games for palette workaround
+  // These games have game codes starting with "FD" (FDKE = Donkey Kong, FDME =
+  // Mario Bros, etc.)
+  if (metadata.gameCode.size() >= 2 && metadata.gameCode.substr(0, 2) == "FD") {
+    std::cout << "[ConfigureBoot] Detected Classic NES Series game, enabling "
+                 "palette workaround"
+              << std::endl;
+    ppu->SetClassicNesMode(true);
+  }
+
   // Apply game-specific boot configurations based on metadata
   // No hardcoded patches - everything is derived from the ROM's actual
   // structure

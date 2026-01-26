@@ -1986,6 +1986,22 @@ void PPU::RenderBackground(int bgIndex) {
     bool vFlip = (tileEntry >> 11) & 1;
     int paletteBank = (tileEntry >> 12) & 0xF;
 
+    // Classic NES Series (OG-DK, Mario Bros, etc.) workaround:
+    // These games use NES-style 4-color palettes (indices 0-3) but store colors
+    // at palette indices 9-14 due to how the DMA buffer is structured.
+    // The tilemap uses paletteBank=8 as a marker. When we see this:
+    // 1. Force palette bank to 0 (where colors actually are)
+    // 2. Add 9 to colorIndex to map NES indices 0-5 → GBA indices 9-14
+    // For ALL tiles in Classic NES mode, we apply the +9 offset since that's
+    // where the actual colors are stored.
+    // Enabled automatically for Classic NES Series games, or via
+    // AIO_OGDK_PALBANK_FIX=1
+    static const bool envOverride = EnvFlagCached("AIO_OGDK_PALBANK_FIX");
+    bool isClassicNesTile = classicNesMode || envOverride;
+    if (isClassicNesTile && paletteBank == 8) {
+      paletteBank = 0;
+    }
+
     int inTileX = scrolledX % 8;
     int inTileY = scrolledY % 8;
 
@@ -2047,11 +2063,19 @@ void PPU::RenderBackground(int bgIndex) {
       // the same, lower BG index wins (rendered later in sorted order)
       int pixelIndex = scanline * SCREEN_WIDTH + x;
       if (bgPriority <= priorityBuffer[pixelIndex]) {
+        // Apply Classic NES Series color index offset if needed
+        // Maps NES-style indices 1-6 → GBA indices 10-15 (since index 0 is
+        // transparent)
+        uint8_t effectiveColorIndex = colorIndex;
+        if (isClassicNesTile && !is8bpp) {
+          effectiveColorIndex = colorIndex + 9;
+        }
+
         // Fetch Color from Palette RAM
         // 0x05000000
         uint32_t paletteAddr = 0x05000000;
         if (!is8bpp) {
-          paletteAddr += (paletteBank * 32) + (colorIndex * 2);
+          paletteAddr += (paletteBank * 32) + (effectiveColorIndex * 2);
         } else {
           paletteAddr += (colorIndex * 2);
         }
@@ -2177,6 +2201,15 @@ void PPU::RestoreFramebuffer(const std::vector<uint32_t> &buffer) {
   std::lock_guard<std::mutex> lock(bufferMutex);
   if (buffer.size() == frontBuffer.size()) {
     frontBuffer = buffer;
+  }
+}
+
+void PPU::SetClassicNesMode(bool enabled) {
+  classicNesMode = enabled;
+  if (enabled) {
+    std::cout << "[PPU] Classic NES Series mode enabled (palette bank "
+                 "workaround active)"
+              << std::endl;
   }
 }
 

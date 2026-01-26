@@ -3545,11 +3545,21 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint32_t src = registers[0];
     uint32_t dst = registers[1];
     bool toVram = (comment == 0x12);
+    uint32_t origDst = dst;
 
     // Read header: bits 4-7 = compression type (1 = LZ77), bits 8-31 =
     // decompressed size
     uint32_t header = memory.Read32(src);
     uint32_t decompSize = header >> 8;
+
+    // OG-DK: Trace LZ77 to IWRAM 0x03007400
+    const bool traceOgdk = (origDst == 0x03007400u);
+    if (traceOgdk) {
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
+          "LZ77 decompress src=0x%08x dst=0x%08x size=%u", src, origDst,
+          decompSize);
+    }
 
     // Debug: trace LZ77 decompression - especially palette writes
     if ((dst & 0xFF000000) == 0x05000000) {
@@ -3621,6 +3631,28 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     // unflushed byte in vramBuffer that must be written
     if (toVram && vramBufferFull) {
       memory.Write16((dst - 1) & ~1, vramBuffer);
+    }
+
+    // OG-DK: Dump decompressed data around palette buffer offset
+    if (traceOgdk) {
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
+          "LZ77 done, written=%u bytes. Dumping first 32 bytes:", written);
+      for (int i = 0; i < 32; i += 4) {
+        uint32_t w = memory.Read32(origDst + i);
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
+            "  [0x%04x]: 0x%08x", i, w);
+      }
+      AIO::Emulator::Common::Logger::Instance().Log(
+          AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
+          "Dumping data at offset 0x10c (palette buffer, 8 bytes valid):");
+      for (int i = 0; i < 32; i += 4) {
+        uint32_t w = memory.Read32(origDst + 0x10c + i);
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
+            "  [0x%04x]: 0x%08x", 0x10c + i, w);
+      }
     }
 
     break;

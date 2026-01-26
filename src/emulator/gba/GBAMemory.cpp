@@ -1813,6 +1813,7 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       break;
     }
     uint32_t offset = address & MemoryMap::WRAM_CHIP_MASK;
+
     wram_chip[offset] = value;
     break;
   }
@@ -1845,8 +1846,6 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
                 << std::dec << std::endl;
     }
 
-    // Log palette writes only when explicitly enabled (this is extremely
-    // high-volume and will tank performance if left on).
     if (tracePalWrites) {
       static int palWriteCount = 0;
       if (palWriteCount < 500) {
@@ -2262,6 +2261,36 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 
         uint16_t control = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
         int timing = (control >> 12) & 3;
+
+        // OG-DK: Trace DMA triggered to palette
+        static int ogdkDmaCount = 0;
+        if (ogdkDmaCount < 20) {
+          uint32_t dst = dmaInternalDst[dmaChannel];
+          uint32_t src = dmaInternalSrc[dmaChannel];
+          if (dst >= 0x05000000u && dst < 0x05000400u) {
+            ogdkDmaCount++;
+            uint16_t cntL = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
+                "DMA%d triggered: src=0x%08x dst=0x%08x cntL=0x%04x "
+                "ctrl=0x%04x timing=%d",
+                dmaChannel, src, dst, cntL, control, timing);
+
+            // Dump first 32 bytes of source
+            if (ogdkDmaCount <= 3) {
+              AIO::Emulator::Common::Logger::Instance().Log(
+                  AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
+                  "First 32 bytes of source:");
+              for (int i = 0; i < 32; i += 4) {
+                uint32_t w = Read32(src + i);
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
+                    "  [%d]: 0x%08x", i, w);
+              }
+            }
+          }
+        }
+
         if (timing == 0)
           PerformDMA(dmaChannel);
       }
@@ -2755,8 +2784,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 
   // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
   // The current emulator relies on the PPU tests and game behavior as a
-  // practical guide; stricter timing (based on ppuTimingScanline/ppuTimingCycle)
-  // previously caused valid game writes to be dropped, corrupting VRAM.
+  // practical guide; stricter timing (based on
+  // ppuTimingScanline/ppuTimingCycle) previously caused valid game writes to be
+  // dropped, corrupting VRAM.
 
   // Optional: trace CPU halfword writes into Palette RAM.
   // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
