@@ -1014,7 +1014,7 @@ void ARM7TDMI::Step() {
     // normal ARM instructions rather than HLE. Keep the address range
     // in sync with the layout used in GBAMemory::InitializeHLEBIOS.
     const bool inIrqTrampoline =
-        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F50u);
+        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F70u);
 
     if (!inIrqVector && !inIrqTrampoline) {
       ExecuteBIOSFunction(pcAligned);
@@ -2789,6 +2789,8 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
       memory.Write16(IORegs::REG_IE, (uint16_t)(ie | (waitFlags & 0xFFFF)));
       cpsr &= ~0x80; // Clear CPSR I-bit (enable IRQ)
       halted = true;
+      sleepHalt = true;
+      debuggerHalt = false;
 
       // Re-run the BIOS call after waking.
       registers[15] = biosPC;

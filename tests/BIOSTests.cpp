@@ -30,44 +30,46 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   // IRQ trampoline base. These implement a small IRQ
   // dispatcher that:
   //  - saves volatile regs on SP_irq
-  //  - switches to System mode so the user handler runs
-  //    on the System stack
-  //  - calls the handler at [0x03FFFFFC] (mirror of
-  //    0x03007FFC)
-  //  - switches back to IRQ mode
-  //  - clears REG_IF using the mask at 0x03007FF4
-  //  - restores regs and returns via SUBS PC, LR, #4
+  //  - acknowledges IF before enabling nested IRQs
+  //  - switches to System mode so the user handler runs on the System stack
+  //  - calls the handler via pointer at 0x03FFFFFC
+  //  - returns to IRQ mode and exception-returns via SUBS PC, LR, #4
 
   constexpr uint32_t base = 0x00003F00u;
 
   EXPECT_EQ(mem.Read32(base + 0x00), 0xE92D500Fu); // STMDB SP!, {R0-R3,R12,LR}
   EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A02404u); // MOV   R2, #0x04000000
-  EXPECT_EQ(mem.Read32(base + 0x08), 0xE10F3000u); // MRS   R3, CPSR
-  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE3C3309Fu); // BIC   R3, R3, #0x9F
-  EXPECT_EQ(mem.Read32(base + 0x10), 0xE383301Fu); // ORR   R3, R3, #0x1F (SYS)
-  EXPECT_EQ(mem.Read32(base + 0x14), 0xE129F003u); // MSR   CPSR_c, R3
+  EXPECT_EQ(mem.Read32(base + 0x08), 0xE2820F80u); // ADD   R0, R2, #0x200
+  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE1D010B0u); // LDRH  R1, [R0, #0]
+  EXPECT_EQ(mem.Read32(base + 0x10), 0xE1D030B2u); // LDRH  R3, [R0, #2]
+  EXPECT_EQ(mem.Read32(base + 0x14), 0xE0011003u); // AND   R1, R1, R3
+  EXPECT_EQ(mem.Read32(base + 0x18), 0xE1C010B2u); // STRH  R1, [R0, #2]
+  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE59F0040u); // LDR   R0, [PC, #64]
+  EXPECT_EQ(mem.Read32(base + 0x20), 0xE1C010B0u); // STRH  R1, [R0]
 
-  EXPECT_EQ(mem.Read32(base + 0x18), 0xE92D4000u); // STMDB SP!, {LR}
-  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE28FE000u); // ADD   LR, PC, #0
-  EXPECT_EQ(mem.Read32(base + 0x20), 0xE512F004u); // LDR   PC, [R2, #-4]
-  EXPECT_EQ(mem.Read32(base + 0x24), 0xE8BD4000u); // LDMIA SP!, {LR}
+  EXPECT_EQ(mem.Read32(base + 0x24), 0xE10F3000u); // MRS   R3, CPSR
+  EXPECT_EQ(mem.Read32(base + 0x28), 0xE3C3309Fu); // BIC   R3, R3, #0x9F
+  EXPECT_EQ(mem.Read32(base + 0x2C), 0xE383301Fu); // ORR   R3, R3, #0x1F
+  EXPECT_EQ(mem.Read32(base + 0x30), 0xE129F003u); // MSR   CPSR_c, R3
 
-  EXPECT_EQ(mem.Read32(base + 0x28), 0xE10F3000u); // MRS   R3, CPSR
-  EXPECT_EQ(mem.Read32(base + 0x2C), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
-  EXPECT_EQ(mem.Read32(base + 0x30), 0xE3833012u); // ORR   R3, R3, #0x12 (IRQ)
-  EXPECT_EQ(mem.Read32(base + 0x34), 0xE129F003u); // MSR   CPSR_c, R3
+  EXPECT_EQ(mem.Read32(base + 0x34), 0xE92D4000u); // STMDB SP!, {LR}
+  EXPECT_EQ(mem.Read32(base + 0x38), 0xE59F0028u); // LDR   R0, [PC, #40]
+  EXPECT_EQ(mem.Read32(base + 0x3C), 0xE5900000u); // LDR   R0, [R0]
+  EXPECT_EQ(mem.Read32(base + 0x40), 0xE28FE000u); // ADD   LR, PC, #0
+  EXPECT_EQ(mem.Read32(base + 0x44), 0xE12FFF10u); // BX    R0
+  EXPECT_EQ(mem.Read32(base + 0x48), 0xE8BD4000u); // LDMIA SP!, {LR}
 
-  EXPECT_EQ(mem.Read32(base + 0x38), 0xE3A02404u); // MOV   R2, #0x04000000
-  EXPECT_EQ(mem.Read32(base + 0x3C), 0xE59F1010u); // LDR   R1, [PC, #16]
-  EXPECT_EQ(mem.Read32(base + 0x40), 0xE1D110B0u); // LDRH  R1, [R1]
-  EXPECT_EQ(mem.Read32(base + 0x44), 0xE2820F80u); // ADD   R0, R2, #0x200
-  EXPECT_EQ(mem.Read32(base + 0x48), 0xE1C010B2u); // STRH  R1, [R0, #2]
+  EXPECT_EQ(mem.Read32(base + 0x4C), 0xE10F3000u); // MRS   R3, CPSR
+  EXPECT_EQ(mem.Read32(base + 0x50), 0xE3C3309Fu); // BIC   R3, R3, #0x9F
+  EXPECT_EQ(mem.Read32(base + 0x54), 0xE3833092u); // ORR   R3, R3, #0x92
+  EXPECT_EQ(mem.Read32(base + 0x58), 0xE129F003u); // MSR   CPSR_c, R3
 
-  EXPECT_EQ(mem.Read32(base + 0x4C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(base + 0x50), 0xE25EF004u); // SUBS  PC, LR, #4
+  EXPECT_EQ(mem.Read32(base + 0x5C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
+  EXPECT_EQ(mem.Read32(base + 0x60), 0xE25EF004u); // SUBS  PC, LR, #4
 
   // Literal pool used by the trampoline.
-  EXPECT_EQ(mem.Read32(base + 0x54), 0x03007FF4u);
+  EXPECT_EQ(mem.Read32(base + 0x64), 0x03007FF8u);
+  EXPECT_EQ(mem.Read32(base + 0x68), 0x03FFFFFCu);
 }
 
 TEST(BIOSTest, ResetInitializesIRQHandlerPointer) {

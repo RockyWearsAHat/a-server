@@ -151,6 +151,18 @@ The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupt
 - Trampoline runs with nested IRQs enabled but same-source blocked
 - User handler can re-enable specific IRQs by clearing IF for them
 
+### HLE BIOS IRQ Trampoline
+
+The HLE BIOS IRQ trampoline at 0x3F00 follows real BIOS semantics:
+
+1. **Acknowledge IF early**: Read IE & IF, write triggered bits back to IF, store to BIOS_IF (0x03007FF8)
+2. **Then enable nested IRQs**: Switch to System mode with CPSR.I=0
+3. **Call user handler**: Via pointer at 0x03FFFFFC (mirror of 0x03007FFC)
+4. **Return to IRQ mode**: Re-mask IRQs (CPSR.I=1)
+5. **Exception return**: SUBS PC, LR, #4 restores CPSR from SPSR
+
+This ordering prevents IRQ re-entry storms when IF has pending bits.
+
 ## Logging and crash capture
 
 - Default log target is `debug.log` at repo root.

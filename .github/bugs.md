@@ -106,3 +106,86 @@ After applying `.github/plan.md` “Fix HLE BIOS IRQ Trampoline CPSR.I Flag”, 
 ### Suggested next steps
 
 - Update the HLE BIOS IRQ trampoline ordering to match real BIOS behavior (acknowledge/clear IF, or otherwise prevent same-source re-entry, before unmasking IRQs in System mode), then adjust/add BIOS tests accordingly.
+
+---
+
+## HLE BIOS IRQ return does not restore Thumb state
+
+**Status:** ⚠️ Blocked
+**Date:** 2026-01-26
+**Reporter:** Implement agent (@Implement)
+
+### Summary
+
+After updating the HLE BIOS IRQ trampoline to acknowledge IF before enabling IRQs in System
+mode, `BIOSTest.IRQReturnRestoresThumbState` still fails. The CPU returns to the wrong PC and
+does not restore Thumb state.
+
+### How to reproduce
+
+1. Build project: `make build`
+2. Run: `./build/bin/BIOSTests --gtest_filter='BIOSTest.IRQReturnRestoresThumbState'`
+
+### Observed behavior
+
+- Trampoline returns with `PC=0x08000000` (ARM-aligned) instead of `0x08000002`.
+- Thumb state is not restored on exception return.
+
+### Expected behavior
+
+- Trampoline returns to `PC=0x08000002` and restores Thumb state (CPSR.T set) via SPSR->CPSR
+  restore on `SUBS PC, LR, #4`.
+
+### Suspected root cause
+
+- Exception return (`SUBS PC, LR, #4`) is not restoring CPSR from SPSR_irq (or the pipeline/
+  Thumb PC adjustment semantics on mode/ISA switch are incorrect).
+
+---
+
+## CTest failing: multiple deterministic PPU tests
+
+**Status:** ⚠️ Blocked
+**Date:** 2026-01-26
+**Reporter:** Implement agent (@Implement)
+
+### Summary
+
+Final plan verification is blocked because `ctest --output-on-failure` fails with multiple deterministic PPU-related test failures.
+
+These failures appear unrelated to the HLE BIOS IRQ trampoline changes (BIOS tests pass), but they prevent completing the required full-suite CTest gate.
+
+### How to reproduce
+
+1. Build project: `make build`
+2. Run full CTest: `cd build/generated/cmake && ctest --output-on-failure`
+
+Optional: reproduce one example directly:
+
+- `./build/bin/PPUTests --gtest_filter='PPUTest.VramWritesBlockedDuringVisible_AllowedDuringHBlank'`
+
+### Observed behavior
+
+CTest summary reports:
+
+- 10 tests failed out of 135
+- Failing tests:
+  - `PPUBlendTest.SemiTransparentOBJ_NoFirstTarget`
+  - `PPUTest.BgTileFetchDoesNotReadFromObjVram_Mode0`
+  - `PPUTest.OamWritesBlockedDuringVisiblePeriod`
+  - `PPUTest.OamWritesDuringHBlankRequireHBlankIntervalFree`
+  - `PPUTest.VramWritesBlockedDuringVisible_AllowedDuringHBlank`
+  - `PPUTest.PaletteWritesBlockedDuringVisible_AllowedDuringHBlank`
+  - `PPUTest.VramUpperWindowMirrorsObjRegion_ForReadWriteMultipleSizes`
+  - `PPUTest.TextBgScreenSize2SelectsSecondVerticalScreenBlock`
+  - `PPUTest.Blend_AlphaClamp_Uses5BitChannelClamp`
+  - `PPUTest.SemiTransparentObjBlendingIsGatedByObjWindowEffectsEnableBit`
+
+Example failure (`PPUTest.VramWritesBlockedDuringVisible_AllowedDuringHBlank`):
+
+- Expected VRAM write during visible to be blocked (readback `0x0000`)
+- Observed VRAM write succeeds (readback `0x1234`)
+
+### Expected behavior
+
+- `ctest --output-on-failure` should pass all tests in this workspace configuration.
