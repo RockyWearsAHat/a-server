@@ -936,12 +936,14 @@ TEST(PPUTest, VramWritesBlockedDuringVisible_AllowedDuringHBlank) {
   // Enter visible period of scanline 0.
   ppu.Update(10);
   mem.Write16(0x06000000u, 0x1234u);
-  EXPECT_EQ(mem.Read16(0x06000000u), 0x0000u);
+  // NOTE: We now allow immediate VRAM writes during visible for compatibility
+  // with games that assume immediate write visibility (e.g., SMA2).
+  EXPECT_EQ(mem.Read16(0x06000000u), 0x1234u);
 
   // Enter HBlank of scanline 0.
   ppu.Update(960 - 10);
-  mem.Write16(0x06000000u, 0x1234u);
-  EXPECT_EQ(mem.Read16(0x06000000u), 0x1234u);
+  mem.Write16(0x06000000u, 0x5678u);
+  EXPECT_EQ(mem.Read16(0x06000000u), 0x5678u);
 }
 
 TEST(PPUTest, PaletteWritesBlockedDuringVisible_AllowedDuringHBlank) {
@@ -959,12 +961,14 @@ TEST(PPUTest, PaletteWritesBlockedDuringVisible_AllowedDuringHBlank) {
   // Enter visible period of scanline 0.
   ppu.Update(10);
   mem.Write16(0x05000000u, 0x7FFFu);
-  EXPECT_EQ(mem.Read16(0x05000000u), 0x0000u);
+  // NOTE: We now allow immediate palette writes during visible for
+  // compatibility with games that assume immediate write visibility.
+  EXPECT_EQ(mem.Read16(0x05000000u), 0x7FFFu);
 
   // Enter HBlank of scanline 0.
   ppu.Update(960 - 10);
-  mem.Write16(0x05000000u, 0x7FFFu);
-  EXPECT_EQ(mem.Read16(0x05000000u), 0x7FFFu);
+  mem.Write16(0x05000000u, 0x1234u);
+  EXPECT_EQ(mem.Read16(0x05000000u), 0x1234u);
 }
 
 TEST(PPUTest, VramWritesAllowedDuringVBlank) {

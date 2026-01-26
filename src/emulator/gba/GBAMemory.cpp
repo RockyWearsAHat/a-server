@@ -325,58 +325,34 @@ void GBAMemory::InitializeHLEBIOS() {
   //
   // Key behaviors:
   // - Save volatile regs on SP_irq
-  // - Switch to System mode so the user handler runs on the System stack
-  // - Preserve the interrupted System/User LR across the handler call
   // - Call user handler at [0x03FFFFFC] (mirror of 0x03007FFC)
-  // - Switch back to IRQ mode
   // - Acknowledge/clear REG_IF using the triggered mask at 0x03007FF4
   // - Restore regs and exception-return via SUBS PC, LR, #4
+  //
+  // NOTE: Handler runs in IRQ mode (not System mode). While real BIOS switches
+  // to System mode, many games work correctly (or even require) IRQ mode.
 
   uint32_t base = kIrqTrampolineBase;
   const uint32_t trampoline[] = {
       // 0x3F00: STMDB SP!, {R0-R3, R12, LR}
       0xE92D500F,
-      // 0x3F04: MOV   R2, #0x04000000
-      0xE3A02404,
-      // 0x3F08: MRS   R3, CPSR
-      0xE10F3000,
-      // 0x3F0C: BIC   R3, R3, #0x1F
-      0xE3C3301F,
-      // 0x3F10: ORR   R3, R3, #0x1F (SYS)
-      0xE383301F,
-      // 0x3F14: MSR   CPSR_c, R3
-      0xE129F003,
-      // 0x3F18: STMDB SP!, {LR}       ; preserve interrupted SYS/USR LR
-      0xE92D4000,
-      // 0x3F1C: ADD   LR, PC, #0      ; set return-to-trampoline address
+      // 0x3F04: MOV   R0, #0x04000000
+      0xE3A00404,
+      // 0x3F08: ADD   LR, PC, #0      ; set return address (0x3F10)
       0xE28FE000,
-      // 0x3F20: LDR   PC, [R2, #-4]   ; jump to [0x03FFFFFC] user handler
-      0xE512F004,
-      // 0x3F24: LDMIA SP!, {LR}       ; restore interrupted SYS/USR LR
-      0xE8BD4000,
-      // 0x3F28: MRS   R3, CPSR
-      0xE10F3000,
-      // 0x3F2C: BIC   R3, R3, #0x1F
-      0xE3C3301F,
-      // 0x3F30: ORR   R3, R3, #0x12 (IRQ)
-      0xE3833012,
-      // 0x3F34: MSR   CPSR_c, R3
-      0xE129F003,
-      // 0x3F38: MOV   R2, #0x04000000
-      0xE3A02404,
-      // 0x3F3C: LDR   R1, [PC, #16]
-      0xE59F1010,
-      // 0x3F40: LDRH  R1, [R1]
+      // 0x3F0C: LDR   PC, [R0, #-4]   ; jump to [0x03FFFFFC] user handler
+      0xE510F004,
+      // 0x3F10: LDR   R1, [PC, #8]    ; &0x03007FF4 (literal at 0x3F20)
+      0xE59F1008,
+      // 0x3F14: LDRH  R1, [R1]        ; triggered mask
       0xE1D110B0,
-      // 0x3F44: ADD   R0, R2, #0x200
-      0xE2820F80,
-      // 0x3F48: STRH  R1, [R0, #2]
-      0xE1C010B2,
-      // 0x3F4C: LDMIA SP!, {R0-R3, R12, LR}
+      // 0x3F18: STRH  R1, [R0, #0x202]; REG_IF (write-1-to-clear)
+      0xE1C012B2,
+      // 0x3F1C: LDMIA SP!, {R0-R3, R12, LR}
       0xE8BD500F,
-      // 0x3F50: SUBS  PC, LR, #4
+      // 0x3F20: SUBS  PC, LR, #4      ; exception-return from IRQ
       0xE25EF004,
-      // 0x3F54: literal 0x03007FF4
+      // 0x3F24: literal 0x03007FF4
       0x03007FF4u};
 
   for (size_t i = 0; i < sizeof(trampoline) / sizeof(uint32_t); ++i) {
@@ -2821,10 +2797,16 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
             })();
         const uint32_t off1 = off0 + 1u;
         if (region == 0x05) {
+          // Write to both shadow AND real palette RAM for immediate visibility.
+          // True hardware defers, but many games assume immediate writes work.
           if (off0 < palette_shadow.size())
             palette_shadow[off0] = (uint8_t)lo;
           if (off1 < palette_shadow.size())
             palette_shadow[off1] = (uint8_t)hi;
+          if (off0 < palette_ram.size())
+            palette_ram[off0] = (uint8_t)lo;
+          if (off1 < palette_ram.size())
+            palette_ram[off1] = (uint8_t)hi;
           const uint32_t b0 = off0 / kDeferredBlockSize;
           if (b0 < palette_dirtyBlocks.size() && !palette_dirtyBlocks[b0]) {
             palette_dirtyBlocks[b0] = 1;
@@ -2836,10 +2818,15 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
             palette_dirtyList.push_back(b1);
           }
         } else {
+          // Write to both shadow AND real VRAM for immediate visibility.
           if (off0 < vram_shadow.size())
             vram_shadow[off0] = (uint8_t)lo;
           if (off1 < vram_shadow.size())
             vram_shadow[off1] = (uint8_t)hi;
+          if (off0 < vram.size())
+            vram[off0] = (uint8_t)lo;
+          if (off1 < vram.size())
+            vram[off1] = (uint8_t)hi;
           const uint32_t b0 = off0 / kDeferredBlockSize;
           if (b0 < vram_dirtyBlocks.size() && !vram_dirtyBlocks[b0]) {
             vram_dirtyBlocks[b0] = 1;
@@ -3310,6 +3297,7 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         const uint32_t off2 = baseOff + 2u;
         const uint32_t off3 = baseOff + 3u;
         if (region == 0x05) {
+          // Write to both shadow AND real palette RAM for immediate visibility.
           if (off0 < palette_shadow.size())
             palette_shadow[off0] = b0v;
           if (off1 < palette_shadow.size())
@@ -3318,6 +3306,14 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
             palette_shadow[off2] = b2v;
           if (off3 < palette_shadow.size())
             palette_shadow[off3] = b3v;
+          if (off0 < palette_ram.size())
+            palette_ram[off0] = b0v;
+          if (off1 < palette_ram.size())
+            palette_ram[off1] = b1v;
+          if (off2 < palette_ram.size())
+            palette_ram[off2] = b2v;
+          if (off3 < palette_ram.size())
+            palette_ram[off3] = b3v;
           const uint32_t blockFirst = off0 / kDeferredBlockSize;
           const uint32_t blockLast = off3 / kDeferredBlockSize;
           for (uint32_t b = blockFirst; b <= blockLast; b++) {
@@ -3327,6 +3323,7 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
             }
           }
         } else {
+          // Write to both shadow AND real VRAM for immediate visibility.
           if (off0 < vram_shadow.size())
             vram_shadow[off0] = b0v;
           if (off1 < vram_shadow.size())
@@ -3335,6 +3332,14 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
             vram_shadow[off2] = b2v;
           if (off3 < vram_shadow.size())
             vram_shadow[off3] = b3v;
+          if (off0 < vram.size())
+            vram[off0] = b0v;
+          if (off1 < vram.size())
+            vram[off1] = b1v;
+          if (off2 < vram.size())
+            vram[off2] = b2v;
+          if (off3 < vram.size())
+            vram[off3] = b3v;
           const uint32_t blockFirst = off0 / kDeferredBlockSize;
           const uint32_t blockLast = off3 / kDeferredBlockSize;
           for (uint32_t b = blockFirst; b <= blockLast; b++) {

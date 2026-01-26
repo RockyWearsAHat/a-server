@@ -1107,8 +1107,9 @@ void ARM7TDMI::Step() {
     // The IRQ trampoline is installed in BIOS space; execute it as
     // normal ARM instructions rather than HLE. Keep the address range
     // in sync with the layout used in GBAMemory::InitializeHLEBIOS.
+    // New simplified trampoline ends at 0x3F28 (10 instructions).
     const bool inIrqTrampoline =
-        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F54u);
+        (pcAligned >= 0x00003F00u && pcAligned < 0x00003F28u);
 
     if (!inIrqVector && !inIrqTrampoline) {
       ExecuteBIOSFunction(pcAligned);
