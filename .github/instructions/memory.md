@@ -142,6 +142,11 @@ Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA ha
 - **Solution:** Fix timing to match GBATEK spec, not use LLE BIOS as workaround
 - These ROMs are excellent test cases for timing accuracy
 
+#### BG VRAM wrapping (text modes)
+
+For text backgrounds (modes 0–2), BG tilemap (screen blocks) and tile graphics (character blocks) are addressed within the BG VRAM window.  
+Implementation invariant (spec-driven): BG fetches for text modes wrap within $64\,\text{KB}$ (offset mask `0xFFFF`), i.e. BG rendering must not accidentally pull tilemap/tile data from the OBJ VRAM region.
+
 ## Logging and crash capture
 
 - Default log target is `debug.log` at repo root.

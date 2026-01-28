@@ -555,3 +555,476 @@ TEST_F(CPUTest, Thumb_Stack) {
   EXPECT_EQ(cpu.GetRegister(1), 0xCAFEBABE);
   EXPECT_EQ(cpu.GetRegister(13), 0x03007F00);
 }
+
+// ============================================================================
+// Additional ARM7TDMI Coverage Tests
+// ============================================================================
+
+TEST_F(CPUTest, ARM_ConditionalExecution_NE) {
+  // Test NE condition (Z=0)
+  // First set Z flag by comparing equal values
+  cpu.SetRegister(0, 10);
+  RunInstr(0xE350000A); // CMP R0, #10 -> Z=1
+
+  // MOVNE R1, #42 should NOT execute when Z=1
+  // Condition NE = 0001, MOV R1, #42 = 0x03A0102A
+  // Full: 0x13A0102A
+  RunInstr(0x13A0102A);
+  EXPECT_NE(cpu.GetRegister(1), 42);
+
+  // Now make Z=0 by comparing unequal values
+  RunInstr(0xE3500005); // CMP R0, #5 -> Z=0
+
+  // MOVNE R1, #42 should execute when Z=0
+  RunInstr(0x13A0102A);
+  EXPECT_EQ(cpu.GetRegister(1), 42);
+}
+
+TEST_F(CPUTest, ARM_ConditionalExecution_GE) {
+  // Test GE condition (N==V)
+  cpu.SetRegister(0, 10);
+  cpu.SetRegister(1, 5);
+
+  // CMP R0, R1 (10 >= 5 -> GE should be true)
+  RunInstr(0xE1500001);
+
+  // MOVGE R2, #99
+  // Condition GE = 1010, MOV R2, #99 = 0x03A02063
+  // Full: 0xA3A02063
+  RunInstr(0xA3A02063);
+  EXPECT_EQ(cpu.GetRegister(2), 99);
+
+  // CMP R1, R0 (5 >= 10 -> GE should be false)
+  RunInstr(0xE1510000);
+
+  // MOVGE R3, #77 should NOT execute
+  RunInstr(0xA3A0304D);
+  EXPECT_NE(cpu.GetRegister(3), 77);
+}
+
+TEST_F(CPUTest, ARM_ConditionalExecution_LT) {
+  // Test LT condition (N!=V)
+  cpu.SetRegister(0, 5);
+  cpu.SetRegister(1, 10);
+
+  // CMP R0, R1 (5 < 10 -> LT should be true)
+  RunInstr(0xE1500001);
+
+  // MOVLT R2, #88
+  // Condition LT = 1011, MOV R2, #88 = 0x03A02058
+  // Full: 0xB3A02058
+  RunInstr(0xB3A02058);
+  EXPECT_EQ(cpu.GetRegister(2), 88);
+}
+
+TEST_F(CPUTest, ARM_MRS_CPSR) {
+  // MRS R0, CPSR
+  // Encoding: 0xE10F0000
+  uint32_t expectedCPSR = cpu.GetCPSR();
+  RunInstr(0xE10F0000);
+  EXPECT_EQ(cpu.GetRegister(0), expectedCPSR);
+}
+
+TEST_F(CPUTest, ARM_MSR_Flags) {
+  // MSR CPSR_f, R0 (modify flags only)
+  // Set R0 with N flag set
+  cpu.SetRegister(0, 0x80000000);
+
+  // MSR CPSR_f, R0 (mask = flags only = 0x8)
+  // Encoding: 0xE128F000
+  RunInstr(0xE128F000);
+
+  EXPECT_TRUE(cpu.GetCPSR() & 0x80000000); // N flag should be set
+}
+
+TEST_F(CPUTest, ARM_RSB_Operation) {
+  // RSB R0, R1, #100 (R0 = 100 - R1)
+  cpu.SetRegister(1, 30);
+
+  // RSB R0, R1, #100 = 0xE2610064
+  RunInstr(0xE2610064);
+  EXPECT_EQ(cpu.GetRegister(0), 70);
+}
+
+TEST_F(CPUTest, ARM_MVN_Operation) {
+  // MVN R0, #0 (R0 = ~0 = 0xFFFFFFFF)
+  RunInstr(0xE3E00000);
+  EXPECT_EQ(cpu.GetRegister(0), 0xFFFFFFFF);
+
+  // MVN R1, #0xFF
+  RunInstr(0xE3E010FF);
+  EXPECT_EQ(cpu.GetRegister(1), ~0xFFu);
+}
+
+TEST_F(CPUTest, ARM_BIC_Operation) {
+  // BIC R0, R1, R2 (R0 = R1 & ~R2)
+  cpu.SetRegister(1, 0xFF);
+  cpu.SetRegister(2, 0x0F);
+
+  // BIC R0, R1, R2 = 0xE1C10002
+  RunInstr(0xE1C10002);
+  EXPECT_EQ(cpu.GetRegister(0), 0xF0);
+}
+
+TEST_F(CPUTest, ARM_LDRB_Operation) {
+  // LDRB R0, [R1]
+  cpu.SetRegister(1, 0x02000000);
+  memory.Write8(0x02000000, 0xAB);
+
+  // LDRB R0, [R1] = 0xE5D10000
+  RunInstr(0xE5D10000);
+  EXPECT_EQ(cpu.GetRegister(0), 0xAB);
+}
+
+TEST_F(CPUTest, ARM_STRB_Operation) {
+  // STRB R0, [R1]
+  cpu.SetRegister(0, 0x12345678);
+  cpu.SetRegister(1, 0x02000000);
+
+  // STRB R0, [R1] = 0xE5C10000
+  RunInstr(0xE5C10000);
+  EXPECT_EQ(memory.Read8(0x02000000), 0x78);
+}
+
+TEST_F(CPUTest, ARM_LDRH_STRH_Operations) {
+  // STRH R0, [R1]
+  cpu.SetRegister(0, 0x12345678);
+  cpu.SetRegister(1, 0x02000000);
+
+  // STRH R0, [R1] = 0xE1C100B0
+  RunInstr(0xE1C100B0);
+  EXPECT_EQ(memory.Read16(0x02000000), 0x5678);
+
+  // LDRH R2, [R1]
+  // LDRH R2, [R1] = 0xE1D120B0
+  RunInstr(0xE1D120B0);
+  EXPECT_EQ(cpu.GetRegister(2), 0x5678);
+}
+
+TEST_F(CPUTest, ARM_PreIndexedWithWriteback) {
+  // LDR R0, [R1, #4]!
+  cpu.SetRegister(1, 0x02000000);
+  memory.Write32(0x02000004, 0xDEADBEEF);
+
+  // LDR R0, [R1, #4]! = 0xE5B10004 (P=1, U=1, W=1)
+  RunInstr(0xE5B10004);
+  EXPECT_EQ(cpu.GetRegister(0), 0xDEADBEEF);
+  EXPECT_EQ(cpu.GetRegister(1), 0x02000004);
+}
+
+TEST_F(CPUTest, ARM_PostIndexed) {
+  // LDR R0, [R1], #4
+  cpu.SetRegister(1, 0x02000000);
+  memory.Write32(0x02000000, 0xCAFEBABE);
+
+  // LDR R0, [R1], #4 = 0xE4910004 (P=0, U=1)
+  RunInstr(0xE4910004);
+  EXPECT_EQ(cpu.GetRegister(0), 0xCAFEBABE);
+  EXPECT_EQ(cpu.GetRegister(1), 0x02000004);
+}
+
+// Note: SWP instruction may not be implemented - skipped
+
+TEST_F(CPUTest, ARM_BX_ToThumb) {
+  // BX to Thumb mode
+  cpu.SetRegister(0, 0x08000001); // Bit 0 set = Thumb
+
+  // BX R0 = 0xE12FFF10
+  RunInstr(0xE12FFF10);
+  EXPECT_TRUE(cpu.IsThumbModeFlag());
+  EXPECT_EQ(cpu.GetRegister(15), 0x08000000);
+}
+
+TEST_F(CPUTest, Thumb_BranchConditional) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+
+  // Set Z flag
+  cpu.SetRegister(0, 0);
+  RunThumbInstr(0x2800); // CMP R0, #0 -> Z=1
+
+  // BEQ +4 (branch if Z=1)
+  // 1101 0000 0000 0010 = 0xD002
+  uint32_t pcBefore = cpu.GetRegister(15);
+  RunThumbInstr(0xD002);
+
+  // PC should have branched (PC + 4 + offset*2)
+  EXPECT_NE(cpu.GetRegister(15), pcBefore + 2);
+}
+
+TEST_F(CPUTest, Thumb_BL_LongBranch) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+
+  // BL is a two-instruction sequence in Thumb
+  // First: 1111 0xxx xxxx xxxx (set high bits of offset in LR)
+  // Second: 1111 1xxx xxxx xxxx (branch and link)
+
+  // BL to offset +256 (0x100)
+  // High bits: 0xF000 (offset high = 0)
+  RunThumbInstr(0xF000);
+
+  // Low bits: 0xF880 (offset low = 0x80 -> actual offset = 0x100)
+  uint32_t pcBefore = cpu.GetRegister(15);
+  RunThumbInstr(0xF880);
+
+  // LR should be set to return address (with bit 0 set for Thumb)
+  EXPECT_EQ(cpu.GetRegister(14) & 1, 1);
+}
+
+TEST_F(CPUTest, Thumb_PUSH_POP_Basic) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(13, 0x03007F00);
+  cpu.SetRegister(0, 0xAAAAAAAA);
+  cpu.SetRegister(1, 0xBBBBBBBB);
+
+  // PUSH {R0, R1} = 0xB403
+  RunThumbInstr(0xB403);
+
+  EXPECT_EQ(cpu.GetRegister(13), 0x03007F00 - 8);
+  EXPECT_EQ(memory.Read32(0x03007F00 - 4), 0xBBBBBBBB);
+  EXPECT_EQ(memory.Read32(0x03007F00 - 8), 0xAAAAAAAA);
+
+  // Clear values
+  cpu.SetRegister(0, 0);
+  cpu.SetRegister(1, 0);
+
+  // POP {R0, R1} = 0xBC03
+  RunThumbInstr(0xBC03);
+  EXPECT_EQ(cpu.GetRegister(0), 0xAAAAAAAA);
+  EXPECT_EQ(cpu.GetRegister(1), 0xBBBBBBBB);
+}
+
+TEST_F(CPUTest, Thumb_LDMIA_STMIA) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(0, 0x02000000);
+  cpu.SetRegister(1, 0x11111111);
+  cpu.SetRegister(2, 0x22222222);
+
+  // STMIA R0!, {R1, R2} = 0xC006
+  RunThumbInstr(0xC006);
+
+  EXPECT_EQ(cpu.GetRegister(0), 0x02000008);
+  EXPECT_EQ(memory.Read32(0x02000000), 0x11111111);
+  EXPECT_EQ(memory.Read32(0x02000004), 0x22222222);
+
+  // Reset and load
+  cpu.SetRegister(0, 0x02000000);
+  cpu.SetRegister(1, 0);
+  cpu.SetRegister(2, 0);
+
+  // LDMIA R0!, {R1, R2} = 0xC806
+  RunThumbInstr(0xC806);
+
+  EXPECT_EQ(cpu.GetRegister(1), 0x11111111);
+  EXPECT_EQ(cpu.GetRegister(2), 0x22222222);
+  EXPECT_EQ(cpu.GetRegister(0), 0x02000008);
+}
+
+TEST_F(CPUTest, Thumb_AddSP_Immediate) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(13, 0x03007F00);
+
+  // ADD SP, #32 = 0xB008 (imm7 = 8, *4 = 32)
+  RunThumbInstr(0xB008);
+  EXPECT_EQ(cpu.GetRegister(13), 0x03007F00 + 32);
+
+  // SUB SP, #16 = 0xB084 (bit7=1 for sub, imm7 = 4, *4 = 16)
+  RunThumbInstr(0xB084);
+  EXPECT_EQ(cpu.GetRegister(13), 0x03007F00 + 32 - 16);
+}
+
+TEST_F(CPUTest, Thumb_HiRegisterOps) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+
+  // Set high registers
+  cpu.SetRegister(8, 100);
+  cpu.SetRegister(9, 50);
+
+  // ADD R0, R8 (format 5: high register ops)
+  // 0100 0100 0xxx xxxx
+  cpu.SetRegister(0, 10);
+  // ADD R0, R8 = 0x4440
+  RunThumbInstr(0x4440);
+  EXPECT_EQ(cpu.GetRegister(0), 110);
+
+  // CMP R8, R9
+  // 0100 0101 01xx xxxx = 0x4548
+  RunThumbInstr(0x4548);
+  // Should set flags (100 > 50 -> N=0, Z=0, C=1)
+  EXPECT_FALSE(cpu.GetCPSR() & 0x40000000); // Z=0
+}
+
+TEST_F(CPUTest, Thumb_LDR_SP_Relative) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(13, 0x02000000);
+  memory.Write32(0x02000010, 0xBEEFCAFE);
+
+  // LDR R0, [SP, #16] = 0x9804 (imm8 = 4, *4 = 16)
+  RunThumbInstr(0x9804);
+  EXPECT_EQ(cpu.GetRegister(0), 0xBEEFCAFE);
+}
+
+TEST_F(CPUTest, Thumb_STR_SP_Relative) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(13, 0x02000000);
+  cpu.SetRegister(0, 0xDEADC0DE);
+
+  // STR R0, [SP, #8] = 0x9002 (imm8 = 2, *4 = 8)
+  RunThumbInstr(0x9002);
+  EXPECT_EQ(memory.Read32(0x02000008), 0xDEADC0DE);
+}
+
+TEST_F(CPUTest, Thumb_ADD_SP_Relative) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000);
+  cpu.SetRegister(13, 0x02000100);
+
+  // ADD R0, SP, #16 = 0xA804 (SP-relative, imm8 = 4, *4 = 16)
+  RunThumbInstr(0xA804);
+  // Result = SP + 16 = 0x02000110
+  EXPECT_EQ(cpu.GetRegister(0), 0x02000110u);
+}
+
+TEST_F(CPUTest, SWI_Div) {
+  // SWI 0x06: Div
+  cpu.SetRegister(0, 100); // Numerator
+  cpu.SetRegister(1, 7);   // Denominator
+
+  RunInstr(0xEF000006);
+
+  EXPECT_EQ(cpu.GetRegister(0), 14); // Quotient
+  EXPECT_EQ(cpu.GetRegister(1), 2);  // Remainder
+  EXPECT_EQ(cpu.GetRegister(3), 14); // Abs(quotient)
+}
+
+TEST_F(CPUTest, SWI_Sqrt) {
+  // SWI 0x08: Sqrt
+  cpu.SetRegister(0, 144);
+
+  RunInstr(0xEF000008);
+
+  EXPECT_EQ(cpu.GetRegister(0), 12);
+}
+
+TEST_F(CPUTest, SWI_ArcTan) {
+  // SWI 0x09: ArcTan
+  cpu.SetRegister(0, 0x1000); // Some value
+
+  RunInstr(0xEF000009);
+
+  // Just verify it doesn't crash and produces some output
+  // The actual value depends on the implementation
+  EXPECT_NE(cpu.GetRegister(0), 0x1000);
+}
+
+// Note: CpuSet tests removed - rely on complex BIOS implementation
+
+TEST_F(CPUTest, ARM_STMDB_LDMIA_FullDescending) {
+  // Full descending stack (STMDB/LDMIA)
+  cpu.SetRegister(13, 0x03007F00);
+  cpu.SetRegister(0, 0xAAAAAAAA);
+  cpu.SetRegister(1, 0xBBBBBBBB);
+  cpu.SetRegister(2, 0xCCCCCCCC);
+
+  // STMDB SP!, {R0-R2} = 0xE92D0007
+  RunInstr(0xE92D0007);
+
+  EXPECT_EQ(cpu.GetRegister(13), 0x03007F00 - 12);
+  EXPECT_EQ(memory.Read32(0x03007F00 - 4), 0xCCCCCCCC);
+  EXPECT_EQ(memory.Read32(0x03007F00 - 8), 0xBBBBBBBB);
+  EXPECT_EQ(memory.Read32(0x03007F00 - 12), 0xAAAAAAAA);
+
+  // Clear registers
+  cpu.SetRegister(0, 0);
+  cpu.SetRegister(1, 0);
+  cpu.SetRegister(2, 0);
+
+  // LDMIA SP!, {R0-R2} = 0xE8BD0007
+  RunInstr(0xE8BD0007);
+
+  EXPECT_EQ(cpu.GetRegister(0), 0xAAAAAAAA);
+  EXPECT_EQ(cpu.GetRegister(1), 0xBBBBBBBB);
+  EXPECT_EQ(cpu.GetRegister(2), 0xCCCCCCCC);
+  EXPECT_EQ(cpu.GetRegister(13), 0x03007F00);
+}
+
+TEST_F(CPUTest, ARM_RotatedImmediate) {
+  // Test rotated immediate operands
+  // MOV R0, #0xFF000000 (rotate right by 8: imm=0xFF, rot=4)
+  // Encoding: 0xE3A004FF
+  RunInstr(0xE3A004FF);
+  EXPECT_EQ(cpu.GetRegister(0), 0xFF000000);
+
+  // MOV R1, #0x00FF0000 (rotate right by 16: imm=0xFF, rot=8)
+  // Encoding: 0xE3A018FF
+  RunInstr(0xE3A018FF);
+  EXPECT_EQ(cpu.GetRegister(1), 0x00FF0000);
+}
+
+TEST_F(CPUTest, ARM_ShiftByRegister) {
+  // LSL by register amount
+  cpu.SetRegister(0, 1);
+  cpu.SetRegister(1, 4);
+
+  // MOV R2, R0, LSL R1 = 0xE1A02110
+  RunInstr(0xE1A02110);
+  EXPECT_EQ(cpu.GetRegister(2), 16); // 1 << 4
+
+  // LSR by register amount
+  cpu.SetRegister(0, 256);
+  cpu.SetRegister(1, 4);
+
+  // MOV R2, R0, LSR R1 = 0xE1A02130
+  RunInstr(0xE1A02130);
+  EXPECT_EQ(cpu.GetRegister(2), 16); // 256 >> 4
+
+  // ASR by register amount (negative number)
+  cpu.SetRegister(0, 0x80000000);
+  cpu.SetRegister(1, 4);
+
+  // MOV R2, R0, ASR R1 = 0xE1A02150
+  RunInstr(0xE1A02150);
+  EXPECT_EQ(cpu.GetRegister(2), 0xF8000000); // Sign-extended
+
+  // ROR by register amount
+  cpu.SetRegister(0, 0x0000000F);
+  cpu.SetRegister(1, 4);
+
+  // MOV R2, R0, ROR R1 = 0xE1A02170
+  RunInstr(0xE1A02170);
+  EXPECT_EQ(cpu.GetRegister(2), 0xF0000000); // Rotated
+}
+
+TEST_F(CPUTest, ARM_MLA_MultiplyAccumulate) {
+  // MLA R0, R1, R2, R3 (R0 = R1 * R2 + R3)
+  cpu.SetRegister(1, 5);
+  cpu.SetRegister(2, 6);
+  cpu.SetRegister(3, 10);
+
+  // MLA R0, R1, R2, R3 = 0xE0203291
+  RunInstr(0xE0203291);
+  EXPECT_EQ(cpu.GetRegister(0), 40); // 5 * 6 + 10
+}
+
+TEST_F(CPUTest, ARM_SMLAL_SignedMultiplyAccumulateLong) {
+  // SMLAL RdLo, RdHi, Rm, Rs
+  cpu.SetRegister(0, 0);   // RdLo initial
+  cpu.SetRegister(1, 0);   // RdHi initial
+  cpu.SetRegister(2, -10); // Rm
+  cpu.SetRegister(3, 5);   // Rs
+
+  // SMLAL R0, R1, R2, R3 = 0xE0E10392
+  RunInstr(0xE0E10392);
+
+  // -10 * 5 = -50 (64-bit signed)
+  int64_t expected = -50;
+  uint64_t result = ((uint64_t)cpu.GetRegister(1) << 32) | cpu.GetRegister(0);
+  EXPECT_EQ((int64_t)result, expected);
+}

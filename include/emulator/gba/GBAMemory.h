@@ -32,6 +32,13 @@ public:
   // execute BIOS code directly instead of using HLE stubs.
   bool HasLLEBIOS() const { return lleBiosLoaded; }
 
+  // Set BIOS prefetch value (used by CPU after SWI calls for Classic NES
+  // protection)
+  void SetBiosPrefetch(uint32_t value) { biosPrefetch = value; }
+
+  // Get open-bus value for unmapped memory reads (Classic NES protection)
+  uint32_t GetOpenBusValue() const;
+
   // APU connection for sound callbacks
   void SetAPU(APU *apuPtr) { apu = apuPtr; }
   // PPU connection for DMA updates
@@ -272,7 +279,14 @@ private:
   // When set, the CPU should treat the BIOS region as real code/data and
   // avoid High-Level Emulation shortcuts for BIOS entry points.
   bool lleBiosLoaded = false;
+
+  // BIOS open bus prefetch value. When reading from BIOS while executing
+  // outside of BIOS, this value is returned instead of actual BIOS data.
+  // Classic NES Series games check this value as an anti-emulation measure.
+  // The value is set to 0xE3A02004 (MOV R2, #4) after SWI calls return.
+  uint32_t biosPrefetch = 0xE3A02004;
   std::vector<uint8_t> rom;
+  size_t romSize = 0; // Actual ROM file size (for open bus detection)
   std::vector<uint8_t> sram;
 
   // EEPROM Helpers

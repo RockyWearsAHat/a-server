@@ -2442,6 +2442,8 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
 
   // If we're about to load PC and the computed address is clearly wrong, log
   // it. This is focused on SMA2's early crash: LDMDA R8, {...,PC}.
+  // NOTE: Disabled for now as it's too noisy
+  /*
   if (L && ((regList >> 15) & 1)) {
     Logger::Instance().LogFmt(LogLevel::Error, "CPU",
                               "LDM setup: instr=0x%08x Rn=R%u base=0x%08x "
@@ -2450,6 +2452,7 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
                               (int)P, (int)U, (int)W, (int)S,
                               (unsigned)regList);
   }
+  */
 
   // Handle S bit:
   // - If LDM with S=1 and PC not in list: access user-mode banked regs (R8-R14)
@@ -2962,6 +2965,16 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   // When we HLE a BIOS routine, we skip the real instruction stream, so we
   // must charge some time explicitly.
   constexpr int kSwiOverheadCycles = 32;
+
+  // OGDK TRACE: Log all SWI calls for debugging
+  if (comment != 0x05) { // Skip VBlankIntrWait spam
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "SWI 0x%02X called r0=0x%08X r1=0x%08X r2=0x%08X", comment,
+             registers[0], registers[1], registers[2]);
+    AIO::Emulator::Common::Logger::Instance().Log(
+        AIO::Emulator::Common::LogLevel::Info, "OGDK_SWI", buf);
+  }
 
   switch (comment) {
   case 0x00: // SoftReset
@@ -3928,6 +3941,12 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
               << " at PC=" << registers[15] << std::endl;
     break;
   }
+
+  // Update biosPrefetch after every SWI call - mimics real BIOS returning with
+  // "MOV R2, #4" (0xE3A02004) at the SWI return point. Classic NES games check
+  // this value when reading BIOS from outside BIOS as anti-emulation
+  // protection.
+  memory.SetBiosPrefetch(0xE3A02004);
 }
 
 void ARM7TDMI::AdvanceHLECycles(int cycles) {

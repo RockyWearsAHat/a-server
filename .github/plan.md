@@ -1,169 +1,206 @@
-# Plan: Diagnose OG-DK (Classic NES Series: Donkey Kong) 8-Color Graphics Issue
+# Plan: Fix Classic NES Series (OG-DK) Palette Rendering
 
-**Status:** 🟡 DIAGNOSIS COMPLETE - REQUIRES FURTHER INVESTIGATION
-**Goal:** Understand why OG-DK (FDKE01) shows only 8 colors instead of full palette
+**Status:** 🔴 NOT STARTED  
+**Goal:** Fix OG-DK showing only 1% red when mgba shows 20%+ red on title screen
 
 ---
 
 ## Context
 
-### Executive Summary
+### Investigation Summary
 
-OG-DK (Classic NES Series: Donkey Kong) shows corrupted graphics with only 8 distinct colors. This issue exists at ALL commits tested, including known-good d20cc15 and 31b507b, meaning it predates recent changes.
+**Issue:** OG-DK.gba shows only ~1% red pixels (367); mgba shows ~20% red.
 
-### Diagnostic Findings
+**VRAM Analysis (debug.log):** Tile data contains both:
 
-#### Display Configuration
+- Low colorIndex (1-6): These get +8 offset → palette 9-14 ✓
+- High colorIndex (9-14): These use direct index → palette 9-14 ✓
 
-- **Mode 0** (tiled backgrounds), NOT Mode 4 (bitmap)
-- **DISPCNT = 0x160**: BG0 enabled, OBJ disabled, 1D OBJ mapping
-- **BG0CNT = 0x8d04**: 4bpp mode (16 colors per palette bank), charBase=1, screenBase=13
-- **Tile map uses palette banks 0, 1, 3, 8** (various tiles use different palette banks)
+**Current Palette Logic (PPU.cpp ~line 2099):**
 
-#### Palette State at Frame 200
+`````cpp
+if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
+  if (colorIndex <= 6) {
+    ````markdown
+    # Plan: Fix OG-DK (Classic NES Series) Corrupted Tiles
 
-```
-Palette[0-8]: All zeros (BLACK)
-Palette[9]: 0x35ad (gray)
-Palette[10]: 0x4e73 (gray)
-Palette[11]: 0x7ff0 (cyan)
-Palette[12]: 0x7fff (white)
-Palette[13]: 0x3ff (yellow/cyan)
-Palette[14]: 0x1f (red)
-Palette[15]: 0x0 (black)
-```
+    **Status:** 🔴 NOT STARTED
+    **Goal:** Fix OG-DK.gba (FDKE) severe BG tile corruption (wrong glyphs/patterns) without ROM-specific hacks.
 
-Colors are **offset by 9 indices** within palette bank 0!
+    ---
 
-#### Frame Output Analysis
+    ## Diagnosis (working hypothesis)
 
-```
-8 unique colors in frame dump:
-- RGB(0,0,0): 37,714 pixels (BLACK - most pixels!)
-- RGB(248,0,0): 217 pixels (RED)
-- RGB(248,248,248): 175 pixels (WHITE)
-- RGB(128,248,248): 91 pixels (CYAN)
-- RGB(248,248,0): 67 pixels (YELLOW)
-- RGB(104,104,104): 64 pixels (GRAY)
-- RGB(152,152,152): 64 pixels (LIGHT GRAY)
-- RGB(224,224,224): 8 pixels (VERY LIGHT GRAY)
-```
+    The current `classicNesMode` path in `PPU::RenderBackground()` contains a heuristic that dynamically chooses tile bases in VRAM for Classic NES titles. This is a game-specific workaround and can easily select incorrect data, producing repeating patterns.
 
-### Root Cause Hypothesis
+    Separately, our BG tile fetch path currently reads VRAM through a unified 96KB view and (per existing tests) allows BG fetches to read from the OBJ region when tile indices overflow. GBATEK documents BG character/screen fetches as wrapping within the BG VRAM window for text modes. Classic NES-on-GBA ROMs appear to rely on correct BG wrapping (and/or not reading OBJ VRAM) to avoid pulling sprite/font data into BG.
 
-In 4bpp mode with palette bank 0:
+    **Fix direction:** make BG tilemap + tile-graphics reads in text BG modes wrap within the 64KB BG VRAM window, and remove the Classic NES tile-base heuristic.
 
-- Tiles reference color indices 0-15
-- Palette bank 0 covers palette RAM at 0x05000000-0x0500001F
-- BUT colors are written starting at index 9, not index 0
+    ---
 
-This means tiles using color indices 0-8 render as BLACK (zero), while only indices 9-14 have actual colors.
+    ## Step 1 — Documentation update (spec-first)
 
-### Possible Causes
+    **File:** `.github/instructions/memory.md`
 
-1. **Palette initialization bug**: Game expects BIOS or hardware to pre-fill palette indices 0-8, but HLE BIOS doesn't
-2. **DMA timing issue**: Palette DMA may be writing to wrong offset or being partially skipped
-3. **SWI decompression bug**: Palette may be LZ77/RLE compressed with a header that shifts the destination
-4. **Classic NES Series quirk**: These games contain NES emulators; the inner emulator may have specific palette expectations
+    **Operation:** `INSERT` under `### Classic NES Series / NES-on-GBA ROMs`
 
----
+    ```markdown
+    #### BG VRAM wrapping (text modes)
 
-## Investigation Steps Required
+    For text backgrounds (modes 0–2), BG tilemap (screen blocks) and tile graphics (character blocks) are addressed within the BG VRAM window.
 
-### Step 1: Compare with LLE BIOS
+    Implementation invariant (spec-driven): BG fetches for text modes wrap within $64\,\text{KB}$ (offset mask `0xFFFF`), i.e. BG rendering must not accidentally pull tilemap/tile data from the OBJ VRAM region.
+    ```
 
-Test if the game works correctly with real GBA BIOS:
+    ---
 
-```bash
-# Add gba_bios.bin to project root and run
-./build/bin/AIOServer --headless --headless-max-ms 5000 --rom OG-DK.gba --headless-dump-ppm /tmp/ogdk_lle.ppm
-```
+    ## Step 2 — Tests (fail first)
 
-### Step 2: Trace Palette Writes During Boot
+    ### 2.1 Update existing test to match spec
 
-Add tracing to `GBAMemory::Write16()` for palette RAM writes (0x05000000-0x050003FF) during the first 100 frames to see:
+    **File:** `tests/PPUTests.cpp`
 
-- What addresses are being written
-- What values are being written
-- What triggers the writes (CPU, DMA, SWI)
+    **Operation:** `UPDATE` test `PPUTest.BgTileFetchDoesNotReadFromObjVram_Mode0`
 
-### Step 3: Check SWI Decompression
+    **Old expectation (current behavior):** BG tile fetch reads OBJ VRAM when tile index overflows into 0x06010000.
 
-If palette is compressed, verify HLE SWI 0x11/0x12/0x13 (LZ77/Huffman) decompression:
+    **New expectation (spec):** BG tile fetch wraps within 64KB BG VRAM, so tile index 512 with charBase=3 wraps to 0x06000000 and produces red.
 
-- Destination address calculation
-- Header byte handling (size vs destination offset)
+    ```cpp
+    // Render scanline 0 and sample pixel (0,0). Spec behavior: BG fetch wraps
+    // within 64KB BG VRAM, so tile 512 wraps and reads from BG VRAM => red.
+    ppu.Update(TestUtil::kCyclesToHBlankStart);
+    ppu.SwapBuffers();
+    EXPECT_EQ(TestUtil::GetPixel(ppu, 0, 0), TestUtil::ARGBFromBGR555(0x001F));
+    ```
 
-### Step 4: Compare Against mGBA
+    ### 2.2 Add a map-wrapping test for size=3
 
-Run with mGBA to verify correct behavior:
+    **File:** `tests/PPUTests.cpp`
 
-```bash
-/opt/homebrew/bin/mgba OG-DK.gba
-# Capture frame at same point for comparison
-```
+    **Operation:** `ADD` new test
 
----
+    ```cpp
+    TEST(PPUTest, BgTileMapWrapsWithin64K_Mode0_Size3) {
+      GBAMemory mem;
+      mem.Reset();
 
-## Files to Investigate
+      // Mode 0, BG0 enabled.
+      mem.Write16(0x04000000u, 0x0100u);
 
-1. [src/emulator/gba/ARM7TDMI.cpp](src/emulator/gba/ARM7TDMI.cpp) - SWI handlers (LZ77, Huffman, RLE decompression)
-2. [src/emulator/gba/GBAMemory.cpp](src/emulator/gba/GBAMemory.cpp) - Palette RAM writes, DMA to palette
-3. [src/emulator/gba/PPU.cpp](src/emulator/gba/PPU.cpp) - 4bpp palette bank calculation (verified correct)
+      // Palette: idx1=red, idx2=green.
+      mem.Write16(0x05000002u, 0x001Fu);
+      mem.Write16(0x05000004u, 0x03E0u);
 
----
+      // BG0CNT:
+      // - char base block 0 => tileBase=0x06000000
+      // - screen base block 31 => mapBase=0x0600F800
+      // - size 3 => 64x64 tiles (4 screen blocks, can overflow 64KB)
+      const uint16_t bg0cnt = (uint16_t)((0u << 2) | (31u << 8) | (3u << 14));
+      mem.Write16(0x04000008u, bg0cnt);
 
-## Technical Details
+      // Scroll into bottom-right block (tx>=32, ty>=32).
+      mem.Write16(0x04000010u, 256u); // BG0HOFS
+      mem.Write16(0x04000012u, 256u); // BG0VOFS
 
-### 4bpp Palette Bank Calculation (Verified Correct)
+      // Tile #0 filled with palette idx 1 (red), tile #1 with idx 2 (green).
+      for (uint32_t o = 0; o < 32; o += 2) {
+        mem.Write16(0x06000000u + o, 0x1111u);
+        mem.Write16(0x06000020u + o, 0x2222u);
+      }
 
-```cpp
-// In PPU::RenderBackground()
-if (!is8bpp) {
-  paletteAddr += (paletteBank * 32) + (colorIndex * 2);
-}
-```
+      // If NOT wrapped, BG would read map entry at 0x06011000 (beyond 64KB).
+      // We intentionally put tile #1 there (green) to catch incorrect behavior.
+      mem.Write16(0x06011000u, 0x0001u);
 
-For palette bank 0, color index 1:
+      // With 64KB wrapping, 0x06011000 wraps to 0x06001000.
+      // Put tile #0 there (red) as the expected correct entry.
+      mem.Write16(0x06001000u, 0x0000u);
 
-- paletteAddr = 0x05000000 + (0 _ 32) + (1 _ 2) = 0x05000002
+      PPU ppu(mem);
+      ppu.Update(TestUtil::kCyclesToHBlankStart);
+      ppu.SwapBuffers();
+      EXPECT_EQ(TestUtil::GetPixel(ppu, 0, 0), TestUtil::ARGBFromBGR555(0x001F));
+    }
+    ```
 
-This is correct per GBATEK.
+    ---
 
-### Expected vs Actual Palette Layout
+    ## Step 3 — Implementation
 
-**Expected (correct game):**
+    ### 3.1 Remove Classic NES tile-base heuristic; implement BG 64KB wrapping
 
-```
-Palette[0]: backdrop color
-Palette[1-15]: game colors for palette bank 0
-```
+    **File:** `src/emulator/gba/PPU.cpp`
 
-**Actual (OG-DK):**
+    **Operation A:** `ADD` BG-specific VRAM readers next to the existing `ReadVram8/ReadVram16` helpers.
 
-```
-Palette[0-8]: BLACK (0x0000)
-Palette[9-14]: game colors (offset by 9!)
-Palette[15]: BLACK
-```
+    ```cpp
+    inline uint32_t MapBgVramOffset(uint32_t offset) {
+      // Text BG fetches wrap within 64KB BG VRAM window.
+      return offset & 0xFFFFu;
+    }
 
----
+    inline uint8_t ReadBgVram8(const uint8_t *vram, size_t vramSize,
+                               uint32_t offset) {
+      if (!vram || vramSize == 0)
+        return 0;
+      const uint32_t mapped = MapBgVramOffset(offset) % (uint32_t)vramSize;
+      return vram[mapped];
+    }
 
-## Next Steps
+    inline uint16_t ReadBgVram16(const uint8_t *vram, size_t vramSize,
+                                 uint32_t offset) {
+      if (!vram || vramSize == 0)
+        return 0;
+      const uint32_t o0 = MapBgVramOffset(offset) % (uint32_t)vramSize;
+      const uint32_t o1 = MapBgVramOffset(offset + 1u) % (uint32_t)vramSize;
+      return (uint16_t)(vram[o0] | (vram[o1] << 8));
+    }
+    ```
 
-This plan documents the diagnosis. The fix requires:
+    **Operation B:** `UPDATE` `PPU::RenderBackground()` to use `ReadBgVram16/ReadBgVram8` for tilemap entries and 4bpp/8bpp tile bytes.
 
-1. **Confirming root cause** with LLE BIOS test
-2. **Tracing palette initialization** to see why indices 0-8 are empty
-3. **Possible SWI fix** if decompression is writing to wrong address
+    ```cpp
+    uint16_t tileEntry = ReadBgVram16(vramData, vramSize, mapOffset);
+    ```
 
-**Status:** Investigation needed. The PPU rendering logic is correct; the issue is in palette initialization/population.
+    ```cpp
+    tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
+    ```
 
----
+    ```cpp
+    tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
+    ```
 
-## Handoff
+    **Operation C:** `DELETE` the `resolveClassicNesTileStartOffset` lambda and the `if (classicNesMode) { ... }` override of tileStartOffset.
 
-This diagnosis is complete. Further work requires:
+    ---
 
-- Access to LLE BIOS for comparison testing
-- Adding palette write tracing to identify the source of the offset problem
+    ## Step 4 — Verify
+
+    1) Build + run unit tests:
+
+    ```bash
+    cd "/Users/alexwaldmann/Desktop/AIO Server" && make build
+    cd "/Users/alexwaldmann/Desktop/AIO Server/build/generated/cmake" && ctest --output-on-failure
+    ```
+
+    2) Headless OG-DK frame dump + ASCII preview (manual sanity):
+
+    ```bash
+    cd "/Users/alexwaldmann/Desktop/AIO Server" && rm -f current_ogdk.ppm && \
+    ./build/bin/AIOServer --rom OG-DK.gba --headless --headless-max-ms 6000 \
+      --headless-dump-ms 3000 --headless-dump-ppm current_ogdk.ppm
+    python3 scripts/ppm_ascii_preview.py current_ogdk.ppm --w 120 --h 70 | head -80
+    python3 analyze_ppm.py current_ogdk.ppm
+    ```
+
+    ---
+
+    ## Handoff
+
+    Run `@Implement` to apply Step 1–4 exactly.
+
+    ````
+`````

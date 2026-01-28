@@ -254,6 +254,35 @@ inline uint16_t ReadVram16(const uint8_t *vram, size_t vramSize,
       MapVramOffset(offset + 1) % static_cast<uint32_t>(vramSize);
   return (uint16_t)(vram[o0] | (vram[o1] << 8));
 }
+
+// BG-specific VRAM accessors -------------------------------------------------
+// BG fetches for text modes (0-2) are confined to the 64KB BG VRAM window and
+// must wrap within that window. Provide helpers that map offsets accordingly so
+// PPU BG code can express intent and avoid accidentally sampling OBJ VRAM.
+inline uint32_t MapBgVramOffset(uint32_t offset) {
+  // Text BG fetches wrap within 64KB BG VRAM window.
+  return offset & 0xFFFFu;
+}
+
+inline uint8_t ReadBgVram8(const uint8_t *vram, size_t vramSize,
+                           uint32_t offset) {
+  if (!vram || vramSize == 0)
+    return 0;
+  const uint32_t mapped =
+      MapBgVramOffset(offset) % static_cast<uint32_t>(vramSize);
+  return vram[mapped];
+}
+
+inline uint16_t ReadBgVram16(const uint8_t *vram, size_t vramSize,
+                             uint32_t offset) {
+  if (!vram || vramSize == 0)
+    return 0;
+  const uint32_t o0 = MapBgVramOffset(offset) % static_cast<uint32_t>(vramSize);
+  const uint32_t o1 =
+      MapBgVramOffset(offset + 1u) % static_cast<uint32_t>(vramSize);
+  return (uint16_t)(vram[o0] | (vram[o1] << 8));
+}
+
 } // namespace
 
 PPU::PPU(GBAMemory &mem)
@@ -273,6 +302,41 @@ PPU::PPU(GBAMemory &mem)
 
 PPU::~PPU() = default;
 
+void PPU::Reset() {
+  // Reset timing state
+  cycleCounter = 0;
+  scanline = 0;
+  frameCount = 0;
+  prevVBlankState = false;
+
+  // Reset internal affine counters
+  bg2x_internal = 0;
+  bg2y_internal = 0;
+  bg3x_internal = 0;
+  bg3y_internal = 0;
+
+  // Clear OBJ window mask
+  objWindowMaskLine.fill(0);
+
+  // CRITICAL: Reset Classic NES mode flag (fixes state leakage between ROMs)
+  classicNesMode = false;
+
+  // Clear framebuffers to black
+  std::fill(backBuffer.begin(), backBuffer.end(), 0xFF000000);
+  {
+    std::lock_guard<std::mutex> lock(bufferMutex);
+    std::fill(frontBuffer.begin(), frontBuffer.end(), 0xFF000000);
+  }
+
+  // Reset priority and layer buffers
+  std::fill(priorityBuffer.begin(), priorityBuffer.end(), 4);
+  std::fill(layerBuffer.begin(), layerBuffer.end(), 5);
+  std::fill(underColorBuffer.begin(), underColorBuffer.end(), 0xFF000000);
+  std::fill(underLayerBuffer.begin(), underLayerBuffer.end(), 5);
+  std::fill(objSemiTransparentBuffer.begin(), objSemiTransparentBuffer.end(),
+            0);
+}
+
 void PPU::Update(int cycles) {
   // GBA PPU Timing (Simplified for now)
   // 4 cycles per pixel (roughly)
@@ -282,17 +346,6 @@ void PPU::Update(int cycles) {
 
   if (TraceGbaSpam()) {
     static int updateCallCount = 0;
-    static int totalCyclesReceived = 0;
-    if (updateCallCount < 10) {
-      updateCallCount++;
-      totalCyclesReceived += cycles;
-      std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
-      dbg << "[PPU::Update #" << updateCallCount << "] cycles=" << cycles
-          << " total=" << totalCyclesReceived
-          << " cycleCounter=" << cycleCounter << " scanline=" << scanline
-          << std::endl;
-      dbg.close();
-    }
   }
 
   while (cycles > 0) {
@@ -393,18 +446,6 @@ void PPU::Update(int cycles) {
             std::cout << " " << std::hex << color << std::dec;
           }
           std::cout << std::endl;
-        }
-
-        if (TraceGbaSpam()) {
-          // Log every frame completion
-          static int frameLogCount = 0;
-          if (frameLogCount < 100) { // Log first 100 frames
-            frameLogCount++;
-            std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
-            dbg << "[PPU FRAME #" << frameCount << "] Completed at cycles"
-                << std::endl;
-            dbg.close();
-          }
         }
       }
 
@@ -733,39 +774,6 @@ void PPU::DrawScanline() {
   uint8_t g = ((backdropColor >> 5) & 0x1F) << 3;
   uint8_t b = ((backdropColor >> 10) & 0x1F) << 3;
   uint32_t backdropARGB = 0xFF000000 | (r << 16) | (g << 8) | b;
-
-  if (TraceGbaSpam()) {
-    static int backdropLogCount = 0;
-    if (backdropLogCount < 5 && scanline == 0) {
-      backdropLogCount++;
-      std::ofstream dbg("/tmp/ppu_debug.txt", std::ios::app);
-      dbg << "[PPU DrawScanline] scanline=0 backdropColor=0x" << std::hex
-          << backdropColor << " RGB=(" << std::dec << (int)r << "," << (int)g
-          << "," << (int)b << ")"
-          << " ARGB=0x" << std::hex << backdropARGB << std::endl;
-      // Sample first few pixels of the buffer after drawing
-      if (!backBuffer.empty()) {
-        dbg << "  Buffer[0]=0x" << std::hex << backBuffer[0]
-            << " Buffer[100]=0x" << backBuffer[100] << " Buffer[1000]=0x"
-            << backBuffer[1000] << std::endl;
-      }
-      dbg.close();
-    }
-
-    static int drawScanlineCount = 0;
-    if (drawScanlineCount < 5 && scanline < 5) {
-      drawScanlineCount++;
-      // Also dump palette from 0x05000000 directly
-      uint16_t pal0 = memory.Read16(0x05000000);
-      uint16_t pal1 = memory.Read16(0x05000002);
-      uint16_t pal2 = memory.Read16(0x05000004);
-      uint16_t pal3 = memory.Read16(0x05000006);
-      std::cout << "[PPU DrawScanline] scanline=" << scanline << " backdrop=0x"
-                << std::hex << backdropColor << " pal[0-3]=0x" << pal0 << "/0x"
-                << pal1 << "/0x" << pal2 << "/0x" << pal3 << " ARGB=0x"
-                << backdropARGB << " mode=" << std::dec << mode << std::endl;
-    }
-  }
 
   // Clear line with backdrop color
   std::fill(backBuffer.begin() + scanline * SCREEN_WIDTH,
@@ -1877,6 +1885,7 @@ void PPU::RenderBackground(int bgIndex) {
   (void)bgMode;
 
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
+
   uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
   uint16_t bgvofs = ReadRegister(0x12 + (bgIndex * 4)) & 0x01FF;
 
@@ -1913,10 +1922,26 @@ void PPU::RenderBackground(int bgIndex) {
   uint32_t mapBase = vramBase + (screenBaseBlock * 2048);
   uint32_t tileBase = vramBase + (charBaseBlock * 16384);
 
+  // Classic NES Series tile base adjustment:
+  // DISABLED FOR NOW - testing shows charBase=1 has valid tile data.
+  // The issue may be with specific high tile indices (320-511) that overlap
+  // with tilemap or OBJ VRAM regions.
+  // static const bool envDisableCharBaseFix =
+  // EnvFlagCached("AIO_DISABLE_CLASSIC_NES_CHARBASE_FIX"); if (classicNesMode
+  // && !envDisableCharBaseFix && charBaseBlock == 1) {
+  //   tileBase = vramBase; // charBase=0 (offset 0x0000)
+  // }
+
   const uint8_t *vramData = memory.GetVRAMData();
   const size_t vramSize = memory.GetVRAMSize();
   const uint8_t *palData = memory.GetPaletteData();
   const size_t palSize = memory.GetPaletteSize();
+
+  // Debug: One-time VRAM analysis for Classic NES (disabled in production)
+  // Can be re-enabled for debugging tile/VRAM layout issues.
+  // static bool dumpedVramAnalysis = false;
+  // if (classicNesMode && !dumpedVramAnalysis && frameCount > 150 && bgIndex ==
+  // 0 && scanline == 0) { ... }
 
   const auto &traceCfg = GetBgPixelTraceConfig();
   static int tracedFrame = -1;
@@ -1979,28 +2004,32 @@ void PPU::RenderBackground(int bgIndex) {
     // Each screen block is 32x32 entries (2KB = 2048 bytes)
     uint32_t mapAddr = mapBase + blockOffset + (ty * 32 + tx) * 2;
     uint32_t mapOffset = mapAddr - 0x06000000u;
-    uint16_t tileEntry = ReadVram16(vramData, vramSize, mapOffset);
+    uint16_t tileEntry = ReadBgVram16(vramData, vramSize, mapOffset);
 
     int tileIndex = tileEntry & 0x3FF;
+
     bool hFlip = (tileEntry >> 10) & 1;
     bool vFlip = (tileEntry >> 11) & 1;
     int paletteBank = (tileEntry >> 12) & 0xF;
 
-    // Classic NES Series (OG-DK, Mario Bros, etc.) workaround:
-    // These games use NES-style 4-color palettes (indices 0-3) but store colors
-    // at palette indices 9-14 due to how the DMA buffer is structured.
-    // The tilemap uses paletteBank=8 as a marker. When we see this:
-    // 1. Force palette bank to 0 (where colors actually are)
-    // 2. Add 9 to colorIndex to map NES indices 0-5 → GBA indices 9-14
-    // For ALL tiles in Classic NES mode, we apply the +9 offset since that's
-    // where the actual colors are stored.
-    // Enabled automatically for Classic NES Series games, or via
-    // AIO_OGDK_PALBANK_FIX=1
-    static const bool envOverride = EnvFlagCached("AIO_OGDK_PALBANK_FIX");
-    bool isClassicNesTile = classicNesMode || envOverride;
-    if (isClassicNesTile && paletteBank == 8) {
-      paletteBank = 0;
-    }
+    // Classic NES Series palette handling:
+    // The NES-on-GBA emulator only populates palette banks 0-7 via DMA.
+    // However, it generates tilemap entries with bit 15 set (palBank=8+),
+    // possibly as a flag or due to NES attribute table quirks.
+    // We mask to 3 bits to use banks 0-7 where actual colors exist.
+    // Additionally, within each bank, indices 0-7 are black/zeros - the
+    // actual colors are at indices 8-15. The +8 offset (below) handles this.
+    // Enabled automatically for Classic NES Series games (game code "FD*"),
+    // or manually via AIO_CLASSIC_NES_PALETTE_FIX=1
+    // Can be disabled via AIO_DISABLE_CLASSIC_NES_FIX=1 for testing
+    static const bool envOverride =
+        EnvFlagCached("AIO_CLASSIC_NES_PALETTE_FIX");
+    static const bool envDisable = EnvFlagCached("AIO_DISABLE_CLASSIC_NES_FIX");
+    const bool applyClassicNesPaletteOffset =
+        !envDisable && (classicNesMode || envOverride);
+
+    // Note: We no longer mask paletteBank - we override it to 0 for Classic NES
+    // in the palette lookup section below.
 
     int inTileX = scrolledX % 8;
     int inTileY = scrolledY % 8;
@@ -2014,24 +2043,45 @@ void PPU::RenderBackground(int bgIndex) {
     uint32_t tileAddr = 0;
     uint8_t tileByte = 0;
 
+    // Classic NES tile resolver removed — rely on explicit BG VRAM wrapping
+    // (`MapBgVramOffset` / `ReadBgVram*`) so behavior is spec-driven (modes 0-2
+    // wrap within the 64KB BG VRAM window). Removing heuristics avoids ROM-
+    // specific tile-base guessing and keeps behavior predictable.
+
     if (!is8bpp) {
       // 4bpp (16 colors)
       // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
-      tileAddr = tileBase + (tileIndex * 32) + (inTileY * 4) + (inTileX / 2);
-      uint32_t tileOffset = tileAddr - 0x06000000u;
-      tileByte = ReadVram8(vramData, vramSize, tileOffset);
+      uint32_t tileStartOffset =
+          (tileBase - 0x06000000u) + (uint32_t)tileIndex * 32u;
+      tileAddr = 0x06000000u + tileStartOffset + (uint32_t)(inTileY * 4) +
+                 (uint32_t)(inTileX / 2);
 
+      // Bounds check: For Classic NES games, apply VRAM wrapping instead of
+      // skipping. The NES emulator may intentionally use wrapped tile indices.
+      // Normal GBA games can read from OBJ VRAM (per test expectations).
+      // Note: We removed the aggressive skip here because it was causing
+      // valid tile content to be hidden. VRAM wrapping is handled by the
+      // ReadVram8 function which masks addresses to VRAM size.
+      // (Classic NES bounds check disabled - relying on VRAM wrapping)
+
+      uint32_t tileOffset = (tileAddr - 0x06000000u);
+      tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
       bool useHighNibble = (inTileX & 1) != 0;
       if (PpuSwap4bppNibbles()) {
         useHighNibble = !useHighNibble;
       }
       colorIndex = useHighNibble ? ((tileByte >> 4) & 0xF) : (tileByte & 0xF);
+
     } else {
       // 8bpp (256 colors)
       // 64 bytes per tile
       tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
+
+      // Note: Removed aggressive bounds check that was skipping valid tile
+      // content. BG-specific VRAM wrapping is handled by ReadBgVram8.
+
       uint32_t tileOffset = tileAddr - 0x06000000u;
-      tileByte = ReadVram8(vramData, vramSize, tileOffset);
+      tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
       colorIndex = tileByte;
     }
 
@@ -2063,19 +2113,30 @@ void PPU::RenderBackground(int bgIndex) {
       // the same, lower BG index wins (rendered later in sorted order)
       int pixelIndex = scanline * SCREEN_WIDTH + x;
       if (bgPriority <= priorityBuffer[pixelIndex]) {
-        // Apply Classic NES Series color index offset if needed
-        // Maps NES-style indices 1-6 → GBA indices 10-15 (since index 0 is
-        // transparent)
+        // Apply Classic NES Series palette handling
         uint8_t effectiveColorIndex = colorIndex;
-        if (isClassicNesTile && !is8bpp) {
-          effectiveColorIndex = colorIndex + 9;
+        uint8_t effectivePaletteBank = paletteBank;
+        // Classic NES Series palette handling:
+        // The NES-on-GBA emulator stores actual colors at palette bank 0,
+        // indices 9-14. However, tilemap entries use various palette bank
+        // values (0, 1, 3, 8, etc.). Analysis shows banks 1-15 are empty/black
+        // - only bank 0 has colors. The solution: Always use palette bank 0,
+        // and add +8 to colorIndex 1-6 to access the actual colors at indices
+        // 9-14.
+        if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
+          effectivePaletteBank = 0; // All colors are in bank 0
+          if (colorIndex <= 6) {
+            effectiveColorIndex = colorIndex + 8; // Map 1-6 to 9-14
+          }
+          // colorIndex 7-15: leave as-is (will mostly read black/transparent)
         }
 
         // Fetch Color from Palette RAM
         // 0x05000000
         uint32_t paletteAddr = 0x05000000;
         if (!is8bpp) {
-          paletteAddr += (paletteBank * 32) + (effectiveColorIndex * 2);
+          paletteAddr +=
+              (effectivePaletteBank * 32) + (effectiveColorIndex * 2);
         } else {
           paletteAddr += (colorIndex * 2);
         }

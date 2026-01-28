@@ -16,6 +16,7 @@ public:
   PPU(GBAMemory &memory);
   ~PPU();
 
+  void Reset();
   void Update(int cycles);
   const std::vector<uint32_t> &GetFramebuffer() const;
   int GetFrameCount() const { return frameCount; }

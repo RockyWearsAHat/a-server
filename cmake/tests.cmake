@@ -195,3 +195,17 @@ gtest_discover_tests(MemoryMapTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# Logger tests (documentation-driven)
+add_executable(LoggerTests ${PROJECT_ROOT}/tests/LoggerTests.cpp)
+set_target_properties(LoggerTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/LoggerTests"
+)
+target_link_libraries(LoggerTests PRIVATE GTest::gtest_main GBAEmulator)
+
+gtest_discover_tests(LoggerTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

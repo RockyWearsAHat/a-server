@@ -57,6 +57,36 @@
       "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/test_suite.py"],
       "group": { "kind": "test" },
       "problemMatcher": []
+    },
+    {
+      "label": "Coverage (Full)",
+      "type": "shell",
+      "command": "zsh",
+      "args": ["-lc", "cd \"${workspaceFolder}\" && make coverage"],
+      "group": { "kind": "test" },
+      "problemMatcher": ["$gcc"],
+      "detail": "Full clean rebuild with coverage instrumentation + run tests + generate lcov.info"
+    },
+    {
+      "label": "Coverage (Regen)",
+      "type": "shell",
+      "command": "zsh",
+      "args": ["-lc", "cd \"${workspaceFolder}\" && make coverage-regen"],
+      "group": { "kind": "test" },
+      "problemMatcher": [],
+      "detail": "Regenerate coverage report from last test run (no rebuild)"
+    },
+    {
+      "label": "Test with Coverage",
+      "type": "shell",
+      "command": "zsh",
+      "args": [
+        "-lc",
+        "cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure && cd \"${workspaceFolder}\" && make coverage-regen"
+      ],
+      "group": { "kind": "test" },
+      "problemMatcher": ["$gcc"],
+      "detail": "Run tests then regenerate coverage for Coverage Gutters"
     }
   ]
 }

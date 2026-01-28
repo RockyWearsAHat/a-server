@@ -122,12 +122,44 @@ TEST(BIOSTest, BIOSReadOutsideBIOSReturnsOpenBus) {
   cpu.SetThumbMode(false);
   cpu.SetRegister(15, 0x08000000);
 
-  // Reads from BIOS while executing from ROM should return open-bus data
-  // derived from the current fetch.
-  EXPECT_EQ(mem.Read8(0x00000000u), 0x44u);
-  EXPECT_EQ(mem.Read8(0x00000001u), 0x33u);
-  EXPECT_EQ(mem.Read8(0x00000002u), 0x22u);
-  EXPECT_EQ(mem.Read8(0x00000003u), 0x11u);
+  // Reads from BIOS addresses < 0x4000 while executing from ROM should return
+  // biosPrefetch (not open bus from current fetch). biosPrefetch is 0xE3A02004
+  // by default (after SWI calls), or 0 if no SWI has been called yet.
+  // Our emulator defaults to 0xE3A02004 for Classic NES protection
+  // compatibility.
+  //
+  // Addresses >= 0x4000 in region 0 return open bus (CPU prefetch), NOT
+  // biosPrefetch.
+  EXPECT_EQ(mem.Read8(0x00000000u), 0x04u); // biosPrefetch byte 0
+  EXPECT_EQ(mem.Read8(0x00000001u), 0x20u); // biosPrefetch byte 1
+  EXPECT_EQ(mem.Read8(0x00000002u), 0xA0u); // biosPrefetch byte 2
+  EXPECT_EQ(mem.Read8(0x00000003u), 0xE3u); // biosPrefetch byte 3
+}
+
+TEST(BIOSTest, Region0AboveBIOSReturnsOpenBusFromPrefetch) {
+  GBAMemory mem;
+  ARM7TDMI cpu(mem);
+  mem.SetCPU(&cpu);
+
+  // Install a known instruction word at 0x08000000.
+  mem.LoadGamePak(std::vector<uint8_t>{0x44, 0x33, 0x22, 0x11});
+
+  cpu.SetThumbMode(false);
+  cpu.SetRegister(15, 0x08000000);
+
+  // Reads from region 0 addresses >= 0x4000 (above BIOS) should return
+  // open bus value based on CPU prefetch from the current PC, NOT biosPrefetch.
+  // This is the behavior Classic NES games rely on for protection checks.
+  // The open bus value for ARM mode from ROM at 0x08000000 is the instruction
+  // there.
+  EXPECT_EQ(mem.Read8(0x00004000u), 0x44u); // open bus from ROM fetch
+  EXPECT_EQ(mem.Read8(0x00004001u), 0x33u);
+  EXPECT_EQ(mem.Read8(0x00004002u), 0x22u);
+  EXPECT_EQ(mem.Read8(0x00004003u), 0x11u);
+
+  // Same for Classic NES protection addresses like 0x00AE0000
+  EXPECT_EQ(mem.Read8(0x00AE0000u), 0x44u);
+  EXPECT_EQ(mem.Read8(0x00AE0001u), 0x33u);
 }
 
 TEST(BIOSTest, CpuFastSetCopies32ByteBlocks) {

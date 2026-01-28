@@ -207,6 +207,7 @@ GBAMemory::GBAMemory() {
   oam_dirtyList.reserve(oamBlocks);
   // ROM and SRAM sizes depend on the loaded game, but we can set defaults
   rom.resize(MemoryMap::ROM_MAX_SIZE);
+  romSize = MemoryMap::ROM_MAX_SIZE; // Default: full 32MB accessible for tests
   sram.resize(SaveTypes::SRAM_SIZE);
   // Default EEPROM state is erased (0xFF); game-specific init happens in
   // LoadSave
@@ -479,6 +480,16 @@ void GBAMemory::Reset() {
     io_regs[0x300] = 0x01;
   }
 
+  // Initialize VCOUNT (0x04000006) to 0x7E when skipping BIOS.
+  // mGBA's GBASkipBIOS() does this because when the BIOS finishes executing,
+  // the hardware is in VBlank (scanline ~126). Classic NES Series games and
+  // others may check VCOUNT at boot expecting VBlank state.
+  // Only do this for DirectBoot (HLE); real BIOS will set VCOUNT naturally.
+  if (!lleBiosLoaded && io_regs.size() > IORegs::VCOUNT + 1) {
+    io_regs[IORegs::VCOUNT] = 0x7E;     // Low byte = 126
+    io_regs[IORegs::VCOUNT + 1] = 0x00; // High byte = 0
+  }
+
   // Initialize DMA Registers to Safe Defaults
   // All DMA channels should be disabled (Enable bit = 0) on boot
   // DMA3 specifically: initialize control register (0x0DE) to 0x0000
@@ -532,6 +543,11 @@ void GBAMemory::Reset() {
   eepromLatch = 0;      // Initialize latch
   eepromWriteDelay = 0; // Reset write delay
   // saveTypeLocked = false; // Do NOT reset this, as it's set by LoadGamePak
+
+  // Reset BIOS prefetch to default value. This is what Classic NES Series
+  // games expect to see when reading BIOS from outside BIOS.
+  // 0xE3A02004 = MOV R2, #4 (the instruction that executes after SWI return)
+  biosPrefetch = 0xE3A02004;
 
   // BIOS HLE: Initialize critical system state that real BIOS sets up.
   // Many games poll specific IWRAM addresses waiting for BIOS background
@@ -721,10 +737,30 @@ bool GBAMemory::ScanForEEPROMSize(const std::vector<uint8_t> &data) {
 }
 
 void GBAMemory::LoadGamePak(const std::vector<uint8_t> &data) {
-  if (data.size() > rom.size()) {
-    rom.resize(data.size());
+  // Classic NES Series ROMs are exactly 1 MiB (0x100000 bytes) and need
+  // to be mirrored 4 times to fill a 4 MiB address space.
+  // Reference: mGBA src/gba/gba.c lines 455-472
+  constexpr size_t kClassicNesRomSize = 0x100000; // 1 MiB
+  constexpr size_t kMirroredRomSize = 0x400000;   // 4 MiB
+
+  if (data.size() == kClassicNesRomSize) {
+    // Mirror 1 MiB ROM 4 times to create 4 MiB address space
+    rom.resize(kMirroredRomSize);
+    std::copy(data.begin(), data.end(), rom.begin());
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize);
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize * 2);
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize * 3);
+    romSize = kMirroredRomSize; // Track actual mirrored size
+    std::cout
+        << "[GBAMemory] Classic NES ROM detected (1 MiB), mirrored 4x to 4 MiB"
+        << std::endl;
+  } else {
+    if (data.size() > rom.size()) {
+      rom.resize(data.size());
+    }
+    std::copy(data.begin(), data.end(), rom.begin());
+    romSize = data.size(); // Track actual ROM size for open bus detection
   }
-  std::copy(data.begin(), data.end(), rom.begin());
 
   // GBA BIOS Header Validation - Required for games to boot correctly!
   // The real BIOS validates the header checksum and sets a flag in IWRAM.
@@ -1083,6 +1119,147 @@ void GBAMemory::SetKeyInput(uint16_t value) {
   }
 }
 
+uint32_t GBAMemory::GetOpenBusValue() const {
+  // Open bus behavior for unmapped memory reads.
+  // Based on mGBA's GBALoadBad: returns the CPU prefetch values.
+  // mGBA uses prefetch[0] and prefetch[1] - two sequential 16-bit fetches.
+  // prefetch[0] = instruction at PC-2 (previously fetched)
+  // prefetch[1] = instruction at PC (being fetched)
+  //
+  // For Thumb mode, different regions combine these differently.
+  // For ARM mode, we return the 32-bit instruction at PC.
+  if (!cpu) {
+    return 0;
+  }
+
+  const uint32_t pc = cpu->GetRegister(15);
+  const bool thumb = cpu->IsThumbModeFlag();
+  const uint8_t pcRegion = (pc >> 24);
+
+  uint32_t value;
+
+  // Helper lambda to read a 16-bit value directly without recursion
+  auto readHalfword = [this](uint32_t addr) -> uint16_t {
+    const uint8_t region = (addr >> 24);
+    switch (region) {
+    case 0x02: // EWRAM
+      if ((addr & 0x00FFFFFF) + 1 < MemoryMap::WRAM_BOARD_SIZE) {
+        uint32_t off = addr & MemoryMap::WRAM_BOARD_MASK;
+        return wram_board[off] | (wram_board[off + 1] << 8);
+      }
+      break;
+    case 0x03: // IWRAM
+      if ((addr & 0x00FFFFFF) + 1 < MemoryMap::WRAM_CHIP_SIZE) {
+        uint32_t off = addr & MemoryMap::WRAM_CHIP_MASK;
+        return wram_chip[off] | (wram_chip[off + 1] << 8);
+      }
+      break;
+    case 0x08:
+    case 0x09:
+    case 0x0A:
+    case 0x0B:
+    case 0x0C:
+    case 0x0D: // ROM
+    {
+      uint32_t off = addr & 0x01FFFFFF;
+      if (off + 1 < rom.size()) {
+        return rom[off] | (rom[off + 1] << 8);
+      } else {
+        // Out of bounds ROM - return address-based open bus
+        return (addr >> 1) & 0xFFFF;
+      }
+    }
+    default:
+      break;
+    }
+    return (addr >> 1) & 0xFFFF;
+  };
+
+  if (thumb) {
+    // mGBA's GBALoadBad for Thumb mode:
+    // prefetch[0] = halfword at PC-2 (previous instruction)
+    // prefetch[1] = halfword at PC (current fetch)
+    // The combination depends on PC region.
+    const uint16_t prefetch0 = readHalfword(pc - 2); // Previous halfword
+    const uint16_t prefetch1 = readHalfword(pc);     // Current halfword
+
+    // mGBA's special handling for Thumb mode open bus:
+    // Different regions have different behaviors for how prefetch[0] and [1]
+    // are combined into the 32-bit open bus value.
+    switch (pcRegion) {
+    case 0x00: // BIOS
+    case 0x07: // OAM
+      // "This isn't right half the time, but we don't have $+6 handy"
+      // value = (prefetch[1] << 16) | prefetch[0]
+      value = ((uint32_t)prefetch1 << 16) | prefetch0;
+      break;
+    case 0x03: // IWRAM
+      // "This doesn't handle prefetch clobbering"
+      // Depends on PC alignment
+      if (pc & 2) {
+        // Misaligned: value = (prefetch[1] << 16) | prefetch[0]
+        value = ((uint32_t)prefetch1 << 16) | prefetch0;
+      } else {
+        // Aligned: value = prefetch[1] | (prefetch[0] << 16)
+        value = prefetch1 | ((uint32_t)prefetch0 << 16);
+      }
+      break;
+    default:
+      // For most regions, duplicate prefetch[1]
+      // value = prefetch[1] | (prefetch[1] << 16)
+      value = prefetch1 | ((uint32_t)prefetch1 << 16);
+      break;
+    }
+  } else {
+    // ARM mode: read 32-bit instruction at PC (prefetch[1])
+    // Helper lambda to read a 32-bit value directly
+    auto read32 = [this](uint32_t addr) -> uint32_t {
+      const uint8_t region = (addr >> 24);
+      switch (region) {
+      case 0x02: // EWRAM
+        if ((addr & 0x00FFFFFF) + 3 < MemoryMap::WRAM_BOARD_SIZE) {
+          uint32_t off = addr & MemoryMap::WRAM_BOARD_MASK;
+          return wram_board[off] | (wram_board[off + 1] << 8) |
+                 (wram_board[off + 2] << 16) | (wram_board[off + 3] << 24);
+        }
+        break;
+      case 0x03: // IWRAM
+        if ((addr & 0x00FFFFFF) + 3 < MemoryMap::WRAM_CHIP_SIZE) {
+          uint32_t off = addr & MemoryMap::WRAM_CHIP_MASK;
+          return wram_chip[off] | (wram_chip[off + 1] << 8) |
+                 (wram_chip[off + 2] << 16) | (wram_chip[off + 3] << 24);
+        }
+        break;
+      case 0x08:
+      case 0x09:
+      case 0x0A:
+      case 0x0B:
+      case 0x0C:
+      case 0x0D: // ROM
+      {
+        uint32_t off = addr & 0x01FFFFFF;
+        if (off + 3 < rom.size()) {
+          return rom[off] | (rom[off + 1] << 8) | (rom[off + 2] << 16) |
+                 (rom[off + 3] << 24);
+        } else {
+          // Out of bounds - address-based pattern
+          uint32_t val = ((addr & ~3u) >> 1) & 0xFFFF;
+          val |= (((addr & ~3u) + 2) >> 1) << 16;
+          return val;
+        }
+      }
+      default:
+        break;
+      }
+      return 0;
+    };
+
+    value = read32(pc);
+  }
+
+  return value;
+}
+
 int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
   // GBA Memory Access Timing (GBATEK)
   // Returns cycles for the given access size (1=8bit, 2=16bit, 4=32bit)
@@ -1207,29 +1384,55 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   static const bool traceDma3Reads =
       EnvTruthy(std::getenv("AIO_TRACE_DMA3_READS"));
   static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceBiosRead =
+      EnvTruthy(std::getenv("AIO_TRACE_BIOS_READ"));
 
   uint8_t region = (address >> 24);
   switch (region) {
   case 0x00: // BIOS (GBATEK: 0x00000000-0x00003FFF)
     // BIOS read protection / open-bus behavior:
-    // When the CPU is executing outside of BIOS, reads from the BIOS region
-    // return the last prefetched instruction data (open bus) rather than BIOS
-    // ROM. Many titles rely on this for entropy or basic checks.
-    if (cpu && cpu->GetRegister(15) >= 0x00004000) {
-      const uint32_t pc = cpu->GetRegister(15);
-      const uint32_t pcAligned = pc & ~3u;
-      const uint32_t openBusWord =
-          cpu->IsThumbModeFlag()
-              ? (uint32_t)ReadInstruction16(pcAligned) |
-                    ((uint32_t)ReadInstruction16(pcAligned + 2) << 16)
-              : ReadInstruction32(pcAligned);
-      return (openBusWord >> ((address & 3u) * 8u)) & 0xFFu;
+    // Only addresses < 0x4000 are in actual BIOS region. Above that is unused.
+    if (address < 0x4000) {
+      // When the CPU is executing outside of BIOS, reads from BIOS return
+      // biosPrefetch (typically 0xE3A02004 = "MOV R2, #4" after SWI).
+      // Classic NES Series games check this value as anti-emulation protection.
+      if (cpu && cpu->GetRegister(15) >= 0x00004000) {
+        uint8_t result = (biosPrefetch >> ((address & 3u) * 8u)) & 0xFFu;
+        if (traceBiosRead) {
+          static int biosReadCount = 0;
+          if (biosReadCount++ < 100) {
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "BIOS_READ",
+                "BIOS read from outside BIOS: addr=0x%08x PC=0x%08x thumb=%d "
+                "biosPrefetch=0x%08x result=0x%02x",
+                address, cpu->GetRegister(15), cpu->IsThumbModeFlag() ? 1 : 0,
+                biosPrefetch, result);
+          }
+        }
+        return result;
+      }
+      // CPU is inside BIOS - return actual BIOS data
+      if (address < bios.size()) {
+        return bios[address];
+      }
     }
-
-    if (address < bios.size()) {
-      return bios[address];
+    // Address >= 0x4000 in region 0: return open bus (CPU prefetch)
+    {
+      uint32_t openBus = GetOpenBusValue();
+      uint8_t result = (openBus >> ((address & 3u) * 8u)) & 0xFFu;
+      if (traceBiosRead && cpu) {
+        static int region0Reads = 0;
+        if (region0Reads++ < 100) {
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "BIOS_READ",
+              "Region0 above BIOS: addr=0x%08x PC=0x%08x thumb=%d "
+              "openBus=0x%08x -> 0x%02x",
+              address, cpu->GetRegister(15), cpu->IsThumbModeFlag() ? 1 : 0,
+              openBus, result);
+        }
+      }
+      return result;
     }
-    break;
   case 0x02: // WRAM (Board) (GBATEK: 0x02000000-0x0203FFFF)
   {
     const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
@@ -1356,13 +1559,21 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   case 0x0A:
   case 0x0B:
   case 0x0C: {
-    // Universal ROM Mirroring (max 32MB space, mirrored every rom.size())
+    // ROM mirroring: The 32MB address space (0x08000000-0x09FFFFFF per
+    // waitstate) is filled with repeating mirrors of the ROM. For example:
+    // - 1 MiB ROM (Classic NES Series): mirrors 4x to fill 4 MiB, then that 4
+    // MiB
+    //   pattern repeats throughout the 32 MiB address space per mGBA's behavior
+    // - 32 MiB ROM: fills the entire space, no mirroring visible
+    // The ROM mirrors at power-of-two boundaries based on the actual ROM size.
     uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
-    if (!rom.empty()) {
-      // `rom` is sized to the 32MB addressable window; avoid modulo.
+    if (romSize > 0) {
+      // Mirror ROM at power-of-two alignment (mGBA behavior for Classic NES)
+      offset = offset % romSize;
       return rom[offset];
     }
-    break;
+    // No ROM loaded - return open bus
+    return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0D: // Game Pak ROM (WS2) or EEPROM depending on cart save type
   {
@@ -1377,11 +1588,13 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // Non-EEPROM cart: treat as ROM mirror (same behavior as 0x08-0x0C).
-    const uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
-    if (!rom.empty()) {
+    uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
+    if (romSize > 0) {
+      offset = offset % romSize;
       return rom[offset];
     }
-    break;
+    // Open bus for out-of-bounds ROM reads
+    return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
   {
@@ -1609,13 +1822,14 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
     uint32_t offset = address & 0x01FFFFFF;
-    if (!rom.empty()) {
-      // ROM space is 0x02000000 bytes max; `rom` is sized to that window.
-      // Avoid modulo in the instruction-fetch hot path.
+    // Return actual ROM data only if within actual ROM size
+    if (offset + 1 < romSize) {
       uint8_t b0 = rom[offset];
       uint8_t b1 = rom[offset + 1u];
       return b0 | (b1 << 8);
     }
+    // Open bus: return address-based value (mGBA behavior)
+    return (address >> 1) & 0xFFFF;
   }
   // Handle IWRAM instruction fetch with proper mirroring
   else if ((address & 0xFF000000u) == 0x03000000u) {
@@ -1786,14 +2000,17 @@ uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
     uint32_t offset = address & 0x01FFFFFF;
-    if (!rom.empty()) {
-      // Avoid modulo in the instruction-fetch hot path.
+    // Return actual ROM data only if within actual ROM size
+    if (offset + 3 < romSize) {
       uint8_t b0 = rom[offset];
       uint8_t b1 = rom[offset + 1u];
       uint8_t b2 = rom[offset + 2u];
       uint8_t b3 = rom[offset + 3u];
       return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
+    // Open bus: return address-based value (mGBA LOAD_CART behavior)
+    uint32_t aligned = address & ~3u;
+    return ((aligned >> 1) & 0xFFFF) | (((aligned + 2) >> 1) << 16);
   }
   // Fallback
   return Read8(address) | (Read8(address + 1) << 8) |
@@ -1877,6 +2094,12 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     if (offset >= MemoryMap::VRAM_ACTUAL_SIZE) {
       offset -= 0x8000u;
     }
+
+    // Classic NES VRAM trace (disabled in production)
+    // static bool ogdkVramTraced = false;
+    // const bool isClassicNes = gameCode.length() >= 2 && gameCode.substr(0, 2)
+    // == "FD";
+    // ... tracing code removed for production ...
 
     // DKC diagnostic: Log VRAM writes during problem frames
     const int frame = ppu ? ppu->GetFrameCount() : -1;
