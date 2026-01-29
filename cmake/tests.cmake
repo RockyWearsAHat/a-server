@@ -209,3 +209,16 @@ gtest_discover_tests(LoggerTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+# GBA integration tests (full coverage of GBA class)
+add_executable(GBAIntegrationTests ${PROJECT_ROOT}/tests/GBATests.cpp)
+set_target_properties(GBAIntegrationTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBAIntegrationTests"
+)
+target_link_libraries(GBAIntegrationTests PRIVATE GTest::gtest_main GBAEmulator)
+
+gtest_discover_tests(GBAIntegrationTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

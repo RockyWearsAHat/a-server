@@ -1,73 +1,100 @@
-# Plan: Fix OG-DK Complete Garbage Rendering
+# Plan: Test Coverage Expansion
 
-**Status:** NOT STARTED
-**Goal:** Fix OG-DK to render correctly like mGBA
-
----
-
-## Context
-
-OG-DK shows complete visual garbage vs mGBA clean rendering.
-
-### Root Cause Analysis
-
-1. CPU Instruction Bug - ARM7TDMI has 36% test coverage
-2. LZ77 Decompression Bug - SWI 0x11/0x12 needs testing
-3. Thumb Format 8 Missing Tests - LDRH/STRH/LDRSB/LDRSH untested
+**Status:** IN PROGRESS
+**Goal:** Expand test coverage to 100% for hardware emulation correctness
 
 ---
 
-## Steps
+## Current Coverage Status
 
-### Step 1: Add Thumb Format 8 tests to tests/CPUTests.cpp
+| File          | Line Coverage | Functions |
+| ------------- | ------------- | --------- |
+| GBA.cpp       | 0.0%          | 0/34      |
+| ARM7TDMI.cpp  | 37.2%         | 73.8%     |
+| GBAMemory.cpp | 41.3%         | 89.6%     |
+| PPU.cpp       | 56.2%         | 94.7%     |
+| APU.cpp       | 76.7%         | 100%      |
 
-**Operation:** INSERT_AFTER last TEST_F (around line 895)
+**Overall: 42.8% line coverage**
 
-```cpp
-TEST_F(CPUTest, Thumb_Format8_STRH_RegisterOffset) {
-  cpu.SetThumbMode(true);
-  cpu.SetRegister(15, 0x08000000u);
-  cpu.SetRegister(0, 0x1234u);
-  cpu.SetRegister(2, 0x02000000u);
-  cpu.SetRegister(3, 0x00000004u);
-  // STRH R0, [R2, R3]: 0x52D0
-  RunThumbInstr(0x52D0);
-  EXPECT_EQ(memory.Read16(0x02000004u), 0x1234u);
-}
+---
 
-TEST_F(CPUTest, Thumb_Format8_LDRH_RegisterOffset) {
-  cpu.SetThumbMode(true);
-  cpu.SetRegister(15, 0x08000000u);
-  cpu.SetRegister(2, 0x02000000u);
-  cpu.SetRegister(3, 0x00000006u);
-  memory.Write16(0x02000006u, 0x5678u);
-  // LDRH R0, [R2, R3]: 0x5AD0
-  RunThumbInstr(0x5AD0);
-  EXPECT_EQ(cpu.GetRegister(0), 0x5678u);
-}
+## Step 1: Create tests/GBATests.cpp (Priority: CRITICAL)
 
-TEST_F(CPUTest, Thumb_Format8_LDRSB_RegisterOffset) {
-  cpu.SetThumbMode(true);
-  cpu.SetRegister(15, 0x08000000u);
-  cpu.SetRegister(2, 0x02000000u);
-  cpu.SetRegister(3, 0x00000007u);
-  memory.Write8(0x02000007u, 0x80u);
-  // LDRSB R0, [R2, R3]: 0x56D0
-  RunThumbInstr(0x56D0);
-  EXPECT_EQ(cpu.GetRegister(0), 0xFFFFFF80u);
+**File:** `tests/GBATests.cpp`
+
+Create comprehensive tests for the GBA class which has 0% coverage:
+
+- Constructor/Reset tests
+- Memory access helpers (ReadMem, WriteMem, ReadMem16, WriteMem16)
+- Register access (GetRegister, SetRegister, GetPC, GetCPSR)
+- State queries (IsHalted, IsCPUHalted, IsThumbMode, GetTotalCycles)
+- Debugger controls (AddBreakpoint, ClearBreakpoints, SetSingleStep, Continue)
+- Utility methods (PatchROM, DumpCPUState, FlushPendingPeripheralCycles)
+
+---
+
+## Step 2: Update cmake/tests.cmake
+
+Add GBATests target with same pattern as other tests.
+
+---
+
+## Step 3: Expand tests/CPUTests.cpp (Priority: HIGH)
+
+Add tests for missing ARM/Thumb instructions:
+
+- Data Processing: EOR, RSB, ADC, SBC, RSC, TST, TEQ, CMN, ORR, BIC, MVN
+- Multiply: MUL, MLA, UMULL, UMLAL, SMULL, SMLAL
+- Thumb shifts: LSL, LSR, ASR by register
+- Conditional execution: all condition codes
+- PSR transfer: MRS, MSR
+
+---
+
+## Step 4: Build and verify all tests pass
+
+```bash
+make build
+ctest --output-on-failure
+```
+
+---
+
+## Step 5: Generate new coverage report
+
+```bash
+make coverage
+lcov --summary lcov.info
+```
+
+---
+
+## Implementation Code
+
+### GBATests.cpp
+
+cpu.SetRegister(15, 0x08000000u);
+cpu.SetRegister(2, 0x02000000u);
+cpu.SetRegister(3, 0x00000007u);
+memory.Write8(0x02000007u, 0x80u);
+// LDRSB R0, [R2, R3]: 0x56D0
+RunThumbInstr(0x56D0);
+EXPECT_EQ(cpu.GetRegister(0), 0xFFFFFF80u);
 }
 
 TEST_F(CPUTest, Thumb_Format8_LDRSH_RegisterOffset) {
-  cpu.SetThumbMode(true);
-  cpu.SetRegister(15, 0x08000000u);
-  cpu.SetRegister(2, 0x02000000u);
-  cpu.SetRegister(3, 0x00000008u);
-  memory.Write16(0x02000008u, 0x8000u);
-  // LDRSH R0, [R2, R3]: 0x5ED0
-  RunThumbInstr(0x5ED0);
-  EXPECT_EQ(cpu.GetRegister(0), 0xFFFF8000u);
+cpu.SetThumbMode(true);
+cpu.SetRegister(15, 0x08000000u);
+cpu.SetRegister(2, 0x02000000u);
+cpu.SetRegister(3, 0x00000008u);
+memory.Write16(0x02000008u, 0x8000u);
+// LDRSH R0, [R2, R3]: 0x5ED0
+RunThumbInstr(0x5ED0);
+EXPECT_EQ(cpu.GetRegister(0), 0xFFFF8000u);
 }
-```
+
+````
 
 **Verify:** `make build && cd build/generated/cmake && ctest -R Thumb_Format8 --output-on-failure`
 
@@ -117,7 +144,7 @@ TEST_F(CPUTest, SWI_LZ77UnCompVram_Literals) {
   EXPECT_EQ(memory.Read16(dst + 0), 0xBBAAu);
   EXPECT_EQ(memory.Read16(dst + 6), 0x2211u);
 }
-```
+````
 
 **Verify:** `make build && cd build/generated/cmake && ctest -R SWI_LZ77 --output-on-failure`
 

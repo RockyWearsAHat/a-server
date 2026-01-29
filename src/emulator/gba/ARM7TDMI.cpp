@@ -2990,37 +2990,40 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
 
     // Bit 0: Clear 256K EWRAM (0x02000000-0x0203FFFF)
     if (flags & 0x01) {
-      for (uint32_t addr = 0x02000000; addr < 0x02040000; addr++) {
-        memory.Write8(addr, 0);
+      for (uint32_t addr = 0x02000000; addr < 0x02040000; addr += 4) {
+        memory.Write32(addr, 0);
       }
     }
 
     // Bit 1: Clear 32K IWRAM (0x03000000-0x03007FFF, excluding last 0x200
     // bytes)
     if (flags & 0x02) {
-      for (uint32_t addr = 0x03000000; addr < 0x03007E00; addr++) {
-        memory.Write8(addr, 0);
+      for (uint32_t addr = 0x03000000; addr < 0x03007E00; addr += 4) {
+        memory.Write32(addr, 0);
       }
     }
 
     // Bit 2: Clear Palette RAM (0x05000000-0x050003FF)
+    // Note: Palette only supports 16/32-bit writes
     if (flags & 0x04) {
-      for (uint32_t addr = 0x05000000; addr < 0x05000400; addr++) {
-        memory.Write8(addr, 0);
+      for (uint32_t addr = 0x05000000; addr < 0x05000400; addr += 4) {
+        memory.Write32(addr, 0);
       }
     }
 
     // Bit 3: Clear VRAM (0x06000000-0x06017FFF)
+    // Note: VRAM only supports 16/32-bit writes
     if (flags & 0x08) {
-      for (uint32_t addr = 0x06000000; addr < 0x06018000; addr++) {
-        memory.Write8(addr, 0);
+      for (uint32_t addr = 0x06000000; addr < 0x06018000; addr += 4) {
+        memory.Write32(addr, 0);
       }
     }
 
     // Bit 4: Clear OAM (0x07000000-0x070003FF)
+    // Note: OAM only supports 16/32-bit writes
     if (flags & 0x10) {
-      for (uint32_t addr = 0x07000000; addr < 0x07000400; addr++) {
-        memory.Write8(addr, 0);
+      for (uint32_t addr = 0x07000000; addr < 0x07000400; addr += 4) {
+        memory.Write32(addr, 0);
       }
     }
 
@@ -3512,17 +3515,21 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     int dstBitPos = 0;
     int srcBitPos = 0;
     uint8_t srcByte = 0;
+    uint32_t bytesRead = 0;
 
-    for (uint32_t i = 0; i < srcLen;) {
+    while (true) {
+      // Read next byte if needed
       if (srcBitPos == 0) {
+        if (bytesRead >= srcLen) break;  // All bytes processed
         srcByte = memory.Read8(src++);
-        i++;
+        bytesRead++;
       }
 
       uint32_t val = (srcByte >> srcBitPos) & srcMask;
       srcBitPos += srcWidth;
-      if (srcBitPos >= 8)
+      if (srcBitPos >= 8) {
         srcBitPos = 0;
+      }
 
       // Apply data offset if value is non-zero or zero-data flag set
       if (val != 0 || (dataOffset & 0x80000000)) {
@@ -4040,12 +4047,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectAddOverflow(val, op2, res));
     }
 
-    const uint32_t old = registers[rd];
     registers[rd] = res;
-    if (rd == 8) {
-      TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16,
-                   old, registers[rd]);
-    }
 
     if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
       // std::cout << "ADD/SUB: Rd=R" << rd << " Val=0x" << std::hex << res <<
@@ -4089,12 +4091,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
 
     UpdateNZFlags(cpsr, res);
     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-    const uint32_t old = registers[rd];
     registers[rd] = res;
-    if (rd == 8) {
-      TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16,
-                   old, registers[rd]);
-    }
 
     if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
       // std::cout << "Shift: Rd=R" << rd << " Val=0x" << std::hex << res <<
@@ -4109,12 +4106,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     uint32_t imm = instruction & 0xFF;
 
     if (opcode == 0) { // MOV Rd, #Offset8
-      const uint32_t old = registers[rd];
       registers[rd] = imm;
-      if (rd == 8) {
-        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16,
-                     old, registers[rd]);
-      }
       UpdateNZFlags(cpsr, registers[rd]);
     } else if (opcode == 1) { // CMP Rd, #Offset8
       uint32_t result = registers[rd] - imm;
@@ -4124,24 +4116,14 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
                   DetectSubOverflow(registers[rd], imm, result));
     } else if (opcode == 2) { // ADD Rd, #Offset8
       uint32_t val = registers[rd];
-      const uint32_t old = registers[rd];
       registers[rd] = val + imm;
-      if (rd == 8) {
-        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16,
-                     old, registers[rd]);
-      }
       UpdateNZFlags(cpsr, registers[rd]);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, DetectAddCarry(val, imm));
       SetCPSRFlag(cpsr, CPSR::FLAG_V,
                   DetectAddOverflow(val, imm, registers[rd]));
     } else if (opcode == 3) { // SUB Rd, #Offset8
       uint32_t val = registers[rd];
-      const uint32_t old = registers[rd];
       registers[rd] = val - imm;
-      if (rd == 8) {
-        TraceR8Write(currentInstrAddr, currentInstrThumb, (uint32_t)currentOp16,
-                     old, registers[rd]);
-      }
       UpdateNZFlags(cpsr, registers[rd]);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, imm));
       SetCPSRFlag(cpsr, CPSR::FLAG_V,
@@ -4163,24 +4145,12 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     case 0x0: // AND
       res = val & op2;
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     case 0x1: // EOR
       res = val ^ op2;
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     case 0x2: // LSL
     {
@@ -4189,13 +4159,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       res = LogicalShiftLeft(val, shiftAmount, tempCPSR, true);
       UpdateNZFlags(cpsr, res);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
     case 0x3: // LSR
@@ -4205,13 +4169,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       res = LogicalShiftRight(val, shiftAmount, tempCPSR, true);
       UpdateNZFlags(cpsr, res);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
     case 0x4: // ASR
@@ -4221,13 +4179,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       res = ArithmeticShiftRight(val, shiftAmount, tempCPSR, true);
       UpdateNZFlags(cpsr, res);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
     case 0x5: // ADC
@@ -4241,13 +4193,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       SetCPSRFlag(cpsr, CPSR::FLAG_C, result64 > 0xFFFFFFFFULL);
       SetCPSRFlag(cpsr, CPSR::FLAG_V,
                   DetectAddOverflow(val, op2 + carryIn, res));
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
     case 0x6: // SBC
@@ -4258,13 +4204,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       UpdateNZFlags(cpsr, res);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, operand));
       SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, operand, res));
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
     case 0x7: // ROR
@@ -4287,13 +4227,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       }
       UpdateNZFlags(cpsr, res);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
     case 0x8: // TST
@@ -4303,13 +4237,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     case 0x9: // NEG (RSB Rd, Rs, #0)
       res = 0 - op2;
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     case 0xA: // CMP
       res = val - op2;
@@ -4326,46 +4254,22 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     case 0xC: // ORR
       res = val | op2;
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     case 0xD: // MUL
       res = val * op2;
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     case 0xE: // BIC
       res = val & (~op2);
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     case 0xF: // MVN
       res = ~op2;
       UpdateNZFlags(cpsr, res);
-      {
-        const uint32_t old = registers[rd];
-        registers[rd] = res;
-        if (rd == 8)
-          TraceR8Write(currentInstrAddr, currentInstrThumb,
-                       (uint32_t)currentOp16, old, registers[rd]);
-      }
+      registers[rd] = res;
       break;
     }
   }

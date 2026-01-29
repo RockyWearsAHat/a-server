@@ -44,6 +44,7 @@ public:
   uint32_t GetRegister(int index) const { return registers[index]; }
   void SetRegister(int index, uint32_t value) { registers[index] = value; }
   uint32_t GetCPSR() const { return cpsr; }
+  void SetCPSR(uint32_t value) { cpsr = value; }
   void SetThumbMode(bool thumb) {
     thumbMode = thumb;
     SetCPSRFlag(cpsr, CPSR::FLAG_T, thumb);

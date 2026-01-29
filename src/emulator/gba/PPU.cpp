@@ -2197,10 +2197,11 @@ void PPU::RenderBackground(int bgIndex) {
         uint8_t effectivePaletteBank = paletteBank;
         // Classic NES Series palette handling v2:
         // The NES-on-GBA emulator stores actual colors at palette bank 0,
-        // indices 9-14. The NES wrapper uses these indices for all game graphics.
-        // Tilemap palette banks (0-15) are used as NES attribute table values,
-        // NOT as GBA palette bank selectors. We always use bank 0 and apply
-        // the +8 offset for colorIndex 1-6 to read the actual NES colors.
+        // indices 9-14. The NES wrapper uses these indices for all game
+        // graphics. Tilemap palette banks (0-15) are used as NES attribute
+        // table values, NOT as GBA palette bank selectors. We always use bank 0
+        // and apply the +8 offset for colorIndex 1-6 to read the actual NES
+        // colors.
 
         // DIAGNOSTIC: Trace Classic NES palette behavior
         static const bool tracePalette = EnvFlagCached("AIO_TRACE_NES_PALETTE");
@@ -2238,8 +2239,8 @@ void PPU::RenderBackground(int bgIndex) {
         // Only trace after frame 10 when palette should be loaded
         static const bool traceColor = EnvFlagCached("AIO_TRACE_NES_PALETTE");
         static int colorTraces = 0;
-        if (traceColor && colorTraces < 50 && frameCount >= 10 && scanline == 0 &&
-            x < 100 && colorIndex != 0) {
+        if (traceColor && colorTraces < 50 && frameCount >= 10 &&
+            scanline == 0 && x < 100 && colorIndex != 0) {
           colorTraces++;
           std::cout << "[NES_COLOR] frame=" << frameCount << " x=" << x
                     << " effIdx=" << (int)effectiveColorIndex << " palAddr=0x"
