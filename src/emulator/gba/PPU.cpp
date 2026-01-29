@@ -1969,6 +1969,82 @@ void PPU::RenderBackground(int bgIndex) {
   // Analysis showed the fix increased corruption (5588 -> 7232 cyan pixels).
   // The actual issue appears to be tile/tilemap VRAM overlap, not charBase.
 
+  // OG-DK diagnostic: dump BG setup and tilemap entries once
+  static bool ogdkDumpDone = false;
+  if (classicNesMode && frameCount == 100 && !ogdkDumpDone && bgIndex == 0 &&
+      scanline == 0) {
+    ogdkDumpDone = true;
+    const uint8_t *vramDataDiag = memory.GetVRAMData();
+    const size_t vramSizeDiag = memory.GetVRAMSize();
+    const uint8_t *palDataDiag = memory.GetPaletteData();
+
+    // Write to file for clean output
+    std::ofstream diagFile("/tmp/ogdk_tilemap.txt");
+    if (diagFile.is_open()) {
+      diagFile << "=== OGDK Tilemap Diagnostic (frame 100) ===\n";
+      diagFile << "BGCNT=0x" << std::hex << bgcnt << std::dec
+               << " charBase=" << charBaseBlock << " (0x" << std::hex
+               << tileBase << ") screenBase=" << screenBaseBlock << " (0x"
+               << mapBase << ")" << std::dec << "\nsize=" << screenSize << " ("
+               << mapWidth << "x" << mapHeight << " tiles) 8bpp=" << is8bpp
+               << " hofs=" << bghofs << " vofs=" << bgvofs << "\n\n";
+
+      // Dump raw bytes of first row of tilemap
+      diagFile << "Raw bytes of tilemap row 0 (64 bytes = 32 entries):\n";
+      for (int i = 0; i < 64; i++) {
+        uint32_t offset = (mapBase - vramBase) + i;
+        uint8_t byte = ReadBgVram8(vramDataDiag, vramSizeDiag, offset);
+        diagFile << std::hex << std::setw(2) << std::setfill('0') << (int)byte
+                 << " ";
+        if ((i + 1) % 16 == 0)
+          diagFile << "\n";
+      }
+      diagFile << std::dec << std::setfill(' ') << "\n";
+
+      // Dump tilemap entries with full hex values
+      diagFile << "Tilemap entries (hex) at screenBase=" << screenBaseBlock
+               << ":\n";
+      for (int row = 0; row < 4; row++) {
+        diagFile << "Row " << std::setw(2) << row << ": ";
+        for (int col = 0; col < 16; col++) {
+          uint32_t offset = (mapBase - vramBase) + (row * 32 + col) * 2;
+          uint16_t entry = ReadBgVram16(vramDataDiag, vramSizeDiag, offset);
+          diagFile << std::hex << std::setw(4) << std::setfill('0') << entry
+                   << " ";
+        }
+        diagFile << "\n";
+      }
+      diagFile << std::dec << std::setfill(' ') << "\n";
+
+      // Dump palette bank 0
+      diagFile << "Palette bank 0 (16 colors):\n  ";
+      for (int i = 0; i < 16; i++) {
+        uint16_t col = palDataDiag[i * 2] | (palDataDiag[i * 2 + 1] << 8);
+        diagFile << std::hex << std::setw(4) << std::setfill('0') << col << " ";
+      }
+      diagFile << std::dec << std::setfill(' ') << "\n";
+
+      // Dump first few tile data blocks
+      diagFile << "\nTile data samples:\n";
+      int sampleTiles[] = {0, 247, 32, 14, 510, 436, 251, 65};
+      for (int t : sampleTiles) {
+        uint32_t tileOff = (tileBase - vramBase) + t * 32;
+        diagFile << "Tile " << std::setw(3) << t << " @0x" << std::hex
+                 << std::setw(4) << std::setfill('0') << tileOff << ": "
+                 << std::dec;
+        for (int i = 0; i < 8; i++) {
+          diagFile << std::hex << std::setw(2) << std::setfill('0')
+                   << (int)ReadBgVram8(vramDataDiag, vramSizeDiag, tileOff + i)
+                   << " ";
+        }
+        diagFile << "...\n" << std::dec << std::setfill(' ');
+      }
+
+      diagFile.close();
+      std::cout << "[OGDK] Diagnostic written to /tmp/ogdk_tilemap.txt\n";
+    }
+  }
+
   const uint8_t *vramData = memory.GetVRAMData();
   const size_t vramSize = memory.GetVRAMSize();
   const uint8_t *palData = memory.GetPaletteData();
@@ -2045,35 +2121,32 @@ void PPU::RenderBackground(int bgIndex) {
 
     int tileIndex = tileEntry & 0x3FF;
 
-    // Diagnostic: Trace tiles that overlap with tilemap region
-    static const bool traceOverlap = EnvFlagCached("AIO_TRACE_TILE_OVERLAP");
-    if (traceOverlap && classicNesMode && tileIndex >= 320 && tileIndex < 448) {
-      static int overlapTraces = 0;
-      if (overlapTraces++ < 50) {
-        uint32_t tileOffset = (tileBase - 0x06000000u) + tileIndex * 32u;
-        std::cout << "[TILE_OVERLAP] frame=" << frameCount
-                  << " tile=" << tileIndex << " tileOffset=0x" << std::hex
-                  << tileOffset << " tilemapStart=0x"
-                  << (screenBaseBlock * 2048) << std::dec << " (overlap!)"
-                  << std::endl;
-      }
-    }
-
-    // Experimental: For Classic NES games, test if tile indices should be
-    // masked to avoid overlap. NES pattern tables only have 512 tiles max.
-    // If tile index > 319 AND would overlap tilemap, wrap to lower range.
-    // TODO: This is experimental - needs verification against mGBA behavior.
-    static const bool experimentalTileMask =
-        EnvFlagCached("AIO_CLASSIC_NES_TILE_MASK");
-    if (experimentalTileMask && classicNesMode) {
-      uint32_t wouldBeOffset =
-          (tileBase - 0x06000000u) + (uint32_t)tileIndex * 32u;
-      uint32_t tilemapStart = screenBaseBlock * 2048u;
-      uint32_t tilemapEnd = tilemapStart + 4096u; // 4KB for screenSize=2
-      if (wouldBeOffset >= tilemapStart && wouldBeOffset < tilemapEnd) {
-        // Wrap tile index to avoid tilemap overlap (experimental)
-        tileIndex = tileIndex & 0xFF; // Mask to 8 bits (0-255)
-      }
+    // Classic NES Series: The NES-on-GBA wrapper uses tilemap entries where
+    // bit 9 (0x200) indicates CHR bank 1 (NES has two 256-tile pattern tables).
+    // With charBase=1 (tiles at 0x6004000), tiles 320+ overlap with the
+    // tilemap region at 0x6006800 (screenBase=13).
+    //
+    // Analysis of raw tilemap data shows high bytes like 0x80, 0x00, 0x01, etc.
+    // which when combined with low bytes in 16-bit LE form give indices > 255.
+    // But the actual NES tile indices are in the LOW byte only.
+    //
+    // Fix: For Classic NES games, extract tile index from low 8 bits only,
+    // and use bit 8 (0x100 in the 16-bit entry) for CHR bank selection.
+    // This keeps tile indices 0-255 per bank, avoiding tilemap overlap.
+    //
+    // The high byte patterns suggest:
+    // - Bit 7 (0x80) = possible CHR bank select or NES attribute flag
+    // - Bits 4-6 = additional attributes
+    // - Low byte = raw NES tile index (0-255)
+    //
+    // For now, we mask to 8 bits and ignore CHR bank 1 (which overlaps
+    // tilemap).
+    // TODO: Investigate if charBase=0 games use both banks correctly.
+    if (classicNesMode) {
+      // Use low 8 bits as tile index (NES tiles are 0-255)
+      // High bits may indicate CHR bank but with current VRAM layout,
+      // bank 1 tiles (256+) would overlap the tilemap region
+      tileIndex = tileEntry & 0xFF;
     }
 
     bool hFlip = (tileEntry >> 10) & 1;

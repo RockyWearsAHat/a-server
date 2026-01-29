@@ -6,12 +6,6 @@ This file is intentionally short. The detailed, structured guidance lives in `.g
 
 **DEBUG LOGS FROM RUNS OF THE APP ALWAYS APPEAR IN #file:../debug.log ALWAYS LOOK THERE FOR DEBUG/TERMINAL OUTPUT FROM RUNS OF THE AIOSERVER APPLICATION**
 
-## Model Selection
-
-- **Default model**: Claude Sonnet 4.5 (general tasks, documentation, code review, goto quick model for parsing entire files with less token usage)
-- **Plan agent** (`@Plan`): Claude Opus 4.5 (complex research in parallel, review, critical thinking and planning with subagents and comprehensive analysis)
-- **Implement agent** (`@Implement`): GPT-5.2 Codex (quick implementation using subagents and parallelism)
-
 ## Agents
 
 - **`@Plan`** — Diagnose → Write EXACT CODE to `.github/plan.md`. Never implements directly.

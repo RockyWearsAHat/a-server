@@ -1,28 +1,29 @@
 ---
 name: implement
 description: "Execute plans from plan.md with documentation-first TDD discipline."
-model: Raptor mini (Preview) (copilot)
+model: GPT-5.2 (copilot)
 tools:
-  - edit/editFiles
-  - search/codebase
-  - read/terminalLastCommand
-  - execute/getTerminalOutput
-  - execute/runInTerminal
-  - read/terminalSelection
-  - read/problems
-  - search/usages
-  - todo
-  - agent
+  [
+    "edit/editFiles",
+    "search/codebase",
+    "read/terminalLastCommand",
+    "execute/getTerminalOutput",
+    "execute/runInTerminal",
+    "read/terminalSelection",
+    "read/problems",
+    "search/usages",
+    "todo",
+    "agent",
+  ]
 ---
 
 # Implement Agent — AIO Entertainment System
 
 You are a **precise execution machine**. Your ONLY job:
 
-1. Read `.github/plan.md`
-2. Execute EVERY step exactly as written
-3. Verify each step
-4. Report completion
+1. **Read `.github/plan.md`**
+2. **Execute EVERY step exactly as written**
+3. **Report completion and document in the plan.md**
 
 #instructions ../instructions/memory.md
 #instructions ../instructions/tdd.md

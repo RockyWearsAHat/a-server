@@ -4762,6 +4762,74 @@ TEST_F(CPUTest, SWI_LZ77UnCompVram_OddSize) {
   EXPECT_EQ(memory.Read16(0x06000002) & 0xFF, 0xCCu);
 }
 
+TEST_F(CPUTest, SWI_LZ77UnCompWram_ToIwram) {
+  // Test LZ77 decompression to IWRAM (0x03000000) - used by Classic NES games
+  const uint32_t src = 0x02000100u;
+  const uint32_t dst = 0x03000400u; // IWRAM destination
+
+  // LZ77 header: size=8, type=0x10
+  memory.Write32(src, (8u << 8) | 0x10u);
+  // Flag byte: 8 literals
+  memory.Write8(src + 4, 0x00u);
+  // 8 literal bytes
+  memory.Write8(src + 5, 0xAAu);
+  memory.Write8(src + 6, 0xBBu);
+  memory.Write8(src + 7, 0xCCu);
+  memory.Write8(src + 8, 0xDDu);
+  memory.Write8(src + 9, 0xEEu);
+  memory.Write8(src + 10, 0xFFu);
+  memory.Write8(src + 11, 0x11u);
+  memory.Write8(src + 12, 0x22u);
+
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  RunInstr(0xEF000011u); // SWI 0x11 = LZ77UnCompWram
+
+  EXPECT_EQ(memory.Read8(dst + 0), 0xAAu);
+  EXPECT_EQ(memory.Read8(dst + 1), 0xBBu);
+  EXPECT_EQ(memory.Read8(dst + 6), 0x11u);
+  EXPECT_EQ(memory.Read8(dst + 7), 0x22u);
+}
+
+TEST_F(CPUTest, SWI_LZ77UnCompWram_LargeBackReference) {
+  // Test LZ77 with back-reference copying previously-written data
+  // LZ77 flag byte is processed from bit 7 (first) to bit 0 (last)
+  // bit=0 means literal, bit=1 means compressed (back-reference)
+  const uint32_t src = 0x02000100u;
+  const uint32_t dst = 0x02000400u;
+
+  // LZ77 header: size=22, type=0x10 (4 literals + 18 back-ref bytes)
+  memory.Write32(src, (22u << 8) | 0x10u);
+  // Flag byte: bits 7,6,5,4=0 (4 literals), bit 3=1 (back-reference)
+  // Binary: 0000_1000 = 0x08
+  memory.Write8(src + 4, 0x08u);
+  // 4 literal bytes (for bits 7,6,5,4)
+  memory.Write8(src + 5, 0x12u);
+  memory.Write8(src + 6, 0x34u);
+  memory.Write8(src + 7, 0x56u);
+  memory.Write8(src + 8, 0x78u);
+  // Back-reference (for bit 3): length=18, displacement=4 (copy from dst+0)
+  // Byte format: [len-3:4 | disp_high:4] [disp_low:8]
+  // len=18 -> len-3=15=0xF, disp=4 -> disp-1=3=0x003 -> bytes: 0xF0, 0x03
+  memory.Write8(src + 9, 0xF0u);
+  memory.Write8(src + 10, 0x03u);
+
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  RunInstr(0xEF000011u);
+
+  // First 4 bytes are literals
+  EXPECT_EQ(memory.Read8(dst + 0), 0x12u);
+  EXPECT_EQ(memory.Read8(dst + 1), 0x34u);
+  EXPECT_EQ(memory.Read8(dst + 2), 0x56u);
+  EXPECT_EQ(memory.Read8(dst + 3), 0x78u);
+  // Next bytes are copies of the first 4, repeated
+  EXPECT_EQ(memory.Read8(dst + 4), 0x12u);
+  EXPECT_EQ(memory.Read8(dst + 5), 0x34u);
+  EXPECT_EQ(memory.Read8(dst + 6), 0x56u);
+  EXPECT_EQ(memory.Read8(dst + 7), 0x78u);
+}
+
 // === CpuSet 16-bit mode tests ===
 
 TEST_F(CPUTest, SWI_CpuSet_16bit_Copy) {

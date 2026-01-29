@@ -101,6 +101,19 @@ The `tests/` folder contains the primary correctness harness:
 
 Guideline: tests should mirror **documentation/spec**, not the current implementation.
 
+### Test Coverage for Classic NES Series (2025-01)
+
+- **PPUTests.cpp**: Classic NES palette bank remapping tests verify:
+  - colorIndex 1-6 maps to palette indices 9-14 via +8 offset
+  - colorIndex 7+ stays unmapped
+  - Disabled mode uses normal palette bank behavior
+
+- **DMATests.cpp**: DMA source control tests verify:
+  - srcCtrl=2 (Fixed) reads same address repeatedly
+  - srcCtrl=1 (Decrement) reads backwards
+  - IWRAM source reads work correctly
+  - Palette RAM destination works correctly
+
 ## Timing & Performance
 
 ### Peripheral Batching
@@ -164,6 +177,30 @@ if (paletteBank >= 8) {
 ```
 
 **Fixed in 2026-01:** Previously, the fix always applied +8 offset regardless of palBank, causing border areas (palBank=8) to render as cyan instead of black.
+
+#### Tile Index Masking
+
+The NES-on-GBA wrapper stores tilemap data in GBA format, but with quirks:
+
+- **Raw entries** look like `0x80F7`, `0x01FE`, etc.
+- The **low 8 bits** (0xF7, 0xFE) are the actual NES tile index (0-255)
+- The **high byte** contains NES attributes or flags (e.g., 0x80 = CHR bank select)
+
+Standard GBA tilemap parsing (`tileIndex = entry & 0x3FF`) would interpret 0x01FE as tile 510, but:
+
+- With charBase=1 (tiles at 0x6004000) and screenBase=13 (tilemap at 0x6006800)
+- Tiles 320+ overlap the tilemap region (0x6004000 + 320\*32 = 0x6006800)
+- Reading tile 510 would fetch tilemap data as if it were tile graphics
+
+**Fix (2026-01):** In `classicNesMode`, mask tile index to 8 bits:
+
+```cpp
+if (classicNesMode) {
+  tileIndex = tileEntry & 0xFF; // Use NES tile index only
+}
+```
+
+This keeps all tile fetches within the valid range (0-255) and avoids VRAM overlap corruption.
 
 #### BG VRAM wrapping (text modes)
 

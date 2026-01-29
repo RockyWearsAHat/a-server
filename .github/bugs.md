@@ -101,4 +101,21 @@ _This bug was recorded automatically by the implement agent while executing `.gi
   1. Test setup timing / OAM write ordering causing other sprites to still draw at scanline 0, or
   2. A subtle rendering ordering/capture issue in `RenderOBJ()` / backBuffer->underColorBuffer recording that should be investigated.
 
-**Status:** ⚠️ Blocked — Step 1 applied but verification failed. Suggest `@Plan` refinement to propose either a small, safe change to `RenderOBJ()` to ensure the "under" pixel for an OBJ is the pre-OBJ pixel (backdrop/BG), or a test refinement that guarantees no other sprites can draw (e.g., fence OAM writes at a known-latch time).
+- NEW: LZ77 WRAM large back-reference failure (this run)
+  - Test: `CPUTest.SWI_LZ77UnCompWram_LargeBackReference` (added per `.github/plan.md`).
+  - Reproduction (same-machine):
+    1. `./build/bin/CPUTests --gtest_filter=CPUTest.SWI_LZ77UnCompWram_LargeBackReference`
+    2. Or run full suite: `cd build/generated/cmake && ctest --output-on-failure`
+  - Observed: back-reference copies into WRAM produce zeroed bytes instead of reading previously-written bytes during the same decompression stream. Multiple EXPECT_EQ(...) checks for bytes copied via back-reference returned 0x00.
+  - Expected: Back-reference should copy previously-written bytes (e.g., 0x12,0x34,0x56,0x78 sequence) per GBATEK; test constructs a back-reference that refers to bytes written earlier in the decompression window.
+  - Likely root causes to investigate:
+    - The WRAM SWI (0x11) path is not reading from the destination address when resolving back-references (reads from an uninitialized buffer or fails to make written bytes visible).
+    - Memory write granularity/side-effects or an off-by-one in the "written"/offset calculation that prevents the back-reference source from being addressed correctly.
+  - Files of interest: `src/emulator/gba/ARM7TDMI.cpp` (SWI LZ77 implementation), `src/emulator/gba/GBAMemory.cpp` (WRAM visibility), related LZ77 tests in `tests/CPUTests.cpp` (VRAM cases pass).
+  - Temporary diagnostics already suggested: enable SWI/LZ77 tracing and re-run the single test; add a micro-repro that writes a known pattern then issues the problematic back-reference.
+  - Suggested next steps (one self-fix attempt allowed):
+    1. Run the failing test with tracing to capture the decompression loop (I can do this now and attach the trace).
+    2. Inspect `ARM7TDMI::ExecuteSWI` WRAM branch to ensure back-reference reads `memory.Read8(dst - offset)` from the correct region and that `memory.Write8(dst, val)` updates visible state immediately.
+    3. If the bug is a simple index/offset mistake or an ordering issue, apply a minimal patch, re-run the failing test, and document the fix in this bug entry.
+
+**Status:** ⚠️ Blocked — multiple plan steps applied; one failing test (`CPUTest.SWI_LZ77UnCompWram_LargeBackReference`) requires investigation/fix before the plan can be marked complete. Suggest I (Implement) run the failing test with LZ77/SWI tracing next (recommended) or attempt one focused self-fix (also OK).
