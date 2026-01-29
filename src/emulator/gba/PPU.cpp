@@ -2197,30 +2197,22 @@ void PPU::RenderBackground(int bgIndex) {
         uint8_t effectivePaletteBank = paletteBank;
         // Classic NES Series palette handling v2:
         // The NES-on-GBA emulator stores actual colors at palette bank 0,
-        // indices 9-14. Tilemap entries may specify:
-        // - palBank 0-7: Apply +8 offset to colorIndex 1-6 → indices 9-14
-        // - palBank 8+: Border/empty regions. Use bank 0 without offset
-        //   (indices 0-8 are zeros = BLACK, which is correct for borders)
+        // indices 9-14. The NES wrapper uses these indices for all game graphics.
+        // Tilemap palette banks (0-15) are used as NES attribute table values,
+        // NOT as GBA palette bank selectors. We always use bank 0 and apply
+        // the +8 offset for colorIndex 1-6 to read the actual NES colors.
 
         // DIAGNOSTIC: Trace Classic NES palette behavior
         static const bool tracePalette = EnvFlagCached("AIO_TRACE_NES_PALETTE");
         static int paletteTraces = 0;
 
         if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
-          if (paletteBank >= 8) {
-            // Border/empty areas: tilemap specifies palBank 8+ (bit 15 set)
-            // Use bank 0 but DON'T apply +8 offset → reads zeros → BLACK
-            effectivePaletteBank = 0;
-            // effectiveColorIndex stays as-is (will be 0-8, all zeros in bank
-            // 0)
-          } else {
-            // Normal tiles: Apply +8 offset to access NES colors at indices
-            // 9-14
-            effectivePaletteBank = 0;
-            if (colorIndex <= 6) {
-              effectiveColorIndex = colorIndex + 8; // Map 1-6 to 9-14
-            }
+          // Always use palette bank 0 and apply +8 offset for colorIndex 1-6
+          effectivePaletteBank = 0;
+          if (colorIndex <= 6) {
+            effectiveColorIndex = colorIndex + 8; // Map 1-6 to 9-14
           }
+          // colorIndex 7-15 stay as-is (7→7, 8→8, etc.)
 
           if (tracePalette && paletteTraces < 20 && scanline == 0 && x < 16) {
             paletteTraces++;
@@ -2243,12 +2235,13 @@ void PPU::RenderBackground(int bgIndex) {
         uint16_t color = ReadLE16(palData, palSize, paletteAddr - 0x05000000u);
 
         // DIAGNOSTIC: Trace actual palette color reads for Classic NES
+        // Only trace after frame 10 when palette should be loaded
         static const bool traceColor = EnvFlagCached("AIO_TRACE_NES_PALETTE");
         static int colorTraces = 0;
-        if (traceColor && colorTraces < 50 && scanline == 0 && x < 100 &&
-            colorIndex != 0) {
+        if (traceColor && colorTraces < 50 && frameCount >= 10 && scanline == 0 &&
+            x < 100 && colorIndex != 0) {
           colorTraces++;
-          std::cout << "[NES_COLOR] x=" << x
+          std::cout << "[NES_COLOR] frame=" << frameCount << " x=" << x
                     << " effIdx=" << (int)effectiveColorIndex << " palAddr=0x"
                     << std::hex << paletteAddr << " color=0x" << color
                     << std::dec << std::endl;
