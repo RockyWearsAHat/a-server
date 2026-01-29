@@ -4,9 +4,9 @@ This file is intentionally short. The detailed, structured guidance lives in `.g
 
 ## Model Selection
 
-- **Default model**: GPT-4.1 (general tasks, documentation, code review)
-- **Plan agent** (`@Plan`): Claude Opus 4.5 (complex research and planning)
-- **Implement agent** (`@Implement`): Raptor Mini (execution and implementation)
+- **Default model**: GPT-5.2 (general tasks, documentation, code review, goto quick model for parsing entire files with less token usage)
+- **Plan agent** (`@Plan`): Claude Opus 4.5 (complex research, review, critical thinking and planning)
+- **Implement agent** (`@Implement`): GPT-5.2 Codex (quick implementation using subagents and parallelism)
 
 ## Agents
 

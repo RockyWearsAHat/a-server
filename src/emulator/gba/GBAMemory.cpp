@@ -4623,6 +4623,16 @@ void GBAMemory::UpdateTimers(int cycles) {
 }
 
 void GBAMemory::AdvanceCycles(int cycles) {
+  // DIAGNOSTIC: Trace AdvanceCycles
+  static const bool traceAdvance = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+  static int advanceTraces = 0;
+  if (traceAdvance && advanceTraces < 5) {
+    advanceTraces++;
+    std::cerr << "[ADVANCE_CYCLES] cycles=" << cycles
+              << " ppu=" << (ppu ? "valid" : "null") << std::endl;
+    std::cerr.flush();
+  }
+
   UpdateTimers(cycles);
   if (ppu)
     ppu->Update(cycles);

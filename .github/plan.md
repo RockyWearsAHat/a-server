@@ -1,206 +1,145 @@
-# Plan: Fix Classic NES Series (OG-DK) Palette Rendering
+# Plan: Fix OG-DK Complete Garbage Rendering
 
-**Status:** 🔴 NOT STARTED  
-**Goal:** Fix OG-DK showing only 1% red when mgba shows 20%+ red on title screen
+**Status:** NOT STARTED
+**Goal:** Fix OG-DK to render correctly like mGBA
 
 ---
 
 ## Context
 
-### Investigation Summary
+OG-DK shows complete visual garbage vs mGBA clean rendering.
 
-**Issue:** OG-DK.gba shows only ~1% red pixels (367); mgba shows ~20% red.
+### Root Cause Analysis
 
-**VRAM Analysis (debug.log):** Tile data contains both:
+1. CPU Instruction Bug - ARM7TDMI has 36% test coverage
+2. LZ77 Decompression Bug - SWI 0x11/0x12 needs testing
+3. Thumb Format 8 Missing Tests - LDRH/STRH/LDRSB/LDRSH untested
 
-- Low colorIndex (1-6): These get +8 offset → palette 9-14 ✓
-- High colorIndex (9-14): These use direct index → palette 9-14 ✓
+---
 
-**Current Palette Logic (PPU.cpp ~line 2099):**
+## Steps
 
-`````cpp
-if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
-  if (colorIndex <= 6) {
-    ````markdown
-    # Plan: Fix OG-DK (Classic NES Series) Corrupted Tiles
+### Step 1: Add Thumb Format 8 tests to tests/CPUTests.cpp
 
-    **Status:** 🔴 NOT STARTED
-    **Goal:** Fix OG-DK.gba (FDKE) severe BG tile corruption (wrong glyphs/patterns) without ROM-specific hacks.
+**Operation:** INSERT_AFTER last TEST_F (around line 895)
 
-    ---
+```cpp
+TEST_F(CPUTest, Thumb_Format8_STRH_RegisterOffset) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000u);
+  cpu.SetRegister(0, 0x1234u);
+  cpu.SetRegister(2, 0x02000000u);
+  cpu.SetRegister(3, 0x00000004u);
+  // STRH R0, [R2, R3]: 0x52D0
+  RunThumbInstr(0x52D0);
+  EXPECT_EQ(memory.Read16(0x02000004u), 0x1234u);
+}
 
-    ## Diagnosis (working hypothesis)
+TEST_F(CPUTest, Thumb_Format8_LDRH_RegisterOffset) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000u);
+  cpu.SetRegister(2, 0x02000000u);
+  cpu.SetRegister(3, 0x00000006u);
+  memory.Write16(0x02000006u, 0x5678u);
+  // LDRH R0, [R2, R3]: 0x5AD0
+  RunThumbInstr(0x5AD0);
+  EXPECT_EQ(cpu.GetRegister(0), 0x5678u);
+}
 
-    The current `classicNesMode` path in `PPU::RenderBackground()` contains a heuristic that dynamically chooses tile bases in VRAM for Classic NES titles. This is a game-specific workaround and can easily select incorrect data, producing repeating patterns.
+TEST_F(CPUTest, Thumb_Format8_LDRSB_RegisterOffset) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000u);
+  cpu.SetRegister(2, 0x02000000u);
+  cpu.SetRegister(3, 0x00000007u);
+  memory.Write8(0x02000007u, 0x80u);
+  // LDRSB R0, [R2, R3]: 0x56D0
+  RunThumbInstr(0x56D0);
+  EXPECT_EQ(cpu.GetRegister(0), 0xFFFFFF80u);
+}
 
-    Separately, our BG tile fetch path currently reads VRAM through a unified 96KB view and (per existing tests) allows BG fetches to read from the OBJ region when tile indices overflow. GBATEK documents BG character/screen fetches as wrapping within the BG VRAM window for text modes. Classic NES-on-GBA ROMs appear to rely on correct BG wrapping (and/or not reading OBJ VRAM) to avoid pulling sprite/font data into BG.
+TEST_F(CPUTest, Thumb_Format8_LDRSH_RegisterOffset) {
+  cpu.SetThumbMode(true);
+  cpu.SetRegister(15, 0x08000000u);
+  cpu.SetRegister(2, 0x02000000u);
+  cpu.SetRegister(3, 0x00000008u);
+  memory.Write16(0x02000008u, 0x8000u);
+  // LDRSH R0, [R2, R3]: 0x5ED0
+  RunThumbInstr(0x5ED0);
+  EXPECT_EQ(cpu.GetRegister(0), 0xFFFF8000u);
+}
+```
 
-    **Fix direction:** make BG tilemap + tile-graphics reads in text BG modes wrap within the 64KB BG VRAM window, and remove the Classic NES tile-base heuristic.
+**Verify:** `make build && cd build/generated/cmake && ctest -R Thumb_Format8 --output-on-failure`
 
-    ---
+---
 
-    ## Step 1 — Documentation update (spec-first)
+### Step 2: Add LZ77 decompression tests to tests/CPUTests.cpp
 
-    **File:** `.github/instructions/memory.md`
+**Operation:** INSERT_AFTER the Format 8 tests
 
-    **Operation:** `INSERT` under `### Classic NES Series / NES-on-GBA ROMs`
+```cpp
+TEST_F(CPUTest, SWI_LZ77UnCompWram_Literals) {
+  const uint32_t src = 0x02000100u;
+  const uint32_t dst = 0x02000200u;
+  memory.Write32(src, 0x00000810u);
+  memory.Write8(src + 4, 0x00u);
+  memory.Write8(src + 5, 0x11u);
+  memory.Write8(src + 6, 0x22u);
+  memory.Write8(src + 7, 0x33u);
+  memory.Write8(src + 8, 0x44u);
+  memory.Write8(src + 9, 0x55u);
+  memory.Write8(src + 10, 0x66u);
+  memory.Write8(src + 11, 0x77u);
+  memory.Write8(src + 12, 0x88u);
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  RunInstr(0xEF000011u);
+  EXPECT_EQ(memory.Read8(dst + 0), 0x11u);
+  EXPECT_EQ(memory.Read8(dst + 7), 0x88u);
+}
 
-    ```markdown
-    #### BG VRAM wrapping (text modes)
+TEST_F(CPUTest, SWI_LZ77UnCompVram_Literals) {
+  const uint32_t src = 0x02000100u;
+  const uint32_t dst = 0x06000000u;
+  memory.Write32(src, 0x00000810u);
+  memory.Write8(src + 4, 0x00u);
+  memory.Write8(src + 5, 0xAAu);
+  memory.Write8(src + 6, 0xBBu);
+  memory.Write8(src + 7, 0xCCu);
+  memory.Write8(src + 8, 0xDDu);
+  memory.Write8(src + 9, 0xEEu);
+  memory.Write8(src + 10, 0xFFu);
+  memory.Write8(src + 11, 0x11u);
+  memory.Write8(src + 12, 0x22u);
+  cpu.SetRegister(0, src);
+  cpu.SetRegister(1, dst);
+  RunInstr(0xEF000012u);
+  EXPECT_EQ(memory.Read16(dst + 0), 0xBBAAu);
+  EXPECT_EQ(memory.Read16(dst + 6), 0x2211u);
+}
+```
 
-    For text backgrounds (modes 0–2), BG tilemap (screen blocks) and tile graphics (character blocks) are addressed within the BG VRAM window.
+**Verify:** `make build && cd build/generated/cmake && ctest -R SWI_LZ77 --output-on-failure`
 
-    Implementation invariant (spec-driven): BG fetches for text modes wrap within $64\,\text{KB}$ (offset mask `0xFFFF`), i.e. BG rendering must not accidentally pull tilemap/tile data from the OBJ VRAM region.
-    ```
+---
 
-    ---
+### Step 3: Run all tests and verify no regressions
 
-    ## Step 2 — Tests (fail first)
+```bash
+make build && cd build/generated/cmake && ctest --output-on-failure
+```
 
-    ### 2.1 Update existing test to match spec
+---
 
-    **File:** `tests/PPUTests.cpp`
+## Test Strategy
 
-    **Operation:** `UPDATE` test `PPUTest.BgTileFetchDoesNotReadFromObjVram_Mode0`
+1. `make build` - compiles without errors
+2. `ctest -R Thumb_Format8` - Format 8 tests pass
+3. `ctest -R SWI_LZ77` - LZ77 tests pass
+4. `ctest --output-on-failure` - all tests pass
 
-    **Old expectation (current behavior):** BG tile fetch reads OBJ VRAM when tile index overflows into 0x06010000.
+---
 
-    **New expectation (spec):** BG tile fetch wraps within 64KB BG VRAM, so tile index 512 with charBase=3 wraps to 0x06000000 and produces red.
+## Handoff
 
-    ```cpp
-    // Render scanline 0 and sample pixel (0,0). Spec behavior: BG fetch wraps
-    // within 64KB BG VRAM, so tile 512 wraps and reads from BG VRAM => red.
-    ppu.Update(TestUtil::kCyclesToHBlankStart);
-    ppu.SwapBuffers();
-    EXPECT_EQ(TestUtil::GetPixel(ppu, 0, 0), TestUtil::ARGBFromBGR555(0x001F));
-    ```
-
-    ### 2.2 Add a map-wrapping test for size=3
-
-    **File:** `tests/PPUTests.cpp`
-
-    **Operation:** `ADD` new test
-
-    ```cpp
-    TEST(PPUTest, BgTileMapWrapsWithin64K_Mode0_Size3) {
-      GBAMemory mem;
-      mem.Reset();
-
-      // Mode 0, BG0 enabled.
-      mem.Write16(0x04000000u, 0x0100u);
-
-      // Palette: idx1=red, idx2=green.
-      mem.Write16(0x05000002u, 0x001Fu);
-      mem.Write16(0x05000004u, 0x03E0u);
-
-      // BG0CNT:
-      // - char base block 0 => tileBase=0x06000000
-      // - screen base block 31 => mapBase=0x0600F800
-      // - size 3 => 64x64 tiles (4 screen blocks, can overflow 64KB)
-      const uint16_t bg0cnt = (uint16_t)((0u << 2) | (31u << 8) | (3u << 14));
-      mem.Write16(0x04000008u, bg0cnt);
-
-      // Scroll into bottom-right block (tx>=32, ty>=32).
-      mem.Write16(0x04000010u, 256u); // BG0HOFS
-      mem.Write16(0x04000012u, 256u); // BG0VOFS
-
-      // Tile #0 filled with palette idx 1 (red), tile #1 with idx 2 (green).
-      for (uint32_t o = 0; o < 32; o += 2) {
-        mem.Write16(0x06000000u + o, 0x1111u);
-        mem.Write16(0x06000020u + o, 0x2222u);
-      }
-
-      // If NOT wrapped, BG would read map entry at 0x06011000 (beyond 64KB).
-      // We intentionally put tile #1 there (green) to catch incorrect behavior.
-      mem.Write16(0x06011000u, 0x0001u);
-
-      // With 64KB wrapping, 0x06011000 wraps to 0x06001000.
-      // Put tile #0 there (red) as the expected correct entry.
-      mem.Write16(0x06001000u, 0x0000u);
-
-      PPU ppu(mem);
-      ppu.Update(TestUtil::kCyclesToHBlankStart);
-      ppu.SwapBuffers();
-      EXPECT_EQ(TestUtil::GetPixel(ppu, 0, 0), TestUtil::ARGBFromBGR555(0x001F));
-    }
-    ```
-
-    ---
-
-    ## Step 3 — Implementation
-
-    ### 3.1 Remove Classic NES tile-base heuristic; implement BG 64KB wrapping
-
-    **File:** `src/emulator/gba/PPU.cpp`
-
-    **Operation A:** `ADD` BG-specific VRAM readers next to the existing `ReadVram8/ReadVram16` helpers.
-
-    ```cpp
-    inline uint32_t MapBgVramOffset(uint32_t offset) {
-      // Text BG fetches wrap within 64KB BG VRAM window.
-      return offset & 0xFFFFu;
-    }
-
-    inline uint8_t ReadBgVram8(const uint8_t *vram, size_t vramSize,
-                               uint32_t offset) {
-      if (!vram || vramSize == 0)
-        return 0;
-      const uint32_t mapped = MapBgVramOffset(offset) % (uint32_t)vramSize;
-      return vram[mapped];
-    }
-
-    inline uint16_t ReadBgVram16(const uint8_t *vram, size_t vramSize,
-                                 uint32_t offset) {
-      if (!vram || vramSize == 0)
-        return 0;
-      const uint32_t o0 = MapBgVramOffset(offset) % (uint32_t)vramSize;
-      const uint32_t o1 = MapBgVramOffset(offset + 1u) % (uint32_t)vramSize;
-      return (uint16_t)(vram[o0] | (vram[o1] << 8));
-    }
-    ```
-
-    **Operation B:** `UPDATE` `PPU::RenderBackground()` to use `ReadBgVram16/ReadBgVram8` for tilemap entries and 4bpp/8bpp tile bytes.
-
-    ```cpp
-    uint16_t tileEntry = ReadBgVram16(vramData, vramSize, mapOffset);
-    ```
-
-    ```cpp
-    tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
-    ```
-
-    ```cpp
-    tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
-    ```
-
-    **Operation C:** `DELETE` the `resolveClassicNesTileStartOffset` lambda and the `if (classicNesMode) { ... }` override of tileStartOffset.
-
-    ---
-
-    ## Step 4 — Verify
-
-    1) Build + run unit tests:
-
-    ```bash
-    cd "/Users/alexwaldmann/Desktop/AIO Server" && make build
-    cd "/Users/alexwaldmann/Desktop/AIO Server/build/generated/cmake" && ctest --output-on-failure
-    ```
-
-    2) Headless OG-DK frame dump + ASCII preview (manual sanity):
-
-    ```bash
-    cd "/Users/alexwaldmann/Desktop/AIO Server" && rm -f current_ogdk.ppm && \
-    ./build/bin/AIOServer --rom OG-DK.gba --headless --headless-max-ms 6000 \
-      --headless-dump-ms 3000 --headless-dump-ppm current_ogdk.ppm
-    python3 scripts/ppm_ascii_preview.py current_ogdk.ppm --w 120 --h 70 | head -80
-    python3 analyze_ppm.py current_ogdk.ppm
-    ```
-
-    ---
-
-    ## Handoff
-
-    Run `@Implement` to apply Step 1–4 exactly.
-
-    ````
-`````
+Run @Implement to execute all steps.

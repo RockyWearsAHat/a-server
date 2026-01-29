@@ -344,6 +344,17 @@ void PPU::Update(int cycles) {
   // 308 * 4 = 1232 cycles per line
   // 160 lines + 68 VBlank = 228 lines total
 
+  // DIAGNOSTIC: Trace PPU::Update entry
+  static const bool tracePpuUpdate = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+  static int ppuUpdateTraces = 0;
+  if (tracePpuUpdate && ppuUpdateTraces < 5) {
+    ppuUpdateTraces++;
+    std::cerr << "[PPU_UPDATE] cycles=" << cycles << " scanline=" << scanline
+              << " cycleCounter=" << cycleCounter << " frame=" << frameCount
+              << std::endl;
+    std::cerr.flush();
+  }
+
   if (TraceGbaSpam()) {
     static int updateCallCount = 0;
   }
@@ -557,6 +568,16 @@ void PPU::Update(int cycles) {
 void PPU::DrawScanline() {
   uint16_t dispcnt = ReadRegister(0x00);
   int mode = dispcnt & 0x7;
+
+  // DIAGNOSTIC: Trace DrawScanline entry
+  static const bool traceDrawScanline = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+  static int drawScanlineTraces = 0;
+  if (traceDrawScanline && drawScanlineTraces < 5 && scanline == 0) {
+    drawScanlineTraces++;
+    std::cerr << "[DRAW_SCANLINE] frame=" << frameCount << " mode=" << mode
+              << " dispcnt=0x" << std::hex << dispcnt << std::dec << std::endl;
+    std::cerr.flush();
+  }
 
   // Optional: per-frame PPU state trace (minimal volume, scanline 0 only).
   // Enable with: AIO_TRACE_PPU_FRAMESTATE=1
@@ -1820,6 +1841,17 @@ void PPU::RenderMode0() {
   // Mode 0: Tiled, BG0-BG3
   uint16_t dispcnt = ReadRegister(0x00);
 
+  // DIAGNOSTIC: Force stderr output for debugging
+  static const bool traceMode0 = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+  static int mode0Traces = 0;
+  if (traceMode0 && mode0Traces < 5 && scanline == 0) {
+    mode0Traces++;
+    std::cerr << "[MODE0] frame=" << frameCount << " dispcnt=0x" << std::hex
+              << dispcnt << " bgEnables=0x" << ((dispcnt >> 8) & 0xF)
+              << std::dec << std::endl;
+    std::cerr.flush();
+  }
+
   if (TraceGbaSpam()) {
     static int renderMode0Count = 0;
     if (renderMode0Count < 5) {
@@ -1880,6 +1912,17 @@ void PPU::RenderMode0() {
 void PPU::RenderBackground(int bgIndex) {
   const uint16_t dispcnt = ReadRegister(0x00);
   const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
+
+  // DIAGNOSTIC: Trace which mode and BG are being rendered
+  static const bool traceMode = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+  static int modeTraces = 0;
+  if (traceMode && modeTraces < 10 && scanline == 0) {
+    modeTraces++;
+    // Write to stderr which isn't buffered
+    std::cerr << "[BG_RENDER] mode=" << (int)bgMode << " bgIndex=" << bgIndex
+              << " dispcnt=0x" << std::hex << dispcnt << std::dec << std::endl;
+  }
+
   // NOTE: BG VRAM wrapping (mapOffset &= 0xFFFF) was attempted for modes 0-2
   // but broke SMA2. Removed for compatibility.
   (void)bgMode;
@@ -1922,15 +1965,9 @@ void PPU::RenderBackground(int bgIndex) {
   uint32_t mapBase = vramBase + (screenBaseBlock * 2048);
   uint32_t tileBase = vramBase + (charBaseBlock * 16384);
 
-  // Classic NES Series tile base adjustment:
-  // DISABLED FOR NOW - testing shows charBase=1 has valid tile data.
-  // The issue may be with specific high tile indices (320-511) that overlap
-  // with tilemap or OBJ VRAM regions.
-  // static const bool envDisableCharBaseFix =
-  // EnvFlagCached("AIO_DISABLE_CLASSIC_NES_CHARBASE_FIX"); if (classicNesMode
-  // && !envDisableCharBaseFix && charBaseBlock == 1) {
-  //   tileBase = vramBase; // charBase=0 (offset 0x0000)
-  // }
+  // NOTE: Previous charBase override for Classic NES was REMOVED.
+  // Analysis showed the fix increased corruption (5588 -> 7232 cyan pixels).
+  // The actual issue appears to be tile/tilemap VRAM overlap, not charBase.
 
   const uint8_t *vramData = memory.GetVRAMData();
   const size_t vramSize = memory.GetVRAMSize();
@@ -2008,6 +2045,37 @@ void PPU::RenderBackground(int bgIndex) {
 
     int tileIndex = tileEntry & 0x3FF;
 
+    // Diagnostic: Trace tiles that overlap with tilemap region
+    static const bool traceOverlap = EnvFlagCached("AIO_TRACE_TILE_OVERLAP");
+    if (traceOverlap && classicNesMode && tileIndex >= 320 && tileIndex < 448) {
+      static int overlapTraces = 0;
+      if (overlapTraces++ < 50) {
+        uint32_t tileOffset = (tileBase - 0x06000000u) + tileIndex * 32u;
+        std::cout << "[TILE_OVERLAP] frame=" << frameCount
+                  << " tile=" << tileIndex << " tileOffset=0x" << std::hex
+                  << tileOffset << " tilemapStart=0x"
+                  << (screenBaseBlock * 2048) << std::dec << " (overlap!)"
+                  << std::endl;
+      }
+    }
+
+    // Experimental: For Classic NES games, test if tile indices should be
+    // masked to avoid overlap. NES pattern tables only have 512 tiles max.
+    // If tile index > 319 AND would overlap tilemap, wrap to lower range.
+    // TODO: This is experimental - needs verification against mGBA behavior.
+    static const bool experimentalTileMask =
+        EnvFlagCached("AIO_CLASSIC_NES_TILE_MASK");
+    if (experimentalTileMask && classicNesMode) {
+      uint32_t wouldBeOffset =
+          (tileBase - 0x06000000u) + (uint32_t)tileIndex * 32u;
+      uint32_t tilemapStart = screenBaseBlock * 2048u;
+      uint32_t tilemapEnd = tilemapStart + 4096u; // 4KB for screenSize=2
+      if (wouldBeOffset >= tilemapStart && wouldBeOffset < tilemapEnd) {
+        // Wrap tile index to avoid tilemap overlap (experimental)
+        tileIndex = tileIndex & 0xFF; // Mask to 8 bits (0-255)
+      }
+    }
+
     bool hFlip = (tileEntry >> 10) & 1;
     bool vFlip = (tileEntry >> 11) & 1;
     int paletteBank = (tileEntry >> 12) & 0xF;
@@ -2027,6 +2095,17 @@ void PPU::RenderBackground(int bgIndex) {
     static const bool envDisable = EnvFlagCached("AIO_DISABLE_CLASSIC_NES_FIX");
     const bool applyClassicNesPaletteOffset =
         !envDisable && (classicNesMode || envOverride);
+
+    // DIAGNOSTIC: Check if classic NES mode is active
+    static const bool traceClassicMode = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+    static int classicModeTraces = 0;
+    if (traceClassicMode && classicModeTraces < 5 && scanline == 0 && x == 0) {
+      classicModeTraces++;
+      std::cout << "[NES_MODE] classicNesMode=" << classicNesMode
+                << " envOverride=" << envOverride
+                << " envDisable=" << envDisable
+                << " applyOffset=" << applyClassicNesPaletteOffset << std::endl;
+    }
 
     // Note: We no longer mask paletteBank - we override it to 0 for Classic NES
     // in the palette lookup section below.
@@ -2116,19 +2195,40 @@ void PPU::RenderBackground(int bgIndex) {
         // Apply Classic NES Series palette handling
         uint8_t effectiveColorIndex = colorIndex;
         uint8_t effectivePaletteBank = paletteBank;
-        // Classic NES Series palette handling:
+        // Classic NES Series palette handling v2:
         // The NES-on-GBA emulator stores actual colors at palette bank 0,
-        // indices 9-14. However, tilemap entries use various palette bank
-        // values (0, 1, 3, 8, etc.). Analysis shows banks 1-15 are empty/black
-        // - only bank 0 has colors. The solution: Always use palette bank 0,
-        // and add +8 to colorIndex 1-6 to access the actual colors at indices
-        // 9-14.
+        // indices 9-14. Tilemap entries may specify:
+        // - palBank 0-7: Apply +8 offset to colorIndex 1-6 → indices 9-14
+        // - palBank 8+: Border/empty regions. Use bank 0 without offset
+        //   (indices 0-8 are zeros = BLACK, which is correct for borders)
+
+        // DIAGNOSTIC: Trace Classic NES palette behavior
+        static const bool tracePalette = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+        static int paletteTraces = 0;
+
         if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
-          effectivePaletteBank = 0; // All colors are in bank 0
-          if (colorIndex <= 6) {
-            effectiveColorIndex = colorIndex + 8; // Map 1-6 to 9-14
+          if (paletteBank >= 8) {
+            // Border/empty areas: tilemap specifies palBank 8+ (bit 15 set)
+            // Use bank 0 but DON'T apply +8 offset → reads zeros → BLACK
+            effectivePaletteBank = 0;
+            // effectiveColorIndex stays as-is (will be 0-8, all zeros in bank
+            // 0)
+          } else {
+            // Normal tiles: Apply +8 offset to access NES colors at indices
+            // 9-14
+            effectivePaletteBank = 0;
+            if (colorIndex <= 6) {
+              effectiveColorIndex = colorIndex + 8; // Map 1-6 to 9-14
+            }
           }
-          // colorIndex 7-15: leave as-is (will mostly read black/transparent)
+
+          if (tracePalette && paletteTraces < 20 && scanline == 0 && x < 16) {
+            paletteTraces++;
+            std::cout << "[NES_PAL] x=" << x << " palBank=" << (int)paletteBank
+                      << " colorIdx=" << (int)colorIndex
+                      << " -> effPal=" << (int)effectivePaletteBank
+                      << " effIdx=" << (int)effectiveColorIndex << std::endl;
+          }
         }
 
         // Fetch Color from Palette RAM
@@ -2141,6 +2241,18 @@ void PPU::RenderBackground(int bgIndex) {
           paletteAddr += (colorIndex * 2);
         }
         uint16_t color = ReadLE16(palData, palSize, paletteAddr - 0x05000000u);
+
+        // DIAGNOSTIC: Trace actual palette color reads for Classic NES
+        static const bool traceColor = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+        static int colorTraces = 0;
+        if (traceColor && colorTraces < 50 && scanline == 0 && x < 100 &&
+            colorIndex != 0) {
+          colorTraces++;
+          std::cout << "[NES_COLOR] x=" << x
+                    << " effIdx=" << (int)effectiveColorIndex << " palAddr=0x"
+                    << std::hex << paletteAddr << " color=0x" << color
+                    << std::dec << std::endl;
+        }
 
         // Convert 15-bit BGR to 32-bit ARGB
         // GBA: xBBBBBGGGGGRRRRR

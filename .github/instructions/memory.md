@@ -142,6 +142,29 @@ Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA ha
 - **Solution:** Fix timing to match GBATEK spec, not use LLE BIOS as workaround
 - These ROMs are excellent test cases for timing accuracy
 
+#### Palette Handling
+
+The NES-on-GBA emulator uses a specific palette layout:
+
+- **Actual NES colors** are stored at palette bank 0, indices 9-14
+- Tilemap entries may specify **palette bank 8+** (bit 15 set) for border/empty areas
+- Palette banks 1-15 are typically all zeros (black)
+
+The PPU applies this logic in `RenderBackground()`:
+
+```cpp
+if (paletteBank >= 8) {
+  // Border/empty: Use bank 0 without offset → indices 0-8 are zeros → BLACK
+  effectivePaletteBank = 0;
+} else {
+  // Normal tiles: Apply +8 to colorIndex 1-6 → indices 9-14
+  effectivePaletteBank = 0;
+  if (colorIndex <= 6) effectiveColorIndex = colorIndex + 8;
+}
+```
+
+**Fixed in 2026-01:** Previously, the fix always applied +8 offset regardless of palBank, causing border areas (palBank=8) to render as cyan instead of black.
+
 #### BG VRAM wrapping (text modes)
 
 For text backgrounds (modes 0–2), BG tilemap (screen blocks) and tile graphics (character blocks) are addressed within the BG VRAM window.  

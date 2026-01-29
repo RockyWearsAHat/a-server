@@ -69,7 +69,7 @@ int main() {
     std::cout << std::endl;
   }
 
-  // Dump first few tiles
+  // Dump first few tiles and tile 0xF7
   std::cout << "\n=== Tile Data (first 4 tiles at char base) ===" << std::endl;
   std::cout << "Char base: 0x" << std::setw(8) << bg0CharBase << std::endl;
   for (int tile = 0; tile < 4; tile++) {
@@ -80,6 +80,108 @@ int main() {
     }
     std::cout << "..." << std::endl;
   }
+
+  // Dump tile 0xF7 (247) - the first tile in the tilemap
+  std::cout << "\n=== Tile 0xF7 (247) - first tile referenced by tilemap ==="
+            << std::endl;
+  std::cout << "Address: 0x" << std::setw(8) << (bg0CharBase + 0xF7 * 32)
+            << std::endl;
+  for (int row = 0; row < 8; row++) {
+    std::cout << "  Row " << row << ": ";
+    for (int col = 0; col < 4; col++) {
+      uint8_t b = mem.Read8(bg0CharBase + 0xF7 * 32 + row * 4 + col);
+      // Show as nibbles (4bpp pixels)
+      int lo = b & 0xF;
+      int hi = (b >> 4) & 0xF;
+      std::cout << std::hex << lo << hi << " ";
+    }
+    std::cout << std::endl;
+  }
+
+  // Find a blank tile (all zeros)
+  std::cout << "\n=== Looking for blank (all-zero) tiles ===" << std::endl;
+  for (int tile = 0; tile < 320; tile++) {
+    bool allZero = true;
+    for (int i = 0; i < 32; i++) {
+      if (mem.Read8(bg0CharBase + tile * 32 + i) != 0) {
+        allZero = false;
+        break;
+      }
+    }
+    if (allZero) {
+      std::cout << "  Tile " << std::dec << tile << " (0x" << std::hex << tile
+                << ") is blank" << std::endl;
+    }
+  }
+  std::cout << std::dec;
+
+  // Check tile 510 (0x1FE) - referenced by tilemap entry 1
+  std::cout << "\n=== Tile 0x1FE (510) - overlaps with tilemap! ==="
+            << std::endl;
+  uint32_t tile510Addr = bg0CharBase + 510 * 32;
+  std::cout << "Address: 0x" << std::hex << tile510Addr << std::dec
+            << std::endl;
+  std::cout << "Tilemap at 0x06006800, so tiles >= 320 overlap!" << std::endl;
+  for (int row = 0; row < 8; row++) {
+    std::cout << "  Row " << row << ": ";
+    for (int col = 0; col < 4; col++) {
+      uint8_t b = mem.Read8(tile510Addr + row * 4 + col);
+      int lo = b & 0xF;
+      int hi = (b >> 4) & 0xF;
+      std::cout << std::hex << lo << hi << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << std::dec;
+
+  // Check charBase=0 region for comparison
+  std::cout << "\n=== CharBase=0 (0x06000000) for comparison ===" << std::endl;
+  std::cout << "Checking if tile data exists at charBase=0:" << std::endl;
+  int nonZeroAtBase0 = 0;
+  for (int i = 0; i < 0x2000; i++) {
+    if (mem.Read8(0x06000000 + i) != 0)
+      nonZeroAtBase0++;
+  }
+  std::cout << "  Non-zero bytes in first 8KB: " << nonZeroAtBase0 << std::endl;
+
+  // Show first few tiles at charBase=0
+  std::cout << "First 4 tiles at charBase=0:" << std::endl;
+  for (int tile = 0; tile < 4; tile++) {
+    std::cout << "  Tile " << tile << ": ";
+    for (int col = 0; col < 8; col++) {
+      uint8_t b = mem.Read8(0x06000000 + tile * 32 + col);
+      std::cout << std::hex << std::setw(2) << (int)b << " ";
+    }
+    std::cout << "..." << std::endl;
+  }
+  std::cout << std::dec;
+
+  // Compare tile 0xF7 at charBase=0 vs charBase=1
+  std::cout << "\n=== Comparing tile 0xF7 at different charBases ==="
+            << std::endl;
+  std::cout << "CharBase=0 (0x06000000 + 0xF7*32 = 0x06001EE0):" << std::endl;
+  for (int row = 0; row < 8; row++) {
+    std::cout << "  Row " << row << ": ";
+    for (int col = 0; col < 4; col++) {
+      uint8_t b = mem.Read8(0x06000000 + 0xF7 * 32 + row * 4 + col);
+      int lo = b & 0xF;
+      int hi = (b >> 4) & 0xF;
+      std::cout << std::hex << lo << hi << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << "CharBase=1 (0x06004000 + 0xF7*32 = 0x06005EE0):" << std::endl;
+  for (int row = 0; row < 8; row++) {
+    std::cout << "  Row " << row << ": ";
+    for (int col = 0; col < 4; col++) {
+      uint8_t b = mem.Read8(0x06004000 + 0xF7 * 32 + row * 4 + col);
+      int lo = b & 0xF;
+      int hi = (b >> 4) & 0xF;
+      std::cout << std::hex << lo << hi << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << std::dec;
 
   // Full palette dump
   std::cout << "\n=== Full Palette (BG) ===" << std::endl;

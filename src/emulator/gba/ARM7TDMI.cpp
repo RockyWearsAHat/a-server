@@ -2968,10 +2968,11 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
 
   // OGDK TRACE: Log all SWI calls for debugging
   if (comment != 0x05) { // Skip VBlankIntrWait spam
-    char buf[128];
+    char buf[160];
     snprintf(buf, sizeof(buf),
-             "SWI 0x%02X called r0=0x%08X r1=0x%08X r2=0x%08X", comment,
-             registers[0], registers[1], registers[2]);
+             "SWI 0x%02X at PC=0x%08X r0=0x%08X r1=0x%08X r2=0x%08X", comment,
+             registers[15] - (thumbMode ? 2 : 4), registers[0], registers[1],
+             registers[2]);
     AIO::Emulator::Common::Logger::Instance().Log(
         AIO::Emulator::Common::LogLevel::Info, "OGDK_SWI", buf);
   }
