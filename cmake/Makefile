@@ -45,7 +45,7 @@ coverage:
 	@cd ../build/generated/cmake && $(MAKE) -j8
 	@cd ../build/generated/cmake && ctest --output-on-failure || true
 	@echo "Generating coverage report..."
-	@cd ../build/generated/cmake && lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
+	@cd ../build/generated/cmake && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
 	@cd ../build/generated/cmake && lcov --remove coverage.info '/usr/*' '*/googletest/*' '*/autogen/*' '*/Applications/*' --output-file coverage_filtered.info --ignore-errors unused,format,inconsistent
 	@cd ../build/generated/cmake && genhtml coverage_filtered.info --output-directory ../../../build/coverage_html --ignore-errors inconsistent,inconsistent,format,format,category
 	@# Copy lcov.info to project root for Coverage Gutters extension
@@ -58,7 +58,7 @@ coverage:
 # Use this after running tests to update coverage without rebuilding
 coverage-regen:
 	@echo "Regenerating coverage from existing test run..."
-	@cd ../build/generated/cmake && lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
+	@cd ../build/generated/cmake && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
 	@cd ../build/generated/cmake && lcov --remove coverage.info '/usr/*' '*/googletest/*' '*/autogen/*' '*/Applications/*' --output-file coverage_filtered.info --ignore-errors unused,format,inconsistent
 	@cd ../build/generated/cmake && genhtml coverage_filtered.info --output-directory ../../../build/coverage_html --ignore-errors inconsistent,inconsistent,format,format,category
 	@cp ../build/generated/cmake/coverage_filtered.info ../lcov.info

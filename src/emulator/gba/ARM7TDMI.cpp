@@ -45,6 +45,7 @@ template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
 
 static void LogBranch([[maybe_unused]] uint32_t from,
                       [[maybe_unused]] uint32_t to) {
+  // LCOV_EXCL_START - Debug tracing, only enabled via environment variables
   static const bool traceBadBranch =
       EnvTruthy(std::getenv("AIO_TRACE_BAD_BRANCH"));
   // Branch logging is on an extremely hot path.
@@ -130,8 +131,11 @@ static void LogBranch([[maybe_unused]] uint32_t from,
                               "BAD BRANCH TO INVALID MEMORY: 0x%08x -> 0x%08x",
                               from, to);
   }
+  // LCOV_EXCL_STOP
 }
 
+// LCOV_EXCL_START - Debug trace functions only enabled via
+// kEnableHeavyCpuTraces or env vars
 static void TracePCWrite(const char *source, uint32_t pcFrom, uint32_t pcTo,
                          uint32_t instruction, uint32_t extra0 = 0,
                          uint32_t extra1 = 0) {
@@ -281,6 +285,7 @@ static void TraceWatchRead32(uint32_t instrAddr, bool thumb,
                               value, sp);
   }
 }
+// LCOV_EXCL_STOP
 
 ARM7TDMI::ARM7TDMI(GBAMemory &mem) : memory(mem) { Reset(); }
 
@@ -398,6 +403,7 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     }
 
     if (kEnableHeavyCpuTraces) {
+      // LCOV_EXCL_START – debug trace (throttled IRQ mode entry log)
       // Debug: Log IRQ mode entry
       static int irq_entry_count = 0;
       if (irq_entry_count++ < 10) {
@@ -405,6 +411,7 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
                   << registers[Register::SP] << " PC=0x" << registers[15]
                   << std::dec << std::endl;
       }
+      // LCOV_EXCL_STOP
     }
     break;
   case CPUMode::SUPERVISOR:
@@ -436,6 +443,7 @@ void ARM7TDMI::CheckInterrupts() {
 
   // Optional trace: interrupts are pending/enabled but CPSR.I prevents entry.
   // Enable with: AIO_TRACE_IRQ_BLOCKED=1
+  // LCOV_EXCL_START – env-gated debug trace
   if (EnvFlagCached("AIO_TRACE_IRQ_BLOCKED") && (ime & 1) && (ie & if_reg) &&
       IRQDisabled(cpsr)) {
     static int blockedCount = 0;
@@ -449,6 +457,7 @@ void ARM7TDMI::CheckInterrupts() {
                                 (unsigned)if_reg);
     }
   }
+  // LCOV_EXCL_STOP
 
   // Debug logging (throttled)
   // static int debugCount = 0;
@@ -508,6 +517,7 @@ void ARM7TDMI::CheckInterrupts() {
     uint32_t oldCpsr = cpsr;
     SetCPSRFlag(oldCpsr, CPSR::FLAG_T, wasThumb);
 
+    // LCOV_EXCL_START – kEnableHeavyCpuTraces debug log
     if (kEnableHeavyCpuTraces) {
       static int irqEntryLogCount = 0;
       if (irqEntryLogCount++ < 20) {
@@ -518,12 +528,14 @@ void ARM7TDMI::CheckInterrupts() {
                   << oldCpsr << std::dec << std::endl;
       }
     }
+    // LCOV_EXCL_STOP
 
     // Switch to IRQ Mode
     SwitchMode(CPUMode::IRQ);
     spsr = oldCpsr;
     spsr_irq = oldCpsr; // Also save to banked SPSR for System Mode return
 
+    // LCOV_EXCL_START – env-gated IRQ entry trace
     if (traceIrqEntry) {
       const uint32_t handlerPtr = memory.Read32(0x03007FFCu);
       if (EnvFlagCached("AIO_TRACE_IRQ_HANDLER_DUMP")) {
@@ -554,6 +566,7 @@ void ARM7TDMI::CheckInterrupts() {
           (unsigned)GetCPUMode(cpsr), registers[Register::SP], cpsr, oldCpsr,
           handlerPtr);
     }
+    // LCOV_EXCL_STOP
 
     // Disable Thumb, enable IRQ mask
     thumbMode = false;
@@ -3520,7 +3533,8 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     while (true) {
       // Read next byte if needed
       if (srcBitPos == 0) {
-        if (bytesRead >= srcLen) break;  // All bytes processed
+        if (bytesRead >= srcLen)
+          break; // All bytes processed
         srcByte = memory.Read8(src++);
         bytesRead++;
       }
