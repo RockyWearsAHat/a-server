@@ -101,6 +101,19 @@ The `tests/` folder contains the primary correctness harness:
 
 Guideline: tests should mirror **documentation/spec**, not the current implementation.
 
+### Test Coverage for Classic NES Series (2025-01)
+
+- **PPUTests.cpp**: Classic NES palette bank remapping tests verify:
+  - colorIndex 1-6 maps to palette indices 9-14 via +8 offset
+  - colorIndex 7+ stays unmapped
+  - Disabled mode uses normal palette bank behavior
+
+- **DMATests.cpp**: DMA source control tests verify:
+  - srcCtrl=2 (Fixed) reads same address repeatedly
+  - srcCtrl=1 (Decrement) reads backwards
+  - IWRAM source reads work correctly
+  - Palette RAM destination works correctly
+
 ## Timing & Performance
 
 ### Peripheral Batching
@@ -142,14 +155,57 @@ Games like "Classic NES Series: Donkey Kong" (OG-DK) run NES emulators on GBA ha
 - **Solution:** Fix timing to match GBATEK spec, not use LLE BIOS as workaround
 - These ROMs are excellent test cases for timing accuracy
 
-### IRQ Entry Semantics
+#### Palette Handling
 
-The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupts`) to prevent immediate re-entry when the HLE BIOS trampoline enables CPSR.I=0 for nested interrupts. This matches real GBA BIOS atomicity semantics:
+The NES-on-GBA emulator uses a specific palette layout:
 
-- Triggered bits (IE & IF) are captured
-- IF is cleared for those bits
-- Trampoline runs with nested IRQs enabled but same-source blocked
-- User handler can re-enable specific IRQs by clearing IF for them
+- **Actual NES colors** are stored at palette bank 0, indices 9-14
+- Tilemap entries may specify **palette bank 8+** (bit 15 set) for border/empty areas
+- Palette banks 1-15 are typically all zeros (black)
+
+The PPU applies this logic in `RenderBackground()`:
+
+```cpp
+if (paletteBank >= 8) {
+  // Border/empty: Use bank 0 without offset → indices 0-8 are zeros → BLACK
+  effectivePaletteBank = 0;
+} else {
+  // Normal tiles: Apply +8 to colorIndex 1-6 → indices 9-14
+  effectivePaletteBank = 0;
+  if (colorIndex <= 6) effectiveColorIndex = colorIndex + 8;
+}
+```
+
+**Fixed in 2026-01:** Previously, the fix always applied +8 offset regardless of palBank, causing border areas (palBank=8) to render as cyan instead of black.
+
+#### Tile Index Masking
+
+The NES-on-GBA wrapper stores tilemap data in GBA format, but with quirks:
+
+- **Raw entries** look like `0x80F7`, `0x01FE`, etc.
+- The **low 8 bits** (0xF7, 0xFE) are the actual NES tile index (0-255)
+- The **high byte** contains NES attributes or flags (e.g., 0x80 = CHR bank select)
+
+Standard GBA tilemap parsing (`tileIndex = entry & 0x3FF`) would interpret 0x01FE as tile 510, but:
+
+- With charBase=1 (tiles at 0x6004000) and screenBase=13 (tilemap at 0x6006800)
+- Tiles 320+ overlap the tilemap region (0x6004000 + 320\*32 = 0x6006800)
+- Reading tile 510 would fetch tilemap data as if it were tile graphics
+
+**Fix (2026-01):** In `classicNesMode`, mask tile index to 8 bits:
+
+```cpp
+if (classicNesMode) {
+  tileIndex = tileEntry & 0xFF; // Use NES tile index only
+}
+```
+
+This keeps all tile fetches within the valid range (0-255) and avoids VRAM overlap corruption.
+
+#### BG VRAM wrapping (text modes)
+
+For text backgrounds (modes 0–2), BG tilemap (screen blocks) and tile graphics (character blocks) are addressed within the BG VRAM window.  
+Implementation invariant (spec-driven): BG fetches for text modes wrap within $64\,\text{KB}$ (offset mask `0xFFFF`), i.e. BG rendering must not accidentally pull tilemap/tile data from the OBJ VRAM region.
 
 ## Logging and crash capture
 
@@ -161,7 +217,6 @@ The emulator clears triggered IF bits at IRQ entry (in `ARM7TDMI::CheckInterrupt
   - `AIO_LOG_LEVEL=debug|info|warn|error|fatal`
   - `AIO_TRACE_PPU_IO_WRITES=1` trace PPU register writes (BLDCNT, BLDY, etc.)
   - `AIO_TRACE_GBA_SPAM=1` verbose CPU/PPU tracing
-  - `AIO_TRACE_IE_WRITES=1` trace IE register writes (PC, old/new value, LR) — useful for OG-DK interrupt debugging
   - `AIO_GBA_BIOS=/path/to/bios.bin` use LLE BIOS instead of HLE
 
 ## Workspace hygiene

@@ -1,0 +1,755 @@
+Tilemap[0,1]: tile=510 palBank=0 tileAddr=0x6007fc0
+Tilemap[0,2]: tile=436 palBank=0 tileAddr=0x6007680 → READS TILEMAP ENTRY 1856
+Tilemap[0,21]: tile=504 palBank=0 tileAddr=0x6007f00
+Tilemap[0,22]: tile=326 palBank=0 tileAddr=0x60068c0 → READS TILEMAP ENTRY 96
+Tilemap[1,6]: tile=464 palBank=2 tileAddr=0x6007a00
+Tilemap[1,14]: tile=376 palBank=1 tileAddr=0x6006f00 → READS TILEMAP ENTRY 896
+Tilemap[2,29]: tile=504 palBank=0 tileAddr=0x6007f00
+Tilemap[3,6]: tile=464 palBank=1 tileAddr=0x6007a00
+Tilemap[3,30]: tile=464 palBank=0 tileAddr=0x6007a00
+Tilemap[4,5]: tile=504 palBank=0 tileAddr=0x6007f00
+Tilemap[4,9]: tile=507 palBank=0 tileAddr=0x6007f60
+Tilemap[5,18]: tile=504 palBank=0 tileAddr=0x6007f00
+Tilemap[5,26]: tile=328 palBank=1 tileAddr=0x6006900 → READS TILEMAP ENTRY 128
+Tilemap[6,6]: tile=777 palBank=15 tileAddr=0x600a120
+Tilemap[6,11]: tile=768 palBank=0 tileAddr=0x600a000
+Tilemap[7,2]: tile=530 palBank=4 tileAddr=0x6008240
+Tilemap[7,23]: tile=768 palBank=4 tileAddr=0x600a000
+Tilemap[7,26]: tile=588 palBank=5 tileAddr=0x6008980
+Tilemap[7,27]: tile=768 palBank=0 tileAddr=0x600a000
+Tilemap[7,30]: tile=596 palBank=5 tileAddr=0x6008a80
+Tilemap[7,31]: tile=768 palBank=0 tileAddr=0x600a000
+Tilemap[8,18]: tile=400 palBank=0 tileAddr=0x6007200 → READS TILEMAP ENTRY 1280
+Tilemap[8,31]: tile=1011 palBank=15 tileAddr=0x600be60
+Tilemap[9,10]: tile=504 palBank=0 tileAddr=0x6007f00
+Tilemap[9,21]: tile=1010 palBank=15 tileAddr=0x600be40
+Tilemap[10,16]: tile=392 palBank=0 tileAddr=0x6007100 → READS TILEMAP ENTRY 1152
+Tilemap[11,5]: tile=1002 palBank=15 tileAddr=0x600bd40
+Tilemap[11,11]: tile=999 palBank=15 tileAddr=0x600bce0
+Tilemap[11,21]: tile=990 palBank=15 tileAddr=0x600bbc0
+Tilemap[11,23]: tile=1001 palBank=15 tileAddr=0x600bd20
+Tilemap[12,10]: tile=517 palBank=0 tileAddr=0x60080a0
+Tilemap[12,11]: tile=434 palBank=0 tileAddr=0x6007640 → READS TILEMAP ENTRY 1824
+Tilemap[12,27]: tile=1017 palBank=15 tileAddr=0x600bf20
+Tilemap[13,21]: tile=946 palBank=15 tileAddr=0x600b640
+Tilemap[13,31]: tile=999 palBank=15 tileAddr=0x600bce0
+Tilemap[14,2]: tile=328 palBank=0 tileAddr=0x6006900 → READS TILEMAP ENTRY 128
+Tilemap[14,7]: tile=973 palBank=15 tileAddr=0x600b9a0
+Tilemap[14,15]: tile=935 palBank=15 tileAddr=0x600b4e0
+Tilemap[14,16]: tile=384 palBank=0 tileAddr=0x6007000 → READS TILEMAP ENTRY 1024
+Tilemap[15,3]: tile=943 palBank=15 tileAddr=0x600b5e0
+Tilemap[15,5]: tile=942 palBank=15 tileAddr=0x600b5c0
+Tilemap[15,11]: tile=977 palBank=15 tileAddr=0x600ba20
+Tilemap[15,19]: tile=909 palBank=15 tileAddr=0x600b1a0
+Tilemap[15,23]: tile=929 palBank=15 tileAddr=0x600b420
+Tilemap[15,29]: tile=968 palBank=15 tileAddr=0x600b900
+Tilemap[16,9]: tile=962 palBank=15 tileAddr=0x600b840
+Tilemap[16,15]: tile=968 palBank=15 tileAddr=0x600b900
+Tilemap[16,16]: tile=448 palBank=0 tileAddr=0x6007800
+Tilemap[16,21]: tile=938 palBank=15 tileAddr=0x600b540
+Tilemap[16,26]: tile=517 palBank=0 tileAddr=0x60080a0
+Tilemap[16,27]: tile=362 palBank=0 tileAddr=0x6006d40 → READS TILEMAP ENTRY 672
+Tilemap[16,29]: tile=911 palBank=15 tileAddr=0x600b1e0
+Tilemap[16,31]: tile=905 palBank=15 tileAddr=0x600b120
+Tilemap[17,0]: tile=505 palBank=0 tileAddr=0x6007f20
+Tilemap[17,1]: tile=1016 palBank=15 tileAddr=0x600bf00
+Tilemap[17,27]: tile=904 palBank=15 tileAddr=0x600b100
+Tilemap[23,0]: tile=578 palBank=4 tileAddr=0x6008840
+Tilemap[23,15]: tile=1022 palBank=15 tileAddr=0x600bfc0
+Tilemap[23,28]: tile=512 palBank=0 tileAddr=0x6008000
+Tilemap[23,29]: tile=773 palBank=4 tileAddr=0x600a0a0
+Tilemap[24,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[24,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[25,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[26,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[27,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[28,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[29,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,4]: tile=457 palBank=2 tileAddr=0x6007920
+Tilemap[30,5]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,6]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,7]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,8]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,9]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,10]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,11]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,12]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,13]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,14]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,15]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,16]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,17]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,18]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,19]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,20]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,21]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,22]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,23]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[30,24]: tile=457 palBank=2 tileAddr=0x6007920
+Tilemap[30,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[30,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,4]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[31,5]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,6]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,7]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,8]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,9]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,10]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,11]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,12]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,13]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,14]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,15]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,16]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,17]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,18]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,19]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,20]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,21]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,22]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,23]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[31,24]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[31,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[31,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,4]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[32,5]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,6]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,7]: tile=450 palBank=14 tileAddr=0x6007840
+Tilemap[32,8]: tile=445 palBank=13 tileAddr=0x60077a0 → READS TILEMAP ENTRY 2000
+Tilemap[32,9]: tile=453 palBank=14 tileAddr=0x60078a0
+Tilemap[32,10]: tile=447 palBank=14 tileAddr=0x60077e0 → READS TILEMAP ENTRY 2032
+Tilemap[32,11]: tile=444 palBank=13 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,12]: tile=456 palBank=15 tileAddr=0x6007900
+Tilemap[32,13]: tile=445 palBank=13 tileAddr=0x60077a0 → READS TILEMAP ENTRY 2000
+Tilemap[32,14]: tile=454 palBank=14 tileAddr=0x60078c0
+Tilemap[32,15]: tile=444 palBank=13 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,16]: tile=447 palBank=14 tileAddr=0x60077e0 → READS TILEMAP ENTRY 2032
+Tilemap[32,17]: tile=448 palBank=15 tileAddr=0x6007800
+Tilemap[32,18]: tile=448 palBank=15 tileAddr=0x6007800
+Tilemap[32,19]: tile=455 palBank=14 tileAddr=0x60078e0
+Tilemap[32,20]: tile=448 palBank=15 tileAddr=0x6007800
+Tilemap[32,21]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,22]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,23]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[32,24]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[32,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[32,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,4]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[33,5]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,6]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,7]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,8]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,9]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,10]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,11]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,12]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,13]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,14]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,15]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,16]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,17]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,18]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,19]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,20]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,21]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,22]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,23]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[33,24]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[33,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[33,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,4]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[34,5]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,6]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,7]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,8]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,9]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,10]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,11]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,12]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,13]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,14]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,15]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,16]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,17]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,18]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,19]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,20]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,21]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,22]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,23]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[34,24]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[34,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[34,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,4]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[35,5]: tile=450 palBank=1 tileAddr=0x6007840
+Tilemap[35,6]: tile=452 palBank=3 tileAddr=0x6007880
+Tilemap[35,7]: tile=448 palBank=3 tileAddr=0x6007800
+Tilemap[35,8]: tile=452 palBank=1 tileAddr=0x6007880
+Tilemap[35,9]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[35,10]: tile=450 palBank=1 tileAddr=0x6007840
+Tilemap[35,11]: tile=451 palBank=3 tileAddr=0x6007860
+Tilemap[35,12]: tile=447 palBank=2 tileAddr=0x60077e0 → READS TILEMAP ENTRY 2032
+Tilemap[35,13]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[35,14]: tile=456 palBank=3 tileAddr=0x6007900
+Tilemap[35,15]: tile=455 palBank=2 tileAddr=0x60078e0
+Tilemap[35,16]: tile=446 palBank=1 tileAddr=0x60077c0 → READS TILEMAP ENTRY 2016
+Tilemap[35,17]: tile=447 palBank=2 tileAddr=0x60077e0 → READS TILEMAP ENTRY 2032
+Tilemap[35,18]: tile=448 palBank=3 tileAddr=0x6007800
+Tilemap[35,19]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[35,20]: tile=455 palBank=2 tileAddr=0x60078e0
+Tilemap[35,21]: tile=449 palBank=1 tileAddr=0x6007820
+Tilemap[35,22]: tile=449 palBank=1 tileAddr=0x6007820
+Tilemap[35,23]: tile=456 palBank=1 tileAddr=0x6007900
+Tilemap[35,24]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[35,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[35,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,4]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[36,5]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,6]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,7]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,8]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,9]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,10]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,11]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,12]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,13]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,14]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,15]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,16]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,17]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,18]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,19]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,20]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,21]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,22]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,23]: tile=444 palBank=1 tileAddr=0x6007780 → READS TILEMAP ENTRY 1984
+Tilemap[36,24]: tile=458 palBank=1 tileAddr=0x6007940
+Tilemap[36,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[36,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,4]: tile=457 palBank=2 tileAddr=0x6007920
+Tilemap[37,5]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,6]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,7]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,8]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,9]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,10]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,11]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,12]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,13]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,14]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,15]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,16]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,17]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,18]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,19]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,20]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,21]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,22]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,23]: tile=457 palBank=3 tileAddr=0x6007920
+Tilemap[37,24]: tile=457 palBank=2 tileAddr=0x6007920
+Tilemap[37,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[37,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[38,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[39,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[40,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[41,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[42,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,0]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,1]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,2]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,3]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,4]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,5]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,6]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,7]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,8]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,9]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,10]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,11]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,12]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,13]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,14]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,15]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,16]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,17]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,18]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,19]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,20]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,21]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,22]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,23]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,24]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,25]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,26]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,27]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,28]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,29]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,30]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[43,31]: tile=440 palBank=0 tileAddr=0x6007700 → READS TILEMAP ENTRY 1920
+Tilemap[60,16]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,17]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,18]: tile=751 palBank=15 tileAddr=0x6009de0
+Tilemap[60,19]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,20]: tile=751 palBank=14 tileAddr=0x6009de0
+Tilemap[60,21]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,22]: tile=751 palBank=14 tileAddr=0x6009de0
+Tilemap[60,23]: tile=1022 palBank=15 tileAddr=0x600bfc0
+Tilemap[60,24]: tile=751 palBank=14 tileAddr=0x6009de0
+Tilemap[60,25]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,26]: tile=751 palBank=15 tileAddr=0x6009de0
+Tilemap[60,27]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,28]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,29]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,30]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[60,31]: tile=1023 palBank=15 tileAddr=0x600bfe0
+Tilemap[62,0]: tile=680 palBank=14 tileAddr=0x6009500
+Tilemap[62,3]: tile=684 palBank=8 tileAddr=0x6009580
+Tilemap[62,5]: tile=684 palBank=8 tileAddr=0x6009580
+Tilemap[62,7]: tile=684 palBank=8 tileAddr=0x6009580
+Tilemap[62,9]: tile=686 palBank=8 tileAddr=0x60095c0
+Tilemap[62,12]: tile=744 palBank=14 tileAddr=0x6009d00
+Tilemap[62,13]: tile=718 palBank=8 tileAddr=0x60099c0
+Tilemap[62,16]: tile=1002 palBank=15 tileAddr=0x600bd40
+Tilemap[62,17]: tile=751 palBank=8 tileAddr=0x6009de0
+Tilemap[62,18]: tile=476 palBank=8 tileAddr=0x6007b80
+Tilemap[62,19]: tile=763 palBank=8 tileAddr=0x6009f60
+Tilemap[62,21]: tile=510 palBank=8 tileAddr=0x6007fc0
+Tilemap[62,22]: tile=665 palBank=14 tileAddr=0x6009320
+Tilemap[62,23]: tile=478 palBank=8 tileAddr=0x6007bc0
+Tilemap[62,24]: tile=1017 palBank=15 tileAddr=0x600bf20
+Tilemap[62,25]: tile=413 palBank=8 tileAddr=0x60073a0 → READS TILEMAP ENTRY 1488
+Tilemap[62,26]: tile=767 palBank=8 tileAddr=0x6009fe0
+Tilemap[62,27]: tile=408 palBank=8 tileAddr=0x6007300 → READS TILEMAP ENTRY 1408
+Tilemap[62,28]: tile=767 palBank=14 tileAddr=0x6009fe0
+Tilemap[62,29]: tile=1022 palBank=8 tileAddr=0x600bfc0
+Tilemap[63,0]: tile=765 palBank=10 tileAddr=0x6009fa0
+Tilemap[63,1]: tile=474 palBank=8 tileAddr=0x6007b40
+Tilemap[63,3]: tile=510 palBank=8 tileAddr=0x6007fc0
+Tilemap[63,5]: tile=476 palBank=8 tileAddr=0x6007b80
+Tilemap[63,6]: tile=953 palBank=15 tileAddr=0x600b720
+Tilemap[63,7]: tile=447 palBank=8 tileAddr=0x60077e0 → READS TILEMAP ENTRY 2032
+Tilemap[63,8]: tile=473 palBank=13 tileAddr=0x6007b20
+Tilemap[63,9]: tile=1021 palBank=8 tileAddr=0x600bfa0
+Tilemap[63,10]: tile=511 palBank=8 tileAddr=0x6007fe0
+Tilemap[63,11]: tile=1021 palBank=8 tileAddr=0x600bfa0
+Tilemap[63,12]: tile=765 palBank=10 tileAddr=0x6009fa0
+Tilemap[63,13]: tile=506 palBank=8 tileAddr=0x6007f40
+Tilemap[63,16]: tile=1022 palBank=15 tileAddr=0x600bfc0
+Tilemap[63,17]: tile=959 palBank=8 tileAddr=0x600b7e0
+Tilemap[63,22]: tile=1006 palBank=11 tileAddr=0x600bdc0
+Tilemap[63,25]: tile=472 palBank=8 tileAddr=0x6007b00
+Tilemap[63,27]: tile=476 palBank=8 tileAddr=0x6007b80
+Tilemap[63,28]: tile=1022 palBank=15 tileAddr=0x600bfc0
+Tilemap[63,29]: tile=703 palBank=8 tileAddr=0x60097e0

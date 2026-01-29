@@ -103,12 +103,7 @@ bool GBA::LoadROM(const std::string &path) {
     romLoaded = true;
 
     // Analyze ROM metadata intelligently (must happen early)
-    std::cerr << "[LoadROM] ===== Analyzing ROM Metadata =====" << std::endl;
-    std::cerr.flush();
     ROMMetadata metadata = ROMMetadataAnalyzer::Analyze(buffer);
-    std::cerr << "[LoadROM] ===== Metadata Analysis Complete ====="
-              << std::endl;
-    std::cerr.flush();
 
     // Apply game-specific ROM patches for known compatibility issues
     ApplyROMPatches(metadata);
@@ -238,6 +233,15 @@ bool GBA::LoadROM(const std::string &path) {
 
     Reset();
 
+    // Post-reset configuration: Apply PPU settings that would be cleared by
+    // Reset() Classic NES Series games need special palette handling
+    if (romMetadata.gameCode.size() >= 2 &&
+        romMetadata.gameCode.substr(0, 2) == "FD") {
+      std::cout << "[LoadROM] Re-applying Classic NES mode after Reset()"
+                << std::endl;
+      ppu->SetClassicNesMode(true);
+    }
+
     std::cout << "[LoadROM] CPU Reset complete. PC=0x" << std::hex
               << cpu->GetRegister(15) << " CPSR=0x" << cpu->GetCPSR()
               << std::dec << std::endl;
@@ -341,6 +345,13 @@ void GBA::ConfigureBootStateFromMetadata(const ROMMetadata &metadata) {
   }
   std::cout << std::endl;
 
+  // Detect Classic NES Series games for palette workaround
+  // These games have game codes starting with "FD" (FDKE = Donkey Kong, FDME =
+  // Mario Bros, etc.)
+  if (metadata.gameCode.size() >= 2 && metadata.gameCode.substr(0, 2) == "FD") {
+    ppu->SetClassicNesMode(true);
+  }
+
   // Apply game-specific boot configurations based on metadata
   // No hardcoded patches - everything is derived from the ROM's actual
   // structure
@@ -365,7 +376,7 @@ void GBA::Reset() {
   cpu->Reset();
   memory->Reset();
   apu->Reset();
-  // ppu->Reset(); // TODO: Implement PPU Reset
+  ppu->Reset();
   lastPcForStall = cpu->GetRegister(15);
   stallCycleAccumulator = 0;
   stallCrashTriggered = false;

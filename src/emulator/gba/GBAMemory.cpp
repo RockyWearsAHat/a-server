@@ -4,6 +4,7 @@
 #include <emulator/common/Logger.h>
 #include <emulator/gba/APU.h>
 #include <emulator/gba/ARM7TDMI.h>
+#include <emulator/gba/GBA.h>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/GameDB.h>
 #include <emulator/gba/IORegs.h>
@@ -11,7 +12,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace AIO::Emulator::GBA {
 
@@ -21,9 +25,9 @@ constexpr uint32_t kIrqHandlerOffset = 0x7FFCu;
 constexpr uint32_t kIrqHandlerDefault = 0x00003FF0u;
 
 inline bool IsIwramMappedAddress(uint32_t address) {
-  // IWRAM is 32KB physically, but is mirrored throughout the entire 0x03xxxxxx
-  // address region on real hardware. Many titles rely on this (intentionally
-  // or incidentally) when using computed jumps or pointers.
+  // IWRAM is 32KB at 0x03000000-0x03007FFF.
+  // On real hardware, the 0x03xxxxxx region aliases into IWRAM via address
+  // line decoding (mirroring within 0x03000000-0x03FFFFFF).
   return (address & 0xFF000000u) == 0x03000000u;
 }
 
@@ -52,7 +56,11 @@ template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
   return enabled;
 }
 
-bool TraceGbaSpam() { return EnvFlagCached("AIO_TRACE_GBA_SPAM"); }
+// Hot-path trace gate: must be extremely cheap when disabled.
+bool TraceGbaSpam() {
+  static const bool enabled = EnvTruthy(std::getenv("AIO_TRACE_GBA_SPAM"));
+  return enabled;
+}
 
 inline bool IsPpuIoOffset(uint32_t offAligned) {
   switch (offAligned) {
@@ -86,7 +94,8 @@ inline bool IsPpuIoOffset(uint32_t offAligned) {
 }
 
 inline void TracePpuIoWrite8(uint32_t address, uint8_t value, uint32_t pc) {
-  if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES"))
+  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
+  if (!trace)
     return;
   if ((address & 0xFF000000u) != 0x04000000u)
     return;
@@ -112,7 +121,8 @@ inline void TracePpuIoWrite8(uint32_t address, uint8_t value, uint32_t pc) {
 }
 
 inline void TracePpuIoWrite16(uint32_t address, uint16_t value, uint32_t pc) {
-  if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES"))
+  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
+  if (!trace)
     return;
   if ((address & 0xFF000000u) != 0x04000000u)
     return;
@@ -138,7 +148,8 @@ inline void TracePpuIoWrite16(uint32_t address, uint16_t value, uint32_t pc) {
 }
 
 inline void TracePpuIoWrite32(uint32_t address, uint32_t value, uint32_t pc) {
-  if (!EnvFlagCached("AIO_TRACE_PPU_IO_WRITES"))
+  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
+  if (!trace)
     return;
   if ((address & 0xFF000000u) != 0x04000000u)
     return;
@@ -174,8 +185,29 @@ GBAMemory::GBAMemory() {
   palette_ram.resize(MemoryMap::PALETTE_SIZE);
   vram.resize(MemoryMap::VRAM_SIZE);
   oam.resize(MemoryMap::OAM_SIZE);
+
+  // Shadow buffers for timing-gated graphics writes.
+  palette_shadow = palette_ram;
+  vram_shadow = vram;
+  oam_shadow = oam;
+
+  const uint32_t palBlocks =
+      (uint32_t)((palette_ram.size() + kDeferredBlockSize - 1u) /
+                 kDeferredBlockSize);
+  const uint32_t vramBlocks =
+      (uint32_t)((vram.size() + kDeferredBlockSize - 1u) / kDeferredBlockSize);
+  const uint32_t oamBlocks =
+      (uint32_t)((oam.size() + kDeferredBlockSize - 1u) / kDeferredBlockSize);
+  palette_dirtyBlocks.assign(palBlocks, 0);
+  vram_dirtyBlocks.assign(vramBlocks, 0);
+  oam_dirtyBlocks.assign(oamBlocks, 0);
+
+  palette_dirtyList.reserve(palBlocks);
+  vram_dirtyList.reserve(vramBlocks);
+  oam_dirtyList.reserve(oamBlocks);
   // ROM and SRAM sizes depend on the loaded game, but we can set defaults
   rom.resize(MemoryMap::ROM_MAX_SIZE);
+  romSize = MemoryMap::ROM_MAX_SIZE; // Default: full 32MB accessible for tests
   sram.resize(SaveTypes::SRAM_SIZE);
   // Default EEPROM state is erased (0xFF); game-specific init happens in
   // LoadSave
@@ -282,18 +314,16 @@ void GBAMemory::InitializeHLEBIOS() {
 
   // IRQ Trampoline
   // This trampoline is a minimal IRQ dispatcher suitable for DirectBoot,
-  // closely matching the behavior from the known-good d20cc15 commit, but
   // relocated to 0x3F00 to keep 0x188/0x194 free for VBlankIntrWait/IntrWait.
   //
   // Key behaviors:
   // - Save volatile regs on SP_irq
   // - Call user handler at [0x03FFFFFC] (mirror of 0x03007FFC)
-  // - Acknowledge/clear REG_IF *after* the user handler returns, using
-  //   the triggered mask stored at 0x03007FF4 by the CPU IRQ entry path
+  // - Acknowledge/clear REG_IF using the triggered mask at 0x03007FF4
   // - Restore regs and exception-return via SUBS PC, LR, #4
   //
-  // This sequence has been validated against DKC/SMA2 behavior in the
-  // earlier accurate core and is preserved here to avoid regressions.
+  // NOTE: Handler runs in IRQ mode (not System mode). While real BIOS switches
+  // to System mode, many games work correctly (or even require) IRQ mode.
 
   uint32_t base = kIrqTrampolineBase;
   const uint32_t trampoline[] = {
@@ -301,11 +331,11 @@ void GBAMemory::InitializeHLEBIOS() {
       0xE92D500F,
       // 0x3F04: MOV   R0, #0x04000000
       0xE3A00404,
-      // 0x3F08: ADD   LR, PC, #0
+      // 0x3F08: ADD   LR, PC, #0      ; set return address (0x3F10)
       0xE28FE000,
       // 0x3F0C: LDR   PC, [R0, #-4]   ; jump to [0x03FFFFFC] user handler
       0xE510F004,
-      // 0x3F10: LDR   R1, [PC, #8]    ; &0x03007FF4 (literal)
+      // 0x3F10: LDR   R1, [PC, #8]    ; &0x03007FF4 (literal at 0x3F20)
       0xE59F1008,
       // 0x3F14: LDRH  R1, [R1]        ; triggered mask
       0xE1D110B0,
@@ -316,7 +346,7 @@ void GBAMemory::InitializeHLEBIOS() {
       // 0x3F20: SUBS  PC, LR, #4      ; exception-return from IRQ
       0xE25EF004,
       // 0x3F24: literal 0x03007FF4
-      0x03007FF4};
+      0x03007FF4u};
 
   for (size_t i = 0; i < sizeof(trampoline) / sizeof(uint32_t); ++i) {
     uint32_t instr = trampoline[i];
@@ -402,6 +432,21 @@ void GBAMemory::Reset() {
   std::fill(vram.begin(), vram.end(), 0);
   std::fill(oam.begin(), oam.end(), 0);
 
+  // Keep deferred-write shadow state coherent after reset.
+  if (!palette_shadow.empty())
+    palette_shadow = palette_ram;
+  if (!vram_shadow.empty())
+    vram_shadow = vram;
+  if (!oam_shadow.empty())
+    oam_shadow = oam;
+
+  std::fill(palette_dirtyBlocks.begin(), palette_dirtyBlocks.end(), 0);
+  std::fill(vram_dirtyBlocks.begin(), vram_dirtyBlocks.end(), 0);
+  std::fill(oam_dirtyBlocks.begin(), oam_dirtyBlocks.end(), 0);
+  palette_dirtyList.clear();
+  vram_dirtyList.clear();
+  oam_dirtyList.clear();
+
   // Initialize KEYINPUT to 0x03FF (All Released)
   if (io_regs.size() > 0x131) {
     io_regs[0x130] = 0xFF;
@@ -433,6 +478,16 @@ void GBAMemory::Reset() {
   // Some titles check this to distinguish cold vs warm boot behavior.
   if (io_regs.size() > 0x300) {
     io_regs[0x300] = 0x01;
+  }
+
+  // Initialize VCOUNT (0x04000006) to 0x7E when skipping BIOS.
+  // mGBA's GBASkipBIOS() does this because when the BIOS finishes executing,
+  // the hardware is in VBlank (scanline ~126). Classic NES Series games and
+  // others may check VCOUNT at boot expecting VBlank state.
+  // Only do this for DirectBoot (HLE); real BIOS will set VCOUNT naturally.
+  if (!lleBiosLoaded && io_regs.size() > IORegs::VCOUNT + 1) {
+    io_regs[IORegs::VCOUNT] = 0x7E;     // Low byte = 126
+    io_regs[IORegs::VCOUNT + 1] = 0x00; // High byte = 0
   }
 
   // Initialize DMA Registers to Safe Defaults
@@ -488,6 +543,11 @@ void GBAMemory::Reset() {
   eepromLatch = 0;      // Initialize latch
   eepromWriteDelay = 0; // Reset write delay
   // saveTypeLocked = false; // Do NOT reset this, as it's set by LoadGamePak
+
+  // Reset BIOS prefetch to default value. This is what Classic NES Series
+  // games expect to see when reading BIOS from outside BIOS.
+  // 0xE3A02004 = MOV R2, #4 (the instruction that executes after SWI return)
+  biosPrefetch = 0xE3A02004;
 
   // BIOS HLE: Initialize critical system state that real BIOS sets up.
   // Many games poll specific IWRAM addresses waiting for BIOS background
@@ -677,10 +737,30 @@ bool GBAMemory::ScanForEEPROMSize(const std::vector<uint8_t> &data) {
 }
 
 void GBAMemory::LoadGamePak(const std::vector<uint8_t> &data) {
-  if (data.size() > rom.size()) {
-    rom.resize(data.size());
+  // Classic NES Series ROMs are exactly 1 MiB (0x100000 bytes) and need
+  // to be mirrored 4 times to fill a 4 MiB address space.
+  // Reference: mGBA src/gba/gba.c lines 455-472
+  constexpr size_t kClassicNesRomSize = 0x100000; // 1 MiB
+  constexpr size_t kMirroredRomSize = 0x400000;   // 4 MiB
+
+  if (data.size() == kClassicNesRomSize) {
+    // Mirror 1 MiB ROM 4 times to create 4 MiB address space
+    rom.resize(kMirroredRomSize);
+    std::copy(data.begin(), data.end(), rom.begin());
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize);
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize * 2);
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize * 3);
+    romSize = kMirroredRomSize; // Track actual mirrored size
+    std::cout
+        << "[GBAMemory] Classic NES ROM detected (1 MiB), mirrored 4x to 4 MiB"
+        << std::endl;
+  } else {
+    if (data.size() > rom.size()) {
+      rom.resize(data.size());
+    }
+    std::copy(data.begin(), data.end(), rom.begin());
+    romSize = data.size(); // Track actual ROM size for open bus detection
   }
-  std::copy(data.begin(), data.end(), rom.begin());
 
   // GBA BIOS Header Validation - Required for games to boot correctly!
   // The real BIOS validates the header checksum and sets a flag in IWRAM.
@@ -1039,6 +1119,147 @@ void GBAMemory::SetKeyInput(uint16_t value) {
   }
 }
 
+uint32_t GBAMemory::GetOpenBusValue() const {
+  // Open bus behavior for unmapped memory reads.
+  // Based on mGBA's GBALoadBad: returns the CPU prefetch values.
+  // mGBA uses prefetch[0] and prefetch[1] - two sequential 16-bit fetches.
+  // prefetch[0] = instruction at PC-2 (previously fetched)
+  // prefetch[1] = instruction at PC (being fetched)
+  //
+  // For Thumb mode, different regions combine these differently.
+  // For ARM mode, we return the 32-bit instruction at PC.
+  if (!cpu) {
+    return 0;
+  }
+
+  const uint32_t pc = cpu->GetRegister(15);
+  const bool thumb = cpu->IsThumbModeFlag();
+  const uint8_t pcRegion = (pc >> 24);
+
+  uint32_t value;
+
+  // Helper lambda to read a 16-bit value directly without recursion
+  auto readHalfword = [this](uint32_t addr) -> uint16_t {
+    const uint8_t region = (addr >> 24);
+    switch (region) {
+    case 0x02: // EWRAM
+      if ((addr & 0x00FFFFFF) + 1 < MemoryMap::WRAM_BOARD_SIZE) {
+        uint32_t off = addr & MemoryMap::WRAM_BOARD_MASK;
+        return wram_board[off] | (wram_board[off + 1] << 8);
+      }
+      break;
+    case 0x03: // IWRAM
+      if ((addr & 0x00FFFFFF) + 1 < MemoryMap::WRAM_CHIP_SIZE) {
+        uint32_t off = addr & MemoryMap::WRAM_CHIP_MASK;
+        return wram_chip[off] | (wram_chip[off + 1] << 8);
+      }
+      break;
+    case 0x08:
+    case 0x09:
+    case 0x0A:
+    case 0x0B:
+    case 0x0C:
+    case 0x0D: // ROM
+    {
+      uint32_t off = addr & 0x01FFFFFF;
+      if (off + 1 < rom.size()) {
+        return rom[off] | (rom[off + 1] << 8);
+      } else {
+        // Out of bounds ROM - return address-based open bus
+        return (addr >> 1) & 0xFFFF;
+      }
+    }
+    default:
+      break;
+    }
+    return (addr >> 1) & 0xFFFF;
+  };
+
+  if (thumb) {
+    // mGBA's GBALoadBad for Thumb mode:
+    // prefetch[0] = halfword at PC-2 (previous instruction)
+    // prefetch[1] = halfword at PC (current fetch)
+    // The combination depends on PC region.
+    const uint16_t prefetch0 = readHalfword(pc - 2); // Previous halfword
+    const uint16_t prefetch1 = readHalfword(pc);     // Current halfword
+
+    // mGBA's special handling for Thumb mode open bus:
+    // Different regions have different behaviors for how prefetch[0] and [1]
+    // are combined into the 32-bit open bus value.
+    switch (pcRegion) {
+    case 0x00: // BIOS
+    case 0x07: // OAM
+      // "This isn't right half the time, but we don't have $+6 handy"
+      // value = (prefetch[1] << 16) | prefetch[0]
+      value = ((uint32_t)prefetch1 << 16) | prefetch0;
+      break;
+    case 0x03: // IWRAM
+      // "This doesn't handle prefetch clobbering"
+      // Depends on PC alignment
+      if (pc & 2) {
+        // Misaligned: value = (prefetch[1] << 16) | prefetch[0]
+        value = ((uint32_t)prefetch1 << 16) | prefetch0;
+      } else {
+        // Aligned: value = prefetch[1] | (prefetch[0] << 16)
+        value = prefetch1 | ((uint32_t)prefetch0 << 16);
+      }
+      break;
+    default:
+      // For most regions, duplicate prefetch[1]
+      // value = prefetch[1] | (prefetch[1] << 16)
+      value = prefetch1 | ((uint32_t)prefetch1 << 16);
+      break;
+    }
+  } else {
+    // ARM mode: read 32-bit instruction at PC (prefetch[1])
+    // Helper lambda to read a 32-bit value directly
+    auto read32 = [this](uint32_t addr) -> uint32_t {
+      const uint8_t region = (addr >> 24);
+      switch (region) {
+      case 0x02: // EWRAM
+        if ((addr & 0x00FFFFFF) + 3 < MemoryMap::WRAM_BOARD_SIZE) {
+          uint32_t off = addr & MemoryMap::WRAM_BOARD_MASK;
+          return wram_board[off] | (wram_board[off + 1] << 8) |
+                 (wram_board[off + 2] << 16) | (wram_board[off + 3] << 24);
+        }
+        break;
+      case 0x03: // IWRAM
+        if ((addr & 0x00FFFFFF) + 3 < MemoryMap::WRAM_CHIP_SIZE) {
+          uint32_t off = addr & MemoryMap::WRAM_CHIP_MASK;
+          return wram_chip[off] | (wram_chip[off + 1] << 8) |
+                 (wram_chip[off + 2] << 16) | (wram_chip[off + 3] << 24);
+        }
+        break;
+      case 0x08:
+      case 0x09:
+      case 0x0A:
+      case 0x0B:
+      case 0x0C:
+      case 0x0D: // ROM
+      {
+        uint32_t off = addr & 0x01FFFFFF;
+        if (off + 3 < rom.size()) {
+          return rom[off] | (rom[off + 1] << 8) | (rom[off + 2] << 16) |
+                 (rom[off + 3] << 24);
+        } else {
+          // Out of bounds - address-based pattern
+          uint32_t val = ((addr & ~3u) >> 1) & 0xFFFF;
+          val |= (((addr & ~3u) + 2) >> 1) << 16;
+          return val;
+        }
+      }
+      default:
+        break;
+      }
+      return 0;
+    };
+
+    value = read32(pc);
+  }
+
+  return value;
+}
+
 int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
   // GBA Memory Access Timing (GBATEK)
   // Returns cycles for the given access size (1=8bit, 2=16bit, 4=32bit)
@@ -1158,35 +1379,67 @@ int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
 }
 
 uint8_t GBAMemory::Read8(uint32_t address) {
+  static const bool traceSma2HeaderReads =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_HEADER_READS"));
+  static const bool traceDma3Reads =
+      EnvTruthy(std::getenv("AIO_TRACE_DMA3_READS"));
+  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceBiosRead =
+      EnvTruthy(std::getenv("AIO_TRACE_BIOS_READ"));
+
   uint8_t region = (address >> 24);
   switch (region) {
   case 0x00: // BIOS (GBATEK: 0x00000000-0x00003FFF)
     // BIOS read protection / open-bus behavior:
-    // When the CPU is executing outside of BIOS, reads from the BIOS region
-    // return the last prefetched instruction data (open bus) rather than BIOS
-    // ROM. Many titles rely on this for entropy or basic checks.
-    if (cpu && cpu->GetRegister(15) >= 0x00004000) {
-      const uint32_t pc = cpu->GetRegister(15);
-      const uint32_t pcAligned = pc & ~3u;
-      const uint32_t openBusWord =
-          cpu->IsThumbModeFlag()
-              ? (uint32_t)ReadInstruction16(pcAligned) |
-                    ((uint32_t)ReadInstruction16(pcAligned + 2) << 16)
-              : ReadInstruction32(pcAligned);
-      return (openBusWord >> ((address & 3u) * 8u)) & 0xFFu;
+    // Only addresses < 0x4000 are in actual BIOS region. Above that is unused.
+    if (address < 0x4000) {
+      // When the CPU is executing outside of BIOS, reads from BIOS return
+      // biosPrefetch (typically 0xE3A02004 = "MOV R2, #4" after SWI).
+      // Classic NES Series games check this value as anti-emulation protection.
+      if (cpu && cpu->GetRegister(15) >= 0x00004000) {
+        uint8_t result = (biosPrefetch >> ((address & 3u) * 8u)) & 0xFFu;
+        if (traceBiosRead) {
+          static int biosReadCount = 0;
+          if (biosReadCount++ < 100) {
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "BIOS_READ",
+                "BIOS read from outside BIOS: addr=0x%08x PC=0x%08x thumb=%d "
+                "biosPrefetch=0x%08x result=0x%02x",
+                address, cpu->GetRegister(15), cpu->IsThumbModeFlag() ? 1 : 0,
+                biosPrefetch, result);
+          }
+        }
+        return result;
+      }
+      // CPU is inside BIOS - return actual BIOS data
+      if (address < bios.size()) {
+        return bios[address];
+      }
     }
-
-    if (address < bios.size()) {
-      return bios[address];
+    // Address >= 0x4000 in region 0: return open bus (CPU prefetch)
+    {
+      uint32_t openBus = GetOpenBusValue();
+      uint8_t result = (openBus >> ((address & 3u) * 8u)) & 0xFFu;
+      if (traceBiosRead && cpu) {
+        static int region0Reads = 0;
+        if (region0Reads++ < 100) {
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "BIOS_READ",
+              "Region0 above BIOS: addr=0x%08x PC=0x%08x thumb=%d "
+              "openBus=0x%08x -> 0x%02x",
+              address, cpu->GetRegister(15), cpu->IsThumbModeFlag() ? 1 : 0,
+              openBus, result);
+        }
+      }
+      return result;
     }
-    break;
   case 0x02: // WRAM (Board) (GBATEK: 0x02000000-0x0203FFFF)
   {
     const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
     const uint8_t v = wram_board[off];
     // SMA2 investigation: trace reads of the 8-byte header staging area.
     // Enable with: AIO_TRACE_SMA2_HEADER_READS=1
-    if (EnvFlagCached("AIO_TRACE_SMA2_HEADER_READS") && cpu) {
+    if (traceSma2HeaderReads && cpu) {
       if (off >= 0x03C0u && off < 0x03C8u) {
         static int hdrReads = 0;
         if (hdrReads < 400) {
@@ -1220,8 +1473,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // DMA3 read trace (useful for save validation loops that poll DMA regs)
-    if (EnvFlagCached("AIO_TRACE_DMA3_READS") && offset >= 0xD4 &&
-        offset <= 0xDF) {
+    if (traceDma3Reads && offset >= 0xD4 && offset <= 0xDF) {
       static int dma3ReadLogs = 0;
       if (dma3ReadLogs < 400) {
         const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
@@ -1236,7 +1488,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     // Generic IO polling trace (8-bit). Useful for diagnosing games stuck in
     // init loops while DISPCNT remains forced blank.
     // Enable with: AIO_TRACE_IO_POLL=1
-    if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu) {
+    if (traceIoPoll && cpu) {
       const uint32_t pc = (uint32_t)cpu->GetRegister(15);
       if (pc >= 0x03000000u && pc < 0x03008000u) {
         static uint32_t lastOffset8 = 0xFFFFFFFFu;
@@ -1273,6 +1525,11 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   case 0x05: // Palette RAM (GBATEK: 0x05000000-0x050003FF)
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
+
+    static const bool traceDkcPalZero =
+        EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
+    static const bool tracePalWrites =
+        EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
     if (offset < palette_ram.size())
       return palette_ram[offset];
     break;
@@ -1302,12 +1559,21 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   case 0x0A:
   case 0x0B:
   case 0x0C: {
-    // Universal ROM Mirroring (max 32MB space, mirrored every rom.size())
+    // ROM mirroring: The 32MB address space (0x08000000-0x09FFFFFF per
+    // waitstate) is filled with repeating mirrors of the ROM. For example:
+    // - 1 MiB ROM (Classic NES Series): mirrors 4x to fill 4 MiB, then that 4
+    // MiB
+    //   pattern repeats throughout the 32 MiB address space per mGBA's behavior
+    // - 32 MiB ROM: fills the entire space, no mirroring visible
+    // The ROM mirrors at power-of-two boundaries based on the actual ROM size.
     uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
-    if (!rom.empty()) {
-      return rom[offset % rom.size()];
+    if (romSize > 0) {
+      // Mirror ROM at power-of-two alignment (mGBA behavior for Classic NES)
+      offset = offset % romSize;
+      return rom[offset];
     }
-    break;
+    // No ROM loaded - return open bus
+    return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0D: // Game Pak ROM (WS2) or EEPROM depending on cart save type
   {
@@ -1322,11 +1588,13 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // Non-EEPROM cart: treat as ROM mirror (same behavior as 0x08-0x0C).
-    const uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
-    if (!rom.empty()) {
-      return rom[offset % rom.size()];
+    uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
+    if (romSize > 0) {
+      offset = offset % romSize;
+      return rom[offset];
     }
-    break;
+    // Open bus for out-of-bounds ROM reads
+    return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
   {
@@ -1364,6 +1632,19 @@ uint8_t GBAMemory::Read8(uint32_t address) {
 }
 
 uint16_t GBAMemory::Read16(uint32_t address) {
+  static const bool traceIoUnaligned =
+      EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
+      EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
+  static const bool traceSma2SaveobjRead =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
+  static const bool traceDkcWaitflag =
+      EnvTruthy(std::getenv("AIO_TRACE_DKC_WAITFLAG"));
+  static const bool traceOgdkVcount =
+      EnvTruthy(std::getenv("AIO_TRACE_OGDK_VCOUNT"));
+  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceSma2EepDmaBufReads =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
+
   // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
   if (region == 0x0D && (!hasSRAM && !isFlash)) {
@@ -1373,8 +1654,6 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // Diagnostics: detect unaligned IO halfword reads.
   // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
   // AIO_TRACE_IO_ODD_HALFWORD=1)
-  const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") ||
-                                EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
   if (traceIoUnaligned && region == 0x04 && (address & 1u)) {
     static int unalignedIoRead16Logs = 0;
     if (unalignedIoRead16Logs < 400) {
@@ -1394,9 +1673,19 @@ uint16_t GBAMemory::Read16(uint32_t address) {
     address &= ~1u;
   }
 
+  // Flush pending peripheral cycles for timing-sensitive reads (GBATEK
+  // compliance)
+  if (region == 0x04) {
+    const uint32_t offset = address & 0x3FFu;
+    // DISPSTAT (0x004) and VCOUNT (0x006) require up-to-date PPU state
+    if ((offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT) && gba) {
+      gba->FlushPendingPeripheralCycles();
+    }
+  }
+
   // SMA2 investigation: trace reads of the save/validator object pointer.
   // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_READ")) {
+  if (traceSma2SaveobjRead) {
     if ((address & 0xFFFFFFFCu) == 0x03007BC8u) {
       static int readLogs16 = 0;
       if (readLogs16 < 400) {
@@ -1414,13 +1703,40 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 
   uint16_t val = Read8(address) | (Read8(address + 1) << 8);
 
+  // DKC black-screen investigation: the title can spin in a Thumb loop polling
+  // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
+  // and where reads come from.
+  // Enable with: AIO_TRACE_DKC_WAITFLAG=1
+  if (traceDkcWaitflag && cpu && region == 0x03 &&
+      ((address & ~1u) == 0x03000064u)) {
+    static uint16_t lastVal = 0xFFFFu;
+    static uint32_t repeats = 0;
+    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+    if (val == lastVal) {
+      repeats++;
+      if (repeats == 1u || (repeats % 4096u) == 0u) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "DKC",
+            "WAITFLAG R16 addr=0x%08x val=0x%04x PC=0x%08x repeats=%u",
+            (unsigned)(address & ~1u), (unsigned)val, (unsigned)pc,
+            (unsigned)repeats);
+      }
+    } else {
+      repeats = 0;
+      lastVal = val;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DKC",
+          "WAITFLAG R16 addr=0x%08x val=0x%04x PC=0x%08x",
+          (unsigned)(address & ~1u), (unsigned)val, (unsigned)pc);
+    }
+  }
+
   // OG-DK / emulation-title investigation: trace VCOUNT polling loops.
   // These games often implement their own PPU timing by busy-waiting on
   // VCOUNT/DISPSTAT. If our VCOUNT model or IRQ timing is off, the loop
   // behavior will look odd (e.g., racing through values or stalling).
   // Enable with: AIO_TRACE_OGDK_VCOUNT=1
-  if (EnvFlagCached("AIO_TRACE_OGDK_VCOUNT") && cpu &&
-      (address & 0xFF000000u) == 0x04000000u) {
+  if (traceOgdkVcount && cpu && (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t offset = address & MemoryMap::IO_REG_MASK;
     if (offset == IORegs::VCOUNT) {
       static uint32_t logCount = 0;
@@ -1439,7 +1755,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // Trace tight IO polling loops (diagnostic for "stuck in forced blank").
   // Enable with: AIO_TRACE_IO_POLL=1
   // This is intentionally very low-volume (change-triggered + periodic).
-  if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu && region == 0x04 &&
+  if (traceIoPoll && cpu && region == 0x04 &&
       (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t pc = (uint32_t)cpu->GetRegister(15);
     // Many titles run hot loops from IWRAM; focus there to keep signal high.
@@ -1473,7 +1789,7 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1 This helps confirm
   // whether the game is actually consuming the expected 0xFFFE/0xFFFF bitstream
   // halfwords after DMA completes.
-  if (EnvFlagCached("AIO_TRACE_SMA2_EEPDMA_BUF_READS") && cpu) {
+  if (traceSma2EepDmaBufReads && cpu) {
     if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
       static int eepBufR16 = 0;
       if (eepBufR16 < 1200) {
@@ -1506,12 +1822,14 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
     uint32_t offset = address & 0x01FFFFFF;
-    if (!rom.empty()) {
-      // Handle wrapping if needed, though usually not for code
-      uint8_t b0 = rom[offset % rom.size()];
-      uint8_t b1 = rom[(offset + 1) % rom.size()];
+    // Return actual ROM data only if within actual ROM size
+    if (offset + 1 < romSize) {
+      uint8_t b0 = rom[offset];
+      uint8_t b1 = rom[offset + 1u];
       return b0 | (b1 << 8);
     }
+    // Open bus: return address-based value (mGBA behavior)
+    return (address >> 1) & 0xFFFF;
   }
   // Handle IWRAM instruction fetch with proper mirroring
   else if ((address & 0xFF000000u) == 0x03000000u) {
@@ -1521,8 +1839,10 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       uint8_t b0 = wram_chip[offset];
       uint8_t b1 = wram_chip[offset + 1];
       uint16_t result = b0 | (b1 << 8);
-      // Debug: log fetches from suspect address
-      if (address == 0x03002e40 && result == 0x0000) {
+      // Debug: log fetches from suspect address (disabled by default)
+      // Enable with: AIO_TRACE_IWRAM_FETCH=1
+      if (EnvTruthy(std::getenv("AIO_TRACE_IWRAM_FETCH")) &&
+          address == 0x03002e40 && result == 0x0000) {
         fprintf(stderr,
                 "[DEBUG] ReadInstruction16(0x%08x) offset=0x%04x b0=0x%02x "
                 "b1=0x%02x result=0x%04x\n",
@@ -1531,10 +1851,13 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       return result;
     }
     // If we get here, something is very wrong
-    fprintf(stderr,
-            "[ERROR] ReadInstruction16(0x%08x) offset=0x%04x exceeds "
-            "wram_chip.size()=%zu\n",
-            address, offset, wram_chip.size());
+    // Keep this behind a flag to avoid I/O stalls if it triggers frequently.
+    if (EnvTruthy(std::getenv("AIO_TRACE_IWRAM_FETCH"))) {
+      fprintf(stderr,
+              "[ERROR] ReadInstruction16(0x%08x) offset=0x%04x exceeds "
+              "wram_chip.size()=%zu\n",
+              address, offset, wram_chip.size());
+    }
   }
   // Handle EWRAM instruction fetch
   else if ((address & 0xFF000000u) == 0x02000000u) {
@@ -1550,6 +1873,15 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
 }
 
 uint32_t GBAMemory::Read32(uint32_t address) {
+  static const bool traceIoUnaligned =
+      EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
+      EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
+  static const bool traceSma2SaveobjRead =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
+  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
+  static const bool traceSma2EepDmaBufReads =
+      EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
+
   // EEPROM Handling - 32-bit read performs two 16-bit reads for EEPROM-save
   // cartridges only.
   uint8_t region = (address >> 24);
@@ -1562,8 +1894,6 @@ uint32_t GBAMemory::Read32(uint32_t address) {
   // Diagnostics: detect unaligned IO word reads.
   // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
   // AIO_TRACE_IO_ODD_HALFWORD=1)
-  const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") ||
-                                EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
   if (traceIoUnaligned && region == 0x04 && (address & 3u)) {
     static int unalignedIoRead32Logs = 0;
     if (unalignedIoRead32Logs < 400) {
@@ -1583,7 +1913,7 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   // SMA2 investigation: trace reads of the save/validator object pointer.
   // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEOBJ_READ")) {
+  if (traceSma2SaveobjRead) {
     if (address == 0x03007BC8u) {
       static int readLogs32 = 0;
       if (readLogs32 < 400) {
@@ -1605,7 +1935,7 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   // Trace tight IO polling loops via 32-bit reads.
   // Enable with: AIO_TRACE_IO_POLL=1
-  if (EnvFlagCached("AIO_TRACE_IO_POLL") && cpu && region == 0x04 &&
+  if (traceIoPoll && cpu && region == 0x04 &&
       (address & 0xFF000000u) == 0x04000000u) {
     const uint32_t pc = (uint32_t)cpu->GetRegister(15);
     if (pc >= 0x03000000u && pc < 0x03008000u) {
@@ -1637,7 +1967,7 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 
   // SMA2 investigation: trace 32-bit reads from the EEPROM DMA destination
   // buffers in IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_EEPDMA_BUF_READS") && cpu) {
+  if (traceSma2EepDmaBufReads && cpu) {
     if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
       static int eepBufR32 = 0;
       if (eepBufR32 < 800) {
@@ -1670,13 +2000,17 @@ uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
     uint32_t offset = address & 0x01FFFFFF;
-    if (!rom.empty()) {
-      uint8_t b0 = rom[offset % rom.size()];
-      uint8_t b1 = rom[(offset + 1) % rom.size()];
-      uint8_t b2 = rom[(offset + 2) % rom.size()];
-      uint8_t b3 = rom[(offset + 3) % rom.size()];
+    // Return actual ROM data only if within actual ROM size
+    if (offset + 3 < romSize) {
+      uint8_t b0 = rom[offset];
+      uint8_t b1 = rom[offset + 1u];
+      uint8_t b2 = rom[offset + 2u];
+      uint8_t b3 = rom[offset + 3u];
       return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
+    // Open bus: return address-based value (mGBA LOAD_CART behavior)
+    uint32_t aligned = address & ~3u;
+    return ((aligned >> 1) & 0xFFFF) | (((aligned + 2) >> 1) << 16);
   }
   // Fallback
   return Read8(address) | (Read8(address + 1) << 8) |
@@ -1696,6 +2030,7 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       break;
     }
     uint32_t offset = address & MemoryMap::WRAM_CHIP_MASK;
+
     wram_chip[offset] = value;
     break;
   }
@@ -1711,10 +2046,16 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
-    // DKC diagnostic: Log palette writes that set BG palette to 0 during
-    // problem window
+    static const bool traceDkcPalZero =
+        EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
+    static const bool tracePalWrites =
+        EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
+
+    // DKC diagnostic: log palette writes that set BG palette to 0 during the
+    // observed problem window.
     const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
-    if (frame >= 2200 && frame <= 2395 && offset < 32 && value == 0) {
+    if (traceDkcPalZero && frame >= 2200 && frame <= 2395 && offset < 32 &&
+        value == 0) {
       std::cout << "[DKC_DIAG] Frame " << frame
                 << " PALETTE ZERO WRITE: offset=0x" << std::hex << offset
                 << " (BG palette index " << std::dec << (offset / 2) << ")"
@@ -1722,24 +2063,29 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
                 << std::dec << std::endl;
     }
 
-    // Log ALL palette writes to understand the pattern
-    static int palWriteCount = 0;
-    if (palWriteCount < 500) {
-      palWriteCount++;
-      const char *state =
-          ppuTimingValid
-              ? (ppuTimingScanline >= 160
-                     ? "VBLANK"
-                     : (ppuTimingCycle >= 960 ? "HBLANK" : "VISIBLE"))
-              : "NO_TIMING";
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "PAL_WRITE",
-          "frame=%d offset=0x%03x val=0x%02x state=%s scanline=%d", frame,
-          offset, value, state, ppuTimingScanline);
+    if (tracePalWrites) {
+      static int palWriteCount = 0;
+      if (palWriteCount < 500) {
+        palWriteCount++;
+        const char *state =
+            ppuTimingValid
+                ? (ppuTimingScanline >= 160
+                       ? "VBLANK"
+                       : (ppuTimingCycle >= 960 ? "HBLANK" : "VISIBLE"))
+                : "NO_TIMING";
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "PAL_WRITE",
+            "frame=%d offset=0x%03x val=0x%02x state=%s scanline=%d", frame,
+            offset, value, state, ppuTimingScanline);
+      }
     }
 
-    if (offset < palette_ram.size())
+    if (offset < palette_ram.size()) {
       palette_ram[offset] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (offset < palette_shadow.size())
+        palette_shadow[offset] = value;
+    }
     break;
   }
   case 0x06: // VRAM (GBATEK: 0x06000000-0x06017FFF)
@@ -1748,6 +2094,12 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     if (offset >= MemoryMap::VRAM_ACTUAL_SIZE) {
       offset -= 0x8000u;
     }
+
+    // Classic NES VRAM trace (disabled in production)
+    // static bool ogdkVramTraced = false;
+    // const bool isClassicNes = gameCode.length() >= 2 && gameCode.substr(0, 2)
+    // == "FD";
+    // ... tracing code removed for production ...
 
     // DKC diagnostic: Log VRAM writes during problem frames
     const int frame = ppu ? ppu->GetFrameCount() : -1;
@@ -1778,15 +2130,64 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       }
     }
 
-    if (offset < vram.size())
+    if (offset < vram.size()) {
       vram[offset] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (offset < vram_shadow.size())
+        vram_shadow[offset] = value;
+    }
     break;
   }
   case 0x07: // OAM (GBATEK: 0x07000000-0x070003FF)
   {
     uint32_t offset = address & MemoryMap::OAM_MASK;
-    if (offset < oam.size())
+    if (offset < oam.size()) {
+      // Enforce visibility rules: writes to OAM during the visible period are
+      // blocked. HBlank writes are only allowed when H-Blank Interval Free is
+      // enabled (DISPCNT bit 5). Forced blank allows all writes.
+      const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
+                                          (io_regs[IORegs::DISPCNT + 1] << 8));
+      const bool forcedBlank = (dispcnt & 0x0080u) != 0;
+      const bool inVisible =
+          ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
+      const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960) &&
+                            (ppuTimingScanline < 160);
+      const bool hBlankIntervalFree = (dispcnt & 0x0020u) != 0;
+
+      if (!forcedBlank) {
+        if (inVisible) {
+          if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
+            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OAM",
+                "OAM CPU W8 BLOCKED addr=0x%08x val=0x%02x PC=0x%08x "
+                "scanline=%d cycle=%d",
+                (unsigned)address, (unsigned)value, (unsigned)pc2,
+                ppuTimingScanline, ppuTimingCycle);
+          }
+          // Block write silently.
+          break;
+        }
+        if (inHBlank && !hBlankIntervalFree) {
+          if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
+            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OAM",
+                "OAM CPU W8 BLOCKED HBLANK addr=0x%08x val=0x%02x PC=0x%08x "
+                "scanline=%d cycle=%d",
+                (unsigned)address, (unsigned)value, (unsigned)pc2,
+                ppuTimingScanline, ppuTimingCycle);
+          }
+          // Block write during HBlank when H-Blank Interval Free is disabled.
+          break;
+        }
+      }
+
       oam[offset] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (offset < oam_shadow.size())
+        oam_shadow[offset] = value;
+    }
     break;
   }
   }
@@ -2048,8 +2449,9 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           std::cout << std::dec << std::endl;
         }
 
-        // DEBUG: Trace DMA setup when dst is around 0x3001500
-        {
+        // DEBUG: Trace DMA setup when dst/src is around 0x3001500
+        // Enable with: AIO_TRACE_DMA_3001500=1
+        if (EnvFlagCached("AIO_TRACE_DMA_3001500")) {
           uint16_t ctrl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
           uint16_t cnt = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
           uint32_t dst = dmaInternalDst[dmaChannel];
@@ -2082,6 +2484,36 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 
         uint16_t control = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
         int timing = (control >> 12) & 3;
+
+        // OG-DK: Trace DMA triggered to palette
+        static int ogdkDmaCount = 0;
+        if (ogdkDmaCount < 20) {
+          uint32_t dst = dmaInternalDst[dmaChannel];
+          uint32_t src = dmaInternalSrc[dmaChannel];
+          if (dst >= 0x05000000u && dst < 0x05000400u) {
+            ogdkDmaCount++;
+            uint16_t cntL = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
+                "DMA%d triggered: src=0x%08x dst=0x%08x cntL=0x%04x "
+                "ctrl=0x%04x timing=%d",
+                dmaChannel, src, dst, cntL, control, timing);
+
+            // Dump first 32 bytes of source
+            if (ogdkDmaCount <= 3) {
+              AIO::Emulator::Common::Logger::Instance().Log(
+                  AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
+                  "First 32 bytes of source:");
+              for (int i = 0; i < 32; i += 4) {
+                uint32_t w = Read32(src + i);
+                AIO::Emulator::Common::Logger::Instance().LogFmt(
+                    AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
+                    "  [%d]: 0x%08x", i, w);
+              }
+            }
+          }
+        }
+
         if (timing == 0)
           PerformDMA(dmaChannel);
       }
@@ -2095,6 +2527,11 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < palette_ram.size()) {
       palette_ram[alignedOffset] = value;
       palette_ram[alignedOffset + 1] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (alignedOffset + 1 < palette_shadow.size()) {
+        palette_shadow[alignedOffset] = value;
+        palette_shadow[alignedOffset + 1] = value;
+      }
     }
     break;
   }
@@ -2108,8 +2545,15 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     // GBA VRAM byte-write quirks:
     // - BG VRAM (0x06000000-0x0600FFFF): 8-bit writes duplicate to both bytes
     //   of the addressed halfword on the 16-bit bus.
-    // - OBJ VRAM (0x06010000-0x06017FFF): 8-bit writes are ignored.
-    if (offset >= 0x10000u) {
+    // - OBJ VRAM: 8-bit writes are ignored.
+    //   * Modes 0-2: OBJ VRAM is 0x06010000-0x06017FFF.
+    //   * Bitmap modes 3-5: 0x06010000-0x06013FFF behaves as BG VRAM, while
+    //     OBJ VRAM is 0x06014000-0x06017FFF.
+    const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
+                                        (io_regs[IORegs::DISPCNT + 1] << 8));
+    const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
+    const uint32_t objVramStart = (bgMode <= 2) ? 0x10000u : 0x14000u;
+    if (offset >= objVramStart) {
       break;
     }
 
@@ -2117,6 +2561,11 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < vram.size()) {
       vram[alignedOffset] = value;
       vram[alignedOffset + 1] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (alignedOffset + 1 < vram_shadow.size()) {
+        vram_shadow[alignedOffset] = value;
+        vram_shadow[alignedOffset + 1] = value;
+      }
     }
     break;
   }
@@ -2266,6 +2715,19 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 }
 
 void GBAMemory::Write16(uint32_t address, uint16_t value) {
+  // DKC black-screen investigation: trace writes to the polled wait flag.
+  // Enable with: AIO_TRACE_DKC_WAITFLAG=1
+  if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu &&
+      ((address & ~1u) == 0x03000064u)) {
+    static int wLogs = 0;
+    if (wLogs++ < 400) {
+      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DKC",
+          "WAITFLAG W16 addr=0x%08x val=0x%04x PC=0x%08x",
+          (unsigned)(address & ~1u), (unsigned)value, (unsigned)pc);
+    }
+  }
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIwram = IsIwramMappedAddress(address);
   const uint32_t iwramOff = address & 0x7FFFu;
@@ -2880,28 +3342,40 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     uint32_t offset = address & MemoryMap::IO_REG_MASK;
     switch (offset) {
     case IORegs::DISPCNT:
-      std::cout << "[IO] DISPCNT write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] DISPCNT write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::DISPSTAT:
-      std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value
+                  << std::dec << std::endl;
+      }
       break;
     case IORegs::VCOUNT:
-      std::cout << "[IO] VCOUNT write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] VCOUNT write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::IE:
-      std::cout << "[IO] IE write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] IE write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::IF:
-      std::cout << "[IO] IF write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] IF write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     case IORegs::IME:
-      std::cout << "[IO] IME write32: 0x" << std::hex << value << std::dec
-                << std::endl;
+      if (TraceGbaSpam()) {
+        std::cout << "[IO] IME write32: 0x" << std::hex << value << std::dec
+                  << std::endl;
+      }
       break;
     default:
       break;
@@ -2944,6 +3418,9 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
   if (region == 0x05 || region == 0x06 || region == 0x07) {
     address &= ~3u;
   }
+
+  // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
+  // (Same as Write16 - see comment there.)
 
   // Optional: trace CPU word writes into Palette RAM.
   // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
@@ -3126,6 +3603,15 @@ void GBAMemory::WriteIORegisterInternal(uint32_t offset, uint16_t value) {
     io_regs[offset] = value & 0xFF;
     io_regs[offset + 1] = (value >> 8) & 0xFF;
   }
+}
+
+uint16_t GBAMemory::ReadIORegister16Internal(uint32_t offset) const {
+  // Direct read from io_regs without triggering flush (for internal PPU use).
+  // This avoids infinite recursion when PPU::Update() reads DISPSTAT/VCOUNT.
+  if (offset + 1 < io_regs.size()) {
+    return io_regs[offset] | (io_regs[offset + 1] << 8);
+  }
+  return 0;
 }
 
 void GBAMemory::CheckDMA(int timing) {
@@ -4137,6 +4623,16 @@ void GBAMemory::UpdateTimers(int cycles) {
 }
 
 void GBAMemory::AdvanceCycles(int cycles) {
+  // DIAGNOSTIC: Trace AdvanceCycles
+  static const bool traceAdvance = EnvFlagCached("AIO_TRACE_NES_PALETTE");
+  static int advanceTraces = 0;
+  if (traceAdvance && advanceTraces < 5) {
+    advanceTraces++;
+    std::cerr << "[ADVANCE_CYCLES] cycles=" << cycles
+              << " ppu=" << (ppu ? "valid" : "null") << std::endl;
+    std::cerr.flush();
+  }
+
   UpdateTimers(cycles);
   if (ppu)
     ppu->Update(cycles);
@@ -4145,41 +4641,47 @@ void GBAMemory::AdvanceCycles(int cycles) {
 }
 
 void GBAMemory::ApplyDeferredWrites() {
-  if (deferredWrites.empty())
+  if (palette_dirtyList.empty() && vram_dirtyList.empty() &&
+      oam_dirtyList.empty()) {
     return;
-
-  static int applyCount = 0;
-  if (applyCount < 10) {
-    applyCount++;
-    AIO::Emulator::Common::Logger::Instance().LogFmt(
-        AIO::Emulator::Common::LogLevel::Info, "DEFER",
-        "[APPLY_DEFERRED] count=%zu scanline=%d cycle=%d",
-        deferredWrites.size(), ppuTimingScanline, ppuTimingCycle);
   }
 
-  for (const auto &write : deferredWrites) {
-    uint32_t offset;
-    switch (write.region) {
-    case 0x05: // Palette
-      offset = write.address & MemoryMap::PALETTE_MASK;
-      if (offset < palette_ram.size())
-        palette_ram[offset] = write.value;
-      break;
-    case 0x06: // VRAM
-      offset = write.address & 0x1FFFFu;
-      if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
-        offset -= 0x8000u;
-      if (offset < vram.size())
-        vram[offset] = write.value;
-      break;
-    case 0x07: // OAM
-      offset = write.address & MemoryMap::OAM_MASK;
-      if (offset < oam.size())
-        oam[offset] = write.value;
-      break;
+  // Enable with: AIO_TRACE_DEFER_APPLY=1
+  static const bool traceDeferApply =
+      EnvTruthy(std::getenv("AIO_TRACE_DEFER_APPLY"));
+  if (traceDeferApply) {
+    static int applyCount = 0;
+    if (applyCount < 10) {
+      applyCount++;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DEFER",
+          "[APPLY_DEFERRED] palBlocks=%zu vramBlocks=%zu oamBlocks=%zu "
+          "scanline=%d cycle=%d",
+          palette_dirtyList.size(), vram_dirtyList.size(), oam_dirtyList.size(),
+          ppuTimingScanline, ppuTimingCycle);
     }
   }
-  deferredWrites.clear();
+
+  auto applyBlocks =
+      [&](std::vector<uint8_t> &dst, const std::vector<uint8_t> &src,
+          std::vector<uint8_t> &dirtyFlags, std::vector<uint32_t> &dirtyList) {
+        for (uint32_t block : dirtyList) {
+          const uint32_t start = block * kDeferredBlockSize;
+          if (start >= dst.size())
+            continue;
+          const uint32_t len = (uint32_t)std::min<size_t>(
+              (size_t)kDeferredBlockSize, dst.size() - (size_t)start);
+          std::memcpy(&dst[start], &src[start], (size_t)len);
+          if (block < dirtyFlags.size())
+            dirtyFlags[block] = 0;
+        }
+        dirtyList.clear();
+      };
+
+  applyBlocks(palette_ram, palette_shadow, palette_dirtyBlocks,
+              palette_dirtyList);
+  applyBlocks(vram, vram_shadow, vram_dirtyBlocks, vram_dirtyList);
+  applyBlocks(oam, oam_shadow, oam_dirtyBlocks, oam_dirtyList);
 }
 
 uint16_t GBAMemory::GetTimerReload(int timerIdx) const {

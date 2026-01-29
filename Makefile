@@ -21,5 +21,14 @@ build:
 test:
 	@$(MAKE) -C cmake test
 
+coverage:
+	@$(MAKE) -C cmake coverage
+
+coverage-regen:
+	@$(MAKE) -C cmake coverage-regen
+
+coverage-clean:
+	@$(MAKE) -C cmake coverage-clean
+
 help:
 	@$(MAKE) -C cmake help

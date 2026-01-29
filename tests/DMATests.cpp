@@ -161,3 +161,41 @@ TEST(AudioDmaTest, SoundFifoDmaNotTriggeredEveryTimerOverflow) {
   const uint32_t sadAfter = mem.Read32(IORegs::BASE + IORegs::DMA1SAD);
   EXPECT_LT(sadAfter - srcBase, 160u);
 }
+// ============================================================================
+// DMA Source Address Control Tests (per GBATEK)
+// ============================================================================
+// GBATEK: DMA_SAD/DAD control bits:
+//   0 = Increment after each transfer
+//   1 = Decrement after each transfer
+//   2 = Fixed (source address doesn't change)
+//   3 = Increment/Reload (DAD only)
+
+TEST(DMATest, SourceControlFixed_ReadsFromSameAddressRepeatedly) {
+  GBAMemory mem;
+  mem.Reset();
+
+  // Source pattern at EWRAM base - different values at each offset
+  mem.Write32(0x02000000u, 0xAABBCCDDu);
+  mem.Write32(0x02000004u, 0x11223344u);
+  mem.Write32(0x02000008u, 0x55667788u);
+
+  // Clear destination
+  mem.Write32(0x06000000u, 0x00000000u);
+  mem.Write32(0x06000004u, 0x00000000u);
+  mem.Write32(0x06000008u, 0x00000000u);
+
+  // DMA3: src=0x02000000, dst=0x06000000, count=3, srcCtrl=FIXED (2)
+  WriteIo32(mem, IORegs::DMA3SAD, 0x02000000u);
+  WriteIo32(mem, IORegs::DMA3DAD, 0x06000000u);
+  WriteIo16(mem, IORegs::DMA3CNT_L, 3);
+
+  // Control: Enable + 32-bit + Immediate + SrcFixed (bits 7-5 = 2)
+  const uint16_t ctrl = DMAControl::ENABLE | DMAControl::TRANSFER_32BIT |
+                        DMAControl::START_IMMEDIATE | (2u << 7);
+  WriteIo16(mem, IORegs::DMA3CNT_H, ctrl);
+
+  // With srcCtrl=Fixed, all 3 transfers read from 0x02000000
+  EXPECT_EQ(mem.Read32(0x06000000u), 0xAABBCCDDu);
+  EXPECT_EQ(mem.Read32(0x06000004u), 0xAABBCCDDu);
+  EXPECT_EQ(mem.Read32(0x06000008u), 0xAABBCCDDu);
+}

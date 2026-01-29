@@ -2,11 +2,9 @@
 
 This file is intentionally short. The detailed, structured guidance lives in `.github/instructions/`.
 
-## Model Selection
+# ABSOLUTLEY ESSENTIAL LOGGING INFORMATION
 
-- **Default model**: GPT-4.1 (general tasks, documentation, code review)
-- **Plan agent** (`@Plan`): Claude Opus 4.5 (complex research and planning)
-- **Implement agent** (`@Implement`): Raptor Mini (execution and implementation)
+**DEBUG LOGS FROM RUNS OF THE APP ALWAYS APPEAR IN #file:../debug.log ALWAYS LOOK THERE FOR DEBUG/TERMINAL OUTPUT FROM RUNS OF THE AIOSERVER APPLICATION**
 
 ## Agents
 

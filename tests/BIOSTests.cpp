@@ -27,47 +27,29 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   GBAMemory mem;
 
   // Verify the exact instruction words we install at the
-  // IRQ trampoline base. These implement a small IRQ
-  // dispatcher that:
+  // IRQ trampoline base. This simplified trampoline:
   //  - saves volatile regs on SP_irq
-  //  - switches to System mode so the user handler runs
-  //    on the System stack
-  //  - calls the handler at [0x03FFFFFC] (mirror of
-  //    0x03007FFC)
-  //  - switches back to IRQ mode
+  //  - calls the handler at [0x03FFFFFC] (mirror of 0x03007FFC)
   //  - clears REG_IF using the mask at 0x03007FF4
   //  - restores regs and returns via SUBS PC, LR, #4
+  //
+  // NOTE: Handler runs in IRQ mode (not System mode), which is
+  // more compatible with the test games (MMBN, MZM, etc.).
 
   constexpr uint32_t base = 0x00003F00u;
 
   EXPECT_EQ(mem.Read32(base + 0x00), 0xE92D500Fu); // STMDB SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A02404u); // MOV   R2, #0x04000000
-  EXPECT_EQ(mem.Read32(base + 0x08), 0xE10F3000u); // MRS   R3, CPSR
-  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE3C3309Fu); // BIC   R3, R3, #0x9F
-  EXPECT_EQ(mem.Read32(base + 0x10), 0xE383301Fu); // ORR   R3, R3, #0x1F (SYS)
-  EXPECT_EQ(mem.Read32(base + 0x14), 0xE129F003u); // MSR   CPSR_c, R3
-
-  EXPECT_EQ(mem.Read32(base + 0x18), 0xE92D4000u); // STMDB SP!, {LR}
-  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE28FE000u); // ADD   LR, PC, #0
-  EXPECT_EQ(mem.Read32(base + 0x20), 0xE512F004u); // LDR   PC, [R2, #-4]
-  EXPECT_EQ(mem.Read32(base + 0x24), 0xE8BD4000u); // LDMIA SP!, {LR}
-
-  EXPECT_EQ(mem.Read32(base + 0x28), 0xE10F3000u); // MRS   R3, CPSR
-  EXPECT_EQ(mem.Read32(base + 0x2C), 0xE3C3301Fu); // BIC   R3, R3, #0x1F
-  EXPECT_EQ(mem.Read32(base + 0x30), 0xE3833012u); // ORR   R3, R3, #0x12 (IRQ)
-  EXPECT_EQ(mem.Read32(base + 0x34), 0xE129F003u); // MSR   CPSR_c, R3
-
-  EXPECT_EQ(mem.Read32(base + 0x38), 0xE3A02404u); // MOV   R2, #0x04000000
-  EXPECT_EQ(mem.Read32(base + 0x3C), 0xE59F1010u); // LDR   R1, [PC, #16]
-  EXPECT_EQ(mem.Read32(base + 0x40), 0xE1D110B0u); // LDRH  R1, [R1]
-  EXPECT_EQ(mem.Read32(base + 0x44), 0xE2820F80u); // ADD   R0, R2, #0x200
-  EXPECT_EQ(mem.Read32(base + 0x48), 0xE1C010B2u); // STRH  R1, [R0, #2]
-
-  EXPECT_EQ(mem.Read32(base + 0x4C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(base + 0x50), 0xE25EF004u); // SUBS  PC, LR, #4
+  EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A00404u); // MOV   R0, #0x04000000
+  EXPECT_EQ(mem.Read32(base + 0x08), 0xE28FE000u); // ADD   LR, PC, #0
+  EXPECT_EQ(mem.Read32(base + 0x0C), 0xE510F004u); // LDR   PC, [R0, #-4]
+  EXPECT_EQ(mem.Read32(base + 0x10), 0xE59F1008u); // LDR   R1, [PC, #8]
+  EXPECT_EQ(mem.Read32(base + 0x14), 0xE1D110B0u); // LDRH  R1, [R1]
+  EXPECT_EQ(mem.Read32(base + 0x18), 0xE1C012B2u); // STRH  R1, [R0, #0x202]
+  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
+  EXPECT_EQ(mem.Read32(base + 0x20), 0xE25EF004u); // SUBS  PC, LR, #4
 
   // Literal pool used by the trampoline.
-  EXPECT_EQ(mem.Read32(base + 0x54), 0x03007FF4u);
+  EXPECT_EQ(mem.Read32(base + 0x24), 0x03007FF4u);
 }
 
 TEST(BIOSTest, ResetInitializesIRQHandlerPointer) {
@@ -140,12 +122,44 @@ TEST(BIOSTest, BIOSReadOutsideBIOSReturnsOpenBus) {
   cpu.SetThumbMode(false);
   cpu.SetRegister(15, 0x08000000);
 
-  // Reads from BIOS while executing from ROM should return open-bus data
-  // derived from the current fetch.
-  EXPECT_EQ(mem.Read8(0x00000000u), 0x44u);
-  EXPECT_EQ(mem.Read8(0x00000001u), 0x33u);
-  EXPECT_EQ(mem.Read8(0x00000002u), 0x22u);
-  EXPECT_EQ(mem.Read8(0x00000003u), 0x11u);
+  // Reads from BIOS addresses < 0x4000 while executing from ROM should return
+  // biosPrefetch (not open bus from current fetch). biosPrefetch is 0xE3A02004
+  // by default (after SWI calls), or 0 if no SWI has been called yet.
+  // Our emulator defaults to 0xE3A02004 for Classic NES protection
+  // compatibility.
+  //
+  // Addresses >= 0x4000 in region 0 return open bus (CPU prefetch), NOT
+  // biosPrefetch.
+  EXPECT_EQ(mem.Read8(0x00000000u), 0x04u); // biosPrefetch byte 0
+  EXPECT_EQ(mem.Read8(0x00000001u), 0x20u); // biosPrefetch byte 1
+  EXPECT_EQ(mem.Read8(0x00000002u), 0xA0u); // biosPrefetch byte 2
+  EXPECT_EQ(mem.Read8(0x00000003u), 0xE3u); // biosPrefetch byte 3
+}
+
+TEST(BIOSTest, Region0AboveBIOSReturnsOpenBusFromPrefetch) {
+  GBAMemory mem;
+  ARM7TDMI cpu(mem);
+  mem.SetCPU(&cpu);
+
+  // Install a known instruction word at 0x08000000.
+  mem.LoadGamePak(std::vector<uint8_t>{0x44, 0x33, 0x22, 0x11});
+
+  cpu.SetThumbMode(false);
+  cpu.SetRegister(15, 0x08000000);
+
+  // Reads from region 0 addresses >= 0x4000 (above BIOS) should return
+  // open bus value based on CPU prefetch from the current PC, NOT biosPrefetch.
+  // This is the behavior Classic NES games rely on for protection checks.
+  // The open bus value for ARM mode from ROM at 0x08000000 is the instruction
+  // there.
+  EXPECT_EQ(mem.Read8(0x00004000u), 0x44u); // open bus from ROM fetch
+  EXPECT_EQ(mem.Read8(0x00004001u), 0x33u);
+  EXPECT_EQ(mem.Read8(0x00004002u), 0x22u);
+  EXPECT_EQ(mem.Read8(0x00004003u), 0x11u);
+
+  // Same for Classic NES protection addresses like 0x00AE0000
+  EXPECT_EQ(mem.Read8(0x00AE0000u), 0x44u);
+  EXPECT_EQ(mem.Read8(0x00AE0001u), 0x33u);
 }
 
 TEST(BIOSTest, CpuFastSetCopies32ByteBlocks) {
@@ -243,17 +257,6 @@ TEST(BIOSTest, IRQReturnRestoresThumbState) {
 
   ARM7TDMI cpu(mem);
   mem.SetCPU(&cpu);
-
-  // Install a minimal IRQ handler in IWRAM that returns immediately.
-  // Note: IF is cleared at IRQ entry by the emulator (matching real BIOS),
-  // so the handler doesn't need to acknowledge IF to prevent re-entry.
-  constexpr uint32_t kHandlerAddr = 0x03001000u;
-  mem.Write32(kHandlerAddr + 0x00, 0xE3A02404u); // MOV   R2, #0x04000000
-  mem.Write32(kHandlerAddr + 0x04, 0xE2820F80u); // ADD   R0, R2, #0x200
-  mem.Write32(kHandlerAddr + 0x08, 0xE3A01001u); // MOV   R1, #1
-  mem.Write32(kHandlerAddr + 0x0C, 0xE1C010B2u); // STRH  R1, [R0, #2] (IF)
-  mem.Write32(kHandlerAddr + 0x10, 0xE12FFF1Eu); // BX    LR
-  mem.Write32(0x03007FFCu, kHandlerAddr);
 
   // Two simple Thumb instructions at ROM base:
   // 0x08000000: MOVS r0, #0
