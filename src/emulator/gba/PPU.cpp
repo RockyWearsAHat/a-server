@@ -2268,33 +2268,27 @@ void PPU::RenderBackground(int bgIndex) {
         // Apply Classic NES Series palette handling
         uint8_t effectiveColorIndex = colorIndex;
         uint8_t effectivePaletteBank = paletteBank;
-        // Classic NES Series palette handling v2:
-        // The NES-on-GBA emulator stores actual colors at palette bank 0,
-        // indices 9-14. The NES wrapper uses these indices for all game
-        // graphics. Tilemap palette banks (0-15) are used as NES attribute
-        // table values, NOT as GBA palette bank selectors. We always use bank 0
-        // and apply the +8 offset for colorIndex 1-6 to read the actual NES
-        // colors.
-
-        // DIAGNOSTIC: Trace Classic NES palette behavior
-        static const bool tracePalette = EnvFlagCached("AIO_TRACE_NES_PALETTE");
-        static int paletteTraces = 0;
+        // Classic NES Series palette handling:
+        // The NES-on-GBA wrapper stores actual NES colors at palette bank 0,
+        // indices 9-14. Tilemap entries may have palBank >= 8 for border/empty
+        // areas (which should render black, as banks 1-15 are zeros).
+        //
+        // Algorithm:
+        // - For normal tiles (palBank < 8): Apply +8 to colorIndex 1-6
+        //   (so 1→9, 2→10, ..., 6→14) to read actual NES colors
+        // - For colorIndex 7+: No offset (uses index directly)
+        // - For border areas (palBank >= 8): Use bank 0 without offset
+        //   (indices 0-8 are zeros → BLACK)
 
         if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
-          // Always use palette bank 0 and apply +8 offset for colorIndex 1-6
+          // Always use palette bank 0 for Classic NES
           effectivePaletteBank = 0;
-          if (colorIndex <= 6) {
-            effectiveColorIndex = colorIndex + 8; // Map 1-6 to 9-14
-          }
-          // colorIndex 7-15 stay as-is (7→7, 8→8, etc.)
 
-          if (tracePalette && paletteTraces < 20 && scanline == 0 && x < 16) {
-            paletteTraces++;
-            std::cout << "[NES_PAL] x=" << x << " palBank=" << (int)paletteBank
-                      << " colorIdx=" << (int)colorIndex
-                      << " -> effPal=" << (int)effectivePaletteBank
-                      << " effIdx=" << (int)effectiveColorIndex << std::endl;
+          if (paletteBank < 8 && colorIndex <= 6) {
+            // Normal tiles: Apply +8 offset to map to actual colors
+            effectiveColorIndex = colorIndex + 8;
           }
+          // colorIndex 7+ or palBank >= 8: no offset (black/border)
         }
 
         // Fetch Color from Palette RAM

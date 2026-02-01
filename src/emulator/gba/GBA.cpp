@@ -43,6 +43,8 @@ GBA::GBA() {
   memory->SetPPU(ppu.get());
   // Wire up CPU to memory for debug
   memory->SetCPU(cpu.get());
+  // Wire up GBA to memory for flush callbacks
+  memory->SetGBA(this);
 
   // NOTE: Do NOT call Reset() here!
   // CPU must reset AFTER ROM is loaded, so that BIOS boot code

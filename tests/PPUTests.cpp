@@ -1223,9 +1223,10 @@ TEST(PPUTest, TextBg_ScreenSize3_UsesCorrectHorizontalScreenBlock) {
 // ============================================================================
 // Classic NES Series Palette Handling Tests
 // ============================================================================
-// Per memory.md: Classic NES games store colors at palette bank 0 indices 9-14.
-// Tilemap palette bank bits (8+) indicate border/empty areas.
-// PPU must remap colorIndex 1-6 to indices 9-14 when classicNesMode is active.
+// Per PPU analysis: Classic NES games store all 4 NES BG palettes in GBA
+// palette bank 0. Each NES palette has 4 colors at indices 8 + nesPal*4.
+// The tilemap's palette bank field (bits 12-13) selects the NES sub-palette.
+// Formula: effectiveIndex = 8 + (palBank & 3) * 4 + colorIndex
 
 TEST(PPUTest, ClassicNesMode_PaletteBankRemapping_ColorIndex1MapsTo9) {
   GBAMemory mem;
@@ -1241,16 +1242,16 @@ TEST(PPUTest, ClassicNesMode_PaletteBankRemapping_ColorIndex1MapsTo9) {
   // Set backdrop (index 0) to black
   mem.Write16(0x05000000u, 0x0000u);
 
-  // Classic NES stores actual colors at bank 0, indices 9-14
-  // Index 9 = red (where colorIndex 1 maps to)
-  mem.Write16(0x05000000u + 9 * 2, 0x001Fu); // Index 9 = red
+  // Classic NES: colorIndex 1-6 maps to indices 9-14 via +8 offset (when
+  // palBank < 8) Color at bank 0, index 9 (where colorIndex 1 maps to)
+  const uint32_t palBank0 = 0x05000000u;
+  mem.Write16(palBank0 + 9 * 2, 0x001Fu); // Bank 0, index 9 = red
 
   // BG0CNT: priority0, charBase=0, screenBase=0, 4bpp, size0
   mem.Write16(0x04000008u, 0x0000u);
 
-  // Tilemap entry (0,0): tile 1, paletteBank=8 (NES attribute indicator)
-  // The paletteBank >= 8 should NOT be used directly; PPU remaps to bank 0
-  mem.Write16(0x06000000u, 0x0001u | (8u << 12));
+  // Tilemap entry (0,0): tile 1, paletteBank=0 (palBank < 8 to apply +8 offset)
+  mem.Write16(0x06000000u, 0x0001u | (0u << 12));
 
   // Tile 1 at charBase 0: pixel 0 = colorIndex 1
   const uint32_t tile1 = 0x06000000u + 1u * 32u;
@@ -1262,7 +1263,7 @@ TEST(PPUTest, ClassicNesMode_PaletteBankRemapping_ColorIndex1MapsTo9) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 1 should map to palette index 9 (red) via +8 offset
+  // colorIndex 1 + 8 = index 9 → red
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x001Fu));
 }
 
@@ -1275,11 +1276,13 @@ TEST(PPUTest, ClassicNesMode_PaletteBankRemapping_ColorIndex6MapsTo14) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u);
-  // Index 14 = green (where colorIndex 6 maps to)
-  mem.Write16(0x05000000u + 14 * 2, 0x03E0u);
+  // Classic NES: colorIndex 1-6 maps to indices 9-14 via +8 offset
+  // Color at bank 0, index 14 (where colorIndex 6 maps to)
+  mem.Write16(0x05000000u + 14 * 2, 0x03E0u); // Index 14 = green
 
   mem.Write16(0x04000008u, 0x0000u);
-  mem.Write16(0x06000000u, 0x0001u | (10u << 12)); // paletteBank=10
+  // palBank < 8 to get the +8 offset applied
+  mem.Write16(0x06000000u, 0x0001u | (0u << 12)); // paletteBank=0
 
   const uint32_t tile1 = 0x06000000u + 1u * 32u;
   mem.Write16(tile1 + 0u, 0x0006u); // colorIndex 6
@@ -1289,7 +1292,7 @@ TEST(PPUTest, ClassicNesMode_PaletteBankRemapping_ColorIndex6MapsTo14) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 6 should map to palette index 14 (green)
+  // colorIndex 6 + 8 = index 14 -> green
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x03E0u));
 }
 
@@ -1302,7 +1305,8 @@ TEST(PPUTest, ClassicNesMode_ColorIndex7AndAbove_NoRemapping) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u);
-  // Index 7 directly (no +8 offset for colorIndex >= 7)
+  // For colorIndex >= 7, no +8 offset is applied
+  // But we still use bank 0, so put blue at bank 0 index 7
   mem.Write16(0x05000000u + 7 * 2, 0x7C00u); // Index 7 = blue
 
   mem.Write16(0x04000008u, 0x0000u);
@@ -1316,7 +1320,7 @@ TEST(PPUTest, ClassicNesMode_ColorIndex7AndAbove_NoRemapping) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 7 stays as index 7 (blue) - no +8 offset
+  // colorIndex 7 stays as index 7 (no +8 for indices >= 7) -> blue
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x7C00u));
 }
 
@@ -1431,9 +1435,13 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   ppu.SetClassicNesMode(true);
   mem.Write16(0x04000000u, 0x0080u); // Forced blank
 
-  // Set up palette: bank 0, indices 9-14 have NES colors
-  mem.Write16(0x05000000u + 9 * 2, 0x7FFFu); // Index 9 = white (for colorIdx 1)
-  mem.Write16(0x05000000u + 10 * 2, 0x001Fu); // Index 10 = red (for colorIdx 2)
+  // Set up palette colors in bank 0, indices 9-10
+  // colorIndex 1-6 maps to indices 9-14 via +8 offset when palBank < 8
+  const uint32_t palBank0 = 0x05000000u;
+  mem.Write16(palBank0 + 9 * 2,
+              0x7FFFu); // Bank 0, index 9 = white (for colorIdx 1)
+  mem.Write16(palBank0 + 10 * 2,
+              0x001Fu); // Bank 0, index 10 = red (for colorIdx 2)
 
   // BG0CNT: charBase=1 (0x4000), screenBase=13 (0x6800)
   // This is the same layout as OG-DK
@@ -1447,10 +1455,10 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   mem.Write8(tile247 + 0, 0x02u); // First byte: nibbles 2,0
 
   // Create tilemap entry at screenBase 13 = 0x06006800
-  // Raw entry 0x80F7 has tile index 0x0F7 with GBA interpretation,
-  // but for Classic NES we mask to 0xF7 (247)
+  // Use entry 0x01F7 which has tile=0x1F7 in GBA interpretation,
+  // but Classic NES masks to 0xF7 (247). palBank=0 to get +8 offset.
   const uint32_t mapBase = 0x06006800u;
-  mem.Write16(mapBase, 0x80F7u); // tile=0x1F7 if 10-bit, or 0xF7 if masked
+  mem.Write16(mapBase, 0x01F7u); // tile=0x1F7 if 10-bit, or 0xF7 if masked
 
   // Also write a tile at 0x1F7 (503) to prove we DON'T read it
   // (503 would overlap tilemap area)
@@ -1461,8 +1469,8 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // With Classic NES tile masking: tile 0xF7 is used, colorIndex 2 maps to 10
-  // => should be red (0x001F)
+  // With Classic NES tile masking: tile 0xF7 is used, colorIndex 2 + 8 = 10
+  // palBank=0 (< 8) so +8 offset applied => should be red (0x001F)
   uint32_t expected = TestUtil::ARGBFromBGR555(0x001Fu);
   uint32_t actual = ppu.GetFramebuffer()[0];
   EXPECT_EQ(actual, expected)

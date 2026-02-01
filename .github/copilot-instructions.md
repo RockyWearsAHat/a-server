@@ -10,8 +10,14 @@ This file is intentionally short. The detailed, structured guidance lives in `.g
 
 - **`@Plan`** — Diagnose → Write EXACT CODE to `.github/plan.md`. Never implements directly.
 - **`@Implement`** — Execute `.github/plan.md` step-by-step. Never improvises or interprets.
+- **`@copilot`** — Documentation-first TDD. Understands gamer lingo → translates to specs → tests → implements.
 
-**Workflow:** User request → `@Plan` (diagnose + write code plan) → `@Implement` (execute exactly)
+**Workflow:**
+
+- Complex changes: `@Plan` → `@Implement`
+- Bug fixes: `@copilot "description in any language"` (handles everything)
+
+**Quick Bug Intake:** Use `/emu-bug` prompt to translate gamer reports to technical specs.
 
 ## Golden Rules
 

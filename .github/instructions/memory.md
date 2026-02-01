@@ -101,12 +101,14 @@ The `tests/` folder contains the primary correctness harness:
 
 Guideline: tests should mirror **documentation/spec**, not the current implementation.
 
-### Test Coverage for Classic NES Series (2025-01)
+### Test Coverage for Classic NES Series (2026-02)
 
 - **PPUTests.cpp**: Classic NES palette bank remapping tests verify:
-  - colorIndex 1-6 maps to palette indices 9-14 via +8 offset
-  - colorIndex 7+ stays unmapped
+  - colorIndex 1-6 maps to palette indices 9-14 via +8 offset (when palBank < 8)
+  - colorIndex 7+ stays unmapped (no +8 offset)
+  - palBank >= 8 (border areas) uses index without offset (renders black)
   - Disabled mode uses normal palette bank behavior
+  - Tile index masking (8-bit) prevents overlap with tilemap region
 
 - **DMATests.cpp**: DMA source control tests verify:
   - srcCtrl=2 (Fixed) reads same address repeatedly
