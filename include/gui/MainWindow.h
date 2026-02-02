@@ -18,6 +18,8 @@
 #include <thread>
 #include <vector>
 
+#include "common/AudioRecorder.h"
+#include "common/VideoRecorder.h"
 #include "gui/NavigationController.h"
 #include "gui/UIActionMapper.h"
 
@@ -77,6 +79,19 @@ public:
   // Must be called on the Qt thread.
   bool DumpCurrentFramePPM(const std::string &path,
                            double *outNonBlackRatio = nullptr) const;
+
+  // Audio recording for development/testing.
+  // Records SDL audio output directly to a WAV file.
+  bool StartAudioRecording(const std::string &path);
+  bool StopAudioRecording();
+  bool IsAudioRecording() const;
+
+  // Combined A/V recording for development/testing.
+  // Records framebuffer + audio directly from emulator buffers.
+  // Perfect sync, cross-platform, no screen capture dependencies.
+  bool StartAVRecording(const std::string &path);
+  bool StopAVRecording();
+  bool IsAVRecording() const;
 
   struct ScriptEvent {
     int64_t ms = 0;
@@ -242,6 +257,12 @@ private:
   SDL_AudioDeviceID audioDevice = 0;
   static constexpr int AUDIO_SAMPLE_RATE = 32768;
   static constexpr int AUDIO_BUFFER_SIZE = 2048;
+
+  // Audio recording for development/testing
+  AIO::Common::AudioRecorder audioRecorder_;
+
+  // Combined A/V recording for development/testing
+  AIO::Common::AVRecorder avRecorder_;
 
   // Emulator thread
   std::thread emulatorThread;

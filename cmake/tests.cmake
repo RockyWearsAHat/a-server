@@ -226,3 +226,35 @@ gtest_discover_tests(GBAIntegrationTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# Graphics corruption tests
+if(EXISTS "${PROJECT_ROOT}/tests/GraphicsCorruptionTests.cpp")
+  add_executable(GraphicsCorruptionTests ${PROJECT_ROOT}/tests/GraphicsCorruptionTests.cpp)
+  set_target_properties(GraphicsCorruptionTests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GraphicsCorruptionTests"
+  )
+  target_link_libraries(GraphicsCorruptionTests PRIVATE GTest::gtest_main GBAEmulator)
+
+  gtest_discover_tests(GraphicsCorruptionTests
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    TEST_DISCOVERY_TIMEOUT 60
+    DISCOVERY_MODE PRE_TEST
+  )
+endif()
+
+# Audio corruption tests
+if(EXISTS "${PROJECT_ROOT}/tests/AudioCorruptionTests.cpp")
+  add_executable(AudioCorruptionTests ${PROJECT_ROOT}/tests/AudioCorruptionTests.cpp)
+  set_target_properties(AudioCorruptionTests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/AudioCorruptionTests"
+  )
+  target_link_libraries(AudioCorruptionTests PRIVATE GTest::gtest_main GBAEmulator)
+
+  gtest_discover_tests(AudioCorruptionTests
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    TEST_DISCOVERY_TIMEOUT 60
+    DISCOVERY_MODE PRE_TEST
+  )
+endif()

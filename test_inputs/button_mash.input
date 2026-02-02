@@ -1,0 +1,48 @@
+# Button Mash Test
+# Rapidly tests all buttons to verify input handling
+
+# Boot
+1500 START DOWN
+1600 START UP
+
+# A button spam
+2000 A DOWN
+2100 A UP
+2200 A DOWN
+2300 A UP
+2400 A DOWN
+2500 A UP
+
+# B button spam
+2700 B DOWN
+2800 B UP
+2900 B DOWN
+3000 B UP
+3100 B DOWN
+3200 B UP
+
+# Shoulder buttons
+3500 L DOWN
+3600 L UP
+3800 R DOWN
+3900 R UP
+
+# Combined: L + R
+4200 L DOWN
+4200 R DOWN
+4400 L UP
+4400 R UP
+
+# SELECT
+4700 SELECT DOWN
+4800 SELECT UP
+
+# All face buttons rapid
+5000 A DOWN
+5050 B DOWN
+5100 A UP
+5150 B UP
+5200 A DOWN
+5250 B DOWN
+5300 A UP
+5350 B UP

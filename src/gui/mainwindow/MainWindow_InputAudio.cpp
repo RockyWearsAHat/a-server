@@ -56,11 +56,17 @@ void MainWindow::initAudio() {
   // actual device rate.
   if (have.freq > 0) {
     gba.GetAPU().SetOutputSampleRate(have.freq);
+    audioRecorder_.SetSampleRate(have.freq);
   }
   audioInstance.store(this, std::memory_order_release);
 }
 
 void MainWindow::closeAudio() {
+  // Stop any active recording before closing the audio device
+  if (audioRecorder_.IsRecording()) {
+    audioRecorder_.StopRecording();
+  }
+
   if (audioDevice != 0) {
     // Ensure the audio callback won't touch MainWindow state during/after
     // shutdown.
@@ -73,6 +79,39 @@ void MainWindow::closeAudio() {
   audioInstance.store(nullptr, std::memory_order_release);
 }
 
+bool MainWindow::StartAudioRecording(const std::string &path) {
+  return audioRecorder_.StartRecording(path);
+}
+
+bool MainWindow::StopAudioRecording() { return audioRecorder_.StopRecording(); }
+
+bool MainWindow::IsAudioRecording() const {
+  return audioRecorder_.IsRecording();
+}
+
+bool MainWindow::StartAVRecording(const std::string &path) {
+  // Configure based on current emulator
+  AIO::Common::AVRecorder::Config cfg;
+  if (currentEmulator == EmulatorType::GBA) {
+    cfg.videoWidth = 240;
+    cfg.videoHeight = 160;
+    cfg.videoFps = 60;
+  } else if (currentEmulator == EmulatorType::Switch) {
+    cfg.videoWidth = 1280;
+    cfg.videoHeight = 720;
+    cfg.videoFps = 60;
+  }
+  cfg.audioSampleRate = AUDIO_SAMPLE_RATE;
+  cfg.audioChannels = 2;
+
+  avRecorder_.Configure(cfg);
+  return avRecorder_.StartRecording(path);
+}
+
+bool MainWindow::StopAVRecording() { return avRecorder_.StopRecording(); }
+
+bool MainWindow::IsAVRecording() const { return avRecorder_.IsRecording(); }
+
 void MainWindow::audioCallback(void *userdata, Uint8 *stream, int len) {
   int16_t *buffer = reinterpret_cast<int16_t *>(stream);
   int numSamples = len / 4; // stereo samples (2 channels * 2 bytes)
@@ -84,12 +123,14 @@ void MainWindow::audioCallback(void *userdata, Uint8 *stream, int len) {
   }
 
   if (self->currentEmulator == EmulatorType::GBA) {
-    // Get samples from APU ring buffer
     self->gba.GetAPU().GetSamples(buffer, numSamples);
   } else {
-    // Silence for now
     memset(stream, 0, len);
   }
+
+  // Duplicate samples to recorders if active
+  self->audioRecorder_.RecordSamples(buffer, numSamples);
+  self->avRecorder_.RecordAudioSamples(buffer, numSamples);
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {

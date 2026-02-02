@@ -1,0 +1,38 @@
+# Platformer Jump Test
+# Simulates typical platformer inputs: run and jump
+
+# Boot and start
+1500 START DOWN
+1600 START UP
+2500 A DOWN
+2600 A UP
+
+# Run right and jump
+3500 RIGHT DOWN
+4000 A DOWN
+4150 A UP
+4500 RIGHT UP
+
+# Standing jump
+5000 A DOWN
+5200 A UP
+
+# Run left and jump
+5500 LEFT DOWN
+6000 A DOWN
+6150 A UP
+6500 LEFT UP
+
+# Double tap for possible dash
+7000 RIGHT DOWN
+7100 RIGHT UP
+7150 RIGHT DOWN
+7600 RIGHT UP
+
+# Hold B while moving (run in many platformers)
+8000 B DOWN
+8000 RIGHT DOWN
+8500 A DOWN
+8650 A UP
+9000 B UP
+9000 RIGHT UP

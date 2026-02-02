@@ -1,0 +1,28 @@
+# Basic Movement Test
+# Tests D-pad in all directions with brief pauses
+
+# Wait for game to be ready
+2000 START DOWN
+2100 START UP
+
+# Move right
+3000 RIGHT DOWN
+3500 RIGHT UP
+
+# Move left
+4000 LEFT DOWN
+4500 LEFT UP
+
+# Move up
+5000 UP DOWN
+5500 UP UP
+
+# Move down
+6000 DOWN DOWN
+6500 DOWN UP
+
+# Diagonal: right + up
+7000 RIGHT DOWN
+7000 UP DOWN
+7500 RIGHT UP
+7500 UP UP

@@ -1,0 +1,11 @@
+# Boot and Press Start
+# Waits for game to boot, then presses START to begin
+# Useful for games that require pressing start at title screen
+
+# Wait for boot sequence (2 seconds)
+2000 START DOWN
+2100 START UP
+
+# Wait and press A (common for "Press Start" followed by menu confirm)
+3500 A DOWN
+3600 A UP

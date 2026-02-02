@@ -46,6 +46,8 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/common/CssVars.cpp
     ${PROJECT_ROOT}/src/common/PixelScaler.cpp
     ${PROJECT_ROOT}/src/common/AssetPaths.cpp
+    ${PROJECT_ROOT}/src/common/AudioRecorder.cpp
+    ${PROJECT_ROOT}/src/common/VideoRecorder.cpp
     ${PROJECT_ROOT}/src/nas/NASServer.cpp
     ${PROJECT_ROOT}/src/nas/server/NASServer_Http.cpp
     ${PROJECT_ROOT}/src/nas/server/NASServer_Routing.cpp

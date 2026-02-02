@@ -1,0 +1,50 @@
+# Menu Navigation Test
+# Tests typical menu navigation patterns
+
+# Boot
+1500 START DOWN
+1600 START UP
+
+# Navigate down through menu items
+2500 DOWN DOWN
+2600 DOWN UP
+
+3000 DOWN DOWN
+3100 DOWN UP
+
+3500 DOWN DOWN
+3600 DOWN UP
+
+# Select with A
+4000 A DOWN
+4100 A UP
+
+# Back with B
+4500 B DOWN
+4600 B UP
+
+# Navigate up
+5000 UP DOWN
+5100 UP UP
+
+5500 UP DOWN
+5600 UP UP
+
+# Select different option
+6000 A DOWN
+6100 A UP
+
+# Use shoulder buttons (page navigation in some menus)
+6500 R DOWN
+6600 R UP
+
+7000 L DOWN
+7100 L UP
+
+# START for pause/options menu
+7500 START DOWN
+7600 START UP
+
+# SELECT for alternate menu/map
+8000 SELECT DOWN
+8100 SELECT UP

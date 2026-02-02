@@ -1108,6 +1108,14 @@ void PPU::RenderOBJ() {
     if (scanline >= y && scanline < y + boundHeight) {
       // Render this line of the sprite
       int x = attr1 & 0x1FF;
+      
+      // Classic NES Series: bit 8 of attr1 may be a CHR bank flag rather than
+      // X coordinate bit. NES sprites use 8-bit X (0-255), not 9-bit.
+      // Mask to 8 bits to prevent sprites being positioned off-screen at x=256→-256.
+      if (classicNesMode) {
+        x = attr1 & 0xFF;
+      }
+      
       if (x >= 256)
         x -= 512; // Sign extend 9-bit X
 
@@ -1311,19 +1319,36 @@ void PPU::RenderOBJ() {
           // Only draw if sprite priority <= existing pixel priority
           // (lower number = higher display priority)
           if (priority <= priorityBuffer[pixelIndex]) {
-            if (objStatsEnabled) {
-              const int fc = (int)frameCount;
-              if (fc >= objStatsStart &&
-                  (objStatsEnd < 0 || fc <= objStatsEnd)) {
-                objStatsDrawn++;
+            // Apply Classic NES Series palette handling for sprites
+            uint8_t effectiveColorIndex = colorIndex;
+            uint8_t effectivePaletteBank = paletteBank;
+            
+            static const bool envOverride =
+                EnvFlagCached("AIO_CLASSIC_NES_PALETTE_FIX");
+            static const bool envDisable = 
+                EnvFlagCached("AIO_DISABLE_CLASSIC_NES_FIX");
+            const bool applyClassicNesPaletteOffset =
+                !envDisable && (classicNesMode || envOverride);
+            
+            if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
+              // Force palette bank 0 for Classic NES (NES uses single palette)
+              effectivePaletteBank = 0;
+              
+              // Map color indices to actual NES palette slots (9-14)
+              if (colorIndex <= 6) {
+                effectiveColorIndex = colorIndex + 8; // 1→9, 2→10, ..., 6→14
+              } else if (colorIndex >= 8) {
+                effectiveColorIndex = (colorIndex < 14) ? (colorIndex + 1) : 14;
               }
+              // colorIndex 7 stays as-is
             }
+            
             // Fetch Color (OBJ Palette starts at 0x05000200)
             uint32_t paletteAddr = 0x05000200;
             if (is8bpp) {
               paletteAddr += colorIndex * 2;
             } else {
-              paletteAddr += (paletteBank * 32) + (colorIndex * 2);
+              paletteAddr += (effectivePaletteBank * 32) + (effectiveColorIndex * 2);
             }
 
             const uint8_t *palData = memory.GetPaletteData();
@@ -1342,6 +1367,15 @@ void PPU::RenderOBJ() {
             objSemiTransparentBuffer[pixelIndex] = (objMode == 1) ? 1 : 0;
             // Update priority buffer (OBJ takes this priority slot)
             priorityBuffer[pixelIndex] = (uint8_t)priority;
+
+            // Increment stats AFTER pixel is actually written to framebuffer
+            if (objStatsEnabled) {
+              const int fc = (int)frameCount;
+              if (fc >= objStatsStart &&
+                  (objStatsEnd < 0 || fc <= objStatsEnd)) {
+                objStatsDrawn++;
+              }
+            }
 
             if (objTraceCfg.enabled &&
                 objTraceHitsThisFrame < objTraceCfg.maxHits &&
@@ -2270,25 +2304,31 @@ void PPU::RenderBackground(int bgIndex) {
         uint8_t effectivePaletteBank = paletteBank;
         // Classic NES Series palette handling:
         // The NES-on-GBA wrapper stores actual NES colors at palette bank 0,
-        // indices 9-14. Tilemap entries may have palBank >= 8 for border/empty
-        // areas (which should render black, as banks 1-15 are zeros).
+        // indices 9-14. The tilemap's palette bank field is used for NES
+        // attribute data, not GBA palette selection.
         //
         // Algorithm:
-        // - For normal tiles (palBank < 8): Apply +8 to colorIndex 1-6
-        //   (so 1→9, 2→10, ..., 6→14) to read actual NES colors
-        // - For colorIndex 7+: No offset (uses index directly)
-        // - For border areas (palBank >= 8): Use bank 0 without offset
-        //   (indices 0-8 are zeros → BLACK)
+        // - Always use palette bank 0
+        // - Apply +8 to colorIndex 1-6 (so 1→9, 2→10, ..., 6→14)
+        // - colorIndex 7+ stays as-is (7→7, 8→8, etc.)
 
         if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
-          // Always use palette bank 0 for Classic NES
+          // Always use palette bank 0
           effectivePaletteBank = 0;
 
-          if (paletteBank < 8 && colorIndex <= 6) {
-            // Normal tiles: Apply +8 offset to map to actual colors
+          // Classic NES Series tile data contains pre-multiplied color indices.
+          // The NES wrapper stores colors at palette indices 9-14.
+          // Tile data uses colorIndex 8, 9, 10, 11, 12, 13, 14 but index 8
+          // maps to an empty slot. Add +1 to indices 8+ to align with palette.
+          if (colorIndex <= 6) {
+            // Legacy: colorIndex 1-6 maps to palette 9-14
             effectiveColorIndex = colorIndex + 8;
+          } else if (colorIndex >= 8) {
+            // New: colorIndex 8-14 should map to palette 9-15
+            // But palette 15 is also empty, so cap at 14
+            effectiveColorIndex = (colorIndex < 14) ? (colorIndex + 1) : 14;
           }
-          // colorIndex 7+ or palBank >= 8: no offset (black/border)
+          // colorIndex 7 stays as-is (likely unused)
         }
 
         // Fetch Color from Palette RAM
@@ -2310,7 +2350,13 @@ void PPU::RenderBackground(int bgIndex) {
             scanline == 0 && x < 100 && colorIndex != 0) {
           colorTraces++;
           std::cout << "[NES_COLOR] frame=" << frameCount << " x=" << x
-                    << " effIdx=" << (int)effectiveColorIndex << " palAddr=0x"
+                    << " tile=" << tileIndex << " inX=" << inTileX
+                    << " inY=" << inTileY << " hF=" << hFlip << " vF=" << vFlip
+                    << " addr=0x" << std::hex << tileAddr << " tileByte=0x"
+                    << (int)tileByte << " rawCI=" << std::dec << (int)colorIndex
+                    << " palBank=" << (int)paletteBank
+                    << " effIdx=" << (int)effectiveColorIndex
+                    << " effBank=" << (int)effectivePaletteBank << " palAddr=0x"
                     << std::hex << paletteAddr << " color=0x" << color
                     << std::dec << std::endl;
         }

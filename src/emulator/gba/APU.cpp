@@ -260,22 +260,21 @@ void APU::OnTimerOverflow(int timer) {
   int32_t right = 0;
 
   // FIFO A volume (bit 2: 0=50%, 1=100%)
-  // This implementation scales int8 samples by 64 at 100% volume.
-  const int volA = (scntH & 0x04) ? 64 : 32;
+  const int volA = (scntH & 0x04) ? 2 : 1;
   // FIFO B volume (bit 3: 0=50%, 1=100%)
-  const int volB = (scntH & 0x08) ? 64 : 32;
+  const int volB = (scntH & 0x08) ? 2 : 1;
 
   // FIFO A enable left/right (bits 9, 8)
   if (scntH & 0x200)
-    left += (int32_t)currentSampleA * volA;
+    left += (int32_t)currentSampleA * volA * 64;
   if (scntH & 0x100)
-    right += (int32_t)currentSampleA * volA;
+    right += (int32_t)currentSampleA * volA * 64;
 
   // FIFO B enable left/right (bits 13, 12)
   if (scntH & 0x2000)
-    left += (int32_t)currentSampleB * volB;
+    left += (int32_t)currentSampleB * volB * 64;
   if (scntH & 0x1000)
-    right += (int32_t)currentSampleB * volB;
+    right += (int32_t)currentSampleB * volB * 64;
 
   // Clamp to signed 16-bit to avoid wraparound distortion.
   if (left < -32768)

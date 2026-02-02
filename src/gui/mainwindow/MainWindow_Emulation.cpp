@@ -809,7 +809,7 @@ void MainWindow::UpdateDisplay() {
       pendingEmuKeyinput.store(inputState, std::memory_order_relaxed);
     }
 
-    // Copy framebuffer to display image
+    // Copy framebuffer to display image and record if active
     const auto &buffer = gba.GetPPU().GetFramebuffer();
     if ((int)buffer.size() >= 240 * 160) {
       for (int y = 0; y < 160; ++y) {
@@ -817,6 +817,8 @@ void MainWindow::UpdateDisplay() {
         uchar *dst = displayImage.scanLine(y);
         memcpy(dst, src, 240 * sizeof(uint32_t));
       }
+      // Record frame if A/V recording is active
+      avRecorder_.RecordVideoFrame(buffer);
     }
   } else if (currentEmulator == EmulatorType::Switch) {
     auto *gpu = switchEmulator.GetGPU();
@@ -825,6 +827,8 @@ void MainWindow::UpdateDisplay() {
       if (buffer.size() >= 1280 * 720) {
         memcpy(displayImage.bits(), buffer.data(),
                buffer.size() * sizeof(uint32_t));
+        // Record frame if A/V recording is active
+        avRecorder_.RecordVideoFrame(buffer);
       }
     }
   }

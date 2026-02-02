@@ -113,6 +113,19 @@ int main(int argc, char *argv[]) {
       "In --headless mode, exit non-zero if dumped frame is entirely black");
   parser.addOption(headlessAssertNonBlackOption);
 
+  QCommandLineOption dumpAudioOption(
+      QStringList() << "dump-audio",
+      "Record audio output to a WAV file (works in headless or GUI mode)",
+      "path");
+  parser.addOption(dumpAudioOption);
+
+  QCommandLineOption recordAVOption(
+      QStringList() << "record-av",
+      "Record synchronized A/V directly from emulator buffers to MP4 "
+      "(cross-platform, frame-accurate)",
+      "path");
+  parser.addOption(recordAVOption);
+
   QCommandLineOption inputScriptOption(
       QStringList() << "input-script",
       "Optional input playback script (applies during emulator runtime). "
@@ -337,6 +350,24 @@ int main(int argc, char *argv[]) {
       AIO::Emulator::Common::Logger::Instance().Log(
           AIO::Emulator::Common::LogLevel::Info, "main",
           "window.LoadROM() returned");
+
+      // Start audio recording if requested
+      if (parser.isSet(dumpAudioOption)) {
+        const QString audioPath = parser.value(dumpAudioOption);
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "main",
+            "Starting audio recording to: %s", audioPath.toStdString().c_str());
+        window.StartAudioRecording(audioPath.toStdString());
+      }
+
+      // Start A/V recording if requested (frame-accurate, no screen capture)
+      if (parser.isSet(recordAVOption)) {
+        const QString avPath = parser.value(recordAVOption);
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "main",
+            "Starting A/V recording to: %s", avPath.toStdString().c_str());
+        window.StartAVRecording(avPath.toStdString());
+      }
 
       if (headless && headlessMaxMs > 0) {
         QTimer::singleShot(headlessMaxMs, [headlessMaxMs]() {
