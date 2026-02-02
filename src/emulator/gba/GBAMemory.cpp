@@ -2405,8 +2405,65 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
                           0; // Bit 7 of high byte = bit 15 of full 16-bit
         bool willBeEnabled = (value & 0x80) != 0;
 
+        // Trace DMA enable transitions for sound channels
+        if (TraceGbaSpam() && (dmaChannel == 1 || dmaChannel == 2)) {
+          static int enableTransitionLogs = 0;
+          if (enableTransitionLogs < 50) {
+            enableTransitionLogs++;
+            std::cout << "[DMA_ENABLE_TRANS] ch=" << dmaChannel
+                      << " wasEnabled=" << wasEnabled
+                      << " willBeEnabled=" << willBeEnabled << " value=0x"
+                      << std::hex << (int)value << " PC=0x";
+            if (cpu)
+              std::cout << cpu->GetRegister(15);
+            std::cout << std::dec << std::endl;
+          }
+        }
+
         if (!wasEnabled && willBeEnabled) {
           dmaLatchNeeded = true;
+        }
+      }
+
+      // Also handle writes to DMA SAD while DMA is enabled (for sound DMA
+      // buffer swapping) Games like MMBN update DMA SAD during VBlank without
+      // disabling DMA
+      int dmaSadChannel = -1;
+      if (offset >= IORegs::DMA0SAD &&
+          offset < IORegs::DMA0SAD + IORegs::DMA_CHANNEL_SIZE * 4) {
+        // Calculate which channel and which byte of SAD
+        int channelOffset = (offset - IORegs::DMA0SAD);
+        int channel = channelOffset / IORegs::DMA_CHANNEL_SIZE;
+        int byteInChannel = channelOffset % IORegs::DMA_CHANNEL_SIZE;
+
+        // SAD occupies bytes 0-3 of each DMA channel
+        if (byteInChannel < 4 && channel >= 0 && channel < 4) {
+          uint32_t dmaBase =
+              IORegs::DMA0SAD + (channel * IORegs::DMA_CHANNEL_SIZE);
+          uint16_t ctrl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
+          bool isEnabled = (ctrl & DMAControl::ENABLE) != 0;
+          int timing = (ctrl >> 12) & 3;
+
+          // Trace ALL writes to DMA1/2 SAD (not just when enabled)
+          if (TraceGbaSpam()) {
+            static int sadWriteLogs = 0;
+            if (sadWriteLogs < 100 && (channel == 1 || channel == 2)) {
+              sadWriteLogs++;
+              std::cout << "[DMA_SAD_WRITE] ch=" << channel
+                        << " byte=" << byteInChannel << " val=0x" << std::hex
+                        << (int)value << " isEnabled=" << isEnabled
+                        << " timing=" << std::dec << timing << " PC=0x"
+                        << std::hex;
+              if (cpu)
+                std::cout << cpu->GetRegister(15);
+              std::cout << std::dec << std::endl;
+            }
+          }
+
+          // For sound DMA (timing=3) that's already enabled, mark for relatch
+          if (isEnabled && timing == 3) {
+            dmaSadChannel = channel;
+          }
         }
       }
 
@@ -2420,16 +2477,56 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
         EvaluateKeypadIRQ();
       }
 
+      // Handle sound DMA SAD relatch (for buffer swapping during VBlank)
+      // This must be BEFORE the normal DMA latch - games update SAD while DMA
+      // stays enabled
+      if (dmaSadChannel >= 0) {
+        uint32_t sadDmaBase =
+            IORegs::DMA0SAD + (dmaSadChannel * IORegs::DMA_CHANNEL_SIZE);
+        uint32_t newSrc = io_regs[sadDmaBase] | (io_regs[sadDmaBase + 1] << 8) |
+                          (io_regs[sadDmaBase + 2] << 16) |
+                          (io_regs[sadDmaBase + 3] << 24);
+
+        if (TraceGbaSpam()) {
+          static int sadRelatchLogs = 0;
+          if (sadRelatchLogs < 20) {
+            sadRelatchLogs++;
+            std::cout << "[SOUND_DMA_RELATCH] ch=" << dmaSadChannel
+                      << " oldSrc=0x" << std::hex
+                      << dmaInternalSrc[dmaSadChannel] << " newSrc=0x" << newSrc
+                      << std::dec << std::endl;
+          }
+        }
+
+        dmaInternalSrc[dmaSadChannel] = newSrc;
+      }
+
       // Handle DMA latch after io_regs is updated
       if (dmaLatchNeeded && dmaChannel >= 0) {
         uint32_t dmaBase =
             IORegs::DMA0SAD + (dmaChannel * IORegs::DMA_CHANNEL_SIZE);
+        uint32_t oldInternalSrc = dmaInternalSrc[dmaChannel];
         dmaInternalSrc[dmaChannel] =
             io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
             (io_regs[dmaBase + 2] << 16) | (io_regs[dmaBase + 3] << 24);
         dmaInternalDst[dmaChannel] =
             io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
             (io_regs[dmaBase + 6] << 16) | (io_regs[dmaBase + 7] << 24);
+
+        // Trace relatch for sound DMA channels
+        if (TraceGbaSpam() && (dmaChannel == 1 || dmaChannel == 2)) {
+          static int relatchLogs = 0;
+          if (relatchLogs < 20) {
+            relatchLogs++;
+            std::cout << "[DMA_RELATCH] ch=" << dmaChannel << " oldSrc=0x"
+                      << std::hex << oldInternalSrc << " newSrc=0x"
+                      << dmaInternalSrc[dmaChannel] << " io_regs_SAD=0x"
+                      << (io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
+                          (io_regs[dmaBase + 2] << 16) |
+                          (io_regs[dmaBase + 3] << 24))
+                      << std::dec << std::endl;
+          }
+        }
 
         static int dmaStartLogs[4] = {0, 0, 0, 0};
         if (verboseLogs && dmaStartLogs[dmaChannel] < 8) {
@@ -4347,6 +4444,68 @@ void GBAMemory::PerformDMA(int channel) {
       }
     } else {
       // Normal memory-to-memory DMA
+
+      // DEBUG: Trace sound FIFO DMA (timing mode 3)
+      if (timing == 3 && TraceGbaSpam()) {
+        // Check if all 4 words are zero
+        uint32_t w0 = Read32(currentSrc);
+        uint32_t w1 = Read32(currentSrc + 4);
+        uint32_t w2 = Read32(currentSrc + 8);
+        uint32_t w3 = Read32(currentSrc + 12);
+        bool allZero = (w0 == 0 && w1 == 0 && w2 == 0 && w3 == 0);
+
+        // Check if data looks like ROM pointers (0x08xxxxxx) vs audio samples
+        bool looksLikePointers = ((w0 >> 24) == 0x08 || (w1 >> 24) == 0x08);
+
+        // Show byte values for audio analysis
+        int8_t s0 = (int8_t)(w0 & 0xFF);
+        int8_t s1 = (int8_t)((w0 >> 8) & 0xFF);
+        int8_t s2 = (int8_t)((w0 >> 16) & 0xFF);
+        int8_t s3 = (int8_t)((w0 >> 24) & 0xFF);
+
+        static int nonZeroCount = 0;
+        static int zeroCount = 0;
+        static int pointerCount = 0;
+
+        // Log first few with full DMA details
+        static int detailCount = 0;
+        if (detailCount < 5) {
+          detailCount++;
+          std::cout << "[SOUND_DMA_DETAIL] ch=" << channel << " src=0x"
+                    << std::hex << currentSrc << " srcCtrl=" << std::dec
+                    << srcCtrl << " repeat=" << repeat << " dmaInternalSrc=0x"
+                    << std::hex << dmaInternalSrc[channel] << std::dec
+                    << std::endl;
+        }
+
+        if (allZero) {
+          zeroCount++;
+          // Limit zero logging
+          if (zeroCount <= 5 || zeroCount % 1000 == 0) {
+            std::cout << "[SOUND_DMA] ch=" << channel << " src=0x" << std::hex
+                      << currentSrc << " ALL ZERO (zero=" << std::dec
+                      << zeroCount << ")" << std::endl;
+          }
+        } else if (looksLikePointers) {
+          pointerCount++;
+          if (pointerCount <= 10) {
+            std::cout << "[SOUND_DMA] ch=" << channel << " src=0x" << std::hex
+                      << currentSrc << " ROM_PTRS w0=0x" << w0
+                      << " (ptrs=" << std::dec << pointerCount << ")"
+                      << std::endl;
+          }
+        } else {
+          nonZeroCount++;
+          if (nonZeroCount <= 20) {
+            std::cout << "[SOUND_DMA] AUDIO ch=" << channel << " src=0x"
+                      << std::hex << currentSrc << " samples=[" << std::dec
+                      << (int)s0 << "," << (int)s1 << "," << (int)s2 << ","
+                      << (int)s3 << "]"
+                      << " (audio=" << nonZeroCount << ")" << std::endl;
+          }
+        }
+      }
+
       for (uint32_t i = 0; i < count; ++i) {
         if (is32Bit) {
           uint32_t val = Read32(currentSrc);
@@ -4456,7 +4615,10 @@ void GBAMemory::PerformDMA(int channel) {
   // However, for EEPROM transfers (0x0Dxxxxxx), some libraries assume the
   // programmed DMAxSAD/DAD remain stable and may use partial writes; writing
   // back advanced addresses can desync subsequent DMA setup.
-  if (!srcIsEEPROM && !dstIsEEPROM) {
+  // Also, for sound FIFO DMAs (timing=3), games rely on the SAD register
+  // retaining its original value so that re-enabling DMA restarts from
+  // the audio buffer start, not from the advanced position.
+  if (!srcIsEEPROM && !dstIsEEPROM && timing != 3) {
     auto writeIo32 = [&](uint32_t off, uint32_t v) {
       if (off + 3 >= io_regs.size())
         return;
@@ -4552,6 +4714,14 @@ void GBAMemory::UpdateTimers(int cycles) {
             // DMA itself (which otherwise causes pathological re-requests).
             if (!dmaInProgress && apu && (i == 0 || i == 1)) {
               apu->OnTimerOverflow(i);
+            } else if (TraceGbaSpam() && (i == 0 || i == 1)) {
+              static int suppressedCount = 0;
+              suppressedCount++;
+              if (suppressedCount <= 10) {
+                std::cout << "[TIMER_OVF_SUPPRESSED] Timer " << i
+                          << " dmaInProgress=" << dmaInProgress
+                          << " apu=" << (apu ? "yes" : "null") << std::endl;
+              }
             }
 
             // IRQ

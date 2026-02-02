@@ -32,7 +32,15 @@ void APU::Reset() {
   currentSampleB = 0;
 
   ringBuffer.fill(0);
-  writePos = 0;
+
+  // Prefill the ring buffer with silence to prevent initial underruns.
+  // This provides a buffer against timing jitter between the emulator
+  // (which may have variable frame timing) and the audio callback
+  // (which runs on a precise real-time schedule).
+  // Prefill with ~125ms of silence (about 4096 stereo samples at 32768 Hz).
+  // This gives significant headroom for timing variations.
+  constexpr int PREFILL_SAMPLES = RING_BUFFER_SIZE / 2; // ~4096 samples
+  writePos = PREFILL_SAMPLES * 2; // Each sample is 2 int16s (stereo)
   readPos = 0;
 
   soundcntH = 0;
@@ -45,12 +53,18 @@ void APU::Reset() {
   waveChannel.Reset();
   // Reset Noise channel
   noiseChannel.Reset();
+
+  // Reset sample accumulator
+  sampleAccumulator = 0.0f;
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
   // Push the sample multiple times based on the upsample ratio
   // This converts from game's timer-based sample rate to our output rate
   sampleAccumulator += currentUpsampleRatio;
+
+  static int pushCount = 0;
+  pushCount++;
 
   while (sampleAccumulator >= 1.0f) {
     int wp = writePos.load(std::memory_order_relaxed);
@@ -72,6 +86,12 @@ void APU::PushSample(int16_t left, int16_t right) {
     ringBuffer[wp] = left;
     ringBuffer[wp + 1] = right;
     writePos.store(nextWp, std::memory_order_release);
+
+    // Trace non-zero samples being pushed
+    if (TraceGbaSpam() && (left != 0 || right != 0) && pushCount <= 50) {
+      std::cout << "[PUSH_NZ] #" << pushCount << " L=" << left << " R=" << right
+                << " upsample=" << currentUpsampleRatio << std::endl;
+    }
 
     sampleAccumulator -= 1.0f;
   }
@@ -178,10 +198,14 @@ void APU::OnTimerOverflow(int timer) {
   // FIFO B uses timer specified in bit 14 (0=Timer0, 1=Timer1)
   int fifoBTimer = (scntH >> 14) & 1;
 
-  // Only generate output samples on the timer(s) that actually clock FIFO A/B.
-  // Timer0/1 are commonly used for non-audio purposes; pushing samples on those
-  // overflows creates audible crackle/jitter.
+  // Early exit if this timer isn't used for audio
   if (timer != fifoATimer && timer != fifoBTimer) {
+    if (TraceGbaSpam() && overflowCount <= 10) {
+      std::cout << "[APU] Timer " << timer << " overflow #" << overflowCount
+                << " SKIPPED (not audio timer) scntH=0x" << std::hex << scntH
+                << std::dec << " fifoATimer=" << fifoATimer
+                << " fifoBTimer=" << fifoBTimer << std::endl;
+    }
     return;
   }
 
@@ -229,6 +253,11 @@ void APU::OnTimerOverflow(int timer) {
   // When the associated timer overflows, consume a sample from FIFO
   if (timer == fifoATimer && fifoA_Count > 0) {
     currentSampleA = fifoA[fifoA_ReadPos];
+    if (TraceGbaSpam() && currentSampleA != 0) {
+      std::cout << "[FIFO_A_CONSUME] sample=" << (int)currentSampleA
+                << " readPos=" << fifoA_ReadPos << " count=" << fifoA_Count
+                << std::endl;
+    }
     fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
     fifoA_Count--;
     consumedA = true;
@@ -240,6 +269,11 @@ void APU::OnTimerOverflow(int timer) {
 
   if (timer == fifoBTimer && fifoB_Count > 0) {
     currentSampleB = fifoB[fifoB_ReadPos];
+    if (TraceGbaSpam() && currentSampleB != 0) {
+      std::cout << "[FIFO_B_CONSUME] sample=" << (int)currentSampleB
+                << " readPos=" << fifoB_ReadPos << " count=" << fifoB_Count
+                << std::endl;
+    }
     fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
     fifoB_Count--;
     consumedB = true;
@@ -286,28 +320,77 @@ void APU::OnTimerOverflow(int timer) {
   if (right > 32767)
     right = 32767;
 
+  // DEBUG: Trace output samples - log non-zero samples
+  if (TraceGbaSpam()) {
+    static int sampleLogCount = 0;
+    static int nonZeroLogCount = 0;
+    sampleLogCount++;
+
+    // Log first 50 samples always, then any non-zero samples up to 100 more
+    bool shouldLog = (sampleLogCount <= 50) ||
+                     ((left != 0 || right != 0) && nonZeroLogCount < 100);
+
+    if (shouldLog && (left != 0 || right != 0)) {
+      nonZeroLogCount++;
+      std::cout << "[APU_OUT_NZ] #" << sampleLogCount
+                << " sampleA=" << (int)currentSampleA
+                << " sampleB=" << (int)currentSampleB << " left=" << left
+                << " right=" << right << " volA=" << volA << " volB=" << volB
+                << " scntH=0x" << std::hex << scntH << std::dec << std::endl;
+    }
+  }
+
   PushSample((int16_t)left, (int16_t)right);
 }
 
 void APU::WriteFIFO_A(uint32_t value) {
   // Write 4 bytes (samples) to FIFO A
+  // GBA FIFO samples are signed 8-bit PCM (-128 to +127)
+  static int writeCountA = 0;
+  static int nonZeroWriteCountA = 0;
+  writeCountA++;
+  bool hasNonZero = (value != 0);
+  if (hasNonZero)
+    nonZeroWriteCountA++;
+
   for (int i = 0; i < 4; i++) {
     if (fifoA_Count < 32) {
-      fifoA[fifoA_WritePos] = static_cast<int8_t>((value >> (i * 8)) & 0xFF);
+      int8_t sample = static_cast<int8_t>((value >> (i * 8)) & 0xFF);
+      fifoA[fifoA_WritePos] = sample;
       fifoA_WritePos = (fifoA_WritePos + 1) % 32;
       fifoA_Count++;
     }
+  }
+
+  // Log all non-zero writes (first 100), and first 20 of any write
+  if (TraceGbaSpam() &&
+      ((hasNonZero && nonZeroWriteCountA <= 100) || writeCountA <= 20)) {
+    std::cout << "[FIFO_A_WRITE #" << writeCountA << "] value=0x" << std::hex
+              << value << std::dec << " count=" << fifoA_Count
+              << " writePos=" << fifoA_WritePos << std::endl;
   }
 }
 
 void APU::WriteFIFO_B(uint32_t value) {
   // Write 4 bytes (samples) to FIFO B
+  // GBA FIFO samples are signed 8-bit PCM (-128 to +127)
+  static int writeCountB = 0;
+  writeCountB++;
+  bool hasNonZero = (value != 0);
+
   for (int i = 0; i < 4; i++) {
     if (fifoB_Count < 32) {
-      fifoB[fifoB_WritePos] = static_cast<int8_t>((value >> (i * 8)) & 0xFF);
+      int8_t sample = static_cast<int8_t>((value >> (i * 8)) & 0xFF);
+      fifoB[fifoB_WritePos] = sample;
       fifoB_WritePos = (fifoB_WritePos + 1) % 32;
       fifoB_Count++;
     }
+  }
+
+  if (TraceGbaSpam() && hasNonZero && writeCountB <= 20) {
+    std::cout << "[FIFO_B_WRITE] value=0x" << std::hex << value << std::dec
+              << " count=" << fifoB_Count << " writePos=" << fifoB_WritePos
+              << std::endl;
   }
 }
 

@@ -52,6 +52,24 @@ public:
   int GetFifoACount() const { return fifoA_Count; }
   int GetFifoBCount() const { return fifoB_Count; }
 
+  // Ring buffer fill level (for audio timing synchronization)
+  // Returns a value from 0.0 (empty) to 1.0 (full)
+  float GetRingBufferFillRatio() const {
+    int wp = writePos.load(std::memory_order_relaxed);
+    int rp = readPos.load(std::memory_order_relaxed);
+    int fill = wp - rp;
+    if (fill < 0)
+      fill += RING_BUFFER_SIZE * 2;
+    return static_cast<float>(fill / 2) / static_cast<float>(RING_BUFFER_SIZE);
+  }
+
+  // Clear the ring buffer (for testing - removes prefill)
+  void ClearRingBuffer() {
+    ringBuffer.fill(0);
+    writePos = 0;
+    readPos = 0;
+  }
+
   // Debug/telemetry (optional logging controlled by env vars)
   struct AudioStats {
     std::atomic<uint64_t> ringUnderrunSamples{0};

@@ -25,6 +25,26 @@ These instructions enable the agent to **truly see and hear** application output
 
 ---
 
+## ⚠️ CRITICAL: Application Logging
+
+**All AIOServer output (including trace logs, audio stats, and debug info) goes to `debug.log` by default**, NOT to stdout/stderr. This is true regardless of other command-line options unless you explicitly override it.
+
+```bash
+# By default, all output goes to debug.log in the current directory
+./build/bin/AIOServer --headless --rom "test_roms/game.gba" --headless-max-ms 5000
+# Check logs: cat debug.log | grep -E "APU|AUDIO|FIFO"
+
+# To redirect logs to a different file:
+./build/bin/AIOServer --headless --rom "test_roms/game.gba" -l /tmp/my_debug.log
+
+# To check trace output after a run:
+tail -100 debug.log | grep -E "AUDIO|APU|FIFO|underrun"
+```
+
+**When debugging audio/video issues, ALWAYS check `debug.log`** for trace output—it won't appear in your terminal!
+
+---
+
 ## 🎬 PRIMARY METHOD: Built-in A/V Recording
 
 **This is the BEST and PREFERRED method for all visual/audio testing.** It captures video frames directly from the PPU framebuffer and audio samples directly from the SDL callback—perfect sync, no external dependencies, cross-platform.
@@ -137,15 +157,19 @@ Monitor and capture audio output to verify sound quality during development.
 #### Audio Statistics Tracing (Built-in)
 
 ```bash
-# Enable detailed audio statistics in logs
+# Enable detailed audio statistics in logs (output goes to debug.log!)
 AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer --headless \
   --rom "test_roms/game.gba" \
-  --headless-max-ms 5000 2>&1 | grep -i "audio\|AUDIO\|buffer\|sample"
+  --headless-max-ms 5000
+
+# Then check debug.log for audio stats:
+cat debug.log | grep -i "audio\|AUDIO\|buffer\|sample"
 
 # Check for audio underruns, buffer levels, sample rates
 AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer --headless \
   --rom "test_roms/DKC.gba" \
-  --headless-max-ms 3000 2>&1 | tee /tmp/audio_trace.log
+  --headless-max-ms 3000
+tail -100 debug.log | grep -E "AUDIO|APU|underrun|FIFO"
 ```
 
 #### Direct Audio Capture (RECOMMENDED - No Setup Required)
@@ -285,6 +309,11 @@ AIO_INPUT_SCRIPT_TIMEBASE=EMU
 AIO_ENABLE_STREAMING=0
 ```
 
+**REMEMBER:** All trace output goes to `debug.log` by default. After running with trace env vars, check:
+```bash
+tail -200 debug.log | grep -E "AUDIO|APU|FIFO|Timer"
+```
+
 ---
 
 ## Quick Reference Commands
@@ -316,6 +345,10 @@ make build
 
 # Kill running AIOServer instances
 pkill -f AIOServer
+
+# ⚠️ CHECK LOGS (output goes to debug.log by default!)
+tail -100 debug.log | grep -E "AUDIO|APU|error|warning"
+cat debug.log | grep -E "underrun|overflow|FIFO"
 ```
 
 ---
@@ -338,10 +371,9 @@ When making a code change, follow this workflow to verify it works:
    # This is the BEST way to verify changes - captures exactly what the emulator outputs
    ./build/bin/AIOServer --headless --rom "test_roms/game.gba" \
      --record-av /tmp/test_result.mp4 --headless-max-ms 5000
-
-   # Open to review
-   open /tmp/test_result.mp4
    ```
+
+   ### After capturing, analyze results and report or continue with visual/audio evidence
 
 4. **For complex interactions, combine with input scripts**
 
@@ -354,7 +386,7 @@ When making a code change, follow this workflow to verify it works:
      --headless-max-ms 10000
    ```
 
-5. **Examine the recording** - Does it show and sound like the expected result?
+5. **Examine the recording** - Does it show and sound like the expected result? Have we improved? If not or the users request still hasn't been met, please iterate on the code and repeat/continue.
 
 6. **For before/after comparisons, capture both**
 

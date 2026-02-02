@@ -220,6 +220,7 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
+  apu.ClearRingBuffer(); // Clear prefill for this test
 
   apu.SetOutputSampleRate(48000.0f);
 

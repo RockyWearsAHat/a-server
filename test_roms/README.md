@@ -39,6 +39,7 @@ Place your GBA ROM files here for testing and development.
 **All console output (stdout/stderr) goes to `debug.log` in the project root!**
 
 To monitor debug output in real-time:
+
 ```bash
 # In one terminal, run the emulator:
 ./build/bin/AIOServer -r test_roms/OG-DK.gba
@@ -48,6 +49,7 @@ tail -f debug.log
 ```
 
 Available debug environment variables:
+
 ```bash
 # PPU (Graphics) Tracing
 AIO_TRACE_PPU_OAM=1              # Trace OAM (sprite) processing
@@ -65,7 +67,7 @@ AIO_PPU_SWAP_4BPP_NIBBLES=1      # Swap nibbles in 4bpp tile reads
 AIO_PPU_IGNORE_WINDOWS=1         # Disable window masking
 AIO_PPU_DISABLE_COLOR_EFFECTS=1  # Disable blending/brightness effects
 
-# APU (Audio) Tracing  
+# APU (Audio) Tracing
 AIO_TRACE_AUDIO_STATS=1          # Periodic audio buffer stats
 AIO_TRACE_GBA_SPAM=1             # Verbose audio/timer logs
 
@@ -82,6 +84,7 @@ AIO_GBA_BIOS=path                # Use custom BIOS file
 ```
 
 Example usage:
+
 ```bash
 # Trace sprites on frame 60 with audio stats
 AIO_TRACE_PPU_OBJPIX=1 AIO_TRACE_PPU_OBJPIX_FRAME=60 AIO_TRACE_AUDIO_STATS=1 \

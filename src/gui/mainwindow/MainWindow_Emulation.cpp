@@ -625,6 +625,39 @@ void MainWindow::EmulatorThreadMain() {
       nextFrame = now;
     }
 
+    // Audio-driven timing: adjust sleep behavior based on audio buffer level.
+    // This helps maintain smooth audio by ensuring the emulator produces
+    // samples fast enough to keep the audio buffer filled.
+    // The target is to keep the buffer around 40-60% full for stability.
+    if (currentEmulator == EmulatorType::GBA) {
+      const float bufferFill = gba.GetAPU().GetRingBufferFillRatio();
+
+      // If buffer is low (< 40%), skip sleep entirely to catch up quickly
+      if (bufferFill < 0.40f) {
+        // Run as fast as possible to refill buffer
+        continue;
+      }
+
+      // If buffer is moderately low (< 50%), reduce sleep time significantly
+      if (bufferFill < 0.50f && now < nextFrame) {
+        // Sleep for only a quarter of the remaining time
+        auto reducedSleep = (nextFrame - now) / 4;
+        if (reducedSleep > std::chrono::microseconds(100)) {
+          std::this_thread::sleep_for(reducedSleep);
+        }
+        continue;
+      }
+
+      // If buffer is getting too full (> 80%), sleep a bit longer to prevent
+      // overflow
+      if (bufferFill > 0.80f && now < nextFrame) {
+        // Add 10% to the sleep time
+        auto extraSleep = (nextFrame - now) / 10;
+        std::this_thread::sleep_until(nextFrame + extraSleep);
+        continue;
+      }
+    }
+
     if (now < nextFrame) {
       std::this_thread::sleep_until(nextFrame);
     }

@@ -48,5 +48,6 @@ AIO_TRACE_AUDIO_STATS=1 ./build/bin/AIOServer --headless --rom "test_roms/game.g
 - Screen recordings (.mov) include audio
 - PPM frame dumps can be converted with ImageMagick: `convert file.ppm file.png`
 - Use input scripts in `test_inputs/` for automated gameplay
+- After capturing, analyze results and report or continue with visual/audio evidence
 
 Refer to `.github/instructions/visual-development-testing.instructions.md` for full documentation.

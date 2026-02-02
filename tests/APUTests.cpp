@@ -384,6 +384,7 @@ TEST(APUTest, GetSamplesFromEmptyBuffer) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
+  apu.ClearRingBuffer(); // Clear prefill for this test
 
   int16_t buffer[64];
   int written = apu.GetSamples(buffer, 32);
@@ -669,6 +670,7 @@ TEST(APUTest, GetSamplesFillsBufferWithSilenceWhenEmpty) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
+  apu.ClearRingBuffer(); // Clear prefill for this test
 
   int16_t buffer[128];
   // Fill with non-zero to verify it gets cleared

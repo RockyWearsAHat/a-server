@@ -1108,14 +1108,15 @@ void PPU::RenderOBJ() {
     if (scanline >= y && scanline < y + boundHeight) {
       // Render this line of the sprite
       int x = attr1 & 0x1FF;
-      
+
       // Classic NES Series: bit 8 of attr1 may be a CHR bank flag rather than
       // X coordinate bit. NES sprites use 8-bit X (0-255), not 9-bit.
-      // Mask to 8 bits to prevent sprites being positioned off-screen at x=256→-256.
+      // Mask to 8 bits to prevent sprites being positioned off-screen at
+      // x=256→-256.
       if (classicNesMode) {
         x = attr1 & 0xFF;
       }
-      
+
       if (x >= 256)
         x -= 512; // Sign extend 9-bit X
 
@@ -1322,18 +1323,18 @@ void PPU::RenderOBJ() {
             // Apply Classic NES Series palette handling for sprites
             uint8_t effectiveColorIndex = colorIndex;
             uint8_t effectivePaletteBank = paletteBank;
-            
+
             static const bool envOverride =
                 EnvFlagCached("AIO_CLASSIC_NES_PALETTE_FIX");
-            static const bool envDisable = 
+            static const bool envDisable =
                 EnvFlagCached("AIO_DISABLE_CLASSIC_NES_FIX");
             const bool applyClassicNesPaletteOffset =
                 !envDisable && (classicNesMode || envOverride);
-            
+
             if (applyClassicNesPaletteOffset && !is8bpp && colorIndex != 0) {
               // Force palette bank 0 for Classic NES (NES uses single palette)
               effectivePaletteBank = 0;
-              
+
               // Map color indices to actual NES palette slots (9-14)
               if (colorIndex <= 6) {
                 effectiveColorIndex = colorIndex + 8; // 1→9, 2→10, ..., 6→14
@@ -1342,13 +1343,14 @@ void PPU::RenderOBJ() {
               }
               // colorIndex 7 stays as-is
             }
-            
+
             // Fetch Color (OBJ Palette starts at 0x05000200)
             uint32_t paletteAddr = 0x05000200;
             if (is8bpp) {
               paletteAddr += colorIndex * 2;
             } else {
-              paletteAddr += (effectivePaletteBank * 32) + (effectiveColorIndex * 2);
+              paletteAddr +=
+                  (effectivePaletteBank * 32) + (effectiveColorIndex * 2);
             }
 
             const uint8_t *palData = memory.GetPaletteData();
