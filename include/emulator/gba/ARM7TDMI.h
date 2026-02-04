@@ -92,9 +92,23 @@ private:
   std::vector<uint32_t> breakpoints;
   bool singleStep{false};
 
-  // Pipeline
+  // Pipeline Prefetch Buffer
   // ARM7TDMI has a 3-stage pipeline: Fetch, Decode, Execute
-  // We might simulate this or just do direct execution for simplicity initially
+  // We simulate prefetch to handle self-modifying code correctly:
+  // - Classic NES games write to upcoming instructions then check if the
+  //   old prefetched opcode executes (it should on real hardware)
+  // - prefetch[0] = instruction about to execute (was fetched 2 cycles ago)
+  // - prefetch[1] = next instruction (was fetched 1 cycle ago)
+  // - When PC changes (branches, interrupts), pipeline must be flushed
+  uint32_t prefetch[2]{
+      0, 0}; // Prefetch buffer (ARM: 32-bit, Thumb: 16-bit in low half)
+  uint32_t prefetchAddr[2]{0, 0};      // Address each prefetch came from
+  bool prefetchValid[2]{false, false}; // Whether each prefetch slot is valid
+  bool prefetchThumb[2]{
+      false, false}; // Whether prefetch is Thumb (16-bit) or ARM (32-bit)
+
+  void FlushPipeline();  // Called on branches/interrupts to invalidate prefetch
+  void RefillPipeline(); // Fill both prefetch slots from current PC
 
   void Fetch();
   void Decode(uint32_t instruction);

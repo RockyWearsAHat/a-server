@@ -1,27 +1,105 @@
 ---
 applyTo: "**"
-description: "Instructions for hands-free visual development testing using screen capture, audio monitoring, recordings, and automated input scripts to see exactly what the user sees rather than relying on logs alone."
+description: "Instructions for visual development testing - capturing A/V output for USER verification, plus automated sanity checks the agent CAN perform."
 ---
 
 # Visual Development Testing Instructions
 
-## ⚠️ MANDATORY FOR ALL AGENTS IN THIS WORKSPACE
+## 🚨 CRITICAL: AGENT CANNOT VIEW IMAGES OR VIDEO
 
-**These instructions apply to EVERY agent working in this codebase.** When developing user-facing features (graphics, audio, input, UI), you MUST use these visual testing capabilities to verify changes work correctly. Do not rely solely on logs—SEE what the user sees, HEAR what the user hears.
+**AI agents CANNOT see, view, or analyze:**
+
+- MP4 video files
+- PNG/PPM image files
+- Any visual output
+
+When you run `open /tmp/file.mp4`, it opens on the USER'S screen. The agent has NO WAY to see or evaluate the contents. **Do not pretend to have verified visual output.**
+
+## What Agents CAN Do (Automated Verification)
+
+1. **Check files exist and have non-zero size**
+2. **Use ffprobe/ffmpeg to get metadata** (duration, dimensions, audio levels)
+3. **Compare file hashes** for regression detection (same input = same output)
+4. **Analyze PPM pixel data** programmatically (check for all-black frames, etc.)
+5. **Run unit tests** that verify specific rendering behaviors
+6. **Ask the user** to verify visual output
+
+## What Agents CANNOT Do
+
+1. ❌ Look at an image and say "this looks correct"
+2. ❌ Watch a video and describe what's shown
+3. ❌ Verify that rendered output matches expected game graphics
+4. ❌ Determine if tiles are "scrambled" vs "correct" by viewing
+
+## Proper Workflow for Visual Changes
+
+1. **Make code changes**
+2. **Run unit tests** - these CAN be verified by the agent
+3. **Generate A/V output** for the user to review
+4. **Run automated sanity checks** (file size, duration, not-all-black)
+5. **Ask the user**: "I've generated /tmp/output.mp4 - please check if this looks correct"
+6. **Wait for user feedback** before concluding the fix works
+
+---
+
+## Automated Sanity Checks (Agent CAN Verify)
+
+### Check Video File Properties
+
+```bash
+# Verify video was created and has content
+ffprobe -v error -show_entries format=duration,size -of csv=p=0 /tmp/test.mp4
+# Output: "5.000000,1234567" (duration in seconds, size in bytes)
+
+# Check video dimensions
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 /tmp/test.mp4
+# Output: "240,160" (GBA resolution)
+```
+
+### Check Audio Levels (Not Silent)
+
+```bash
+# Verify audio has actual content (not silence)
+ffmpeg -i /tmp/test.mp4 -af volumedetect -f null - 2>&1 | grep -E "mean_volume|max_volume"
+# mean_volume should NOT be -91.0 dB (silence)
+```
+
+### Check Frame is Not All Black (PPM Analysis)
+
+```bash
+# Dump a frame and check it's not entirely black
+./build/bin/AIOServer --headless --rom "test_roms/game.gba" \
+  --headless-max-ms 3000 --headless-dump-ppm /tmp/frame.ppm --headless-dump-ms 2000
+
+# Check if frame has any non-black pixels (PPM P6 format)
+# Skip header (first 3 lines), check if any byte > 0
+tail -c +100 /tmp/frame.ppm | od -A n -t u1 | tr ' ' '\n' | grep -v '^$' | sort -u | head -5
+# If only "0" appears, frame is all black
+```
+
+### Hash-Based Regression Check
+
+```bash
+# Save hash of known-good output
+md5 /tmp/known_good.mp4 > /tmp/expected_hash.txt
+
+# After changes, compare
+md5 /tmp/new_output.mp4 | diff - /tmp/expected_hash.txt
+# If hashes match, output is identical (good for non-visual changes)
+```
+
+---
 
 ## Purpose
 
-These instructions enable the agent to **truly see and hear** application output during development—exactly as the user experiences it—rather than inferring behavior from logs alone. This dramatically accelerates debugging and development by providing immediate sensory feedback on changes.
+These tools help capture application output for the **USER to verify visually**. The agent's role is to:
 
-**This is NOT a replacement for unit tests.** Unit tests prevent regressions. Visual/audio testing lets the agent verify changes work correctly in real-time by observing actual screen output, hearing audio, and interacting via input scripts.
+1. Generate the output files
+2. Run automated sanity checks
+3. Present files to the user for visual verification
+4. Iterate based on user feedback
 
-### Why This Matters
-
-- **Logs tell you what the code did. Visuals/audio show you what the user experienced.**
-- A log saying "frame rendered" doesn't tell you if it looks correct
-- A log saying "audio sample generated" doesn't tell you if it sounds right
-- Screen capture and recording let you SEE and HEAR the actual result
-- This is MULTIPLES faster than hunting through thousands of log lines
+**This is NOT a replacement for unit tests.** Unit tests prevent regressions and CAN be verified by the agent. Visual verification requires human eyes.
 
 ---
 
@@ -310,6 +388,7 @@ AIO_ENABLE_STREAMING=0
 ```
 
 **REMEMBER:** All trace output goes to `debug.log` by default. After running with trace env vars, check:
+
 ```bash
 tail -200 debug.log | grep -E "AUDIO|APU|FIFO|Timer"
 ```

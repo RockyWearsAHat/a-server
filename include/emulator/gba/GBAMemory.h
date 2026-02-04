@@ -293,7 +293,9 @@ private:
   // The value is set to 0xE3A02004 (MOV R2, #4) after SWI calls return.
   uint32_t biosPrefetch = 0xE3A02004;
   std::vector<uint8_t> rom;
-  size_t romSize = 0; // Actual ROM file size (for open bus detection)
+  size_t romSize = 0; // Actual ROM file size
+  uint32_t romMask =
+      0; // Power-of-two mask for ROM mirroring (hardware behavior)
   std::vector<uint8_t> sram;
 
   // EEPROM Helpers

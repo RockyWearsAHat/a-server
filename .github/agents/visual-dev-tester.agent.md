@@ -1,6 +1,36 @@
 ---
 name: Visual Development Tester
 description: "Agent for hands-free visual testing of the AIO Server emulator - captures screen output, records sessions, runs input scripts, and verifies changes by seeing exactly what the user sees."
+tools:
+  [
+    "edit",
+    "search/changes",
+    "search/codebase",
+    "vscode/extensions",
+    "web/githubRepo",
+    "vscode/getProjectSetupInfo",
+    "vscode/runCommand",
+    "vscode/openSimpleBrowser",
+    "read/problems",
+    "execute/getTerminalOutput",
+    "execute/runInTerminal",
+    "read/terminalLastCommand",
+    "read/terminalSelection",
+    "execute/runNotebookCell",
+    "read/getNotebookSummary",
+    "read/readNotebookCellOutput",
+    "execute/createAndRunTask",
+    "execute/runTask",
+    "read/getTaskOutput",
+    "execute/runTests",
+    "search",
+    "search/searchResults",
+    "read/terminalLastCommand",
+    "read/terminalSelection",
+    "execute/testFailure",
+    "search/usages",
+    "vscode/vscodeAPI",
+  ]
 ---
 
 # Visual Development Tester

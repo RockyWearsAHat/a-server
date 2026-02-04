@@ -35,6 +35,10 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   //
   // NOTE: Handler runs in IRQ mode (not System mode), which is
   // more compatible with the test games (MMBN, MZM, etc.).
+  //
+  // The trampoline adds 0x200 to R0 before STRH because ARM STRH
+  // immediate can only encode offsets up to 255, but REG_IF is at
+  // offset 0x202 from IO base.
 
   constexpr uint32_t base = 0x00003F00u;
 
@@ -42,14 +46,15 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
   EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A00404u); // MOV   R0, #0x04000000
   EXPECT_EQ(mem.Read32(base + 0x08), 0xE28FE000u); // ADD   LR, PC, #0
   EXPECT_EQ(mem.Read32(base + 0x0C), 0xE510F004u); // LDR   PC, [R0, #-4]
-  EXPECT_EQ(mem.Read32(base + 0x10), 0xE59F1008u); // LDR   R1, [PC, #8]
+  EXPECT_EQ(mem.Read32(base + 0x10), 0xE59F1010u); // LDR   R1, [PC, #16]
   EXPECT_EQ(mem.Read32(base + 0x14), 0xE1D110B0u); // LDRH  R1, [R1]
-  EXPECT_EQ(mem.Read32(base + 0x18), 0xE1C012B2u); // STRH  R1, [R0, #0x202]
-  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
-  EXPECT_EQ(mem.Read32(base + 0x20), 0xE25EF004u); // SUBS  PC, LR, #4
+  EXPECT_EQ(mem.Read32(base + 0x18), 0xE2800F80u); // ADD   R0, R0, #0x200
+  EXPECT_EQ(mem.Read32(base + 0x1C), 0xE1C010B2u); // STRH  R1, [R0, #2]
+  EXPECT_EQ(mem.Read32(base + 0x20), 0xE8BD500Fu); // LDMIA SP!, {R0-R3,R12,LR}
+  EXPECT_EQ(mem.Read32(base + 0x24), 0xE25EF004u); // SUBS  PC, LR, #4
 
   // Literal pool used by the trampoline.
-  EXPECT_EQ(mem.Read32(base + 0x24), 0x03007FF4u);
+  EXPECT_EQ(mem.Read32(base + 0x28), 0x03007FF4u);
 }
 
 TEST(BIOSTest, ResetInitializesIRQHandlerPointer) {

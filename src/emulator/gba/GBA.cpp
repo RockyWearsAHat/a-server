@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
@@ -18,8 +20,15 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
+// Fixed: Use a map to cache by string content, not just string length
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  bool enabled = EnvTruthy(std::getenv(name));
+  cache[name] = enabled;
   return enabled;
 }
 

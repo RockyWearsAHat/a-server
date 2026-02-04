@@ -37,8 +37,15 @@ inline bool EnvTruthy(const char *v) {
   return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 
-template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
+// Fixed: Use a map to cache by string content, not just string length
+inline bool EnvFlagCached(const char *name) {
+  static std::unordered_map<std::string, bool> cache;
+  auto it = cache.find(name);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  bool enabled = EnvTruthy(std::getenv(name));
+  cache[name] = enabled;
   return enabled;
 }
 } // namespace
@@ -242,6 +249,9 @@ static void RecordR11Write(uint32_t instrAddr, bool thumb, uint32_t instruction,
 static void TraceWatchWrite32(uint32_t instrAddr, bool thumb,
                               uint32_t instruction, uint32_t addr,
                               uint32_t value, uint32_t sp) {
+  // OGDK buffer tracing disabled for performance
+  // (was tracking 0x03007B14, 0x03007B18, 0x03007B1C)
+
   if (!kEnableHeavyCpuTraces)
     return;
   // Watch the exact stack slots later popped into r3/r4 before MOV r8,r3.
@@ -330,6 +340,55 @@ void ARM7TDMI::Reset() {
   g_reportedFirstR11Zero = false;
   g_reportedFirstR11NonZero = false;
   g_r11WriteHistory.clear();
+
+  // Initialize pipeline - will be filled on first Step()
+  FlushPipeline();
+}
+
+void ARM7TDMI::FlushPipeline() {
+  // Invalidate prefetch buffer - called when PC changes non-sequentially
+  // (branches, interrupts, exceptions). On real ARM7TDMI, a branch causes
+  // the pipeline to flush and refetch from the new PC.
+  prefetchValid[0] = false;
+  prefetchValid[1] = false;
+  prefetch[0] = 0;
+  prefetch[1] = 0;
+  prefetchAddr[0] = 0;
+  prefetchAddr[1] = 0;
+  prefetchThumb[0] = false;
+  prefetchThumb[1] = false;
+}
+
+void ARM7TDMI::RefillPipeline() {
+  // Fill both prefetch slots from current PC.
+  // Called after FlushPipeline() or when pipeline is empty.
+  // This simulates the ARM7TDMI refetching instructions after a branch.
+  const uint32_t pc = registers[15];
+  const bool thumb = IsThumbMode(cpsr);
+
+  if (thumb) {
+    // Thumb: 16-bit instructions, halfword aligned
+    const uint32_t addr0 = pc & ~1u;
+    const uint32_t addr1 = addr0 + 2u;
+    prefetch[0] = memory.ReadInstruction16(addr0);
+    prefetch[1] = memory.ReadInstruction16(addr1);
+    prefetchAddr[0] = addr0;
+    prefetchAddr[1] = addr1;
+    prefetchThumb[0] = true;
+    prefetchThumb[1] = true;
+  } else {
+    // ARM: 32-bit instructions, word aligned
+    const uint32_t addr0 = pc & ~3u;
+    const uint32_t addr1 = addr0 + 4u;
+    prefetch[0] = memory.ReadInstruction32(addr0);
+    prefetch[1] = memory.ReadInstruction32(addr1);
+    prefetchAddr[0] = addr0;
+    prefetchAddr[1] = addr1;
+    prefetchThumb[0] = false;
+    prefetchThumb[1] = false;
+  }
+  prefetchValid[0] = true;
+  prefetchValid[1] = true;
 }
 
 void ARM7TDMI::SwitchMode(uint32_t newMode) {
@@ -471,16 +530,42 @@ void ARM7TDMI::CheckInterrupts() {
   // Wake from HALT/STOP/IntrWait if any enabled interrupt is pending.
   // Do NOT auto-resume debugger breakpoints/stepback halts.
   if (halted && sleepHalt && (ie & if_reg)) {
+    // OGDK DEBUG: Log wake from halt with CPSR state
+    static int wakeLogs = 0;
+    if (wakeLogs++ < 20) {
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "OGDK_HALT",
+          "WAKE PC=0x%08x ie&if=0x%04x IE=0x%04x IF=0x%04x CPSR.I=%d IME=%d",
+          (unsigned)registers[15], (unsigned)(ie & if_reg), (unsigned)ie,
+          (unsigned)if_reg, IRQDisabled(cpsr) ? 1 : 0, (int)(ime & 1));
+    }
     halted = false;
     sleepHalt = false;
   }
 
   if (!(ime & 1))
     return;
-  if (IRQDisabled(cpsr))
+  if (IRQDisabled(cpsr)) {
+    // OGDK DEBUG: Check if this is why IRQs aren't entering
+    static int irqBlockedLogs = 0;
+    if (irqBlockedLogs++ < 10 && (ie & if_reg)) {
+      Logger::Instance().LogFmt(LogLevel::Info, "OGDK_IRQ",
+                                "IRQ_BLOCKED PC=0x%08x CPSR.I=1 ie&if=0x%04x",
+                                (unsigned)registers[15],
+                                (unsigned)(ie & if_reg));
+    }
     return; // IRQ disabled in CPSR
+  }
 
   if (ie & if_reg) {
+    // OGDK DEBUG: Confirm IRQ entry
+    static int irqEntryLogs = 0;
+    if (irqEntryLogs++ < 20) {
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "OGDK_IRQ",
+          "IRQ_ENTRY PC=0x%08x ie&if=0x%04x jumping to 0x18",
+          (unsigned)registers[15], (unsigned)(ie & if_reg));
+    }
     // Calculate triggered interrupts NOW before PPU/Timers run
     // On real GBA, BIOS reads IE & IF atomically at IRQ entry
     uint16_t triggered = ie & if_reg;
@@ -591,6 +676,7 @@ void ARM7TDMI::CheckInterrupts() {
 
     // Jump to BIOS IRQ Trampoline at ExceptionVector::IRQ
     registers[Register::PC] = ExceptionVector::IRQ;
+    FlushPipeline(); // IRQ entry invalidates prefetched instructions
     if (kEnableHeavyCpuTraces) {
       std::cerr << "[IRQ SETUP] After PC assignment: PC=0x" << std::hex
                 << registers[Register::PC] << " SP=0x"
@@ -1146,7 +1232,42 @@ void ARM7TDMI::Step() {
     // Always fetch from aligned address so we don't accidentally read a
     // swapped/invalid opcode.
     const uint32_t instrAddr = pcAligned;
-    const uint16_t instruction = memory.ReadInstruction16(instrAddr);
+
+    // Pipeline emulation: Use prefetched instruction if available.
+    // Classic NES games test self-modifying code behavior - on real ARM7TDMI,
+    // writes to upcoming instructions don't affect already-prefetched opcodes.
+    uint16_t instruction;
+    if (prefetchValid[0] && prefetchThumb[0] && prefetchAddr[0] == instrAddr) {
+      // Use prefetched instruction (may differ from current memory if SMC)
+      instruction = static_cast<uint16_t>(prefetch[0] & 0xFFFF);
+
+      // Shift pipeline: move slot 1 to slot 0
+      prefetch[0] = prefetch[1];
+      prefetchAddr[0] = prefetchAddr[1];
+      prefetchThumb[0] = prefetchThumb[1];
+      prefetchValid[0] = prefetchValid[1];
+
+      // Fetch next instruction into slot 1
+      const uint32_t nextAddr = instrAddr + 2u;
+      prefetch[1] = memory.ReadInstruction16(nextAddr);
+      prefetchAddr[1] = nextAddr;
+      prefetchThumb[1] = true;
+      prefetchValid[1] = true;
+    } else {
+      // Pipeline miss or first instruction - fetch directly and refill pipeline
+      instruction = memory.ReadInstruction16(instrAddr);
+
+      // Fill pipeline for next instructions
+      prefetch[0] = memory.ReadInstruction16(instrAddr + 2u);
+      prefetchAddr[0] = instrAddr + 2u;
+      prefetchThumb[0] = true;
+      prefetchValid[0] = true;
+
+      prefetch[1] = memory.ReadInstruction16(instrAddr + 4u);
+      prefetchAddr[1] = instrAddr + 4u;
+      prefetchThumb[1] = true;
+      prefetchValid[1] = true;
+    }
 
     // Focused trace: the early IRQ/dispatch window where LR becomes even and BX
     // drops into ARM.
@@ -1550,7 +1671,42 @@ void ARM7TDMI::Step() {
     g_memoryForLog = &memory;
     g_thumbModeForLog = false;
     const uint32_t instrAddr = pc & ~3u;
-    const uint32_t instruction = memory.ReadInstruction32(instrAddr);
+
+    // Pipeline emulation: Use prefetched instruction if available.
+    // Classic NES games test self-modifying code behavior - on real ARM7TDMI,
+    // writes to upcoming instructions don't affect already-prefetched opcodes.
+    uint32_t instruction;
+    if (prefetchValid[0] && !prefetchThumb[0] && prefetchAddr[0] == instrAddr) {
+      // Use prefetched instruction (may differ from current memory if SMC)
+      instruction = prefetch[0];
+
+      // Shift pipeline: move slot 1 to slot 0
+      prefetch[0] = prefetch[1];
+      prefetchAddr[0] = prefetchAddr[1];
+      prefetchThumb[0] = prefetchThumb[1];
+      prefetchValid[0] = prefetchValid[1];
+
+      // Fetch next instruction into slot 1
+      const uint32_t nextAddr = instrAddr + 4u;
+      prefetch[1] = memory.ReadInstruction32(nextAddr);
+      prefetchAddr[1] = nextAddr;
+      prefetchThumb[1] = false;
+      prefetchValid[1] = true;
+    } else {
+      // Pipeline miss or first instruction - fetch directly and refill pipeline
+      instruction = memory.ReadInstruction32(instrAddr);
+
+      // Fill pipeline for next instructions
+      prefetch[0] = memory.ReadInstruction32(instrAddr + 4u);
+      prefetchAddr[0] = instrAddr + 4u;
+      prefetchThumb[0] = false;
+      prefetchValid[0] = true;
+
+      prefetch[1] = memory.ReadInstruction32(instrAddr + 8u);
+      prefetchAddr[1] = instrAddr + 8u;
+      prefetchThumb[1] = false;
+      prefetchValid[1] = true;
+    }
 
     // Capture authoritative instruction context for tracing.
     currentInstrAddr = instrAddr;
@@ -1816,6 +1972,7 @@ void ARM7TDMI::ExecuteBranch(uint32_t instruction) {
 
   LogBranch(currentPC - 4, target); // Log from actual instruction address
   registers[Register::PC] = target;
+  FlushPipeline(); // Branch invalidates prefetched instructions
 }
 
 void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
@@ -2047,6 +2204,9 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       LogBranch(from, result);
     }
     registers[rd] = result;
+    if (rd == Register::PC) {
+      FlushPipeline(); // Data processing to PC invalidates prefetch
+    }
 
     // DKC audio investigation: capture data-processing results in the
     // narrow ROM window around the site that computes the bogus
@@ -2187,6 +2347,8 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       // Align PC based on the restored state.
       registers[Register::PC] = thumbMode ? (registers[Register::PC] & ~1u)
                                           : (registers[Register::PC] & ~3u);
+      FlushPipeline(); // Data processing with S=1 and rd=PC invalidates
+                       // prefetch
 
       // Debug: confirm CPSR restore actually re-enters Thumb when expected.
       if (oldMode == CPUMode::IRQ) {
@@ -2297,6 +2459,9 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
       }
       const uint32_t old = registers[rd];
       registers[rd] = val;
+      if (rd == Register::PC) {
+        FlushPipeline(); // LDR to PC invalidates prefetch
+      }
       if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
         const uint32_t pc = currentInstrAddr;
         if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
@@ -2512,6 +2677,9 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
         } else {
           const uint32_t old = registers[i];
           registers[i] = val;
+          if (i == 15 && !S) {
+            FlushPipeline(); // LDM to PC (without S bit) invalidates prefetch
+          }
           if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && i == 0) {
             const uint32_t pc = currentInstrAddr;
             if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
@@ -2626,6 +2794,7 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
     // Align PC based on the restored state.
     registers[Register::PC] = thumbMode ? (registers[Register::PC] & ~1u)
                                         : (registers[Register::PC] & ~3u);
+    FlushPipeline(); // LDM with PC and S=1 invalidates prefetch
   }
 
   // Writeback
@@ -2782,6 +2951,8 @@ void ARM7TDMI::ExecuteBX(uint32_t instruction) {
     SetCPSRFlag(cpsr, CPSR::FLAG_T, false);        // Clear T bit in CPSR
     registers[Register::PC] = target & 0xFFFFFFFC; // Align to 4 bytes
   }
+  FlushPipeline(); // BX invalidates prefetched instructions (and may switch
+                   // mode)
 }
 
 void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
@@ -2952,6 +3123,7 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
     registers[15] = 0x08000000;
     thumbMode = false;
     SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
+    FlushPipeline(); // Reset invalidates prefetch
     return;
 
   default:
@@ -2971,6 +3143,7 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
     SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
     registers[15] = returnAddr & 0xFFFFFFFC;
   }
+  FlushPipeline(); // BIOS return invalidates prefetch
 }
 
 void ARM7TDMI::ExecuteSWI(uint32_t comment) {
@@ -2979,15 +3152,85 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   // must charge some time explicitly.
   constexpr int kSwiOverheadCycles = 32;
 
-  // OGDK TRACE: Log all SWI calls for debugging
-  if (comment != 0x05) { // Skip VBlankIntrWait spam
-    char buf[160];
+  // OGDK TRACE: Log all SWI calls for debugging (with instruction bytes)
+  if (comment != 0x05 && comment != 0x04 &&
+      comment != 0x02) { // Skip VBlankIntrWait/IntrWait/HALT spam
+    uint32_t instrAddr = registers[15] - (thumbMode ? 2 : 4);
+    uint32_t instrBytes = thumbMode ? currentOp16 : currentOp32;
+    uint32_t cond = (instrBytes >> 28) & 0xF;
+    bool zFlag = (cpsr >> 30) & 1;
+    char buf[250];
     snprintf(buf, sizeof(buf),
-             "SWI 0x%02X at PC=0x%08X r0=0x%08X r1=0x%08X r2=0x%08X", comment,
-             registers[15] - (thumbMode ? 2 : 4), registers[0], registers[1],
+             "SWI 0x%02X at PC=0x%08X instr=0x%08X cond=%X Z=%d %s r0=0x%08X "
+             "r1=0x%08X r2=0x%08X",
+             comment, instrAddr, instrBytes, cond, zFlag,
+             thumbMode ? "THUMB" : "ARM", registers[0], registers[1],
              registers[2]);
     AIO::Emulator::Common::Logger::Instance().Log(
         AIO::Emulator::Common::LogLevel::Info, "OGDK_SWI", buf);
+  }
+
+  // OGDK: Dump IWRAM code around 0x54E0 and 0x56A4 (IRQ handler) at first SWI
+  // 0x02
+  {
+    uint32_t instrAddr = registers[15] - (thumbMode ? 2 : 4);
+    static bool dumpedIwram = false;
+    if (!dumpedIwram && comment == 0x02 && instrAddr == 0x030054E0) {
+      dumpedIwram = true;
+      FILE *f = fopen("/tmp/iwram_code.txt", "w");
+      if (f) {
+        fprintf(f, "=== IWRAM code dump around 0x54E0 (wait loop/SWI 0x02 "
+                   "location) ===\n\n");
+        for (int i = -32; i <= 32; i++) {
+          uint32_t addr = 0x030054E0 + i * 4;
+          uint32_t instr = memory.Read32(addr);
+          const char *marker = (i == 0) ? " <-- SWI HERE" : "";
+          fprintf(f, "0x%08X: 0x%08X%s\n", addr, instr, marker);
+        }
+        fprintf(f, "\n=== IWRAM code at 0x030056A4 (IRQ handler) ===\n\n");
+        for (int i = -8; i <= 48; i++) {
+          uint32_t addr = 0x030056A4 + i * 4;
+          uint32_t instr = memory.Read32(addr);
+          const char *marker = (i == 0) ? " <-- IRQ HANDLER ENTRY" : "";
+          fprintf(f, "0x%08X: 0x%08X%s\n", addr, instr, marker);
+        }
+        fprintf(f,
+                "\n=== IWRAM code at 0x030051CC (target buffer write) ===\n\n");
+        for (int i = -20; i <= 20; i++) {
+          uint32_t addr = 0x030051CC + i * 4;
+          uint32_t instr = memory.Read32(addr);
+          const char *marker = (i == 0) ? " <-- TARGET WRITE" : "";
+          fprintf(f, "0x%08X: 0x%08X%s\n", addr, instr, marker);
+        }
+
+        // Dump VRAM tile data at CharBase 0 and CharBase 1
+        fprintf(f, "\n=== VRAM CharBase 0 (0x06000000) first 64 bytes ===\n");
+        for (int i = 0; i < 64; i += 4) {
+          uint32_t val = memory.Read32(0x06000000 + i);
+          fprintf(f, "0x%08X: 0x%08X\n", 0x06000000 + i, val);
+        }
+        fprintf(f, "\n=== VRAM CharBase 1 (0x06004000) first 64 bytes ===\n");
+        for (int i = 0; i < 64; i += 4) {
+          uint32_t val = memory.Read32(0x06004000 + i);
+          fprintf(f, "0x%08X: 0x%08X\n", 0x06004000 + i, val);
+        }
+
+        // Dump VRAM code at 0x060000FC (where BG0CNT is set)
+        fprintf(f,
+                "\n=== VRAM code at 0x060000FC (BG0CNT write location) ===\n");
+        for (int i = -16; i <= 32; i++) {
+          uint32_t addr = 0x060000FC + i * 4;
+          uint32_t instr = memory.Read32(addr);
+          const char *marker = (i == 0) ? " <-- BG0CNT WRITE" : "";
+          fprintf(f, "0x%08X: 0x%08X%s\n", addr, instr, marker);
+        }
+
+        fclose(f);
+        AIO::Emulator::Common::Logger::Instance().Log(
+            AIO::Emulator::Common::LogLevel::Info, "OGDK_SWI",
+            "Dumped IWRAM code to /tmp/iwram_code.txt");
+      }
+    }
   }
 
   switch (comment) {
@@ -2996,6 +3239,7 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     registers[13] = 0x03007F00; // Reset SP
     thumbMode = false;
     SetCPSRFlag(cpsr, CPSR::FLAG_T, false);
+    FlushPipeline(); // SoftReset jumps to ROM entry
     break;
   case 0x01: // RegisterRamReset - Clear/Initialize RAM and registers
   {
@@ -3069,10 +3313,24 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     break;
   }
   case 0x02: // Halt
+  {
+    // OGDK DEBUG: Log halt entry with interrupt state
+    uint16_t ie = memory.Read16(IORegs::REG_IE);
+    uint16_t if_reg = memory.Read16(IORegs::REG_IF);
+    uint16_t ime = memory.Read16(IORegs::REG_IME);
+    static int haltLogs = 0;
+    if (haltLogs++ < 20) {
+      Logger::Instance().LogFmt(
+          LogLevel::Info, "OGDK_HALT",
+          "ENTRY PC=0x%08x IME=%d IE=0x%04x IF=0x%04x ie&if=0x%04x",
+          (unsigned)(registers[15] - 4), (int)(ime & 1), (unsigned)ie,
+          (unsigned)if_reg, (unsigned)(ie & if_reg));
+    }
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
     break;
+  }
   case 0x03: // Stop/Sleep
     halted = true;
     sleepHalt = true;
@@ -4317,6 +4575,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         LogBranch(registers[15] - 2, newPC);
         // In Thumb, ADD to PC should clear bit 0 (PC must be aligned)
         registers[15] = newPC & 0xFFFFFFFE;
+        FlushPipeline(); // Thumb ADD PC invalidates prefetch
       } else {
         // Normal ADD Rd, Rm where Rd is not PC
         const uint32_t old = registers[regD];
@@ -4353,6 +4612,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         // In Thumb, MOV PC, Rm should clear bit 0 (not interworking on
         // ARM7TDMI)
         registers[15] = val & 0xFFFFFFFE;
+        FlushPipeline(); // Thumb MOV PC invalidates prefetch
       } else {
         // PC as source needs +2 adjustment in Thumb mode
         const uint32_t val = (regM == 15) ? pcValue : registers[regM];
@@ -4440,6 +4700,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         cpsr &= ~0x20; // Clear T bit in CPSR
         registers[15] = target & 0xFFFFFFFC;
       }
+      FlushPipeline(); // Thumb BX invalidates prefetch (and may switch mode)
     }
   }
   // Format 6: PC-relative Load
@@ -4809,6 +5070,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         LogBranch(registers[15] - 2, pc);
         registers[15] = pc & 0xFFFFFFFE; // Pop PC (Thumb)
         registers[15] &= ~1;
+        FlushPipeline(); // POP PC invalidates prefetch
         currentAddr += 4;
       }
 
@@ -4861,6 +5123,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
         uint32_t target = registers[15] + 2 + (offset * 2);
         LogBranch(registers[15] - 2, target);
         registers[15] = target;
+        FlushPipeline(); // Thumb conditional branch invalidates prefetch
       }
     } else {
       // SWI (Format 17)
@@ -4884,6 +5147,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     }
     LogBranch(registers[15] - 2, target);
     registers[15] = target;
+    FlushPipeline(); // Thumb unconditional branch invalidates prefetch
   }
   // Format 19: Long Branch with Link
   // 1111 xxxx xxxx xxxx
@@ -4908,6 +5172,7 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       registers[14] = (nextPC + 2) |
                       1; // LR = Return Address + 1 (Thumb) -> Next Instruction
       registers[15] = target;
+      FlushPipeline(); // Thumb BL second half invalidates prefetch
     }
   } else {
     // Unknown Thumb instruction
