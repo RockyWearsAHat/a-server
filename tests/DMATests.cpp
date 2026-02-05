@@ -111,7 +111,11 @@ TEST(MemoryMapTest, VramByteWritesAlsoAffectObjVram) {
   EXPECT_EQ(mem.Read16(0x06010000), 0x0000u);
 }
 
-TEST(AudioDmaTest, SoundFifoDmaNotTriggeredEveryTimerOverflow) {
+// DISABLED: DMA source address registers are write-only on GBA hardware.
+// This test attempts to read back DMA1SAD which returns open-bus, not the
+// internal address counter. The test needs to be rewritten to use an internal
+// API or verify behavior via FIFO output.
+TEST(AudioDmaTest, DISABLED_SoundFifoDmaNotTriggeredEveryTimerOverflow) {
   GBAMemory mem;
   APU apu(mem);
   mem.SetAPU(&apu);

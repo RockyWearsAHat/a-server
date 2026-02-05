@@ -51,6 +51,7 @@ public:
   }
   bool IsHalted() const { return halted; }
   bool IsThumbModeFlag() const { return thumbMode; }
+  void FlushPipeline();  // Invalidate prefetch (for tests with dynamic code writes)
   struct CpuSnapshot {
     uint32_t registers[16];
     uint32_t cpsr;
@@ -107,7 +108,6 @@ private:
   bool prefetchThumb[2]{
       false, false}; // Whether prefetch is Thumb (16-bit) or ARM (32-bit)
 
-  void FlushPipeline();  // Called on branches/interrupts to invalidate prefetch
   void RefillPipeline(); // Fill both prefetch slots from current PC
 
   void Fetch();

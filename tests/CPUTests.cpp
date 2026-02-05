@@ -11,13 +11,18 @@ protected:
 
   CPUTest() : cpu(memory) {}
 
-  void SetUp() override { cpu.Reset(); }
+  void SetUp() override {
+    memory.Reset(); // Initialize ROM size and other memory state
+    cpu.Reset();
+  }
 
   // Helper to run one instruction
   void RunInstr(uint32_t opcode) {
     // Write opcode to current PC
     uint32_t pc = cpu.GetRegister(15);
     memory.WriteROM32(pc, opcode);
+    // Flush pipeline so the new instruction is fetched from memory
+    cpu.FlushPipeline();
     cpu.Step();
   }
 
@@ -26,6 +31,8 @@ protected:
     uint32_t pc = cpu.GetRegister(15);
     memory.WriteROM(pc, opcode & 0xFF);
     memory.WriteROM(pc + 1, (opcode >> 8) & 0xFF);
+    // Flush pipeline so the new instruction is fetched from memory
+    cpu.FlushPipeline();
     cpu.Step();
   }
 };
