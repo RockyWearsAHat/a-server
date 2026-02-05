@@ -3246,8 +3246,8 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint8_t flags = registers[0] & 0xFF;
 
     // OGDK DEBUG: Trace RegisterRamReset calls
-    std::cout << "[OGDK_RAMRESET] RegisterRamReset flags=0x" << std::hex << (int)flags
-              << " EWRAM=" << ((flags & 0x01) ? 1 : 0)
+    std::cout << "[OGDK_RAMRESET] RegisterRamReset flags=0x" << std::hex
+              << (int)flags << " EWRAM=" << ((flags & 0x01) ? 1 : 0)
               << " IWRAM=" << ((flags & 0x02) ? 1 : 0)
               << " PRAM=" << ((flags & 0x04) ? 1 : 0)
               << " VRAM=" << ((flags & 0x08) ? 1 : 0)
@@ -5162,6 +5162,8 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
   // Format 19: Long Branch with Link
   // 1111 xxxx xxxx xxxx
   else if ((instruction & 0xF000) == 0xF000) {
+    static const bool traceThumbBl =
+        EnvTruthy(std::getenv("AIO_TRACE_THUMB_BL"));
     bool H = (instruction >> 11) & 1;
     int32_t offset = instruction & 0x7FF;
 
@@ -5170,8 +5172,17 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       if (offset & 0x400000)
         offset |= 0xFF800000; // Sign extend
       // LR gets (PC+4+offset). With our PC model, that's registers[15] + 2 +
-      // offset.
-      registers[14] = registers[15] + 2 + offset;
+      // offset. Ensure bit0 is set so a later BX/POP can return to Thumb
+      // state even if software inspects LR between the two halves.
+      registers[14] = (registers[15] + 2 + offset) | 1u;
+      if (traceThumbBl) {
+        Logger::Instance().LogFmt(LogLevel::Info, "CPU",
+                                  "THUMB BL high: PC=0x%08x instr=0x%04x "
+                                  "offset=0x%08x LR=0x%08x",
+                                  (unsigned)(registers[15] - 2),
+                                  (unsigned)instruction, (unsigned)offset,
+                                  (unsigned)registers[14]);
+      }
     } else { // Second instruction (Low)
       uint32_t nextPC =
           registers[15] - 2; // Instruction address + 2 (already incremented)
@@ -5181,6 +5192,14 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
 
       registers[14] = (nextPC + 2) |
                       1; // LR = Return Address + 1 (Thumb) -> Next Instruction
+      if (traceThumbBl) {
+        Logger::Instance().LogFmt(LogLevel::Info, "CPU",
+                                  "THUMB BL low: PC=0x%08x instr=0x%04x "
+                                  "offset=0x%04x target=0x%08x LR=0x%08x",
+                                  (unsigned)nextPC, (unsigned)instruction,
+                                  (unsigned)offset, (unsigned)target,
+                                  (unsigned)registers[14]);
+      }
       registers[15] = target;
       FlushPipeline(); // Thumb BL second half invalidates prefetch
     }

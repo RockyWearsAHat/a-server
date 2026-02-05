@@ -1223,14 +1223,13 @@ TEST(PPUTest, TextBg_ScreenSize3_UsesCorrectHorizontalScreenBlock) {
 // ============================================================================
 // Classic NES Series Palette Handling Tests
 // ============================================================================
-// Per PPU analysis: Classic NES games store all 4 NES BG palettes in GBA
-// palette bank 0. Each NES palette has 4 colors at indices 8 + nesPal*4.
-// The tilemap's palette bank field (bits 12-13) selects the NES sub-palette.
-// Formula: effectiveIndex = 8 + (palBank & 3) * 4 + colorIndex
+// Per PPU analysis: Classic NES games store palette data in palette bank 0.
+// The tilemap's palette bank field is ignored - we always use bank 0.
+// Color indices are used directly (no remapping) as the NES engine sets up
+// the palette at the expected indices.
 
-TEST(PPUTest, ClassicNesMode_ColorIndexRemapping) {
-  // Classic NES games store palette colors at indices 9-14.
-  // Color indices 1-6 are remapped by adding 8.
+TEST(PPUTest, ClassicNesMode_UsesPaletteBank0_DirectColorIndex) {
+  // Classic NES mode forces palette bank 0 and uses color indices directly.
   GBAMemory mem;
   mem.Reset();
   PPU ppu(mem);
@@ -1239,8 +1238,8 @@ TEST(PPUTest, ClassicNesMode_ColorIndexRemapping) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u); // backdrop black
-  // Put red at bank 0, index 9 (remapped location for colorIndex 1)
-  mem.Write16(0x05000000u + 9 * 2, 0x001Fu); // Index 9 = red
+  // Put red at bank 0, index 1 (color index used directly)
+  mem.Write16(0x05000000u + 1 * 2, 0x001Fu); // Index 1 = red
 
   mem.Write16(0x04000008u, 0x0000u);
   mem.Write16(0x06000000u, 0x0001u | (0u << 12)); // tile 1, paletteBank=0
@@ -1253,12 +1252,12 @@ TEST(PPUTest, ClassicNesMode_ColorIndexRemapping) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 1 remaps to index 9 (1+8) -> red
+  // colorIndex 1 uses index 1 directly -> red
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x001Fu));
 }
 
 TEST(PPUTest, ClassicNesMode_UsesPaletteBank0ForAllTiles) {
-  // Classic NES games store all palette colors in bank 0 (indices 8+).
+  // Classic NES games store all palette colors in bank 0.
   // The tilemap's palette bank field is ignored - we always use bank 0.
   GBAMemory mem;
   mem.Reset();
@@ -1268,9 +1267,9 @@ TEST(PPUTest, ClassicNesMode_UsesPaletteBank0ForAllTiles) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u); // backdrop black
-  // Put green at bank 0, index 11 (remapped location for colorIndex 3)
-  mem.Write16(0x05000000u + (0 * 32) + (11 * 2),
-              0x03E0u); // Bank 0, index 11 = green
+  // Put green at bank 0, index 3 (color index used directly)
+  mem.Write16(0x05000000u + (0 * 32) + (3 * 2),
+              0x03E0u); // Bank 0, index 3 = green
 
   mem.Write16(0x04000008u, 0x0000u);
   // Even with paletteBank=5 in tilemap, Classic NES uses bank 0
@@ -1284,7 +1283,7 @@ TEST(PPUTest, ClassicNesMode_UsesPaletteBank0ForAllTiles) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 3 remaps to index 11, bank is forced to 0 -> green
+  // colorIndex 3 uses index 3 directly in forced bank 0 -> green
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x03E0u));
 }
 
@@ -1424,8 +1423,8 @@ TEST(PPUTest, TextBg_ScrollY_WrapsAt512ForSize3) {
 // overlap with the tilemap. For OG-DK: charBase=1 (0x4000), screenBase=13
 // (0x6800), 8-bit tile indices.
 TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
-  // Classic NES mode masks tile indices to 8 bits to prevent VRAM overlap
-  // This is the ONLY special handling - no palette remapping.
+  // Classic NES mode masks tile indices to 8 bits and forces palette bank 0.
+  // Color indices are used directly (no remapping).
   GBAMemory mem;
   mem.Reset();
   PPU ppu(mem);
@@ -1433,10 +1432,9 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   ppu.SetClassicNesMode(true);
   mem.Write16(0x04000000u, 0x0080u); // Forced blank
 
-  // Set up palette color at bank 0, index 10 (remapped location for colorIndex
-  // 2)
+  // Set up palette color at bank 0, index 2 (color index used directly)
   const uint32_t palBank0 = 0x05000000u;
-  mem.Write16(palBank0 + 10 * 2, 0x001Fu); // Bank 0, index 10 = red
+  mem.Write16(palBank0 + 2 * 2, 0x001Fu); // Bank 0, index 2 = red
 
   // BG0CNT: charBase=1 (0x4000), screenBase=13 (0x6800)
   mem.Write16(0x04000008u, 0x0D04u);
@@ -1459,7 +1457,7 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   ppu.SwapBuffers();
 
   // With Classic NES 8-bit tile masking: tile 0xF7 is used from charBase 1
-  // colorIndex 2 remaps to palette index 10 (2+8) => red
+  // colorIndex 2 uses palette index 2 directly => red
   uint32_t expected = TestUtil::ARGBFromBGR555(0x001Fu);
   uint32_t actual = ppu.GetFramebuffer()[0];
   EXPECT_EQ(actual, expected) << "Classic NES should use tile index 0xF7 (247) "
