@@ -2211,6 +2211,14 @@ void PPU::RenderBackground(int bgIndex) {
     // Extract tile entry components (standard GBA format)
     int tileIndex = tileEntry & 0x3FF; // 10-bit tile index
 
+    // Classic NES Series: The NES-on-GBA wrapper uses tilemap entries where
+    // the actual NES tile index is in the LOW byte only (0-255).
+    // With charBase=1 (tiles at 0x6004000), tiles 256+ would overlap with the
+    // tilemap region at 0x6006800 (screenBase=13). Mask to 8 bits to avoid.
+    if (classicNesMode && !DisableAllClassicNesHandling()) {
+      tileIndex = tileEntry & 0xFF;
+    }
+
     bool hFlip = (tileEntry >> 10) & 1;
     bool vFlip = (tileEntry >> 11) & 1;
     int paletteBank = (tileEntry >> 12) & 0xF;
@@ -2315,6 +2323,17 @@ void PPU::RenderBackground(int bgIndex) {
         // Calculate effective color index and palette bank
         uint8_t effectiveColorIndex = colorIndex;
         uint8_t effectivePaletteBank = paletteBank;
+
+        // Classic NES Series palette handling:
+        // The NES-on-GBA emulator stores all palette colors at bank 0,
+        // indices 9-14. The tilemap palette bank field is ignored.
+        // Color indices 1-6 remap to 9-14 (add +8), indices 7+ stay as-is.
+        if (classicNesMode && !DisableAllClassicNesHandling() && !is8bpp) {
+          effectivePaletteBank = 0;
+          if (colorIndex >= 1 && colorIndex <= 6) {
+            effectiveColorIndex = colorIndex + 8;
+          }
+        }
 
         // Fetch Color from Palette RAM
         uint32_t paletteAddr = 0x05000000;

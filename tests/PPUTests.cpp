@@ -1613,11 +1613,13 @@ TEST(PPUTest, ObjVramUpperWindowMirrorsToObjRegion) {
 }
 
 TEST(PPUTest, UnalignedIoWrite16AlignsToEvenAddress) {
+  // Test that unaligned 16-bit IO writes get aligned to even addresses.
+  // Use SOUNDBIAS (0x04000088) which is readable, not WINH which is write-only.
   GBAMemory mem;
   mem.Reset();
 
-  mem.Write16(0x04000041u, 0xFFFEu);
-  EXPECT_EQ(mem.Read16(0x04000040u), 0xFFFEu);
+  mem.Write16(0x04000089u, 0x0200u); // Unaligned write to odd address
+  EXPECT_EQ(mem.Read16(0x04000088u), 0x0200u); // Should read from even address
 }
 
 TEST(PPUTest, UnalignedVramWritesAlign) {
