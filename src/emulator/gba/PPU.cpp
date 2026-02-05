@@ -1913,6 +1913,11 @@ void PPU::RenderMode0() {
 }
 
 void PPU::RenderBackground(int bgIndex) {
+  if (bgIndex == 0 && scanline == 0) {
+    fprintf(stderr, "[BG0_ENTER] frame=%d dispcnt=0x%04x classic=%d\n",
+            frameCount, ReadRegister(0x00), classicNesMode ? 1 : 0);
+    fflush(stderr);
+  }
   // Debug: allow disabling BG0 to test if it's the source of corruption
   if (bgIndex == 0 && PpuDisableBg0()) {
     return;
@@ -1926,6 +1931,11 @@ void PPU::RenderBackground(int bgIndex) {
   (void)bgMode;
 
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
+
+  // Classic NES BG0: The NES emulator DMAs code/data into the BG0 tilemap area
+  // during boot, leaving some entries corrupted. Instead of skipping BG0
+  // entirely, we filter out garbage entries per-tile during rendering.
+  // See the tile rendering loop for the garbage entry detection.
 
   uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
   uint16_t bgvofs = ReadRegister(0x12 + (bgIndex * 4)) & 0x01FF;
@@ -2215,6 +2225,22 @@ void PPU::RenderBackground(int bgIndex) {
     bool vFlip = (tileEntry >> 11) & 1;
     int paletteBank = (tileEntry >> 12) & 0xF;
 
+    // Classic NES Series: Detect and skip garbage tilemap entries.
+    // The NES emulator DMAs code/data into the tilemap area during boot,
+    // leaving some entries with ARM pointer values (e.g., 0x5A1A from
+    // 0x03005A1A). Valid NES tilemap entries have tile indices 0-255 and
+    // use palette bank 0. Garbage entries typically have non-zero palette
+    // bits AND tile indices >= 256. Valid entries may have tile >= 256
+    // but palette == 0 (the game expects 8-bit masking).
+    // Heuristic: skip if (palette != 0 AND tile >= 256).
+    if (classicNesMode && bgIndex == 0 && !is8bpp) {
+      if (paletteBank != 0 && tileIndex >= 256) {
+        continue; // Skip garbage: non-zero palette + high tile index
+      }
+      // Apply 8-bit mask for valid Classic NES entries
+      tileIndex &= 0xFF;
+    }
+
     int inTileX = scrolledX % 8;
     int inTileY = scrolledY % 8;
 
@@ -2255,17 +2281,30 @@ void PPU::RenderBackground(int bgIndex) {
         useHighNibble = !useHighNibble;
       }
       colorIndex = useHighNibble ? ((tileByte >> 4) & 0xF) : (tileByte & 0xF);
-      
+
       // OGDK DEBUG: Trace BG0 rendering for first 3 scanlines at frame 60+
       if (classicNesMode && bgIndex == 0 && scanline < 3 && x < 24 &&
           frameCount >= 60 && frameCount <= 62) {
         static int bg0PixelLogs = 0;
         if (bg0PixelLogs < 100) {
           bg0PixelLogs++;
-          fprintf(stderr, "[OGDK_BG0_PIX] f=%d x=%d y=%d tile=%d tileOff=0x%X byte=0x%02X ci=%d pal=%d entry=0x%04X\n",
-                  frameCount, x, scanline, tileIndex, tileOffset, tileByte, colorIndex, paletteBank, tileEntry);
+          fprintf(stderr,
+                  "[OGDK_BG0_PIX] f=%d x=%d y=%d tile=%d tileOff=0x%X "
+                  "byte=0x%02X ci=%d pal=%d entry=0x%04X\n",
+                  frameCount, x, scanline, tileIndex, tileOffset, tileByte,
+                  colorIndex, paletteBank, tileEntry);
           fflush(stderr);
         }
+      }
+
+      // Classic NES unit-test debug: log tile/byte/color for BG0 at (0,0)
+      if (classicNesMode && bgIndex == 0 && scanline == 0 && x == 0) {
+        fprintf(stderr,
+                "[CLASSICNES_TILE] tile=%d tileOff=0x%X byte=0x%02X ci=%d "
+                "pal=%d entry=0x%04X\n",
+                tileIndex, tileOffset, tileByte, colorIndex, paletteBank,
+                tileEntry);
+        fflush(stderr);
       }
 
     } else {
@@ -2312,6 +2351,24 @@ void PPU::RenderBackground(int bgIndex) {
         // Calculate effective color index and palette bank
         uint8_t effectiveColorIndex = colorIndex;
         uint8_t effectivePaletteBank = paletteBank;
+
+        // Classic NES Series: force palette bank 0 for BG0. The internal NES
+        // emulator stores all palette data in bank 0. Color indices are used
+        // directly without remapping - the NES engine sets up the palette at
+        // the correct indices already.
+        if (classicNesMode && bgIndex == 0 && !is8bpp) {
+          effectivePaletteBank = 0;
+        }
+
+        // Minimal debug for Classic NES unit tests: log BG0 pixel (0,0)
+        // so we can confirm tile/palette resolution.
+        if (classicNesMode && bgIndex == 0 && scanline == 0 && x == 0) {
+          fprintf(stderr,
+                  "[CLASSICNES_DBG] ci=%u effCi=%u palBank=%u effPal=%u\n",
+                  (unsigned)colorIndex, (unsigned)effectiveColorIndex,
+                  (unsigned)paletteBank, (unsigned)effectivePaletteBank);
+          fflush(stderr);
+        }
 
         // Fetch Color from Palette RAM
         uint32_t paletteAddr = 0x05000000;
