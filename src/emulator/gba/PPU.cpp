@@ -2119,6 +2119,17 @@ void PPU::RenderBackground(int bgIndex) {
     uint32_t mapOffset = mapAddr - 0x06000000u;
     uint16_t tileEntry = ReadBgVram16(vramData, vramSize, mapOffset);
 
+    // OGDK DEBUG: Log first 8 pixels of BG0 at scanline 80 on frame 60
+    static int ogdkDebugCount = 0;
+    if (classicNesMode && bgIndex == 0 && scanline == 80 && x < 8 &&
+        frameCount == 60 && ogdkDebugCount < 16) {
+      ogdkDebugCount++;
+      std::cout << "[OGDK_TILE] x=" << x << " mapOff=0x" << std::hex
+                << mapOffset << " entry=0x" << tileEntry << " tile=" << std::dec
+                << (tileEntry & 0x3FF) << " masked=" << (tileEntry & 0xFF)
+                << std::endl;
+    }
+
     int tileIndex = tileEntry & 0x3FF;
 
     // Classic NES Series: The NES-on-GBA wrapper uses tilemap entries where
