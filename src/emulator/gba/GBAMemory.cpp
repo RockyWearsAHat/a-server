@@ -208,7 +208,6 @@ GBAMemory::GBAMemory() {
   // ROM and SRAM sizes depend on the loaded game, but we can set defaults
   rom.resize(MemoryMap::ROM_MAX_SIZE);
   romSize = MemoryMap::ROM_MAX_SIZE; // Default: full 32MB accessible for tests
-  romMask = MemoryMap::ROM_MIRROR_MASK; // Default: 32MB mask
   sram.resize(SaveTypes::SRAM_SIZE);
   // Default EEPROM state is erased (0xFF); game-specific init happens in
   // LoadSave
@@ -336,19 +335,17 @@ void GBAMemory::InitializeHLEBIOS() {
       0xE28FE000,
       // 0x3F0C: LDR   PC, [R0, #-4]   ; jump to [0x03FFFFFC] user handler
       0xE510F004,
-      // 0x3F10: LDR   R1, [PC, #16]   ; &0x03007FF4 (literal at 0x3F28)
-      0xE59F1010,
+      // 0x3F10: LDR   R1, [PC, #8]    ; &0x03007FF4 (literal at 0x3F20)
+      0xE59F1008,
       // 0x3F14: LDRH  R1, [R1]        ; triggered mask
       0xE1D110B0,
-      // 0x3F18: ADD   R0, R0, #0x200  ; point to IO+0x200 region
-      0xE2800F80,
-      // 0x3F1C: STRH  R1, [R0, #2]    ; REG_IF at 0x04000202 (write-1-to-clear)
-      0xE1C010B2,
-      // 0x3F20: LDMIA SP!, {R0-R3, R12, LR}
+      // 0x3F18: STRH  R1, [R0, #0x202]; REG_IF (write-1-to-clear)
+      0xE1C012B2,
+      // 0x3F1C: LDMIA SP!, {R0-R3, R12, LR}
       0xE8BD500F,
-      // 0x3F24: SUBS  PC, LR, #4      ; exception-return from IRQ
+      // 0x3F20: SUBS  PC, LR, #4      ; exception-return from IRQ
       0xE25EF004,
-      // 0x3F28: literal 0x03007FF4
+      // 0x3F24: literal 0x03007FF4
       0x03007FF4u};
 
   for (size_t i = 0; i < sizeof(trampoline) / sizeof(uint32_t); ++i) {
@@ -740,27 +737,30 @@ bool GBAMemory::ScanForEEPROMSize(const std::vector<uint8_t> &data) {
 }
 
 void GBAMemory::LoadGamePak(const std::vector<uint8_t> &data) {
-  // Store ROM data as-is - no pre-mirroring needed.
-  // Hardware naturally mirrors ROMs because cartridge address lines only
-  // decode the actual ROM size. We emulate this by using a power-of-two mask.
-  if (data.size() > rom.size()) {
-    rom.resize(data.size());
-  }
-  std::copy(data.begin(), data.end(), rom.begin());
-  romSize = data.size();
+  // Classic NES Series ROMs are exactly 1 MiB (0x100000 bytes) and need
+  // to be mirrored 4 times to fill a 4 MiB address space.
+  // Reference: mGBA src/gba/gba.c lines 455-472
+  constexpr size_t kClassicNesRomSize = 0x100000; // 1 MiB
+  constexpr size_t kMirroredRomSize = 0x400000;   // 4 MiB
 
-  // Calculate ROM mask for hardware-accurate mirroring.
-  // Real cartridges mirror at power-of-two boundaries because they only
-  // have enough address lines for their actual size.
-  // Example: 1 MiB ROM uses 20 address lines, so mask = 0x0FFFFF
-  size_t pot = 1;
-  while (pot < romSize) {
-    pot *= 2;
+  if (data.size() == kClassicNesRomSize) {
+    // Mirror 1 MiB ROM 4 times to create 4 MiB address space
+    rom.resize(kMirroredRomSize);
+    std::copy(data.begin(), data.end(), rom.begin());
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize);
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize * 2);
+    std::copy(data.begin(), data.end(), rom.begin() + kClassicNesRomSize * 3);
+    romSize = kMirroredRomSize; // Track actual mirrored size
+    std::cout
+        << "[GBAMemory] Classic NES ROM detected (1 MiB), mirrored 4x to 4 MiB"
+        << std::endl;
+  } else {
+    if (data.size() > rom.size()) {
+      rom.resize(data.size());
+    }
+    std::copy(data.begin(), data.end(), rom.begin());
+    romSize = data.size(); // Track actual ROM size for open bus detection
   }
-  romMask = static_cast<uint32_t>(pot - 1);
-
-  std::cout << "[GBAMemory] Loaded ROM: " << romSize << " bytes, mask=0x"
-            << std::hex << romMask << std::dec << std::endl;
 
   // GBA BIOS Header Validation - Required for games to boot correctly!
   // The real BIOS validates the header checksum and sets a flag in IWRAM.
@@ -1154,17 +1154,6 @@ uint32_t GBAMemory::GetOpenBusValue() const {
         return wram_chip[off] | (wram_chip[off + 1] << 8);
       }
       break;
-    case 0x06: // VRAM (code can execute from here in some games)
-    {
-      uint32_t off = addr & 0x1FFFF; // VRAM is 128KB with mirroring
-      if (off >= 0x18000) {
-        off -= 0x8000; // Mirror upper 32KB back to 0x10000-0x17FFF
-      }
-      if (off + 1 < vram.size()) {
-        return vram[off] | (vram[off + 1] << 8);
-      }
-      break;
-    }
     case 0x08:
     case 0x09:
     case 0x0A:
@@ -1241,18 +1230,6 @@ uint32_t GBAMemory::GetOpenBusValue() const {
                  (wram_chip[off + 2] << 16) | (wram_chip[off + 3] << 24);
         }
         break;
-      case 0x06: // VRAM (code can execute from here in some games)
-      {
-        uint32_t off = addr & 0x1FFFF; // VRAM is 128KB with mirroring
-        if (off >= 0x18000) {
-          off -= 0x8000; // Mirror upper 32KB back to 0x10000-0x17FFF
-        }
-        if (off + 3 < vram.size()) {
-          return vram[off] | (vram[off + 1] << 8) | (vram[off + 2] << 16) |
-                 (vram[off + 3] << 24);
-        }
-        break;
-      }
       case 0x08:
       case 0x09:
       case 0x0A:
@@ -1485,75 +1462,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   case 0x04: // IO Registers (GBATEK: 0x04000000-0x040003FF)
   {
     uint32_t offset = address & MemoryMap::IO_REG_MASK;
-
-    // Write-only PPU registers return open bus on read (GBATEK compliance).
-    // Classic NES Series games depend on this behavior - they read from these
-    // registers expecting open bus, not the last written value.
-    // Note: We check 16-bit register boundaries, returning open bus for both
-    // bytes of a write-only halfword register.
-    {
-      // BG scroll registers (0x10-0x1F) - write-only
-      // TEMP DISABLED: Testing if this affects OG-DK behavior
-      // if (offset >= 0x10 && offset <= 0x1F) {
-      //   uint32_t openBus = GetOpenBusValue();
-      //   return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      // }
-      // BG rotation/scaling registers (0x20-0x3F) - write-only
-      if (offset >= 0x20 && offset <= 0x3F) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // Window dimension registers (0x40-0x47) - write-only
-      if (offset >= 0x40 && offset <= 0x47) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // MOSAIC (0x4C-0x4D) - write-only
-      if (offset >= 0x4C && offset <= 0x4D) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // BLDY (0x54-0x55) - write-only
-      if (offset >= 0x54 && offset <= 0x55) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // FIFO registers (0xA0-0xA7) - write-only
-      if (offset >= 0xA0 && offset <= 0xA7) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // DMA source addresses - write-only, return open bus
-      // DMA0SAD (0xB0-0xB3), DMA1SAD (0xBC-0xBF), DMA2SAD (0xC8-0xCB),
-      // DMA3SAD (0xD4-0xD7)
-      if ((offset >= 0xB0 && offset <= 0xB3) ||
-          (offset >= 0xBC && offset <= 0xBF) ||
-          (offset >= 0xC8 && offset <= 0xCB) ||
-          (offset >= 0xD4 && offset <= 0xD7)) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // DMA destination addresses - write-only, return open bus
-      // DMA0DAD (0xB4-0xB7), DMA1DAD (0xC0-0xC3), DMA2DAD (0xCC-0xCF),
-      // DMA3DAD (0xD8-0xDB)
-      if ((offset >= 0xB4 && offset <= 0xB7) ||
-          (offset >= 0xC0 && offset <= 0xC3) ||
-          (offset >= 0xCC && offset <= 0xCF) ||
-          (offset >= 0xD8 && offset <= 0xDB)) {
-        uint32_t openBus = GetOpenBusValue();
-        return (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      }
-      // DMA count registers - write-only, return 0 (mGBA behavior)
-      // DMA0CNT_L (0xB8-0xB9), DMA1CNT_L (0xC4-0xC5),
-      // DMA2CNT_L (0xD0-0xD1), DMA3CNT_L (0xDC-0xDD)
-      if ((offset >= 0xB8 && offset <= 0xB9) ||
-          (offset >= 0xC4 && offset <= 0xC5) ||
-          (offset >= 0xD0 && offset <= 0xD1) ||
-          (offset >= 0xDC && offset <= 0xDD)) {
-        return 0;
-      }
-    }
-
     uint8_t val = 0;
     if (offset < io_regs.size())
       val = io_regs[offset];
@@ -1651,17 +1559,20 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   case 0x0A:
   case 0x0B:
   case 0x0C: {
-    // Hardware-accurate ROM mirroring: Real cartridges only have address lines
-    // for their actual ROM size, so addresses naturally wrap at power-of-two
-    // boundaries. A 1 MiB ROM mirrors every 1 MiB throughout the 32 MB space.
+    // ROM mirroring: The 32MB address space (0x08000000-0x09FFFFFF per
+    // waitstate) is filled with repeating mirrors of the ROM. For example:
+    // - 1 MiB ROM (Classic NES Series): mirrors 4x to fill 4 MiB, then that 4
+    // MiB
+    //   pattern repeats throughout the 32 MiB address space per mGBA's behavior
+    // - 32 MiB ROM: fills the entire space, no mirroring visible
+    // The ROM mirrors at power-of-two boundaries based on the actual ROM size.
+    uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
     if (romSize > 0) {
-      uint32_t offset = address & romMask;
-      if (offset < romSize) {
-        return rom[offset];
-      }
-      // Past actual ROM but within power-of-two boundary: open bus
-      // Returns (address / 2) pattern per GBATEK
+      // Mirror ROM at power-of-two alignment (mGBA behavior for Classic NES)
+      offset = offset % romSize;
+      return rom[offset];
     }
+    // No ROM loaded - return open bus
     return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0D: // Game Pak ROM (WS2) or EEPROM depending on cart save type
@@ -1677,35 +1588,21 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // Non-EEPROM cart: treat as ROM mirror (same behavior as 0x08-0x0C).
+    uint32_t offset = address & MemoryMap::ROM_MIRROR_MASK;
     if (romSize > 0) {
-      uint32_t offset = address & romMask;
-      if (offset < romSize) {
-        return rom[offset];
-      }
+      offset = offset % romSize;
+      return rom[offset];
     }
+    // Open bus for out-of-bounds ROM reads
     return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
   {
-    static const bool traceSramAccess =
-        EnvTruthy(std::getenv("AIO_TRACE_SRAM_ACCESS"));
-
     if (!hasSRAM) {
       // EEPROM-only cartridges have no SRAM/Flash chip.
-      // Classic NES games check for SRAM by writing a value and reading it
-      // back. If they detect SRAM (value echoes), they REFUSE TO RUN. So for
-      // EEPROM carts, we must NOT echo writes - return open bus instead.
-      if (traceSramAccess) {
-        static int sramReadLogs = 0;
-        if (sramReadLogs++ < 50) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SRAM",
-              "Read8 from SRAM region (no SRAM): addr=0x%08x PC=0x%08x "
-              "returning 0xFF",
-              address, pc);
-        }
-      }
+      // In practice the bus is pulled-up and reads appear erased (0xFF).
+      // Returning address-dependent garbage can confuse save probes and
+      // lead to false "save data corrupt" paths.
       return EEPROM::ERASED_VALUE;
     }
 
@@ -1924,8 +1821,8 @@ uint16_t GBAMemory::Read16(uint32_t address) {
 uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
-    // Hardware-accurate ROM mirroring using power-of-two mask
-    uint32_t offset = address & romMask;
+    uint32_t offset = address & 0x01FFFFFF;
+    // Return actual ROM data only if within actual ROM size
     if (offset + 1 < romSize) {
       uint8_t b0 = rom[offset];
       uint8_t b1 = rom[offset + 1u];
@@ -2102,8 +1999,8 @@ uint32_t GBAMemory::Read32(uint32_t address) {
 uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
   if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
-    // Hardware-accurate ROM mirroring using power-of-two mask
-    uint32_t offset = address & romMask;
+    uint32_t offset = address & 0x01FFFFFF;
+    // Return actual ROM data only if within actual ROM size
     if (offset + 3 < romSize) {
       uint8_t b0 = rom[offset];
       uint8_t b1 = rom[offset + 1u];
@@ -2122,21 +2019,6 @@ uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
 
 // Internal write that bypasses the GBA 8-bit write quirks for video memory
 void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
-  // OG-DK: Trace writes to the NES palette buffer region in IWRAM
-  if (EnvFlagCached("AIO_TRACE_OGDK_PAL_BUF") && cpu) {
-    const uint32_t maskedAddr = address & 0x0FFFFFFFu;
-    if (maskedAddr >= 0x03007500u && maskedAddr < 0x03007600u) {
-      static int palBufLogs8 = 0;
-      if (palBufLogs8++ < 500) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "OGDK_PAL_BUF",
-            "W8 addr=0x%08x val=0x%02x PC=0x%08x", (unsigned)address,
-            (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-
   uint8_t region = (address >> 24);
   switch (region) {
   case 0x02: // WRAM (Board) (GBATEK: 0x02000000-0x0203FFFF)
@@ -2221,21 +2103,6 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
 
     // DKC diagnostic: Log VRAM writes during problem frames
     const int frame = ppu ? ppu->GetFrameCount() : -1;
-
-    // Classic NES: Trace writes to tilemap region (screenBase=13 = 0x6800)
-    const bool isClassicNes =
-        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-    static int tilemapTraceCount = 0;
-    if (isClassicNes && offset >= 0x6800 && offset < 0x7800 &&
-        tilemapTraceCount < 50) {
-      tilemapTraceCount++;
-      std::cout << "[OGDK_TILEMAP] Frame " << frame << " write offset=0x"
-                << std::hex << offset << " val=0x" << (int)value;
-      if (cpu)
-        std::cout << " PC=0x" << cpu->GetRegister(15);
-      std::cout << std::dec << std::endl;
-    }
-
     if ((frame >= 1655 && frame <= 1665) || (frame >= 1885 && frame <= 1895) ||
         (frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399)) {
       static int diagVramWrites = 0;
@@ -2268,33 +2135,6 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       // Keep shadow coherent for later deferred apply.
       if (offset < vram_shadow.size())
         vram_shadow[offset] = value;
-
-      // Debug: Trace writes to tile 440 area (offset 0x7700-0x771F)
-      if (isClassicNes && offset >= 0x7700 && offset < 0x7720) {
-        static int tile440Logs = 0;
-        if (tile440Logs++ < 100) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "OGDK_TILE440",
-              "VRAM write to tile 440: offset=0x%04x val=0x%02x frame=%d "
-              "PC=0x%08x",
-              (unsigned)offset, (unsigned)value, frame,
-              cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        }
-      }
-
-      // Debug: Trace writes to CharBase 0 source area (0xB74-0xB93) - where
-      // Frame 6 DMA reads from
-      if (isClassicNes && offset >= 0x0B74 && offset < 0x0BA0) {
-        static int charBase0Logs = 0;
-        if (charBase0Logs++ < 100) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "OGDK_CHARBASE0_SRC",
-              "CharBase0 DMA source write: offset=0x%04x val=0x%02x frame=%d "
-              "PC=0x%08x",
-              (unsigned)offset, (unsigned)value, frame,
-              cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        }
-      }
     }
     break;
   }
@@ -2565,132 +2405,13 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
                           0; // Bit 7 of high byte = bit 15 of full 16-bit
         bool willBeEnabled = (value & 0x80) != 0;
 
-        // Trace DMA enable transitions for sound channels
-        if (TraceGbaSpam() && (dmaChannel == 1 || dmaChannel == 2)) {
-          static int enableTransitionLogs = 0;
-          if (enableTransitionLogs < 50) {
-            enableTransitionLogs++;
-            std::cout << "[DMA_ENABLE_TRANS] ch=" << dmaChannel
-                      << " wasEnabled=" << wasEnabled
-                      << " willBeEnabled=" << willBeEnabled << " value=0x"
-                      << std::hex << (int)value << " PC=0x";
-            if (cpu)
-              std::cout << cpu->GetRegister(15);
-            std::cout << std::dec << std::endl;
-          }
-        }
-
         if (!wasEnabled && willBeEnabled) {
           dmaLatchNeeded = true;
         }
       }
 
-      // Also handle writes to DMA SAD while DMA is enabled (for sound DMA
-      // buffer swapping) Games like MMBN update DMA SAD during VBlank without
-      // disabling DMA
-      int dmaSadChannel = -1;
-      if (offset >= IORegs::DMA0SAD &&
-          offset < IORegs::DMA0SAD + IORegs::DMA_CHANNEL_SIZE * 4) {
-        // Calculate which channel and which byte of SAD
-        int channelOffset = (offset - IORegs::DMA0SAD);
-        int channel = channelOffset / IORegs::DMA_CHANNEL_SIZE;
-        int byteInChannel = channelOffset % IORegs::DMA_CHANNEL_SIZE;
-
-        // SAD occupies bytes 0-3 of each DMA channel
-        if (byteInChannel < 4 && channel >= 0 && channel < 4) {
-          uint32_t dmaBase =
-              IORegs::DMA0SAD + (channel * IORegs::DMA_CHANNEL_SIZE);
-          uint16_t ctrl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
-          bool isEnabled = (ctrl & DMAControl::ENABLE) != 0;
-          int timing = (ctrl >> 12) & 3;
-
-          // Trace ALL writes to DMA1/2 SAD (not just when enabled)
-          if (TraceGbaSpam()) {
-            static int sadWriteLogs = 0;
-            if (sadWriteLogs < 100 && (channel == 1 || channel == 2)) {
-              sadWriteLogs++;
-              std::cout << "[DMA_SAD_WRITE] ch=" << channel
-                        << " byte=" << byteInChannel << " val=0x" << std::hex
-                        << (int)value << " isEnabled=" << isEnabled
-                        << " timing=" << std::dec << timing << " PC=0x"
-                        << std::hex;
-              if (cpu)
-                std::cout << cpu->GetRegister(15);
-              std::cout << std::dec << std::endl;
-            }
-          }
-
-          // For sound DMA (timing=3) that's already enabled, mark for relatch
-          // IMPORTANT: Only relatch when the HIGH byte (byte 3) is written.
-          // Games that write SAD byte-by-byte (like Classic NES Series) create
-          // corrupt intermediate addresses if we relatch on every byte write.
-          // Hardware likely only updates the internal SAD register after a
-          // complete word write or on the final byte.
-          if (isEnabled && timing == 3 && byteInChannel == 3) {
-            dmaSadChannel = channel;
-          }
-        }
-      }
-
       if (offset < io_regs.size()) {
         io_regs[offset] = value;
-      }
-
-      // Trace writes to BG0CNT (offset 0x08-0x09) from any path
-      if (offset == 0x08 || offset == 0x09) {
-        static int bg0cntW8Logs = 0;
-        if (bg0cntW8Logs < 50) {
-          bg0cntW8Logs++;
-          const uint16_t fullVal = io_regs[0x08] | (io_regs[0x09] << 8);
-          const int charBase = (fullVal >> 2) & 0x3;
-          const int screenBase = (fullVal >> 8) & 0x1F;
-          const int priority = fullVal & 0x3;
-          const int bpp = (fullVal >> 7) & 1;
-          // OGDK: stderr trace for BG0CNT
-          const bool isClassicNes =
-              gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-          if (isClassicNes) {
-            fprintf(stderr,
-                    "[OGDK_BG0CNT] Write8 offset=0x%02x val=0x%02x full=0x%04x "
-                    "pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) %dbpp "
-                    "PC=0x%08X\n",
-                    offset, value, fullVal, priority, charBase,
-                    charBase * 0x4000, screenBase, screenBase * 0x800,
-                    bpp ? 8 : 4, cpu ? cpu->GetRegister(15) : 0);
-            fflush(stderr);
-          }
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "BGCNT",
-              "BG0CNT_WRITE8 offset=0x%02x val=0x%02x full=0x%04x charBase=%d "
-              "screenBase=%d PC=0x%08x",
-              (unsigned)offset, (unsigned)value, (unsigned)fullVal, charBase,
-              screenBase, cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        }
-      }
-
-      // Trace writes to BG3CNT (offset 0x0E-0x0F) for Classic NES
-      if (offset == 0x0E || offset == 0x0F) {
-        const bool isClassicNes =
-            gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-        if (isClassicNes) {
-          static int bg3cntW8Logs = 0;
-          if (bg3cntW8Logs < 50) {
-            bg3cntW8Logs++;
-            const uint16_t fullVal = io_regs[0x0E] | (io_regs[0x0F] << 8);
-            const int charBase = (fullVal >> 2) & 0x3;
-            const int screenBase = (fullVal >> 8) & 0x1F;
-            const int priority = fullVal & 0x3;
-            const int bpp = (fullVal >> 7) & 1;
-            fprintf(stderr,
-                    "[OGDK_BG3CNT] Write8 offset=0x%02x val=0x%02x full=0x%04x "
-                    "pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) %dbpp "
-                    "PC=0x%08X\n",
-                    offset, value, fullVal, priority, charBase,
-                    charBase * 0x4000, screenBase, screenBase * 0x800,
-                    bpp ? 8 : 4, cpu ? cpu->GetRegister(15) : 0);
-            fflush(stderr);
-          }
-        }
       }
 
       // KEYCNT changes can make the keypad IRQ condition become true without
@@ -2699,56 +2420,16 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
         EvaluateKeypadIRQ();
       }
 
-      // Handle sound DMA SAD relatch (for buffer swapping during VBlank)
-      // This must be BEFORE the normal DMA latch - games update SAD while DMA
-      // stays enabled
-      if (dmaSadChannel >= 0) {
-        uint32_t sadDmaBase =
-            IORegs::DMA0SAD + (dmaSadChannel * IORegs::DMA_CHANNEL_SIZE);
-        uint32_t newSrc = io_regs[sadDmaBase] | (io_regs[sadDmaBase + 1] << 8) |
-                          (io_regs[sadDmaBase + 2] << 16) |
-                          (io_regs[sadDmaBase + 3] << 24);
-
-        if (TraceGbaSpam()) {
-          static int sadRelatchLogs = 0;
-          if (sadRelatchLogs < 20) {
-            sadRelatchLogs++;
-            std::cout << "[SOUND_DMA_RELATCH] ch=" << dmaSadChannel
-                      << " oldSrc=0x" << std::hex
-                      << dmaInternalSrc[dmaSadChannel] << " newSrc=0x" << newSrc
-                      << std::dec << std::endl;
-          }
-        }
-
-        dmaInternalSrc[dmaSadChannel] = newSrc;
-      }
-
       // Handle DMA latch after io_regs is updated
       if (dmaLatchNeeded && dmaChannel >= 0) {
         uint32_t dmaBase =
             IORegs::DMA0SAD + (dmaChannel * IORegs::DMA_CHANNEL_SIZE);
-        uint32_t oldInternalSrc = dmaInternalSrc[dmaChannel];
         dmaInternalSrc[dmaChannel] =
             io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
             (io_regs[dmaBase + 2] << 16) | (io_regs[dmaBase + 3] << 24);
         dmaInternalDst[dmaChannel] =
             io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
             (io_regs[dmaBase + 6] << 16) | (io_regs[dmaBase + 7] << 24);
-
-        // Trace relatch for sound DMA channels
-        if (TraceGbaSpam() && (dmaChannel == 1 || dmaChannel == 2)) {
-          static int relatchLogs = 0;
-          if (relatchLogs < 20) {
-            relatchLogs++;
-            std::cout << "[DMA_RELATCH] ch=" << dmaChannel << " oldSrc=0x"
-                      << std::hex << oldInternalSrc << " newSrc=0x"
-                      << dmaInternalSrc[dmaChannel] << " io_regs_SAD=0x"
-                      << (io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
-                          (io_regs[dmaBase + 2] << 16) |
-                          (io_regs[dmaBase + 3] << 24))
-                      << std::dec << std::endl;
-          }
-        }
 
         static int dmaStartLogs[4] = {0, 0, 0, 0};
         if (verboseLogs && dmaStartLogs[dmaChannel] < 8) {
@@ -2812,18 +2493,14 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           if (dst >= 0x05000000u && dst < 0x05000400u) {
             ogdkDmaCount++;
             uint16_t cntL = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
-            int srcCtrlLocal = (control >> 7) & 3;
-            int dstCtrlLocal = (control >> 5) & 3;
-            bool is32BitLocal = (control & 0x0400) != 0;
             AIO::Emulator::Common::Logger::Instance().LogFmt(
                 AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
                 "DMA%d triggered: src=0x%08x dst=0x%08x cntL=0x%04x "
-                "ctrl=0x%04x timing=%d srcCtrl=%d dstCtrl=%d 32bit=%d",
-                dmaChannel, src, dst, cntL, control, timing, srcCtrlLocal,
-                dstCtrlLocal, is32BitLocal ? 1 : 0);
+                "ctrl=0x%04x timing=%d",
+                dmaChannel, src, dst, cntL, control, timing);
 
             // Dump first 32 bytes of source
-            if (ogdkDmaCount <= 10) {
+            if (ogdkDmaCount <= 3) {
               AIO::Emulator::Common::Logger::Instance().Log(
                   AIO::Emulator::Common::LogLevel::Info, "OGDK_DMA",
                   "First 32 bytes of source:");
@@ -2880,30 +2557,14 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
       break;
     }
 
-    // Classic NES Series games (FDKE=Donkey Kong, etc.) run a software NES
-    // emulator that performs sequential 8-bit writes to build 16-bit tilemap
-    // entries. Standard GBA behavior duplicates 8-bit writes to both bytes of
-    // the aligned halfword, which corrupts this sequential pattern. For these
-    // games, we write the byte directly without duplication.
-    const bool isClassicNesGame =
-        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-
-    if (isClassicNesGame) {
-      if (offset < vram.size()) {
-        vram[offset] = value;
-        if (offset < vram_shadow.size()) {
-          vram_shadow[offset] = value;
-        }
-      }
-    } else {
-      uint32_t alignedOffset = offset & ~1;
-      if (alignedOffset + 1 < vram.size()) {
-        vram[alignedOffset] = value;
-        vram[alignedOffset + 1] = value;
-        if (alignedOffset + 1 < vram_shadow.size()) {
-          vram_shadow[alignedOffset] = value;
-          vram_shadow[alignedOffset + 1] = value;
-        }
+    uint32_t alignedOffset = offset & ~1;
+    if (alignedOffset + 1 < vram.size()) {
+      vram[alignedOffset] = value;
+      vram[alignedOffset + 1] = value;
+      // Keep shadow coherent for later deferred apply.
+      if (alignedOffset + 1 < vram_shadow.size()) {
+        vram_shadow[alignedOffset] = value;
+        vram_shadow[alignedOffset + 1] = value;
       }
     }
     break;
@@ -2916,26 +2577,8 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
   }
   case 0x0E: // SRAM/Flash
   {
-    static const bool traceSramAccess =
-        EnvTruthy(std::getenv("AIO_TRACE_SRAM_ACCESS"));
-
-    if (!hasSRAM) {
-      // Classic NES games write to SRAM to test for its presence.
-      // If write echoes on read, they detect SRAM and refuse to run.
-      // For EEPROM carts, writes are ignored (no SRAM chip present).
-      if (traceSramAccess) {
-        static int sramWriteLogs = 0;
-        if (sramWriteLogs++ < 50) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SRAM",
-              "Write8 to SRAM region (no SRAM): addr=0x%08x val=0x%02x "
-              "PC=0x%08x IGNORED",
-              address, value, pc);
-        }
-      }
+    if (!hasSRAM)
       return; // Ignore writes if no SRAM/Flash present
-    }
 
     uint32_t offset = address & 0xFFFF;
 
@@ -3085,23 +2728,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
           (unsigned)(address & ~1u), (unsigned)value, (unsigned)pc);
     }
   }
-
-  // OG-DK: Trace writes to the NES palette buffer region in IWRAM
-  // Enable with: AIO_TRACE_OGDK_PAL_BUF=1
-  if (EnvFlagCached("AIO_TRACE_OGDK_PAL_BUF") && cpu) {
-    const uint32_t maskedAddr = address & 0x0FFFFFFFu;
-    if (maskedAddr >= 0x03007500u && maskedAddr < 0x03007600u) {
-      static int palBufLogs = 0;
-      if (palBufLogs++ < 500) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "OGDK_PAL_BUF",
-            "W16 addr=0x%08x val=0x%04x PC=0x%08x", (unsigned)address,
-            (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIwram = IsIwramMappedAddress(address);
   const uint32_t iwramOff = address & 0x7FFFu;
@@ -3286,29 +2912,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       std::cout << std::dec << std::endl;
     };
 
-    // OGDK: Trace DISPCNT writes to see BG enables
-    const bool isClassicNesReg =
-        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-    if (isClassicNesReg && offset == IORegs::DISPCNT) {
-      static int ogdkDispcntLogs = 0;
-      if (ogdkDispcntLogs < 20) {
-        ogdkDispcntLogs++;
-        int mode = value & 0x7;
-        bool bg0 = (value >> 8) & 1;
-        bool bg1 = (value >> 9) & 1;
-        bool bg2 = (value >> 10) & 1;
-        bool bg3 = (value >> 11) & 1;
-        bool obj = (value >> 12) & 1;
-        bool forcedBlank = (value >> 7) & 1;
-        fprintf(stderr,
-                "[OGDK_DISPCNT] Write 0x%04X mode=%d BG0=%d BG1=%d BG2=%d "
-                "BG3=%d OBJ=%d forcedBlank=%d PC=0x%08X\n",
-                value, mode, bg0, bg1, bg2, bg3, obj, forcedBlank,
-                cpu ? cpu->GetRegister(15) : 0);
-        fflush(stderr);
-      }
-    }
-
     if (offset == IORegs::DISPCNT && dispcntLogs < 8) {
       dispcntLogs++;
       logReg("DISPCNT");
@@ -3320,25 +2923,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       name << "BG" << ((offset - 0x08) / 2) << "CNT";
       logReg(name.str().c_str());
     }
-    // Always log BGCNT for Classic NES debugging (first 50 writes)
-    static int bgcntDetailLogs = 0;
-    if (isClassicNesReg && offset >= 0x08 && offset <= 0x0E &&
-        offset % 2 == 0 && bgcntDetailLogs < 50) {
-      bgcntDetailLogs++;
-      int bgNum = (offset - 0x08) / 2;
-      int pri = value & 0x3;
-      int charBase = (value >> 2) & 0x3;
-      int screenBase = (value >> 8) & 0x1F;
-      int size = (value >> 14) & 0x3;
-      int bpp = (value >> 7) & 1; // 0=4bpp, 1=8bpp
-      fprintf(stderr,
-              "[OGDK_BGCNT] BG%d = 0x%04X pri=%d charBase=%d (0x%X) "
-              "screenBase=%d (0x%X) size=%d %dbpp PC=0x%08X\n",
-              bgNum, value, pri, charBase, charBase * 0x4000, screenBase,
-              screenBase * 0x800, size, bpp ? 8 : 4,
-              cpu ? cpu->GetRegister(15) : 0);
-      fflush(stderr);
-    }
     if ((offset == 0x10 || offset == 0x12 || offset == 0x14 ||
          offset == 0x16) &&
         bghofsLogs < 16) {
@@ -3347,17 +2931,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       std::ostringstream name;
       name << "BG" << ((offset - 0x10) / 2) << "HOFS";
       logReg(name.str().c_str());
-    }
-    // OGDK: Trace BG0 scroll offsets
-    if (isClassicNesReg && (offset == 0x10 || offset == 0x12)) {
-      static int bg0ScrollLogs = 0;
-      if (bg0ScrollLogs < 30) {
-        bg0ScrollLogs++;
-        const char *which = (offset == 0x10) ? "HOFS" : "VOFS";
-        fprintf(stderr, "[OGDK_BG0_SCROLL] BG0%s = %d PC=0x%08X\n", which,
-                value & 0x1FF, cpu ? cpu->GetRegister(15) : 0);
-        fflush(stderr);
-      }
     }
     if ((offset == 0x11 || offset == 0x13 || offset == 0x15 ||
          offset == 0x17) &&
@@ -3499,24 +3072,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   }
 
   if (region == 0x05 || region == 0x06 || region == 0x07) {
-    // Classic NES: Trace 16-bit writes to tilemap region
-    const bool isClassicNes16 =
-        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-    if (isClassicNes16 && region == 0x06) {
-      uint32_t offset = address & 0x1FFFFu;
-      if (offset >= 0x18000u)
-        offset -= 0x8000u;
-      static int tilemap16Trace = 0;
-      if (offset >= 0x6800 && offset < 0x7800 && tilemap16Trace < 30) {
-        tilemap16Trace++;
-        const int frame = ppu ? ppu->GetFrameCount() : -1;
-        std::cout << "[OGDK_TILEMAP16] Frame " << frame << " write offset=0x"
-                  << std::hex << offset << " val=0x" << value;
-        if (cpu)
-          std::cout << " PC=0x" << cpu->GetRegister(15);
-        std::cout << std::dec << std::endl;
-      }
-    }
     Write8Internal(address, value & 0xFF);
     Write8Internal(address + 1, (value >> 8) & 0xFF);
   } else {
@@ -3633,70 +3188,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 }
 
 void GBAMemory::Write32(uint32_t address, uint32_t value) {
-  // OGDK DEBUG: Trace writes to VRAM tilemap area 0x6800-0x6FFF
-  const bool isClassicNes =
-      gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-  if (isClassicNes && (address & 0xFF000000u) == 0x06000000u) {
-    const uint32_t vramOff = address & 0x1FFFFu;
-    if (vramOff >= 0x6800u && vramOff < 0x7000u) {
-      static int tilemapWriteLogs = 0;
-      // Only log writes that look like tilemap entries (small values, not
-      // code/pointers) Tilemap entries are 16-bit: tile# (0-1023) + flags. So
-      // 32-bit value would be two entries. Max tile# = 0x3FF, so valid tilemap
-      // 32-bit value would be <= 0x0FFF0FFF roughly
-      bool looksLikeTilemap =
-          (value & 0xF000F000u) == 0; // Both entries have tile# < 4096
-      if (tilemapWriteLogs < 200 || looksLikeTilemap) {
-        tilemapWriteLogs++;
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
-        if (looksLikeTilemap || tilemapWriteLogs <= 20) {
-          fprintf(stderr,
-                  "[OGDK_TILEMAP_W32] vramOff=0x%X val=0x%08X %s PC=0x%08X\n",
-                  vramOff, value, looksLikeTilemap ? "[VALID?]" : "[garbage]",
-                  pc);
-          fflush(stderr);
-        }
-      }
-    }
-  }
-
-  // OG-DK: Trace writes to the NES buffer control variables in IWRAM
-  // SP=0x03007200, so buffer pointers are at:
-  // CURRENT: SP+0x914 = 0x03007B14
-  // PENDING: SP+0x918 = 0x03007B18
-  // TARGET:  SP+0x91C = 0x03007B1C
-  if (EnvFlagCached("AIO_TRACE_OGDK_BUFPTRS") && cpu) {
-    const uint32_t maskedAddr = address & 0x0FFFFFFFu;
-    if (maskedAddr >= 0x03007B14u && maskedAddr <= 0x03007B1Cu) {
-      static int bufPtrLogs = 0;
-      if (bufPtrLogs++ < 100) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        const char *name = (maskedAddr == 0x03007B14u)   ? "CURRENT"
-                           : (maskedAddr == 0x03007B18u) ? "PENDING"
-                                                         : "TARGET";
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "OGDK_BUFPTR",
-            "W32 %s (0x%08x) = 0x%08x PC=0x%08x", name, (unsigned)address,
-            (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-
-  // OG-DK: Trace writes to the NES palette buffer region in IWRAM
-  if (EnvFlagCached("AIO_TRACE_OGDK_PAL_BUF") && cpu) {
-    const uint32_t maskedAddr = address & 0x0FFFFFFFu;
-    if (maskedAddr >= 0x03007500u && maskedAddr < 0x03007600u) {
-      static int palBufLogs32 = 0;
-      if (palBufLogs32++ < 500) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "OGDK_PAL_BUF",
-            "W32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
-            (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIrqHandPtrWord =
       IsIwramMappedAddress(address) && ((address & 0x7FFFu) == 0x7FFCu);
@@ -4245,29 +3736,6 @@ void GBAMemory::PerformDMA(int channel) {
   //               << " srcVal=0x" << std::hex << srcVal << std::dec <<
   //               std::endl;
   // }
-
-  // Classic NES: Trace ALL DMA to VRAM to find where tilemap data comes from
-  const bool isClassicNesDma =
-      gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-  if (isClassicNesDma && (dst & 0xFF000000) == 0x06000000) {
-    uint32_t dstOff = dst & 0x1FFFF;
-    uint32_t dstEnd = dstOff + (count * (is32Bit ? 4 : 2));
-    // Focus on DMAs that touch the BG0 tilemap at 0x6800-0x7000
-    if (dstOff < 0x7000 && dstEnd > 0x6800) {
-      static int dmaVramTrace = 0;
-      if (dmaVramTrace < 100) {
-        dmaVramTrace++;
-        fprintf(stderr,
-                "[OGDK_DMA_TILEMAP] Frame %d DMA ch%d src=0x%08X dst=0x%08X "
-                "dstOff=0x%X-0x%X count=%d 32bit=%d PC=0x%08X "
-                "srcData=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
-                frame, channel, src, dst, dstOff, dstEnd, count, is32Bit,
-                cpu ? cpu->GetRegister(15) : 0, Read32(src), Read32(src + 4),
-                Read32(src + 8), Read32(src + 12));
-        fflush(stderr);
-      }
-    }
-  }
 
   bool irq = (control >> 14) & 1;
 
@@ -4879,7 +4347,6 @@ void GBAMemory::PerformDMA(int channel) {
       }
     } else {
       // Normal memory-to-memory DMA
-
       for (uint32_t i = 0; i < count; ++i) {
         if (is32Bit) {
           uint32_t val = Read32(currentSrc);
@@ -4951,25 +4418,6 @@ void GBAMemory::PerformDMA(int channel) {
   if (ppu)
     ppu->Update(totalCycles);
 
-  // OG-DK: Trace palette state after VRAM DMA
-  if (dstIsPalette && (src >= 0x06000000u && src < 0x06018000u)) {
-    static int palStateTrace = 0;
-    if (palStateTrace < 5) {
-      palStateTrace++;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "OGDK_PAL_STATE",
-          "After VRAM->Palette DMA (count=%u, 32bit=%d, frame=%d), "
-          "palette_ram.data() entries 8-15:",
-          (unsigned)count, is32Bit ? 1 : 0, frame);
-      for (int i = 8; i < 16; i++) {
-        uint16_t c = palette_ram[i * 2] | (palette_ram[i * 2 + 1] << 8);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "OGDK_PAL_STATE",
-            "  entry %d @ offset %d: 0x%04x", i, i * 2, c);
-      }
-    }
-  }
-
   // Save updated internal addresses
   dmaInternalSrc[channel] = currentSrc;
   // For repeat DMA with destCtrl=3 (Inc/Reload), reload destination
@@ -5008,10 +4456,7 @@ void GBAMemory::PerformDMA(int channel) {
   // However, for EEPROM transfers (0x0Dxxxxxx), some libraries assume the
   // programmed DMAxSAD/DAD remain stable and may use partial writes; writing
   // back advanced addresses can desync subsequent DMA setup.
-  // Also, for sound FIFO DMAs (timing=3), games rely on the SAD register
-  // retaining its original value so that re-enabling DMA restarts from
-  // the audio buffer start, not from the advanced position.
-  if (!srcIsEEPROM && !dstIsEEPROM && timing != 3) {
+  if (!srcIsEEPROM && !dstIsEEPROM) {
     auto writeIo32 = [&](uint32_t off, uint32_t v) {
       if (off + 3 >= io_regs.size())
         return;
@@ -5107,14 +4552,6 @@ void GBAMemory::UpdateTimers(int cycles) {
             // DMA itself (which otherwise causes pathological re-requests).
             if (!dmaInProgress && apu && (i == 0 || i == 1)) {
               apu->OnTimerOverflow(i);
-            } else if (TraceGbaSpam() && (i == 0 || i == 1)) {
-              static int suppressedCount = 0;
-              suppressedCount++;
-              if (suppressedCount <= 10) {
-                std::cout << "[TIMER_OVF_SUPPRESSED] Timer " << i
-                          << " dmaInProgress=" << dmaInProgress
-                          << " apu=" << (apu ? "yes" : "null") << std::endl;
-              }
             }
 
             // IRQ
