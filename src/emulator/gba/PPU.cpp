@@ -104,6 +104,8 @@ bool PpuDisableColorEffects() {
   return EnvFlagCached("AIO_PPU_DISABLE_COLOR_EFFECTS");
 }
 
+bool PpuDisableBg0() { return EnvFlagCached("AIO_PPU_DISABLE_BG0"); }
+
 bool PpuSwap4bppNibbles() { return EnvFlagCached("AIO_PPU_SWAP_4BPP_NIBBLES"); }
 
 bool DisableAllClassicNesHandling() {
@@ -1911,6 +1913,11 @@ void PPU::RenderMode0() {
 }
 
 void PPU::RenderBackground(int bgIndex) {
+  // Debug: allow disabling BG0 to test if it's the source of corruption
+  if (bgIndex == 0 && PpuDisableBg0()) {
+    return;
+  }
+
   const uint16_t dispcnt = ReadRegister(0x00);
   const uint8_t bgMode = (uint8_t)(dispcnt & 0x7u);
 
@@ -1956,10 +1963,11 @@ void PPU::RenderBackground(int bgIndex) {
   const uint8_t *palData = memory.GetPaletteData();
   const size_t palSize = memory.GetPaletteSize();
 
-  // TEMP DEBUG: Dump raw VRAM to binary file at frames 5, 7 to capture
-  // before/after the problematic Frame 6 DMA
+  // TEMP DEBUG: Dump raw VRAM to binary file at frames 5, 7, 60 to capture
+  // before/after the problematic Frame 6 DMA and during gameplay
   static bool vramDumped5 = false;
   static bool vramDumped7 = false;
+  static bool vramDumped60 = false;
   bool doDump = false;
   const char *dumpSuffix = "";
 
@@ -1971,6 +1979,10 @@ void PPU::RenderBackground(int bgIndex) {
     vramDumped7 = true;
     doDump = true;
     dumpSuffix = "_f7";
+  } else if (!vramDumped60 && frameCount >= 60 && classicNesMode) {
+    vramDumped60 = true;
+    doDump = true;
+    dumpSuffix = "_f60";
   }
 
   if (doDump) {
@@ -2243,6 +2255,18 @@ void PPU::RenderBackground(int bgIndex) {
         useHighNibble = !useHighNibble;
       }
       colorIndex = useHighNibble ? ((tileByte >> 4) & 0xF) : (tileByte & 0xF);
+      
+      // OGDK DEBUG: Trace BG0 rendering for first 3 scanlines at frame 60+
+      if (classicNesMode && bgIndex == 0 && scanline < 3 && x < 24 &&
+          frameCount >= 60 && frameCount <= 62) {
+        static int bg0PixelLogs = 0;
+        if (bg0PixelLogs < 100) {
+          bg0PixelLogs++;
+          fprintf(stderr, "[OGDK_BG0_PIX] f=%d x=%d y=%d tile=%d tileOff=0x%X byte=0x%02X ci=%d pal=%d entry=0x%04X\n",
+                  frameCount, x, scanline, tileIndex, tileOffset, tileByte, colorIndex, paletteBank, tileEntry);
+          fflush(stderr);
+        }
+      }
 
     } else {
       // 8bpp (256 colors)

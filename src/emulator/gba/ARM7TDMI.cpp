@@ -3245,6 +3245,14 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   {
     uint8_t flags = registers[0] & 0xFF;
 
+    // OGDK DEBUG: Trace RegisterRamReset calls
+    std::cout << "[OGDK_RAMRESET] RegisterRamReset flags=0x" << std::hex << (int)flags
+              << " EWRAM=" << ((flags & 0x01) ? 1 : 0)
+              << " IWRAM=" << ((flags & 0x02) ? 1 : 0)
+              << " PRAM=" << ((flags & 0x04) ? 1 : 0)
+              << " VRAM=" << ((flags & 0x08) ? 1 : 0)
+              << " OAM=" << ((flags & 0x10) ? 1 : 0) << std::dec << std::endl;
+
     // Bit 0: Clear 256K EWRAM (0x02000000-0x0203FFFF)
     if (flags & 0x01) {
       for (uint32_t addr = 0x02000000; addr < 0x02040000; addr += 4) {
@@ -3845,9 +3853,11 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint32_t header = memory.Read32(src);
     uint32_t decompSize = header >> 8;
 
-    // OG-DK: Trace LZ77 to IWRAM 0x03007400
+    // OG-DK: Trace LZ77 to IWRAM 0x03007400 or VRAM tilemaps
     const bool traceOgdk = (origDst == 0x03007400u);
-    if (traceOgdk) {
+    const bool traceVramTilemap =
+        (origDst == 0x06006800u || origDst == 0x06003200u);
+    if (traceOgdk || traceVramTilemap) {
       AIO::Emulator::Common::Logger::Instance().LogFmt(
           AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
           "LZ77 decompress src=0x%08x dst=0x%08x size=%u", src, origDst,
@@ -3927,7 +3937,7 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     }
 
     // OG-DK: Dump decompressed data around palette buffer offset
-    if (traceOgdk) {
+    if (traceOgdk || traceVramTilemap) {
       AIO::Emulator::Common::Logger::Instance().LogFmt(
           AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
           "LZ77 done, written=%u bytes. Dumping first 32 bytes:", written);
