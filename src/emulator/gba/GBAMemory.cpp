@@ -2647,12 +2647,16 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           const int priority = fullVal & 0x3;
           const int bpp = (fullVal >> 7) & 1;
           // OGDK: stderr trace for BG0CNT
-          const bool isClassicNes = gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+          const bool isClassicNes =
+              gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
           if (isClassicNes) {
-            fprintf(stderr, "[OGDK_BG0CNT] Write8 offset=0x%02x val=0x%02x full=0x%04x pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) %dbpp PC=0x%08X\n",
-                    offset, value, fullVal, priority, charBase, charBase * 0x4000,
-                    screenBase, screenBase * 0x800, bpp ? 8 : 4,
-                    cpu ? cpu->GetRegister(15) : 0);
+            fprintf(stderr,
+                    "[OGDK_BG0CNT] Write8 offset=0x%02x val=0x%02x full=0x%04x "
+                    "pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) %dbpp "
+                    "PC=0x%08X\n",
+                    offset, value, fullVal, priority, charBase,
+                    charBase * 0x4000, screenBase, screenBase * 0x800,
+                    bpp ? 8 : 4, cpu ? cpu->GetRegister(15) : 0);
             fflush(stderr);
           }
           AIO::Emulator::Common::Logger::Instance().LogFmt(
@@ -2663,7 +2667,7 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
               screenBase, cpu ? (unsigned)cpu->GetRegister(15) : 0u);
         }
       }
-      
+
       // Trace writes to BG3CNT (offset 0x0E-0x0F) for Classic NES
       if (offset == 0x0E || offset == 0x0F) {
         const bool isClassicNes =
@@ -2677,10 +2681,13 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
             const int screenBase = (fullVal >> 8) & 0x1F;
             const int priority = fullVal & 0x3;
             const int bpp = (fullVal >> 7) & 1;
-            fprintf(stderr, "[OGDK_BG3CNT] Write8 offset=0x%02x val=0x%02x full=0x%04x pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) %dbpp PC=0x%08X\n",
-                    offset, value, fullVal, priority, charBase, charBase * 0x4000,
-                    screenBase, screenBase * 0x800, bpp ? 8 : 4,
-                    cpu ? cpu->GetRegister(15) : 0);
+            fprintf(stderr,
+                    "[OGDK_BG3CNT] Write8 offset=0x%02x val=0x%02x full=0x%04x "
+                    "pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) %dbpp "
+                    "PC=0x%08X\n",
+                    offset, value, fullVal, priority, charBase,
+                    charBase * 0x4000, screenBase, screenBase * 0x800,
+                    bpp ? 8 : 4, cpu ? cpu->GetRegister(15) : 0);
             fflush(stderr);
           }
         }
@@ -3280,7 +3287,8 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     };
 
     // OGDK: Trace DISPCNT writes to see BG enables
-    const bool isClassicNesReg = gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+    const bool isClassicNesReg =
+        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
     if (isClassicNesReg && offset == IORegs::DISPCNT) {
       static int ogdkDispcntLogs = 0;
       if (ogdkDispcntLogs < 20) {
@@ -3292,7 +3300,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
         bool bg3 = (value >> 11) & 1;
         bool obj = (value >> 12) & 1;
         bool forcedBlank = (value >> 7) & 1;
-        fprintf(stderr, "[OGDK_DISPCNT] Write 0x%04X mode=%d BG0=%d BG1=%d BG2=%d BG3=%d OBJ=%d forcedBlank=%d PC=0x%08X\n",
+        fprintf(stderr,
+                "[OGDK_DISPCNT] Write 0x%04X mode=%d BG0=%d BG1=%d BG2=%d "
+                "BG3=%d OBJ=%d forcedBlank=%d PC=0x%08X\n",
                 value, mode, bg0, bg1, bg2, bg3, obj, forcedBlank,
                 cpu ? cpu->GetRegister(15) : 0);
         fflush(stderr);
@@ -3312,18 +3322,20 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     }
     // Always log BGCNT for Classic NES debugging (first 50 writes)
     static int bgcntDetailLogs = 0;
-    if (isClassicNesReg && offset >= 0x08 && offset <= 0x0E && offset % 2 == 0 &&
-        bgcntDetailLogs < 50) {
+    if (isClassicNesReg && offset >= 0x08 && offset <= 0x0E &&
+        offset % 2 == 0 && bgcntDetailLogs < 50) {
       bgcntDetailLogs++;
       int bgNum = (offset - 0x08) / 2;
       int pri = value & 0x3;
       int charBase = (value >> 2) & 0x3;
       int screenBase = (value >> 8) & 0x1F;
       int size = (value >> 14) & 0x3;
-      int bpp = (value >> 7) & 1;  // 0=4bpp, 1=8bpp
-      fprintf(stderr, "[OGDK_BGCNT] BG%d = 0x%04X pri=%d charBase=%d (0x%X) screenBase=%d (0x%X) size=%d %dbpp PC=0x%08X\n",
-              bgNum, value, pri, charBase, charBase * 0x4000,
-              screenBase, screenBase * 0x800, size, bpp ? 8 : 4,
+      int bpp = (value >> 7) & 1; // 0=4bpp, 1=8bpp
+      fprintf(stderr,
+              "[OGDK_BGCNT] BG%d = 0x%04X pri=%d charBase=%d (0x%X) "
+              "screenBase=%d (0x%X) size=%d %dbpp PC=0x%08X\n",
+              bgNum, value, pri, charBase, charBase * 0x4000, screenBase,
+              screenBase * 0x800, size, bpp ? 8 : 4,
               cpu ? cpu->GetRegister(15) : 0);
       fflush(stderr);
     }
@@ -3341,9 +3353,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       static int bg0ScrollLogs = 0;
       if (bg0ScrollLogs < 30) {
         bg0ScrollLogs++;
-        const char* which = (offset == 0x10) ? "HOFS" : "VOFS";
-        fprintf(stderr, "[OGDK_BG0_SCROLL] BG0%s = %d PC=0x%08X\n",
-                which, value & 0x1FF, cpu ? cpu->GetRegister(15) : 0);
+        const char *which = (offset == 0x10) ? "HOFS" : "VOFS";
+        fprintf(stderr, "[OGDK_BG0_SCROLL] BG0%s = %d PC=0x%08X\n", which,
+                value & 0x1FF, cpu ? cpu->GetRegister(15) : 0);
         fflush(stderr);
       }
     }
@@ -3622,21 +3634,26 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 
 void GBAMemory::Write32(uint32_t address, uint32_t value) {
   // OGDK DEBUG: Trace writes to VRAM tilemap area 0x6800-0x6FFF
-  const bool isClassicNes = gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+  const bool isClassicNes =
+      gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
   if (isClassicNes && (address & 0xFF000000u) == 0x06000000u) {
     const uint32_t vramOff = address & 0x1FFFFu;
     if (vramOff >= 0x6800u && vramOff < 0x7000u) {
       static int tilemapWriteLogs = 0;
-      // Only log writes that look like tilemap entries (small values, not code/pointers)
-      // Tilemap entries are 16-bit: tile# (0-1023) + flags. So 32-bit value would be two entries.
-      // Max tile# = 0x3FF, so valid tilemap 32-bit value would be <= 0x0FFF0FFF roughly
-      bool looksLikeTilemap = (value & 0xF000F000u) == 0; // Both entries have tile# < 4096
+      // Only log writes that look like tilemap entries (small values, not
+      // code/pointers) Tilemap entries are 16-bit: tile# (0-1023) + flags. So
+      // 32-bit value would be two entries. Max tile# = 0x3FF, so valid tilemap
+      // 32-bit value would be <= 0x0FFF0FFF roughly
+      bool looksLikeTilemap =
+          (value & 0xF000F000u) == 0; // Both entries have tile# < 4096
       if (tilemapWriteLogs < 200 || looksLikeTilemap) {
         tilemapWriteLogs++;
         const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
         if (looksLikeTilemap || tilemapWriteLogs <= 20) {
-          fprintf(stderr, "[OGDK_TILEMAP_W32] vramOff=0x%X val=0x%08X %s PC=0x%08X\n",
-                  vramOff, value, looksLikeTilemap ? "[VALID?]" : "[garbage]", pc);
+          fprintf(stderr,
+                  "[OGDK_TILEMAP_W32] vramOff=0x%X val=0x%08X %s PC=0x%08X\n",
+                  vramOff, value, looksLikeTilemap ? "[VALID?]" : "[garbage]",
+                  pc);
           fflush(stderr);
         }
       }
@@ -4240,10 +4257,13 @@ void GBAMemory::PerformDMA(int channel) {
       static int dmaVramTrace = 0;
       if (dmaVramTrace < 100) {
         dmaVramTrace++;
-        fprintf(stderr, "[OGDK_DMA_TILEMAP] Frame %d DMA ch%d src=0x%08X dst=0x%08X dstOff=0x%X-0x%X count=%d 32bit=%d PC=0x%08X srcData=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
+        fprintf(stderr,
+                "[OGDK_DMA_TILEMAP] Frame %d DMA ch%d src=0x%08X dst=0x%08X "
+                "dstOff=0x%X-0x%X count=%d 32bit=%d PC=0x%08X "
+                "srcData=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
                 frame, channel, src, dst, dstOff, dstEnd, count, is32Bit,
-                cpu ? cpu->GetRegister(15) : 0,
-                Read32(src), Read32(src+4), Read32(src+8), Read32(src+12));
+                cpu ? cpu->GetRegister(15) : 0, Read32(src), Read32(src + 4),
+                Read32(src + 8), Read32(src + 12));
         fflush(stderr);
       }
     }

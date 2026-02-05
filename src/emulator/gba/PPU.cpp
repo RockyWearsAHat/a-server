@@ -2255,15 +2255,18 @@ void PPU::RenderBackground(int bgIndex) {
         useHighNibble = !useHighNibble;
       }
       colorIndex = useHighNibble ? ((tileByte >> 4) & 0xF) : (tileByte & 0xF);
-      
+
       // OGDK DEBUG: Trace BG0 rendering for first 3 scanlines at frame 60+
       if (classicNesMode && bgIndex == 0 && scanline < 3 && x < 24 &&
           frameCount >= 60 && frameCount <= 62) {
         static int bg0PixelLogs = 0;
         if (bg0PixelLogs < 100) {
           bg0PixelLogs++;
-          fprintf(stderr, "[OGDK_BG0_PIX] f=%d x=%d y=%d tile=%d tileOff=0x%X byte=0x%02X ci=%d pal=%d entry=0x%04X\n",
-                  frameCount, x, scanline, tileIndex, tileOffset, tileByte, colorIndex, paletteBank, tileEntry);
+          fprintf(stderr,
+                  "[OGDK_BG0_PIX] f=%d x=%d y=%d tile=%d tileOff=0x%X "
+                  "byte=0x%02X ci=%d pal=%d entry=0x%04X\n",
+                  frameCount, x, scanline, tileIndex, tileOffset, tileByte,
+                  colorIndex, paletteBank, tileEntry);
           fflush(stderr);
         }
       }

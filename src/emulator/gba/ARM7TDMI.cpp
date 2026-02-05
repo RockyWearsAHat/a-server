@@ -3246,8 +3246,8 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint8_t flags = registers[0] & 0xFF;
 
     // OGDK DEBUG: Trace RegisterRamReset calls
-    std::cout << "[OGDK_RAMRESET] RegisterRamReset flags=0x" << std::hex << (int)flags
-              << " EWRAM=" << ((flags & 0x01) ? 1 : 0)
+    std::cout << "[OGDK_RAMRESET] RegisterRamReset flags=0x" << std::hex
+              << (int)flags << " EWRAM=" << ((flags & 0x01) ? 1 : 0)
               << " IWRAM=" << ((flags & 0x02) ? 1 : 0)
               << " PRAM=" << ((flags & 0x04) ? 1 : 0)
               << " VRAM=" << ((flags & 0x08) ? 1 : 0)
