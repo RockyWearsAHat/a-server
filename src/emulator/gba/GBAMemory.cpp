@@ -1479,7 +1479,28 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   }
   case 0x03: // WRAM (Chip) (GBATEK: 0x03000000-0x03007FFF)
     if (IsIwramMappedAddress(address)) {
-      return wram_chip[address & MemoryMap::WRAM_CHIP_MASK];
+      const uint32_t offset = address & MemoryMap::WRAM_CHIP_MASK;
+      const uint8_t val = wram_chip[offset];
+      
+      // OGDK DEBUG: Trace ALL reads from pointer table region
+      const bool isClassicNesR8 =
+          gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+      if (isClassicNesR8 && offset >= 0x5A00u && offset < 0x6000u) {
+        static int ptrTblReadLogs = 0;
+        const int frame = ppu ? ppu->GetFrameCount() : -1;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        // Log ALL reads from pointer table region
+        if (ptrTblReadLogs < 100) {
+          ptrTblReadLogs++;
+          fprintf(stderr,
+                  "[OGDK_PTRTBL_R8] Frame %d iwramOff=0x%04X val=0x%02X "
+                  "PC=0x%08X\n",
+                  frame, offset, val, pc);
+          fflush(stderr);
+        }
+      }
+      
+      return val;
     }
     return 0;
   case 0x04: // IO Registers (GBATEK: 0x04000000-0x040003FF)
@@ -2525,6 +2546,56 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
       break;
     }
     const uint32_t offset = address & 0x7FFFu;
+    
+    // OGDK DEBUG: Trace writes to offset 0x1E5E (the corruption source)
+    const bool isClassicNes8 =
+        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+    if (isClassicNes8 && offset >= 0x1E5Cu && offset < 0x1E64u) {
+      static int corruptSrcLogs = 0;
+      const int frame = ppu ? ppu->GetFrameCount() : -1;
+      if (corruptSrcLogs < 50) {
+        corruptSrcLogs++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        fprintf(stderr,
+                "[OGDK_CORRUPT_SRC] Frame %d iwramOff=0x%04X val=0x%02X "
+                "PC=0x%08X oldVal=0x%02X\n",
+                frame, offset, value, pc, wram_chip[offset]);
+        fflush(stderr);
+      }
+    }
+    
+    // OGDK DEBUG: Trace Write8 to first 4 bytes of Buffer B (0x1000-0x1003)
+    // This is where pointer values appear: 0x03005A1A = bytes 0x1A, 0x5A, 0x00, 0x03
+    if (isClassicNes8 && offset >= 0x1000u && offset < 0x1004u) {
+      static int bufBFirstBytesLogs = 0;
+      const int frame = ppu ? ppu->GetFrameCount() : -1;
+      if (bufBFirstBytesLogs < 100 && frame <= 1) {
+        bufBFirstBytesLogs++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        const uint32_t srcAddr = cpu ? (uint32_t)cpu->GetRegister(9) : 0;
+        fprintf(stderr,
+                "[OGDK_BUFB_1000] Frame %d off=0x%04X val=0x%02X PC=0x%08X "
+                "srcR9=0x%08X oldVal=0x%02X\n",
+                frame, offset, value, pc, srcAddr, wram_chip[offset]);
+        fflush(stderr);
+      }
+    }
+    
+    // OGDK DEBUG: Trace writes to Buffer A offset 0xE5C-0xE63 (the source of corruption)
+    if (isClassicNes8 && offset >= 0xE5Cu && offset < 0xE64u) {
+      static int bufACorruptLogs = 0;
+      const int frame = ppu ? ppu->GetFrameCount() : -1;
+      if (bufACorruptLogs < 200) {
+        bufACorruptLogs++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        fprintf(stderr,
+                "[OGDK_BUFA_CORRUPT_W8] Frame %d iwramOff=0x%04X val=0x%02X "
+                "PC=0x%08X oldVal=0x%02X\n",
+                frame, offset, value, pc, wram_chip[offset]);
+        fflush(stderr);
+      }
+    }
+    
     wram_chip[offset] = value;
     break;
   }
@@ -3072,6 +3143,41 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 }
 
 void GBAMemory::Write16(uint32_t address, uint16_t value) {
+  // OGDK: Trace writes to IWRAM 0x03001000 buffer region (NES frame buffer)
+  const bool isClassicNes16 =
+      gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+  if (isClassicNes16 && (address & 0xFF000000u) == 0x03000000u) {
+    const uint32_t iwramOff = address & 0x7FFFu;
+    // Trace writes to Buffer B (0x03001000-0x03002000) in early frames
+    if (iwramOff >= 0x1000u && iwramOff < 0x1010u) {
+      static int bufBWriteLogs = 0;
+      const int frame = ppu ? ppu->GetFrameCount() : -1;
+      if (bufBWriteLogs < 100 && frame < 5) {
+        bufBWriteLogs++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        fprintf(stderr,
+                "[OGDK_BUFB_W16] Frame %d iwramOff=0x%04X val=0x%04X "
+                "PC=0x%08X\n",
+                frame, iwramOff, value, pc);
+        fflush(stderr);
+      }
+    }
+    // Also trace writes to pointer table region
+    if (iwramOff >= 0x5A00u && iwramOff < 0x5B00u) {
+      static int ptrTable16Logs = 0;
+      if (ptrTable16Logs < 50) {
+        ptrTable16Logs++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        const int frame = ppu ? ppu->GetFrameCount() : -1;
+        fprintf(stderr,
+                "[OGDK_PTRTBL_W16] Frame %d iwramOff=0x%04X val=0x%04X "
+                "PC=0x%08X\n",
+                frame, iwramOff, value, pc);
+        fflush(stderr);
+      }
+    }
+  }
+
   // DKC black-screen investigation: trace writes to the polled wait flag.
   // Enable with: AIO_TRACE_DKC_WAITFLAG=1
   if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu &&
@@ -3633,9 +3739,46 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 }
 
 void GBAMemory::Write32(uint32_t address, uint32_t value) {
-  // OGDK DEBUG: Trace writes to VRAM tilemap area 0x6800-0x6FFF
+  // Global sequence counter for tracing order of operations
+  static int globalSeq = 0;
+  
+  // OGDK DEBUG: Trace writes to IWRAM Buffer B region 0x03001000
   const bool isClassicNes =
       gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+  if (isClassicNes && (address & 0xFF000000u) == 0x03000000u) {
+    const uint32_t iwramOff = address & 0x7FFFu;
+    // Trace writes to Buffer B - always in early startup
+    if (iwramOff >= 0x1000u && iwramOff < 0x2000u) {
+      static int bufBWrite32Logs = 0;
+      const int frame = ppu ? ppu->GetFrameCount() : -1;
+      if (bufBWrite32Logs < 500) {
+        bufBWrite32Logs++;
+        globalSeq++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        fprintf(stderr,
+                "[OGDK_BUFB_W32] SEQ=%d Frame %d iwramOff=0x%04X val=0x%08X "
+                "PC=0x%08X\n",
+                globalSeq, frame, iwramOff, value, pc);
+        fflush(stderr);
+      }
+    }
+    // Trace writes to pointer table region
+    if (iwramOff >= 0x5A00u && iwramOff < 0x5B00u) {
+      static int ptrTableLogs = 0;
+      if (ptrTableLogs < 100) {
+        ptrTableLogs++;
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0;
+        const int frame = ppu ? ppu->GetFrameCount() : -1;
+        fprintf(stderr,
+                "[OGDK_PTRTBL_W32] Frame %d iwramOff=0x%04X val=0x%08X "
+                "PC=0x%08X\n",
+                frame, iwramOff, value, pc);
+        fflush(stderr);
+      }
+    }
+  }
+
+  // OGDK DEBUG: Trace writes to VRAM tilemap area 0x6800-0x6FFF
   if (isClassicNes && (address & 0xFF000000u) == 0x06000000u) {
     const uint32_t vramOff = address & 0x1FFFFu;
     if (vramOff >= 0x6800u && vramOff < 0x7000u) {
@@ -4165,6 +4308,27 @@ void GBAMemory::PerformDMA(int channel) {
   static bool inImmediateDMA = false; // Only guard immediate DMAs
   dmaSeq++;
 
+  // OGDK DEBUG: Log ALL DMAs to understand timing
+  const bool isClassicNesAll =
+      gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+  const int frameAll = ppu ? ppu->GetFrameCount() : -1;
+  if (isClassicNesAll && dmaSeq < 50 && frameAll <= 10) {
+    uint32_t baseOff = IORegs::DMA0SAD + (channel * IORegs::DMA_CHANNEL_SIZE);
+    uint32_t srcAll = io_regs[baseOff] | (io_regs[baseOff + 1] << 8) |
+                      (io_regs[baseOff + 2] << 16) | (io_regs[baseOff + 3] << 24);
+    uint32_t dstAll = io_regs[baseOff + 4] | (io_regs[baseOff + 5] << 8) |
+                      (io_regs[baseOff + 6] << 16) | (io_regs[baseOff + 7] << 24);
+    uint32_t cntAll = io_regs[baseOff + 8] | (io_regs[baseOff + 9] << 8);
+    uint16_t cntH = io_regs[baseOff + 10] | (io_regs[baseOff + 11] << 8);
+    int timingMode = (cntH >> 12) & 3;
+    const char* timingStr = timingMode == 0 ? "IMMEDIATE" : 
+                            timingMode == 1 ? "VBLANK" :
+                            timingMode == 2 ? "HBLANK" : "SPECIAL";
+    fprintf(stderr, "[OGDK_DMA_TIMING] DmaSeq=%d Frame %d ch%d src=0x%08X dst=0x%08X cnt=%d timing=%d(%s)\n",
+            dmaSeq, frameAll, channel, srcAll, dstAll, cntAll, timingMode, timingStr);
+    fflush(stderr);
+  }
+
   if (dmaInProgress) {
     return;
   }
@@ -4249,6 +4413,70 @@ void GBAMemory::PerformDMA(int channel) {
   // Classic NES: Trace ALL DMA to VRAM to find where tilemap data comes from
   const bool isClassicNesDma =
       gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+
+  // Classic NES: Trace DMAs to IWRAM buffer B at 0x03001000
+  if (isClassicNesDma && (dst & 0xFF000000) == 0x03000000) {
+    uint32_t dstOff = dst & 0x7FFF;
+    if (dstOff >= 0x1000 && dstOff < 0x2000) {
+      static int dmaBufBTrace = 0;
+      if (dmaBufBTrace < 50) {
+        dmaBufBTrace++;
+        fprintf(stderr,
+                "[OGDK_DMA_TO_BUFB] Frame %d DMA ch%d src=0x%08X dst=0x%08X "
+                "dstOff=0x%X count=%d 32bit=%d PC=0x%08X "
+                "srcData=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
+                frame, channel, src, dst, dstOff, count, is32Bit,
+                cpu ? cpu->GetRegister(15) : 0, Read32(src), Read32(src + 4),
+                Read32(src + 8), Read32(src + 12));
+        fflush(stderr);
+      }
+    }
+  }
+
+  // Classic NES: Trace ALL DMAs to IWRAM to understand data flow
+  if (isClassicNesDma && (dst & 0xFF000000) == 0x03000000) {
+    uint32_t dstOff = dst & 0x7FFF;
+    static int dmaIwramAnyTrace = 0;
+    const bool fromROM = (src >= 0x08000000 && src < 0x0E000000);
+    // Trace ALL DMAs to 0x03001000 region, or any DMA from ROM
+    if (dmaIwramAnyTrace < 200 && (dstOff >= 0x1000 && dstOff < 0x2000 || fromROM)) {
+      dmaIwramAnyTrace++;
+      fprintf(stderr,
+              "[OGDK_DMA_IWRAM_ANY] DmaSeq=%d Frame %d DMA ch%d src=0x%08X%s dst=0x%08X "
+              "dstOff=0x%X count=%d 32bit=%d PC=0x%08X\n",
+              dmaSeq, frame, channel, src, fromROM ? " (ROM)" : "", dst, dstOff, count,
+              is32Bit, cpu ? cpu->GetRegister(15) : 0);
+      fflush(stderr);
+    }
+  }
+
+  // Classic NES: Trace DMAs targeting the IWRAM buffer region at 0x03000000
+  if (isClassicNesDma && (dst & 0xFF000000) == 0x03000000) {
+    uint32_t dstOff = dst & 0x7FFF;
+    if (dstOff < 0x2000) {
+      static int dmaIwramTrace = 0;
+      if (dmaIwramTrace < 100) {
+        dmaIwramTrace++;
+        // Read actual io_regs SAD to compare with internal
+        uint32_t ioSad = io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8) |
+                         (io_regs[baseOffset + 2] << 16) | (io_regs[baseOffset + 3] << 24);
+        // Show what's at Buffer A 0xE5E and Buffer B 0xE5E BEFORE this DMA
+        uint32_t bufA_E5E = wram_chip[0xE5E] | (wram_chip[0xE5F] << 8) |
+                           (wram_chip[0xE60] << 16) | (wram_chip[0xE61] << 24);
+        uint32_t bufB_E5E = wram_chip[0x1E5E] | (wram_chip[0x1E5F] << 8) |
+                           (wram_chip[0x1E60] << 16) | (wram_chip[0x1E61] << 24);
+        fprintf(stderr,
+                "[OGDK_DMA_IWRAM] DmaSeq=%d Frame %d ch%d "
+                "src=0x%08X dst=0x%08X count=%d "
+                "BufA@E5E=0x%08X BufB@E5E=0x%08X "
+                "srcData[0]=0x%08X\n",
+                dmaSeq, frame, channel, src, dst, count,
+                bufA_E5E, bufB_E5E, Read32(src));
+        fflush(stderr);
+      }
+    }
+  }
+
   if (isClassicNesDma && (dst & 0xFF000000) == 0x06000000) {
     uint32_t dstOff = dst & 0x1FFFF;
     uint32_t dstEnd = dstOff + (count * (is32Bit ? 4 : 2));

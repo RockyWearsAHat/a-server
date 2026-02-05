@@ -488,10 +488,17 @@ int GBA::Step() {
   // When CPU is halted, fast-forward time so PPU/timers can reach VBlank/IRQs.
   int totalCycles = cpuCycles + dmaCycles + hleCycles;
 
-  int peripheralCycles = cpuCycles + hleCycles;
+  // HLE helpers already advanced timers/PPU/APU via AdvanceHLECycles(), so do
+  // not add hleCycles to the pending peripheral budget or we will double-step
+  // the display pipeline (Classic NES would hit VBlank far too early).
+  int peripheralCycles = cpuCycles;
   if (cpu->IsHalted()) {
     totalCycles = 1232;
     peripheralCycles = totalCycles;
+  }
+
+  if (hleCycles > 0) {
+    cpu->PollInterrupts();
   }
 
   uint32_t currPc = cpu->GetRegister(15);

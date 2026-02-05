@@ -215,6 +215,13 @@ private:
   uint32_t dmaInternalDst[4] = {0};
   bool dmaInProgress = false;
 
+  // Pending immediate DMA tracking for correct channel priority ordering.
+  // On real hardware, when multiple immediate DMAs are triggered in quick
+  // succession, lower channel numbers have priority (DMA0 > DMA1 > DMA2 > DMA3).
+  // Games like Classic NES Series rely on this for double-buffer schemes.
+  bool dmaPending[4] = {false, false, false, false};
+  void FlushPendingImmediateDMAs();
+
   // Flash State
   int flashState = 0;   // 0=Idle, 1=Cmd1(AA), 2=Cmd2(55), 3=ID Mode
   int flashCmd = 0;     // Current Flash Command

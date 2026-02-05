@@ -5,9 +5,9 @@ description: "Instructions for visual development testing - capturing A/V output
 
 # Visual Development Testing Instructions
 
-## 🚨 CRITICAL: AGENT CANNOT VIEW IMAGES OR VIDEO
+## 🚨 CRITICAL: AGENT MAY VIEW IMAGES OR VIDEO, BUT IF YOU CANNOT ADD IT TO YOUR CONTEXT YOU CAN COMPARE STATES FROM USER'S REQUEST START TO CURRENT STATE OR OUTPUT AN IMAGE IN TEXT FORM IN THE CONSOLE SO YOU CAN EXAMINE IF IT "LOOKS" LIKE IT SHOULD.
 
-**AI agents CANNOT see, view, or analyze:**
+**AI agents MAY BE ABLE TO see, view, or analyze:**
 
 - MP4 video files
 - PNG/PPM image files
@@ -15,7 +15,7 @@ description: "Instructions for visual development testing - capturing A/V output
 
 When you run `open /tmp/file.mp4`, it opens on the USER'S screen. The agent has NO WAY to see or evaluate the contents. **Do not pretend to have verified visual output.**
 
-## What Agents CAN Do (Automated Verification)
+## What Agents CAN ABSOLUTLEY Do (Automated Verification)
 
 1. **Check files exist and have non-zero size**
 2. **Use ffprobe/ffmpeg to get metadata** (duration, dimensions, audio levels)
@@ -24,21 +24,29 @@ When you run `open /tmp/file.mp4`, it opens on the USER'S screen. The agent has 
 5. **Run unit tests** that verify specific rendering behaviors
 6. **Ask the user** to verify visual output
 
-## What Agents CANNOT Do
+If these are better steps than opening the file for the user to view, please use these over user dependent steps.
+
+## What Agents MAY NOT BE ABLE TO DO
 
 1. ❌ Look at an image and say "this looks correct"
 2. ❌ Watch a video and describe what's shown
 3. ❌ Verify that rendered output matches expected game graphics
 4. ❌ Determine if tiles are "scrambled" vs "correct" by viewing
 
+## What Agents CAN ABSOLUTLEY & PROGRAMATICALLY DO
+
+1. ✅ Generate the output files (video/image)
+2. ✅ Run automated sanity checks (file size, duration, not-all-black)
+3. ✅ Compare states of new and old images, print image output in console, or if no other verification method will ensure correctness, open & ask the user to verify visually
+4. ✅ Iterate based on user feedback (if available & output was shown to the user) or iterate based upon the expected output the user has specified in their request and the analyzed state of the dump/image
+
 ## Proper Workflow for Visual Changes
 
 1. **Make code changes**
 2. **Run unit tests** - these CAN be verified by the agent
-3. **Generate A/V output** for the user to review
-4. **Run automated sanity checks** (file size, duration, not-all-black)
-5. **Ask the user**: "I've generated /tmp/output.mp4 - please check if this looks correct"
-6. **Wait for user feedback** before concluding the fix works
+3. **Generate A/V output** for review by yourself through visual examination and adding the output to the context for the agent to analyze or by using automated checks to verify the output is correct without needing to see it (e.g. output colors as characters to terminal and read terminal)
+4. **Analyze**: Please avoid things like "I've generated /tmp/output.mp4 - please check if this looks correct", add it to your context OR if you can run automated analysis inside of the terminal so that you can see what the image "looks" like visually without needing to open it
+5. **Wait for user feedback OR ENSURE PROPER BEHAVIOR** before concluding that the fix works
 
 ---
 
