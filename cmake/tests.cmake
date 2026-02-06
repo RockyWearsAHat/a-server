@@ -258,3 +258,19 @@ if(EXISTS "${PROJECT_ROOT}/tests/AudioCorruptionTests.cpp")
     DISCOVERY_MODE PRE_TEST
   )
 endif()
+
+# DMA timing wait state tests
+if(EXISTS "${PROJECT_ROOT}/tests/DMATimingTests.cpp")
+  add_executable(DMATimingTests ${PROJECT_ROOT}/tests/DMATimingTests.cpp)
+  set_target_properties(DMATimingTests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DMATimingTests"
+  )
+  target_link_libraries(DMATimingTests PRIVATE GTest::gtest_main)
+
+  gtest_discover_tests(DMATimingTests
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    TEST_DISCOVERY_TIMEOUT 60
+    DISCOVERY_MODE PRE_TEST
+  )
+endif()

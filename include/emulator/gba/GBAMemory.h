@@ -102,6 +102,11 @@ public:
     graphicsWriteContext = context;
   }
 
+  // Check if this is a Classic NES Series game (game code starts with "FD")
+  bool IsClassicNES() const {
+    return gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
+  }
+
   void PerformDMA(int channel);
   void CheckDMA(int timing);
   void UpdateTimers(int cycles);

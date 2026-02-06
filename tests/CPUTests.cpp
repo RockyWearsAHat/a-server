@@ -5631,3 +5631,53 @@ TEST_F(CPUTest, SWI_UnimplementedHandler) {
   // Should not crash - R0 unchanged by unimplemented handler
   EXPECT_EQ(cpu.GetRegister(0), 0xDEADBEEFu);
 }
+
+// === Classic NES Pipeline Self-Modifying Code Test ===
+// This tests the ARM7TDMI 3-stage pipeline behavior that Classic NES games
+// rely on for anti-emulation protection.
+// Reference: docs/research/classic-nes-series-emulation.md
+
+TEST_F(CPUTest, Pipeline_SelfModifyingCode_ClassicNES) {
+  // Classic NES Metroid anti-emulation test sequence:
+  // 06000260:  E3A01000     mov r1, #0
+  // 06000264:  E28FE008     add lr, pc, #8       ; lr = 0x264+8+8 = 0x274
+  // 06000268:  E51F0010     ldr r0, [$06000260]  ; r0 = 0xE3A01000
+  // 0600026C:  E58E0000     str r0, [lr, #0]     ; Writes to 0x274
+  // 06000270:  E3A010FF     mov r1, #255
+  // 06000274:  E3A010FF     mov r1, #255         ; Gets overwritten!
+  //
+  // With correct 3-stage pipeline: r1 = 255 (old instruction was prefetched)
+  // With wrong pipeline: r1 = 0 (modified instruction is fetched)
+
+  // Use VRAM region (0x06000000) since Classic NES games execute code there
+  const uint32_t base = 0x06000260;
+
+  // Write the test sequence to VRAM
+  memory.Write32(base + 0x00, 0xE3A01000); // mov r1, #0
+  memory.Write32(base + 0x04, 0xE28FE008); // add lr, pc, #8
+  memory.Write32(base + 0x08, 0xE51F0010); // ldr r0, [$06000260]
+  memory.Write32(base + 0x0C, 0xE58E0000); // str r0, [lr, #0]
+  memory.Write32(base + 0x10, 0xE3A010FF); // mov r1, #255
+  memory.Write32(base + 0x14, 0xE3A010FF); // mov r1, #255 (will be overwritten)
+
+  // Set PC to start of sequence and ensure ARM mode
+  cpu.SetRegister(15, base);
+  cpu.SetCPSR(cpu.GetCPSR() & ~0x20); // Clear Thumb bit
+  cpu.FlushPipeline();
+
+  // Execute all 6 instructions
+  for (int i = 0; i < 6; ++i) {
+    cpu.Step();
+  }
+
+  // On correct ARM7TDMI emulation with 3-stage pipeline:
+  // When STR at 0x26C executes, the instruction at 0x274 is already in the
+  // prefetch buffer. So the old "mov r1, #255" executes, giving r1 = 255.
+  //
+  // On broken emulators with 2-stage or no pipeline:
+  // The modified instruction "mov r1, #0" (from 0x260) is fetched, giving r1 =
+  // 0.
+  EXPECT_EQ(cpu.GetRegister(1), 255u)
+      << "Pipeline depth test failed: Classic NES games expect the old "
+         "instruction to be prefetched before self-modifying code completes.";
+}

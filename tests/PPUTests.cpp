@@ -1225,12 +1225,14 @@ TEST(PPUTest, TextBg_ScreenSize3_UsesCorrectHorizontalScreenBlock) {
 // ============================================================================
 // Per PPU analysis: Classic NES games store all 4 NES BG palettes in GBA
 // palette bank 0. Each NES palette has 4 colors at indices 8 + nesPal*4.
-// The tilemap's palette bank field (bits 12-13) selects the NES sub-palette.
+// The tilemap's palette bits 12-13 select the NES sub-palette.
 // Formula: effectiveIndex = 8 + (palBank & 3) * 4 + colorIndex
 
 TEST(PPUTest, ClassicNesMode_ColorIndexRemapping) {
-  // Classic NES games store palette colors at indices 9-14.
-  // Color indices 1-6 are remapped by adding 8.
+  // Classic NES mode uses:
+  // - Standard GBA tilemap format (16-bit entries)
+  // - NES 2bpp planar tile data format
+  // - Color remapping: index = 8 + paletteBank*4 + colorIndex
   GBAMemory mem;
   mem.Reset();
   PPU ppu(mem);
@@ -1239,27 +1241,34 @@ TEST(PPUTest, ClassicNesMode_ColorIndexRemapping) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u); // backdrop black
-  // Put red at bank 0, index 9 (remapped location for colorIndex 1)
+  // Put red at palette index 9 (8 + 0*4 + 1)
   mem.Write16(0x05000000u + 9 * 2, 0x001Fu); // Index 9 = red
 
-  mem.Write16(0x04000008u, 0x0000u);
-  mem.Write16(0x06000000u, 0x0001u | (0u << 12)); // tile 1, paletteBank=0
+  // BG0CNT: charBase=1 (0x04), screenBase=13 (0x0D)
+  mem.Write16(0x04000008u, 0x0D04u);
 
-  const uint32_t tile1 = 0x06000000u + 1u * 32u;
-  mem.Write16(tile1 + 0u, 0x0001u); // colorIndex 1
-  mem.Write16(tile1 + 2u, 0x0000u);
+  // Standard GBA tilemap: 16-bit entry with tile=1, palette=0
+  const uint32_t mapBase = 0x06006800u;
+  mem.Write16(mapBase, 0x0001u); // tile 1, palette 0
+
+  // NES 2bpp tile 1 at charBase 1 (0x06004000)
+  const uint32_t tile1 = 0x06004000u + 1u * 32u;
+  // colorIndex 1 at pixel 0: plane0 bit 7 = 1, plane1 bit 7 = 0
+  mem.Write8(tile1 + 0u, 0x80u); // plane0: bit 7 = 1
+  mem.Write8(tile1 + 8u, 0x00u); // plane1: bit 7 = 0
 
   mem.Write16(0x04000000u, 0x0100u);
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 1 remaps to index 9 (1+8) -> red
+  // colorIndex 1 remaps to index 9 (8 + 0*4 + 1) -> red
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x001Fu));
 }
 
-TEST(PPUTest, ClassicNesMode_UsesPaletteBank0ForAllTiles) {
-  // Classic NES games store all palette colors in bank 0 (indices 8+).
-  // The tilemap's palette bank field is ignored - we always use bank 0.
+TEST(PPUTest, ClassicNesMode_UsesTilemapSubPaletteBits) {
+  // Classic NES mode uses standard GBA tilemap with palette bits (12-15).
+  // Tile data is NES 2bpp planar format.
+  // Final palette index = 8 + (paletteBank & 0x3)*4 + colorIndex
   GBAMemory mem;
   mem.Reset();
   PPU ppu(mem);
@@ -1268,28 +1277,36 @@ TEST(PPUTest, ClassicNesMode_UsesPaletteBank0ForAllTiles) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u); // backdrop black
-  // Put green at bank 0, index 11 (remapped location for colorIndex 3)
-  mem.Write16(0x05000000u + (0 * 32) + (11 * 2),
-              0x03E0u); // Bank 0, index 11 = green
+  // palette 0, colorIndex 3: index 11 (8+0*4+3) = green
+  // palette 1, colorIndex 3: index 15 (8+1*4+3) = blue
+  mem.Write16(0x05000000u + 11 * 2, 0x03E0u); // green at index 11
+  mem.Write16(0x05000000u + 15 * 2, 0x7C00u); // blue at index 15
 
-  mem.Write16(0x04000008u, 0x0000u);
-  // Even with paletteBank=5 in tilemap, Classic NES uses bank 0
-  mem.Write16(0x06000000u, 0x0001u | (5u << 12)); // tile 1, paletteBank=5
+  // BG0CNT: charBase=1 (0x04), screenBase=13 (0x0D)
+  mem.Write16(0x04000008u, 0x0D04u);
 
-  const uint32_t tile1 = 0x06000000u + 1u * 32u;
-  mem.Write16(tile1 + 0u, 0x0003u); // colorIndex 3
-  mem.Write16(tile1 + 2u, 0x0000u);
+  const uint32_t mapBase = 0x06006800u;
+  // Standard GBA tilemap: tile 1 with palette 1 (bits 12-15 = 1)
+  mem.Write16(mapBase, 0x1001u); // tile 1, palette 1
+
+  // NES 2bpp tile 1 at charBase 1 (0x06004000)
+  const uint32_t tile1 = 0x06004000u + 1u * 32u;
+  // colorIndex 3 at pixel 0: plane0 bit7=1, plane1 bit7=1
+  mem.Write8(tile1 + 0u, 0x80u); // plane0: bit 7 = 1
+  mem.Write8(tile1 + 8u, 0x80u); // plane1: bit 7 = 1 → colorIndex = 3
 
   mem.Write16(0x04000000u, 0x0100u);
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 3 remaps to index 11, bank is forced to 0 -> green
-  EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x03E0u));
+  // colorIndex 3, palette 1 -> index 15 (8 + 1*4 + 3) → blue
+  EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x7C00u));
 }
 
-TEST(PPUTest, ClassicNesMode_ColorIndex7_StandardLookup) {
-  // Classic NES mode uses standard palette lookups (no special handling)
+TEST(PPUTest, ClassicNesMode_ColorIndex0_UsesBackgroundColor) {
+  // Classic NES mode: color index 0 maps to palette index 8 + pal*4 + 0.
+  // Unlike normal GBA where colorIndex 0 is transparent, Classic NES
+  // remaps it to the sub-palette's first entry.
   GBAMemory mem;
   mem.Reset();
   PPU ppu(mem);
@@ -1298,21 +1315,26 @@ TEST(PPUTest, ClassicNesMode_ColorIndex7_StandardLookup) {
   mem.Write16(0x04000000u, 0x0080u);
 
   mem.Write16(0x05000000u, 0x0000u);
-  // Put blue at bank 0 index 7
-  mem.Write16(0x05000000u + 7 * 2, 0x7C00u); // Index 7 = blue
+  // Put blue at palette index 8 (8 + 0*4 + 0)
+  mem.Write16(0x05000000u + 8 * 2, 0x7C00u); // Index 8 = blue
 
-  mem.Write16(0x04000008u, 0x0000u);
-  mem.Write16(0x06000000u, 0x0001u | (0u << 12)); // paletteBank=0
+  // BG0CNT: charBase=1 (0x04), screenBase=13 (0x0D)
+  mem.Write16(0x04000008u, 0x0D04u);
 
-  const uint32_t tile1 = 0x06000000u + 1u * 32u;
-  mem.Write16(tile1 + 0u, 0x0007u); // colorIndex 7
-  mem.Write16(tile1 + 2u, 0x0000u);
+  const uint32_t mapBase = 0x06006800u;
+  // Standard GBA tilemap: tile 1, palette 0
+  mem.Write16(mapBase, 0x0001u);
+
+  // NES 2bpp tile 1: colorIndex 0 (both planes = 0)
+  const uint32_t tile1 = 0x06004000u + 1u * 32u;
+  mem.Write8(tile1 + 0u, 0x00u); // plane0: bit 7 = 0
+  mem.Write8(tile1 + 8u, 0x00u); // plane1: bit 7 = 0 → colorIndex = 0
 
   mem.Write16(0x04000000u, 0x0100u);
   ppu.Update(960);
   ppu.SwapBuffers();
 
-  // colorIndex 7 maps directly to bank 0 index 7 -> blue
+  // colorIndex 0 maps to index 8 (8 + 0*4 + 0) → blue
   EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x7C00u));
 }
 
@@ -1424,8 +1446,8 @@ TEST(PPUTest, TextBg_ScrollY_WrapsAt512ForSize3) {
 // overlap with the tilemap. For OG-DK: charBase=1 (0x4000), screenBase=13
 // (0x6800), 8-bit tile indices.
 TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
-  // Classic NES mode masks tile indices to 8 bits to prevent VRAM overlap
-  // This is the ONLY special handling - no palette remapping.
+  // Classic NES mode masks tile indices to 8 bits to prevent VRAM overlap.
+  // Tile data is in NES 2bpp planar format.
   GBAMemory mem;
   mem.Reset();
   PPU ppu(mem);
@@ -1434,18 +1456,20 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   mem.Write16(0x04000000u, 0x0080u); // Forced blank
 
   // Set up palette color at bank 0, index 10 (remapped location for colorIndex
-  // 2)
+  // 2) Final index = 8 + paletteBank*4 + colorIndex = 8 + 0*4 + 2 = 10
   const uint32_t palBank0 = 0x05000000u;
   mem.Write16(palBank0 + 10 * 2, 0x001Fu); // Bank 0, index 10 = red
 
   // BG0CNT: charBase=1 (0x4000), screenBase=13 (0x6800)
   mem.Write16(0x04000008u, 0x0D04u);
 
-  // Create tile 0xF7 (247) at charBase 1 (0x06004000)
+  // Create tile 0xF7 (247) at charBase 1 (0x06004000) in NES 2bpp format
   const uint32_t tileBase = 0x06004000u; // charBase 1
   const uint32_t tile247 = tileBase + 247u * 32u;
-  // Write 4bpp tile data: colorIndex 2 at pixel (0,0)
-  mem.Write8(tile247 + 0, 0x02u); // First byte: nibbles 2,0
+  // NES 2bpp: colorIndex 2 = plane0 bit 0, plane1 bit 1
+  // For pixel 0 (bit 7): plane0=0, plane1=1 → colorIndex 2
+  mem.Write8(tile247 + 0, 0x00u); // plane0: bit 7 = 0
+  mem.Write8(tile247 + 8, 0x80u); // plane1: bit 7 = 1 → colorIndex = 2
 
   // Create tilemap entry at screenBase 13 = 0x06006800
   // Use entry 0x01F7 which has tile=0x1F7 in 10-bit interpretation,
@@ -1459,7 +1483,7 @@ TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
   ppu.SwapBuffers();
 
   // With Classic NES 8-bit tile masking: tile 0xF7 is used from charBase 1
-  // colorIndex 2 remaps to palette index 10 (2+8) => red
+  // colorIndex 2 remaps to palette index 10 (8 + 0*4 + 2) => red
   uint32_t expected = TestUtil::ARGBFromBGR555(0x001Fu);
   uint32_t actual = ppu.GetFramebuffer()[0];
   EXPECT_EQ(actual, expected) << "Classic NES should use tile index 0xF7 (247) "
@@ -1618,7 +1642,7 @@ TEST(PPUTest, UnalignedIoWrite16AlignsToEvenAddress) {
   GBAMemory mem;
   mem.Reset();
 
-  mem.Write16(0x04000089u, 0x0200u); // Unaligned write to odd address
+  mem.Write16(0x04000089u, 0x0200u);           // Unaligned write to odd address
   EXPECT_EQ(mem.Read16(0x04000088u), 0x0200u); // Should read from even address
 }
 

@@ -51,7 +51,8 @@ public:
   }
   bool IsHalted() const { return halted; }
   bool IsThumbModeFlag() const { return thumbMode; }
-  void FlushPipeline();  // Invalidate prefetch (for tests with dynamic code writes)
+  void
+  FlushPipeline(); // Invalidate prefetch (for tests with dynamic code writes)
   struct CpuSnapshot {
     uint32_t registers[16];
     uint32_t cpsr;

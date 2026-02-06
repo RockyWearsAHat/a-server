@@ -244,13 +244,11 @@ bool GBA::LoadROM(const std::string &path) {
 
     Reset();
 
-    // Post-reset configuration: Apply PPU settings that would be cleared by
-    // Reset() Classic NES Series games need special palette handling
-    if (romMetadata.gameCode.size() >= 2 &&
-        romMetadata.gameCode.substr(0, 2) == "FD") {
-      std::cout << "[LoadROM] Re-applying Classic NES mode after Reset()"
-                << std::endl;
+    // Enable Classic NES mode for FD* games (Donkey Kong, etc.)
+    // These games use NES 2bpp tile format stored in GBA VRAM
+    if (memory->IsClassicNES()) {
       ppu->SetClassicNesMode(true);
+      std::cout << "[LoadROM] Enabled Classic NES mode" << std::endl;
     }
 
     std::cout << "[LoadROM] CPU Reset complete. PC=0x" << std::hex
@@ -356,12 +354,10 @@ void GBA::ConfigureBootStateFromMetadata(const ROMMetadata &metadata) {
   }
   std::cout << std::endl;
 
-  // Detect Classic NES Series games for palette workaround
-  // These games have game codes starting with "FD" (FDKE = Donkey Kong, FDME =
-  // Mario Bros, etc.)
-  if (metadata.gameCode.size() >= 2 && metadata.gameCode.substr(0, 2) == "FD") {
-    ppu->SetClassicNesMode(true);
-  }
+  // Classic NES Series games (game codes starting with "FD") use standard GBA
+  // rendering - they internally emulate an NES but output through the normal
+  // GBA PPU pipeline with standard 4bpp tiles and 2-byte tilemap entries.
+  // No special handling is needed.
 
   // Apply game-specific boot configurations based on metadata
   // No hardcoded patches - everything is derived from the ROM's actual
@@ -490,8 +486,11 @@ int GBA::Step() {
 
   int peripheralCycles = cpuCycles + hleCycles;
   if (cpu->IsHalted()) {
-    totalCycles = 1232;
-    peripheralCycles = totalCycles;
+    // OGDK FIX: Do NOT jump 1 scanline at a time. This breaks precise timing
+    // for NES emulation. Instead, let the standard cycle accumulation (or the
+    // explicit AdvanceCycles in ARM7TDMI) handle it. If we advance too fast, we
+    // miss the VBlank trigger window or race with it. totalCycles = 1232;
+    // peripheralCycles = totalCycles;
   }
 
   uint32_t currPc = cpu->GetRegister(15);

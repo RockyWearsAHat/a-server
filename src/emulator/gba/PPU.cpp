@@ -106,6 +106,8 @@ bool PpuDisableColorEffects() {
 
 bool PpuDisableBg0() { return EnvFlagCached("AIO_PPU_DISABLE_BG0"); }
 
+bool PpuDisableBg3() { return EnvFlagCached("AIO_PPU_DISABLE_BG3"); }
+
 bool PpuSwap4bppNibbles() { return EnvFlagCached("AIO_PPU_SWAP_4BPP_NIBBLES"); }
 
 bool DisableAllClassicNesHandling() {
@@ -211,7 +213,7 @@ const OamTraceConfig &GetOamTraceConfig() {
   static bool initialized = false;
   if (!initialized) {
     initialized = true;
-    cfg.enabled = EnvTruthy(std::getenv("AIO_TRACE_PPU_OAM"));
+    cfg.enabled = EnvTruthy(std::getenv("AIO_TRACE_PPU_OAM_DISABLED"));
     cfg.startFrame = EnvInt("AIO_TRACE_PPU_OAM_START", 0);
     cfg.endFrame = EnvInt("AIO_TRACE_PPU_OAM_END", -1);
     cfg.maxLines = EnvInt("AIO_TRACE_PPU_OAM_MAX", 1200);
@@ -295,6 +297,125 @@ inline uint16_t ReadBgVram16(const uint8_t *vram, size_t vramSize,
   const uint32_t o1 =
       MapBgVramOffset(offset + 1u) % static_cast<uint32_t>(vramSize);
   return (uint16_t)(vram[o0] | (vram[o1] << 8));
+}
+
+inline bool ShouldUseClassicNesTilemap(const uint8_t *vram, size_t vramSize,
+                                       uint32_t mapBaseOffset) {
+  if (!vram || vramSize == 0)
+    return false;
+  int oddZero = 0;
+  int oddTotal = 0;
+  for (int i = 0; i < 128; ++i) {
+    const uint32_t off = mapBaseOffset + static_cast<uint32_t>(i * 2 + 1);
+    const uint8_t v = ReadBgVram8(vram, vramSize, off);
+    if (v == 0)
+      oddZero++;
+    oddTotal++;
+  }
+  if (oddTotal == 0)
+    return false;
+  const float oddZeroRatio = static_cast<float>(oddZero) / oddTotal;
+  return oddZeroRatio <= 0.75f;
+}
+
+// Detect if a tilemap area looks like ARM THUMB code rather than valid tilemap
+// data. Classic NES games store executable code in upper BG VRAM, and if BG0's
+// screenBase points there, the code bytes get interpreted as garbage tilemap
+// entries. This function scans the tilemap area looking for ARM THUMB
+// instruction patterns.
+inline bool TilemapLooksLikeCode(const uint8_t *vram, size_t vramSize,
+                                 uint32_t mapBaseOffset, int numEntries = 64) {
+  if (!vram || vramSize == 0)
+    return false;
+
+  int codePatternCount = 0;
+  int totalNonZero = 0;
+
+  for (int i = 0; i < numEntries; ++i) {
+    const uint32_t off = mapBaseOffset + static_cast<uint32_t>(i * 2);
+    if (off + 1 >= vramSize)
+      break;
+
+    uint16_t entry = ReadBgVram8(vram, vramSize, off) |
+                     (ReadBgVram8(vram, vramSize, off + 1) << 8);
+
+    if (entry == 0)
+      continue;
+    totalNonZero++;
+
+    // Check for common ARM THUMB instruction patterns in high byte
+    uint8_t hi = (entry >> 8) & 0xFF;
+
+    // PUSH/POP with registers
+    if ((hi & 0xFE) == 0xB4 || (hi & 0xFE) == 0xBC) {
+      codePatternCount++;
+      continue;
+    }
+    // BX/BLX register
+    if ((hi & 0xFF) == 0x47) {
+      codePatternCount++;
+      continue;
+    }
+    // BL prefix (F0xx, F7xx, F3xx, etc.)
+    if ((hi & 0xF8) == 0xF0 || (hi & 0xF8) == 0xF8) {
+      codePatternCount++;
+      continue;
+    }
+    // LDR Rd, [PC, #imm] (literal pool load) - 0x48-0x4F
+    if ((hi & 0xF8) == 0x48) {
+      codePatternCount++;
+      continue;
+    }
+    // Conditional branches (Bcc) - 0xD0-0xDF
+    if ((hi & 0xF0) == 0xD0) {
+      codePatternCount++;
+      continue;
+    }
+    // MOV Rd, #imm - 0x20-0x27
+    if ((hi & 0xF8) == 0x20) {
+      codePatternCount++;
+      continue;
+    }
+    // CMP Rn, #imm - 0x28-0x2F
+    if ((hi & 0xF8) == 0x28) {
+      codePatternCount++;
+      continue;
+    }
+    // ADD Rd, #imm - 0x30-0x37
+    if ((hi & 0xF8) == 0x30) {
+      codePatternCount++;
+      continue;
+    }
+    // SUB Rd, #imm - 0x38-0x3F
+    if ((hi & 0xF8) == 0x38) {
+      codePatternCount++;
+      continue;
+    }
+    // LDR/STR with register offset - 0x50-0x5F
+    if ((hi & 0xF0) == 0x50) {
+      codePatternCount++;
+      continue;
+    }
+    // LDR/STR halfword - 0x80-0x8F
+    if ((hi & 0xF0) == 0x80) {
+      codePatternCount++;
+      continue;
+    }
+    // STR/LDR SP-relative - 0x90-0x9F
+    if ((hi & 0xF0) == 0x90) {
+      codePatternCount++;
+      continue;
+    }
+    // ADD PC/SP - 0xA0-0xAF (but 0xA0 is also suspicious as tilemap)
+    if ((hi & 0xF0) == 0xA0 && (hi & 0x08)) {
+      codePatternCount++;
+      continue;
+    }
+  }
+
+  // If we found at least 3 strong code patterns among non-zero entries, it's
+  // code
+  return codePatternCount >= 3;
 }
 
 } // namespace
@@ -435,9 +556,8 @@ void PPU::Update(int cycles) {
         // Swap buffers after frame completion for thread-safe display
         SwapBuffers();
 
-        // DKC diagnostic: Log DISPCNT during problem frames
-        if ((frameCount >= 2195 && frameCount <= 2205) ||
-            (frameCount >= 2400 && frameCount <= 2415)) {
+        // DKC diagnostic: Log DISPCNT periodically
+        if (frameCount % 60 == 0) {
           uint16_t dispcnt = memory.ReadIORegister16Internal(0x00);
           bool forcedBlank = (dispcnt >> 7) & 1;
           uint8_t bgMode = dispcnt & 0x7;
@@ -486,6 +606,7 @@ void PPU::Update(int cycles) {
 
         // Trigger VBlank IRQ on rising edge
         if (!wasVBlank) {
+
           // Apply any deferred palette writes now that we're in VBlank
           // This ensures palette is stable for entire previous frame
           memory.ApplyDeferredWrites();
@@ -576,7 +697,7 @@ void PPU::DrawScanline() {
   // Enable with: AIO_TRACE_PPU_FRAMESTATE=1
   if (scanline == 0) {
     static const bool traceFrameState =
-        EnvTruthy(std::getenv("AIO_TRACE_PPU_FRAMESTATE"));
+        EnvTruthy(std::getenv("AIO_TRACE_PPU_FRAMESTATE_DISABLED"));
     if (traceFrameState) {
       static bool initialized = false;
       static int startFrame = 0;
@@ -1910,11 +2031,38 @@ void PPU::RenderMode0() {
       RenderBackground(bgs[i].index);
     }
   }
+
+  // DEBUG: Log enabled BGs at frame 60 scanline 0
+  static bool mode0DebugDone = false;
+  bool bg3enabled = dispcnt & (0x100 << 3);
+  if (!mode0DebugDone && bg3enabled && scanline == 0) {
+    mode0DebugDone = true;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "MODE0_DEBUG",
+        "Frame %d scanline 0: DISPCNT=0x%04x BG0=%d BG1=%d BG2=%d BG3=%d",
+        frameCount, dispcnt, (dispcnt & 0x100) ? 1 : 0,
+        (dispcnt & 0x200) ? 1 : 0, (dispcnt & 0x400) ? 1 : 0,
+        (dispcnt & 0x800) ? 1 : 0);
+  }
 }
 
 void PPU::RenderBackground(int bgIndex) {
+  // DEBUG: Log entry into RenderBackground
+  static bool entryDebugDone[4] = {false, false, false, false};
+  if (!entryDebugDone[bgIndex]) {
+    entryDebugDone[bgIndex] = true;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "BG_ENTRY",
+        "RenderBackground called for BG%d frame=%d scanline=%d", bgIndex,
+        frameCount, scanline);
+  }
+
   // Debug: allow disabling BG0 to test if it's the source of corruption
   if (bgIndex == 0 && PpuDisableBg0()) {
+    return;
+  }
+  // Debug: allow disabling BG3 to test if it's the source of corruption
+  if (bgIndex == 3 && PpuDisableBg3()) {
     return;
   }
 
@@ -1927,8 +2075,49 @@ void PPU::RenderBackground(int bgIndex) {
 
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
 
+  // DEBUG: Log BG3CNT on first render at frame 60
+  static bool bg3DebugDone = false;
+  if (!bg3DebugDone && bgIndex == 3) {
+    bg3DebugDone = true;
+    int cb = (bgcnt >> 2) & 0x3;
+    int sb = (bgcnt >> 8) & 0x1F;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "BG3_DEBUG",
+        "Frame %d: BG3CNT=0x%04x charBase=%d screenBase=%d priority=%d",
+        frameCount, bgcnt, cb, sb, bgcnt & 0x3);
+  }
+
+  // DEBUG: Log WHICH BGs are being rendered at frame 60
+  static bool bgRenderDebugDone = false;
+  if (!bgRenderDebugDone && frameCount == 60 && scanline == 0) {
+    bgRenderDebugDone = true;
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "BG_RENDER",
+        "Frame 60: Rendering BG%d, DISPCNT=0x%04x", bgIndex, dispcnt);
+  }
+
   uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
   uint16_t bgvofs = ReadRegister(0x12 + (bgIndex * 4)) & 0x01FF;
+
+  // DEBUG: Log BG0 and BG3 scroll values to understand the vertical shift
+  static bool bg0ScrollLogged = false;
+  static bool bg3ScrollLogged = false;
+  if (!bg0ScrollLogged && bgIndex == 0 && scanline == 0 && frameCount >= 60 &&
+      classicNesMode) {
+    bg0ScrollLogged = true;
+    std::cout << "[BG0_SCROLL] Frame " << frameCount << ": BG0HOFS=" << bghofs
+              << " BG0VOFS=" << bgvofs
+              << " (screenBase=" << ((ReadRegister(0x08) >> 8) & 0x1F) << ")"
+              << std::endl;
+  }
+  if (!bg3ScrollLogged && bgIndex == 3 && scanline == 0 && frameCount >= 60 &&
+      classicNesMode) {
+    bg3ScrollLogged = true;
+    std::cout << "[BG3_SCROLL] Frame " << frameCount << ": BG3HOFS=" << bghofs
+              << " BG3VOFS=" << bgvofs
+              << " (screenBase=" << ((ReadRegister(0x0E) >> 8) & 0x1F) << ")"
+              << std::endl;
+  }
 
   const bool mosaicEnable = ((bgcnt >> 6) & 1) != 0;
   int mosaicH = 1;
@@ -1945,6 +2134,52 @@ void PPU::RenderBackground(int bgIndex) {
   int charBaseBlock = (bgcnt >> 2) & 0x3;
   int screenBaseBlock = (bgcnt >> 8) & 0x1F;
   bool is8bpp = ((bgcnt >> 7) & 1) != 0;
+
+  // Classic NES Series fix: The internal NES emulator stores executable code
+  // in upper BG VRAM. When a BG's tilemap points to this code region, the ARM
+  // THUMB instructions get interpreted as tilemap entries, causing severe
+  // graphics corruption. Detect if tilemap looks like code and skip rendering.
+  // BG3 (screenBase 4) contains the real tilemap and renders correctly.
+  const bool classicNesActive =
+      classicNesMode && !DisableAllClassicNesHandling();
+  if (classicNesActive && bgIndex == 0 && screenBaseBlock >= 12) {
+    // Check if the tilemap area actually looks like code
+    const uint8_t *vramData = memory.GetVRAMData();
+    const size_t vramSize = memory.GetVRAMSize();
+    uint32_t mapBaseOffset = screenBaseBlock * 2048;
+    bool looksLikeCode =
+        TilemapLooksLikeCode(vramData, vramSize, mapBaseOffset);
+
+    // Log scroll values for comparison with BG3 (only once)
+    static bool bg0SkipLogged = false;
+    if (!bg0SkipLogged && scanline == 0 && frameCount >= 60) {
+      bg0SkipLogged = true;
+      // Read BG0 and BG3 scroll registers for comparison
+      uint16_t bg0hofs = ReadRegister(0x10) & 0x01FF; // BG0HOFS
+      uint16_t bg0vofs = ReadRegister(0x12) & 0x01FF; // BG0VOFS
+      uint16_t bg3hofs = ReadRegister(0x1C) & 0x01FF; // BG3HOFS
+      uint16_t bg3vofs = ReadRegister(0x1E) & 0x01FF; // BG3VOFS
+      std::cout << "[SCROLL_COMPARE] BG0: HOFS=" << bg0hofs
+                << " VOFS=" << bg0vofs << " | BG3: HOFS=" << bg3hofs
+                << " VOFS=" << bg3vofs << std::endl;
+    }
+
+    // Log code detection once per session
+    static bool codeDetectionLogged = false;
+    if (!codeDetectionLogged && scanline == 0 && frameCount >= 10) {
+      codeDetectionLogged = true;
+      std::cout << "[PPU] Classic NES BG0 code detection: screenBase="
+                << screenBaseBlock << " mapOffset=0x" << std::hex
+                << mapBaseOffset << " looksLikeCode=" << std::dec
+                << looksLikeCode << std::endl;
+    }
+
+    if (looksLikeCode) {
+      // BG0 tilemap contains executable code - skip to avoid garbage rendering
+      return;
+    }
+  }
+
   // 2: 256x512 (32x64 tiles)
   // 3: 512x512 (64x64 tiles)
   int screenSize = (bgcnt >> 14) & 0x3;
@@ -2180,13 +2415,36 @@ void PPU::RenderBackground(int bgIndex) {
     int blockX = (tx >= 32) ? 1 : 0;
     int blockY = (ty >= 32) ? 1 : 0;
 
+    // DEBUG: One-time check of classicNesMode value for OG-DK
+    static bool classicNesDebugDone = false;
+    if (!classicNesDebugDone && bgIndex == 0 && scanline == 0 && x == 0 &&
+        frameCount >= 10) {
+      classicNesDebugDone = true;
+      std::cout << "[PPU_DEBUG] classicNesMode=" << classicNesMode
+                << " classicNesActive=" << classicNesActive
+                << " frame=" << frameCount << std::endl;
+    }
+
+    // DEBUG: Trace first 8 pixels of tile at frame 60
+    static bool pixelDebugDone = false;
+    if (!pixelDebugDone && bgIndex == 0 && scanline == 80 && x < 8 &&
+        frameCount == 60) {
+      if (x == 7)
+        pixelDebugDone = true;
+      std::cout << "[PIXEL_TRACE] x=" << x << " scrolledX=" << scrolledX
+                << " tx=" << tx << " inTileX=" << (scrolledX % 8)
+                << " tileBase=0x" << std::hex << tileBase << std::dec
+                << std::endl;
+    }
+
     // Wrap tile coordinates within the block
     tx &= 31;
     ty &= 31;
 
-    // Calculate block offset
-    // Standard GBA: 2048 bytes per block (32x32 tiles * 2 bytes per entry)
-    int blockSize = 2048;
+    // CRITICAL: Classic NES games store tilemaps in standard GBA 2-byte format,
+    // but render tiles using NES 2bpp (16 bytes/tile) instead of GBA 4bpp.
+    // Always use standard GBA tilemap reading (2048 bytes/block).
+    const int blockSize = 2048;
     int blockOffset = 0;
     switch (screenSize) {
     case 0: // 32x32, single block
@@ -2202,26 +2460,34 @@ void PPU::RenderBackground(int bgIndex) {
       break;
     }
 
-    // Fetch Tile Map Entry (standard GBA: 2 bytes per entry)
-    int entrySize = 2;
-    uint32_t mapAddr = mapBase + blockOffset + (ty * 32 + tx) * entrySize;
-    uint32_t mapOffset = mapAddr - 0x06000000u;
-    uint16_t tileEntry = ReadBgVram16(vramData, vramSize, mapOffset);
+    uint32_t mapAddr = 0;
+    uint32_t mapOffset = 0;
+    uint16_t tileEntry = 0;
+    int tileIndex = 0;
+    bool hFlip = false;
+    bool vFlip = false;
+    int paletteBank = 0;
+
+    // Standard GBA tilemap: 2 bytes per tile (used by ALL games)
+    const int entrySize = 2;
+    mapAddr = mapBase + blockOffset + (ty * 32 + tx) * entrySize;
+    mapOffset = mapAddr - 0x06000000u;
+    tileEntry = ReadBgVram16(vramData, vramSize, mapOffset);
 
     // Extract tile entry components (standard GBA format)
-    int tileIndex = tileEntry & 0x3FF; // 10-bit tile index
+    tileIndex = tileEntry & 0x3FF; // 10-bit tile index
+    hFlip = (tileEntry >> 10) & 1;
+    vFlip = (tileEntry >> 11) & 1;
+    paletteBank = (tileEntry >> 12) & 0xF;
 
-    // Classic NES Series: The NES-on-GBA wrapper uses tilemap entries where
-    // the actual NES tile index is in the LOW byte only (0-255).
-    // With charBase=1 (tiles at 0x6004000), tiles 256+ would overlap with the
-    // tilemap region at 0x6006800 (screenBase=13). Mask to 8 bits to avoid.
-    if (classicNesMode && !DisableAllClassicNesHandling()) {
-      tileIndex = tileEntry & 0xFF;
+    // Classic NES Series fix: The NES emulator stores code in BG VRAM after
+    // tile data. Tilemaps often contain garbage entries with high tile indices
+    // that would read from code regions instead of tile graphics.
+    // NES only has 256 tiles, so mask to 8 bits to prevent corruption.
+    // This matches what the original NES hardware would do.
+    if (classicNesActive) {
+      tileIndex &= 0xFF;
     }
-
-    bool hFlip = (tileEntry >> 10) & 1;
-    bool vFlip = (tileEntry >> 11) & 1;
-    int paletteBank = (tileEntry >> 12) & 0xF;
 
     int inTileX = scrolledX % 8;
     int inTileY = scrolledY % 8;
@@ -2235,61 +2501,87 @@ void PPU::RenderBackground(int bgIndex) {
     uint32_t tileAddr = 0;
     uint8_t tileByte = 0;
 
+    // DEBUG: Check which tile read path we're taking
+    static bool pathDebugDone = false;
+    if (!pathDebugDone && bgIndex == 0 && scanline == 80 && x == 0 &&
+        frameCount == 60) {
+      pathDebugDone = true;
+      std::cout << "[PATH_DEBUG] is8bpp=" << is8bpp
+                << " classicNesActive=" << classicNesActive
+                << " bgIndex=" << bgIndex << std::endl;
+    }
+
+    // DEBUG: Frame 60 BG0 detailed trace for corruption diagnosis
+    static bool frame60Traced = false;
+    bool shouldTraceF60 = !frame60Traced && frameCount == 60 && bgIndex == 0 &&
+                          scanline >= 48 && scanline <= 64 && x >= 40 &&
+                          x < 160;
+    if (shouldTraceF60 && x == 40 && scanline == 48) {
+      std::cout << "[F60_TRACE] tileBase=0x" << std::hex << tileBase
+                << " mapBase=0x" << mapBase << std::dec
+                << " charBaseBlock=" << charBaseBlock
+                << " screenBaseBlock=" << screenBaseBlock << std::endl;
+    }
+
     // Classic NES tile resolver removed — rely on explicit BG VRAM wrapping
     // (`MapBgVramOffset` / `ReadBgVram*`) so behavior is spec-driven (modes 0-2
     // wrap within the 64KB BG VRAM window). Removing heuristics avoids ROM-
     // specific tile-base guessing and keeps behavior predictable.
 
     if (!is8bpp) {
-      // 4bpp (16 colors)
-      // 32 bytes per tile (8x8 pixels * 4 bits = 256 bits = 32 bytes)
+      // 4bpp (16 colors) - Standard GBA format for ALL games including Classic
+      // NES The tile data bytes contain pairs of 4-bit color indices
       uint32_t tileStartOffset =
           (tileBase - 0x06000000u) + (uint32_t)tileIndex * 32u;
-      tileAddr = 0x06000000u + tileStartOffset + (uint32_t)(inTileY * 4) +
-                 (uint32_t)(inTileX / 2);
 
-      // Bounds check: For Classic NES games, apply VRAM wrapping instead of
-      // skipping. The NES emulator may intentionally use wrapped tile indices.
-      // Normal GBA games can read from OBJ VRAM (per test expectations).
-      // Note: We removed the aggressive skip here because it was causing
-      // valid tile content to be hidden. VRAM wrapping is handled by the
-      // ReadVram8 function which masks addresses to VRAM size.
-      // (Classic NES bounds check disabled - relying on VRAM wrapping)
-
-      uint32_t tileOffset = (tileAddr - 0x06000000u);
-      tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
-      bool useHighNibble = (inTileX & 1) != 0;
-      if (PpuSwap4bppNibbles()) {
-        useHighNibble = !useHighNibble;
+      // DEBUG: Trace frame 60 tile reads
+      if (shouldTraceF60) {
+        std::cout << "[F60_TILE] x=" << x << " y=" << scanline
+                  << " tile=" << tileIndex << " tileStartOff=0x" << std::hex
+                  << tileStartOffset << " mapOff=0x" << mapOffset << " entry=0x"
+                  << tileEntry << " pal=" << std::dec << paletteBank
+                  << std::endl;
       }
-      colorIndex = useHighNibble ? ((tileByte >> 4) & 0xF) : (tileByte & 0xF);
 
-      // OGDK DEBUG: Trace BG0 rendering for first 3 scanlines at frame 60+
-      if (classicNesMode && bgIndex == 0 && scanline < 3 && x < 24 &&
-          frameCount >= 60 && frameCount <= 62) {
-        static int bg0PixelLogs = 0;
-        if (bg0PixelLogs < 100) {
-          bg0PixelLogs++;
-          fprintf(stderr,
-                  "[OGDK_BG0_PIX] f=%d x=%d y=%d tile=%d tileOff=0x%X "
-                  "byte=0x%02X ci=%d pal=%d entry=0x%04X\n",
-                  frameCount, x, scanline, tileIndex, tileOffset, tileByte,
-                  colorIndex, paletteBank, tileEntry);
-          fflush(stderr);
+      // mGBA behavior: skip tiles that would read from OBJ VRAM (>= 0x10000)
+      // These tiles are simply not rendered, leaving transparent pixels
+      if (tileStartOffset >= 0x10000u) {
+        colorIndex = 0; // Transparent
+      } else {
+        tileAddr = 0x06000000u + tileStartOffset + (uint32_t)(inTileY * 4) +
+                   (uint32_t)(inTileX / 2);
+
+        uint32_t tileOffset = (tileAddr - 0x06000000u);
+        tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
+        bool useHighNibble = (inTileX & 1) != 0;
+        if (PpuSwap4bppNibbles()) {
+          useHighNibble = !useHighNibble;
+        }
+        colorIndex = useHighNibble ? ((tileByte >> 4) & 0xF) : (tileByte & 0xF);
+
+        // DEBUG: Show actual tile data being read
+        if (shouldTraceF60 && x < 16) {
+          std::cout << "[F60_DATA] x=" << x << " tileOff=0x" << std::hex
+                    << tileOffset << " byte=0x" << (int)tileByte
+                    << " ci=" << std::dec << (int)colorIndex << std::endl;
         }
       }
-
     } else {
       // 8bpp (256 colors)
       // 64 bytes per tile
-      tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
+      uint32_t tileStartOffset =
+          (tileBase - 0x06000000u) + (uint32_t)tileIndex * 64u;
 
-      // Note: Removed aggressive bounds check that was skipping valid tile
-      // content. BG-specific VRAM wrapping is handled by ReadBgVram8.
+      // mGBA behavior: skip tiles that would read from OBJ VRAM (>= 0x10000)
+      if (tileStartOffset >= 0x10000u) {
+        colorIndex = 0; // Transparent
+      } else {
+        tileAddr = tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
 
-      uint32_t tileOffset = tileAddr - 0x06000000u;
-      tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
-      colorIndex = tileByte;
+        uint32_t tileOffset = tileAddr - 0x06000000u;
+        tileByte = ReadBgVram8(vramData, vramSize, tileOffset);
+        colorIndex = tileByte;
+      }
     }
 
     if (shouldTraceThisBg && (traceCfg.x < 0 || x == traceCfg.x)) {
@@ -2309,7 +2601,10 @@ void PPU::RenderBackground(int bgIndex) {
                 << std::dec << " ci=" << (int)colorIndex << std::endl;
     }
 
-    if (colorIndex != 0) { // Index 0 is transparent
+    // Color index 0 is transparent in standard GBA rendering
+    bool isTransparent = (colorIndex == 0);
+
+    if (!isTransparent) {
       // Check if this BG layer is enabled by window settings at this pixel
       if (!IsLayerEnabledAtPixel(x, scanline, bgIndex)) {
         continue; // Window masks this layer at this position
@@ -2323,17 +2618,6 @@ void PPU::RenderBackground(int bgIndex) {
         // Calculate effective color index and palette bank
         uint8_t effectiveColorIndex = colorIndex;
         uint8_t effectivePaletteBank = paletteBank;
-
-        // Classic NES Series palette handling:
-        // The NES-on-GBA emulator stores all palette colors at bank 0,
-        // indices 9-14. The tilemap palette bank field is ignored.
-        // Color indices 1-6 remap to 9-14 (add +8), indices 7+ stay as-is.
-        if (classicNesMode && !DisableAllClassicNesHandling() && !is8bpp) {
-          effectivePaletteBank = 0;
-          if (colorIndex >= 1 && colorIndex <= 6) {
-            effectiveColorIndex = colorIndex + 8;
-          }
-        }
 
         // Fetch Color from Palette RAM
         uint32_t paletteAddr = 0x05000000;
@@ -2392,6 +2676,7 @@ void PPU::SwapBuffers() {
   }
 
   // OG-DK palette diagnostic: dump first few palette banks on frame 10
+  /*
   if (classicNesMode && frameCount == 10) {
     std::cout << "[OGDK_PAL] Frame 10 palette dump:" << std::endl;
     const auto *palData = memory.GetPaletteRAM();
@@ -2417,6 +2702,7 @@ void PPU::SwapBuffers() {
       std::cout << std::dec << std::endl;
     }
   }
+  */
 
   // DKC diagnostic: Log around problem frames + OAM analysis
   if (frameCount >= 1655 && frameCount <= 1665) {

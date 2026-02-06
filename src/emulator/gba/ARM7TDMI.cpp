@@ -530,15 +530,6 @@ void ARM7TDMI::CheckInterrupts() {
   // Wake from HALT/STOP/IntrWait if any enabled interrupt is pending.
   // Do NOT auto-resume debugger breakpoints/stepback halts.
   if (halted && sleepHalt && (ie & if_reg)) {
-    // OGDK DEBUG: Log wake from halt with CPSR state
-    static int wakeLogs = 0;
-    if (wakeLogs++ < 20) {
-      Logger::Instance().LogFmt(
-          LogLevel::Info, "OGDK_HALT",
-          "WAKE PC=0x%08x ie&if=0x%04x IE=0x%04x IF=0x%04x CPSR.I=%d IME=%d",
-          (unsigned)registers[15], (unsigned)(ie & if_reg), (unsigned)ie,
-          (unsigned)if_reg, IRQDisabled(cpsr) ? 1 : 0, (int)(ime & 1));
-    }
     halted = false;
     sleepHalt = false;
   }
@@ -547,6 +538,7 @@ void ARM7TDMI::CheckInterrupts() {
     return;
   if (IRQDisabled(cpsr)) {
     // OGDK DEBUG: Check if this is why IRQs aren't entering
+    /*
     static int irqBlockedLogs = 0;
     if (irqBlockedLogs++ < 10 && (ie & if_reg)) {
       Logger::Instance().LogFmt(LogLevel::Info, "OGDK_IRQ",
@@ -554,11 +546,13 @@ void ARM7TDMI::CheckInterrupts() {
                                 (unsigned)registers[15],
                                 (unsigned)(ie & if_reg));
     }
+    */
     return; // IRQ disabled in CPSR
   }
 
   if (ie & if_reg) {
     // OGDK DEBUG: Confirm IRQ entry
+    /*
     static int irqEntryLogs = 0;
     if (irqEntryLogs++ < 20) {
       Logger::Instance().LogFmt(
@@ -566,6 +560,7 @@ void ARM7TDMI::CheckInterrupts() {
           "IRQ_ENTRY PC=0x%08x ie&if=0x%04x jumping to 0x18",
           (unsigned)registers[15], (unsigned)(ie & if_reg));
     }
+    */
     // Calculate triggered interrupts NOW before PPU/Timers run
     // On real GBA, BIOS reads IE & IF atomically at IRQ entry
     uint16_t triggered = ie & if_reg;
@@ -963,6 +958,11 @@ void ARM7TDMI::Step() {
   CheckInterrupts();
 
   if (halted) {
+    // CRITICAL FIX: When halted, CPU doesn't execute instructions, but hardware
+    // (PPU/APU/timers) MUST still advance! On real GBA hardware, HALT stops the
+    // CPU clock but peripheral clocks keep running. Without this, VBlank never
+    // occurs and games hang in HALT forever.
+    memory.AdvanceCycles(1);
     return;
   }
 
@@ -1247,8 +1247,10 @@ void ARM7TDMI::Step() {
       prefetchThumb[0] = prefetchThumb[1];
       prefetchValid[0] = prefetchValid[1];
 
-      // Fetch next instruction into slot 1
-      const uint32_t nextAddr = instrAddr + 2u;
+      // Fetch next instruction into slot 1 (2 instructions ahead of current)
+      // ARM7TDMI has 3-stage pipeline: fetch→decode→execute
+      // After executing instrAddr, slot 0 has instrAddr+2, need instrAddr+4
+      const uint32_t nextAddr = instrAddr + 4u;
       prefetch[1] = memory.ReadInstruction16(nextAddr);
       prefetchAddr[1] = nextAddr;
       prefetchThumb[1] = true;
@@ -1676,9 +1678,31 @@ void ARM7TDMI::Step() {
     // Classic NES games test self-modifying code behavior - on real ARM7TDMI,
     // writes to upcoming instructions don't affect already-prefetched opcodes.
     uint32_t instruction;
+    const bool traceVramPipeline =
+        EnvFlagCached("AIO_TRACE_VRAM_PIPELINE") &&
+        (instrAddr >= 0x06000000u && instrAddr < 0x06018000u);
+
     if (prefetchValid[0] && !prefetchThumb[0] && prefetchAddr[0] == instrAddr) {
       // Use prefetched instruction (may differ from current memory if SMC)
       instruction = prefetch[0];
+
+      // Trace: Check if prefetched instruction differs from current memory (SMC
+      // detection)
+      if (traceVramPipeline) {
+        const uint32_t memInstr = memory.ReadInstruction32(instrAddr);
+        if (instruction != memInstr) {
+          Logger::Instance().LogFmt(
+              LogLevel::Info, "CPU",
+              "VRAM_PIPELINE SMC_HIT pc=0x%08x prefetched=0x%08x memory=0x%08x",
+              instrAddr, instruction, memInstr);
+        } else {
+          Logger::Instance().LogFmt(LogLevel::Info, "CPU",
+                                    "VRAM_PIPELINE HIT pc=0x%08x instr=0x%08x "
+                                    "pf0_addr=0x%08x pf1_addr=0x%08x",
+                                    instrAddr, instruction, prefetchAddr[0],
+                                    prefetchAddr[1]);
+        }
+      }
 
       // Shift pipeline: move slot 1 to slot 0
       prefetch[0] = prefetch[1];
@@ -1686,8 +1710,10 @@ void ARM7TDMI::Step() {
       prefetchThumb[0] = prefetchThumb[1];
       prefetchValid[0] = prefetchValid[1];
 
-      // Fetch next instruction into slot 1
-      const uint32_t nextAddr = instrAddr + 4u;
+      // Fetch next instruction into slot 1 (2 instructions ahead of current)
+      // ARM7TDMI has 3-stage pipeline: fetch→decode→execute
+      // After executing instrAddr, slot 0 has instrAddr+4, need instrAddr+8
+      const uint32_t nextAddr = instrAddr + 8u;
       prefetch[1] = memory.ReadInstruction32(nextAddr);
       prefetchAddr[1] = nextAddr;
       prefetchThumb[1] = false;
@@ -1695,6 +1721,13 @@ void ARM7TDMI::Step() {
     } else {
       // Pipeline miss or first instruction - fetch directly and refill pipeline
       instruction = memory.ReadInstruction32(instrAddr);
+
+      if (traceVramPipeline) {
+        Logger::Instance().LogFmt(
+            LogLevel::Info, "CPU",
+            "VRAM_PIPELINE MISS pc=0x%08x instr=0x%08x (refilling pipeline)",
+            instrAddr, instruction);
+      }
 
       // Fill pipeline for next instructions
       prefetch[0] = memory.ReadInstruction32(instrAddr + 4u);
@@ -3153,6 +3186,7 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   constexpr int kSwiOverheadCycles = 32;
 
   // OGDK TRACE: Log all SWI calls for debugging (with instruction bytes)
+  /*
   if (comment != 0x05 && comment != 0x04 &&
       comment != 0x02) { // Skip VBlankIntrWait/IntrWait/HALT spam
     uint32_t instrAddr = registers[15] - (thumbMode ? 2 : 4);
@@ -3169,9 +3203,11 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     AIO::Emulator::Common::Logger::Instance().Log(
         AIO::Emulator::Common::LogLevel::Info, "OGDK_SWI", buf);
   }
+  */
 
   // OGDK: Dump IWRAM code around 0x54E0 and 0x56A4 (IRQ handler) at first SWI
   // 0x02
+  /*
   {
     uint32_t instrAddr = registers[15] - (thumbMode ? 2 : 4);
     static bool dumpedIwram = false;
@@ -3232,6 +3268,7 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
       }
     }
   }
+  */
 
   switch (comment) {
   case 0x00: // SoftReset
@@ -3245,13 +3282,11 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   {
     uint8_t flags = registers[0] & 0xFF;
 
-    // OGDK DEBUG: Trace RegisterRamReset calls
+    // OGDK DEBUG: Trace RegisterRamReset - Removed
+    /*
     std::cout << "[OGDK_RAMRESET] RegisterRamReset flags=0x" << std::hex
-              << (int)flags << " EWRAM=" << ((flags & 0x01) ? 1 : 0)
-              << " IWRAM=" << ((flags & 0x02) ? 1 : 0)
-              << " PRAM=" << ((flags & 0x04) ? 1 : 0)
-              << " VRAM=" << ((flags & 0x08) ? 1 : 0)
-              << " OAM=" << ((flags & 0x10) ? 1 : 0) << std::dec << std::endl;
+              << (int)flags << ... << std::dec << std::endl;
+    */
 
     // Bit 0: Clear 256K EWRAM (0x02000000-0x0203FFFF)
     if (flags & 0x01) {
@@ -3323,6 +3358,7 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   case 0x02: // Halt
   {
     // OGDK DEBUG: Log halt entry with interrupt state
+    /*
     uint16_t ie = memory.Read16(IORegs::REG_IE);
     uint16_t if_reg = memory.Read16(IORegs::REG_IF);
     uint16_t ime = memory.Read16(IORegs::REG_IME);
@@ -3334,6 +3370,7 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
           (unsigned)(registers[15] - 4), (int)(ime & 1), (unsigned)ie,
           (unsigned)if_reg, (unsigned)(ie & if_reg));
     }
+    */
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
@@ -3527,14 +3564,12 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     bool fixedSrc = (registers[2] >> 24) & 1;
     bool is32Bit = (registers[2] >> 26) & 1;
 
-    // Debug: trace CpuSet to VRAM
-    // DISABLED: Too verbose during boot
-    // if ((dst & 0xFF000000) == 0x06000000) {
-    //     std::cout << "[SWI 0x0B] CpuSet to VRAM: src=0x" << std::hex << src
-    //               << " dst=0x" << dst << " len=" << std::dec << len
-    //               << " 32bit=" << is32Bit << " fixed=" << fixedSrc <<
-    //               std::endl;
-    // }
+    // OGDK DEBUG: Trace CpuSet - Removed
+    /*
+    if ((dst & 0xFF000000) == 0x03000000 && (dst & 0x7FFF) < 0x2000) {
+      // Log removed
+    }
+    */
 
     int perUnitCycles = is32Bit ? 4 : 2;
     const uint32_t batchSize = 64; // Update PPU every 64 units
@@ -3599,14 +3634,12 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
 
     bool fixedSrc = (registers[2] >> 24) & 1;
 
-    // Debug: trace CpuFastSet to VRAM
-    // DISABLED: Too verbose during boot
-    // if ((dst & 0xFF000000) == 0x06000000) {
-    //     std::cout << "[SWI 0x0C] CpuFastSet to VRAM: src=0x" << std::hex <<
-    //     src
-    //               << " dst=0x" << dst << " len=" << std::dec << len
-    //               << " fixed=" << fixedSrc << std::endl;
-    // }
+    // OGDK DEBUG: Trace CpuFastSet - Removed
+    /*
+    if ((dst & 0xFF000000) == 0x03000000 && (dst & 0x7FFF) < 0x2000) {
+      // Log removed
+    }
+    */
 
     // Always 32-bit; CpuFastSet transfers in 8-word blocks.
     const uint32_t units = (wordCount + 7u) & ~7u;
@@ -3854,9 +3887,9 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     uint32_t decompSize = header >> 8;
 
     // OG-DK: Trace LZ77 to IWRAM 0x03007400 or VRAM tilemaps
-    const bool traceOgdk = (origDst == 0x03007400u);
-    const bool traceVramTilemap =
-        (origDst == 0x06006800u || origDst == 0x06003200u);
+    const bool traceOgdk = false; // (origDst == 0x03007400u);
+    const bool traceVramTilemap = false;
+    // (origDst == 0x06006800u || origDst == 0x06003200u);
     if (traceOgdk || traceVramTilemap) {
       AIO::Emulator::Common::Logger::Instance().LogFmt(
           AIO::Emulator::Common::LogLevel::Info, "OGDK_LZ77",
@@ -4918,27 +4951,22 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     uint32_t addr = registers[rb];
     uint32_t startAddr = addr;
 
-    // DEBUG: Trace STMIA to DMA2 control registers (0x40000C8-0x40000D3) -
-    // disabled bool traceDMA2 = (!L && addr >= 0x40000C8 && addr <= 0x40000D3);
-    // if (traceDMA2) {
-    //     std::cout << "[STMIA DMA2] PC=0x" << std::hex << (registers[15] - 2)
-    //               << " R" << std::dec << rb << "=0x" << std::hex << addr
-    //               << " rList=0x" << (int)rList;
-    //     for (int i=0; i<8; ++i) {
-    //         if ((rList >> i) & 1) {
-    //             std::cout << " R" << i << "=0x" << registers[i];
-    //         }
-    //     }
-    //     std::cout << std::dec << std::endl;
-    // }
-
-    // DEBUG: Trace STMIA to 0x3001500 - disabled
-    // bool traceMixbuf = (!L && (addr & 0xFF000000) == 0x03000000 && (addr &
-    // 0x7FFF) >= 0x1500 && (addr & 0x7FFF) < 0x1600); if (traceMixbuf) {
-    //     std::cout << "[STMIA] PC=0x" << std::hex << (registers[15] - 2)
-    //               << " R" << std::dec << rb << "=0x" << std::hex << addr
-    //               << " rList=0x" << (int)rList << std::dec << std::endl;
-    // }
+    // DEBUG: Trace STMIA to DMA3 control registers (0x40000D4-0x40000DF)
+    // Classic NES games use STM ordering quirks to set up DMA
+    const bool isClassicNes = memory.IsClassicNES();
+    bool traceDMA3 =
+        isClassicNes && (!L && addr >= 0x40000D4 && addr <= 0x40000E0);
+    if (traceDMA3) {
+      fprintf(stderr, "[STMIA DMA3] PC=0x%08X R%d=0x%08X rList=0x%02X",
+              registers[15] - 2, rb, addr, rList);
+      for (int i = 0; i < 8; ++i) {
+        if ((rList >> i) & 1) {
+          fprintf(stderr, " R%d=0x%08X", i, registers[i]);
+        }
+      }
+      fprintf(stderr, "\n");
+      fflush(stderr);
+    }
 
     for (int i = 0; i < 8; ++i) {
       if ((rList >> i) & 1) {
