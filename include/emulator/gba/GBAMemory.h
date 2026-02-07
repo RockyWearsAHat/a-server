@@ -152,9 +152,6 @@ public:
   int diagDataIoCycles = 0;
   int diagDataIoReads = 0;
 
-  // Control verbose internal logging (default: false)
-  void SetVerboseLogs(bool enabled) { verboseLogs = enabled; }
-
   // Cycle-accurate memory access timing
   int GetAccessCycles(uint32_t address, int accessSize) const;
 
@@ -357,8 +354,6 @@ private:
   // emulation).
   mutable uint32_t lastGamePakAccessAddr = 0xFFFFFFFFu;
   mutable uint8_t lastGamePakAccessRegionGroup = 0xFFu;
-
-  bool verboseLogs = false; // Guard for heavy std::cout traces
 };
 
 } // namespace AIO::Emulator::GBA

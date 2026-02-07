@@ -261,6 +261,10 @@ private:
   float outputSampleRate = OUTPUT_SAMPLE_RATE;
   static constexpr float GBA_CPU_FREQ = 16777216.0f;
 
+  // Previous sample for linear interpolation (avoids whirly/aliasing artifacts)
+  int16_t prevLeft = 0;
+  int16_t prevRight = 0;
+
   // Add a sample to the ring buffer
   void PushSample(int16_t left, int16_t right);
 };

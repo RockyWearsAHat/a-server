@@ -11,30 +11,9 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
-
-namespace {
-inline bool EnvTruthy(const char *v) {
-  return v != nullptr && v[0] != '\0' && v[0] != '0';
-}
-
-// Fixed: Use a map to cache by string content, not just string length
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  bool enabled = EnvTruthy(std::getenv(name));
-  cache[name] = enabled;
-  return enabled;
-}
-
-bool TraceGbaSpam() { return EnvFlagCached("AIO_TRACE_GBA_SPAM"); }
-} // namespace
 
 void GBA::WriteMem16(uint32_t addr, uint16_t val) {
   if (memory)
@@ -150,82 +129,17 @@ bool GBA::LoadROM(const std::string &path) {
                 << " bytes)" << std::endl;
       saveFile.seekg(0, std::ios::beg);
 
-      // Verify seek worked
-      std::streampos pos = saveFile.tellg();
-      std::cout << "[LoadROM] After seekg(0), position is: " << pos
-                << std::endl;
-
       std::vector<uint8_t> saveData(saveSize);
-      std::cout << "[LoadROM] Created saveData vector of size: "
-                << saveData.size() << std::endl;
-
       if (saveFile.read(reinterpret_cast<char *>(saveData.data()), saveSize)) {
-        std::cout << "[LoadROM] Successfully read " << saveSize
-                  << " bytes from save file" << std::endl;
-        std::cout << "[LoadROM] First 32 bytes of saveData: " << std::hex;
-        for (size_t i = 0; i < std::min((size_t)saveSize, size_t(32)); i++) {
-          std::cout << std::setw(2) << std::setfill('0') << (int)saveData[i]
-                    << " ";
-        }
-        std::cout << std::dec << std::endl;
-        std::cout << "[LoadROM] Bytes at offset 0x10-0x17: " << std::hex;
-        for (size_t i = 0x10; i < std::min((size_t)saveSize, size_t(0x18));
-             i++) {
-          std::cout << std::setw(2) << std::setfill('0') << (int)saveData[i]
-                    << " ";
-        }
-        std::cout << std::dec << std::endl;
-        std::cout << "[LoadROM] Bytes at offset 0x18-0x2f: " << std::hex;
-        for (size_t i = 0x18; i < std::min((size_t)saveSize, size_t(0x30));
-             i++) {
-          std::cout << std::setw(2) << std::setfill('0') << (int)saveData[i]
-                    << " ";
-        }
-        std::cout << std::dec << std::endl;
-
-        // DEBUG: Verify saveData immediately before passing to LoadSave
-        std::cout
-            << "[LoadROM DEBUG] About to call LoadSave. saveData[0x10-0x27]: "
-            << std::hex;
-        for (size_t i = 0x10; i < std::min((size_t)saveSize, size_t(0x28));
-             i++) {
-          std::cout << std::setw(2) << std::setfill('0') << (int)saveData[i]
-                    << " ";
-        }
-        std::cout << std::dec << std::endl;
         memory->LoadSave(saveData);
-
-        // Verify the load worked correctly
-        auto loadedData = memory->GetSaveData();
-        std::cout << "[LoadROM] Verification: GetSaveData() returns "
-                  << loadedData.size() << " bytes" << std::endl;
-        std::cout << "[LoadROM] Verification: First 32 bytes: " << std::hex;
-        for (size_t i = 0; i < std::min(loadedData.size(), size_t(32)); i++) {
-          std::cout << std::setw(2) << std::setfill('0') << (int)loadedData[i]
-                    << " ";
-        }
-        std::cout << std::dec << std::endl;
-        std::cout << "[LoadROM] Verification: Bytes at 0x10-0x17: " << std::hex;
-        for (size_t i = 0x10; i < 0x18 && i < loadedData.size(); i++) {
-          std::cout << std::setw(2) << std::setfill('0') << (int)loadedData[i]
-                    << " ";
-        }
-        std::cout << std::dec << std::endl;
       } else {
         std::cout << "[LoadROM] Failed to read save file" << std::endl;
-        // Failed to read save file, use default initialization
         memory->LoadSave(std::vector<uint8_t>());
       }
     } else {
       // Save file doesn't exist - this is normal on first run
       // Call LoadSave with empty data to ensure proper initialization
       memory->LoadSave(std::vector<uint8_t>());
-    }
-
-    // Optional verbose EEPROM logging via env var
-    if (EnvFlagCached("AIO_VERBOSE_EEPROM")) {
-      std::cout << "[LoadROM] Enabling verbose EEPROM logs" << std::endl;
-      memory->SetVerboseLogs(true);
     }
 
     // Optional LLE BIOS support via environment variable.
@@ -398,59 +312,6 @@ int GBA::Step() {
 
   uint32_t prevPc = cpu->GetRegister(15);
 
-  // Loop detection for debugging stuck games
-  static uint32_t lastPC = 0;
-  static int pcRepeatCount = 0;
-  static int totalSteps = 0;
-  totalSteps++;
-
-  // Verbose boot trace: useful for bring-up, but extremely expensive when
-  // stdout is redirected to disk.
-  if (TraceGbaSpam() && totalSteps <= 100) {
-    if (totalSteps % 10 == 0 || totalSteps <= 10) {
-      uint32_t pc = cpu->GetRegister(15);
-      uint16_t ime = memory->Read16(0x04000208);
-      uint16_t ie = memory->Read16(0x04000200);
-      uint16_t if_reg = memory->Read16(0x04000202);
-      std::cout << "[Step " << totalSteps << "] PC=0x" << std::hex << pc
-                << " IME=" << std::dec << ime << " IE=0x" << std::hex << ie
-                << " IF=0x" << if_reg << " Halted=" << std::dec
-                << cpu->IsHalted() << std::endl;
-    }
-  }
-
-  if (prevPc == lastPC) {
-    pcRepeatCount++;
-    if (pcRepeatCount == 10000 && TraceGbaSpam()) {
-      std::cout << "[LOOP DETECTED] PC=0x" << std::hex << prevPc
-                << " stuck for 10k steps. Total steps: " << std::dec
-                << totalSteps << std::endl;
-      std::cout << "  R0=0x" << std::hex << cpu->GetRegister(0) << " R1=0x"
-                << cpu->GetRegister(1) << " R2=0x" << cpu->GetRegister(2)
-                << " R3=0x" << cpu->GetRegister(3) << std::endl;
-      std::cout << "  SP=0x" << cpu->GetRegister(13) << " LR=0x"
-                << cpu->GetRegister(14) << " CPSR=0x" << cpu->GetCPSR()
-                << std::dec << std::endl;
-
-      // Also capture display timing state when we detect a tight CPU loop.
-      // Many games (including OG-DK style emulation titles) busy-wait on
-      // VCOUNT / DISPSTAT, so seeing their instantaneous values helps
-      // distinguish a legitimate wait loop from a broken PPU/VCOUNT model.
-      uint16_t dispstat = memory->Read16(0x04000004);
-      uint16_t vcount = memory->Read16(0x04000006);
-      uint16_t ime = memory->Read16(0x04000208);
-      uint16_t ie = memory->Read16(0x04000200);
-      uint16_t if_reg = memory->Read16(0x04000202);
-      std::cout << "  DISPSTAT=0x" << std::hex << dispstat
-                << " VCOUNT=" << std::dec << (unsigned)vcount << " IME=" << ime
-                << " IE=0x" << std::hex << ie << " IF=0x" << if_reg << std::dec
-                << std::endl;
-    }
-  } else {
-    lastPC = prevPc;
-    pcRepeatCount = 0;
-  }
-
   // Step CPU by one instruction
   uint32_t pcBefore = cpu->GetRegister(15);
   memory->BeginCpuDataAccess();
@@ -494,211 +355,6 @@ int GBA::Step() {
     totalCycles = 1 + dmaCycles + hleCycles;
   }
 
-  // TEMPORARY: Log DMA config at frame transition
-  {
-    static int dmaConfigFrame = -1;
-    static int dmaConfigPrevScanline = -1;
-    int dmaConfigScanline = (int)memory->Read8(0x04000006);
-    if (dmaConfigScanline == 0 && dmaConfigPrevScanline != 0)
-      dmaConfigFrame++;
-    dmaConfigPrevScanline = dmaConfigScanline;
-
-    static bool dmaConfigLogged = false;
-    if (dmaConfigFrame == 30 && !dmaConfigLogged) {
-      dmaConfigLogged = true;
-      for (int ch = 0; ch < 4; ch++) {
-        uint32_t base = 0x040000B0 + ch * 12;
-        uint32_t srcLo = memory->Read16(base);
-        uint32_t srcHi = memory->Read16(base + 2);
-        uint32_t src = srcLo | (srcHi << 16);
-        uint32_t dstLo = memory->Read16(base + 4);
-        uint32_t dstHi = memory->Read16(base + 6);
-        uint32_t dst = dstLo | (dstHi << 16);
-        uint16_t cnt = memory->Read16(base + 8);
-        uint16_t ctl = memory->Read16(base + 10);
-        Common::Logger::Instance().LogFmt(
-            Common::LogLevel::Info, "DMA_CONFIG",
-            "Frame %d DMA%d: src=0x%08x dst=0x%08x cnt=%u ctl=0x%04x "
-            "en=%d timing=%d wordSz=%d repeat=%d srcCtl=%d dstCtl=%d",
-            dmaConfigFrame, ch, src, dst, cnt, ctl, (ctl >> 15) & 1,
-            (ctl >> 12) & 3, (ctl >> 10) & 1, (ctl >> 9) & 1, (ctl >> 7) & 3,
-            (ctl >> 5) & 3);
-      }
-    }
-  }
-
-  // TEMPORARY: Dump VRAM scroll table contents at frame 30
-  {
-    static bool scrollTableDumped = false;
-    int dumpFrame = 30;
-    static int scrollDumpFrame = -1;
-    static int scrollDumpPrevScanline = -1;
-    int scrollDumpScanline = (int)memory->Read8(0x04000006);
-    if (scrollDumpScanline == 0 && scrollDumpPrevScanline != 0)
-      scrollDumpFrame++;
-    scrollDumpPrevScanline = scrollDumpScanline;
-
-    if (scrollDumpFrame == dumpFrame && !scrollTableDumped) {
-      scrollTableDumped = true;
-      const auto *vram = memory->GetVRAMData();
-      const size_t vramSize = memory->GetVRAMSize();
-
-      // Dump ALL 160 entries of both scroll table buffers
-      for (int buf = 1; buf <= 2; buf++) {
-        uint32_t baseOffset = (buf == 1) ? 0x3514 : 0x6B14;
-        Common::Logger::Instance().LogFmt(
-            Common::LogLevel::Info, "SCROLL_DUMP",
-            "Buffer %d (VRAM offset 0x%04x) at frame %d:", buf, baseOffset,
-            dumpFrame);
-        for (int i = 0; i < 160; i++) {
-          uint32_t off = baseOffset + i * 4;
-          if (off + 3 < vramSize) {
-            uint32_t val = vram[off] | (vram[off + 1] << 8) |
-                           (vram[off + 2] << 16) | (vram[off + 3] << 24);
-            uint16_t hofs = val & 0xFFFF;
-            uint16_t vofs = (val >> 16) & 0xFFFF;
-            Common::Logger::Instance().LogFmt(
-                Common::LogLevel::Info, "SCROLL_DUMP",
-                "  buf%d[%3d] off=0x%05x HOFS=%5u VOFS=%5u raw=0x%08x", buf, i,
-                off, hofs, vofs, val);
-          }
-        }
-      }
-
-      // Also check if there's any non-zero data in the range
-      for (int buf = 1; buf <= 2; buf++) {
-        uint32_t baseOffset = (buf == 1) ? 0x3514 : 0x6B14;
-        int nonZeroCount = 0;
-        int totalEntries = 160;
-        for (int i = 0; i < totalEntries; i++) {
-          uint32_t off = baseOffset + i * 4;
-          if (off + 3 < vramSize) {
-            uint32_t val = vram[off] | (vram[off + 1] << 8) |
-                           (vram[off + 2] << 16) | (vram[off + 3] << 24);
-            if (val != 0)
-              nonZeroCount++;
-          }
-        }
-        Common::Logger::Instance().LogFmt(Common::LogLevel::Info, "SCROLL_DUMP",
-                                          "Buffer %d: %d/%d entries non-zero",
-                                          buf, nonZeroCount, totalEntries);
-      }
-    }
-  }
-
-  // TEMPORARY: HALT work-window diagnostic — tracks cycles/instructions
-  // between each HALT-exit (IRQ wakes CPU) and next HALT-enter, plus
-  // data access and branch/fetch breakdown. Includes PC histogram.
-  {
-    static bool wasHalted = false;
-    static uint64_t windowCycles = 0;
-    static uint64_t windowInstrs = 0;
-    static uint64_t windowDataCycles = 0;
-    static uint64_t windowBranches = 0;
-    static uint64_t windowFetchCycles = 0;
-    static uint64_t windowBranchPenCycles = 0;
-    static int windowLogs = 0;
-    static int diagFrame2 = -1;
-    static int prevScanline2 = -1;
-    static std::unordered_map<uint32_t, uint32_t> pcHistogram;
-    static uint64_t windowIwramLoads = 0;
-    static uint64_t windowIwramStores = 0;
-    static uint64_t windowIoAccesses = 0;
-    static uint64_t windowVramAccesses = 0;
-
-    int scanline2 = (int)memory->Read8(0x04000006);
-    if (scanline2 == 0 && prevScanline2 != 0)
-      diagFrame2++;
-    prevScanline2 = scanline2;
-
-    const bool isHalted = cpu->IsHalted();
-    const bool isBranch = ((pcAfter & ~0x1) != expectedNextPC);
-
-    if (wasHalted && !isHalted) {
-      windowCycles = 0;
-      windowInstrs = 0;
-      windowDataCycles = 0;
-      windowBranches = 0;
-      windowFetchCycles = 0;
-      windowBranchPenCycles = 0;
-      pcHistogram.clear();
-      windowIwramLoads = 0;
-      windowIwramStores = 0;
-      windowIoAccesses = 0;
-      windowVramAccesses = 0;
-    }
-
-    if (!isHalted) {
-      int fetchCost = memory->GetAccessCycles(pcBefore, isThumb ? 2 : 4);
-      windowCycles += cpuCycles;
-      windowInstrs++;
-      windowDataCycles += dataAccessCycles;
-      windowFetchCycles += fetchCost;
-      pcHistogram[pcBefore & ~1u]++;
-      if (isBranch) {
-        windowBranches++;
-        windowBranchPenCycles += 2;
-      }
-    }
-
-    if (!wasHalted && isHalted && diagFrame2 >= 30 && diagFrame2 <= 35 &&
-        windowLogs < 50) {
-      Common::Logger::Instance().LogFmt(
-          Common::LogLevel::Info, "WORK_WINDOW",
-          "Frame %d scanline=%d: instrs=%llu cycles=%llu "
-          "fetch=%llu data=%llu branches=%llu branchPen=%llu "
-          "avgCycPerInstr=%.3f unaccounted=%lld uniquePCs=%zu",
-          diagFrame2, scanline2, (unsigned long long)windowInstrs,
-          (unsigned long long)windowCycles,
-          (unsigned long long)windowFetchCycles,
-          (unsigned long long)windowDataCycles,
-          (unsigned long long)windowBranches,
-          (unsigned long long)windowBranchPenCycles,
-          windowInstrs > 0 ? (double)windowCycles / windowInstrs : 0.0,
-          (long long)(windowCycles - windowFetchCycles - windowDataCycles -
-                      windowBranchPenCycles),
-          pcHistogram.size());
-
-      // Log top 20 hottest PCs
-      std::vector<std::pair<uint32_t, uint32_t>> sorted(pcHistogram.begin(),
-                                                        pcHistogram.end());
-      std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) {
-        return a.second > b.second;
-      });
-      for (size_t i = 0; i < std::min(sorted.size(), (size_t)20); i++) {
-        uint8_t pcRegion = (uint8_t)(sorted[i].first >> 24);
-        Common::Logger::Instance().LogFmt(
-            Common::LogLevel::Info, "WORK_WINDOW",
-            "  HOT_PC #%zu: 0x%08x count=%u (%.1f%%) rgn=0x%02x", i + 1,
-            sorted[i].first, sorted[i].second,
-            100.0 * sorted[i].second / windowInstrs, pcRegion);
-      }
-      windowLogs++;
-
-      // One-shot dump of the NES emulator inner loop at 0x03004A00-0x03004A60
-      // Read as 32-bit ARM instructions
-      static bool dumpedIWRAM = false;
-      if (!dumpedIWRAM) {
-        dumpedIWRAM = true;
-        for (uint32_t addr = 0x03004A00; addr <= 0x03004A60; addr += 4) {
-          uint32_t opcode = memory->Read32(addr);
-          Common::Logger::Instance().LogFmt(
-              Common::LogLevel::Info, "WORK_WINDOW",
-              "IWRAM_ARM: 0x%08x: 0x%08x", addr, opcode);
-        }
-        // Also dump the dispatcher at 0x03005300-0x03005320
-        for (uint32_t addr = 0x03005300; addr <= 0x03005320; addr += 4) {
-          uint32_t opcode = memory->Read32(addr);
-          Common::Logger::Instance().LogFmt(
-              Common::LogLevel::Info, "WORK_WINDOW",
-              "IWRAM_ARM_DISP: 0x%08x: 0x%08x", addr, opcode);
-        }
-      }
-    }
-
-    wasHalted = isHalted;
-  }
-
   uint32_t currPc = cpu->GetRegister(15);
   if (currPc == prevPc) {
     stallCycleAccumulator += static_cast<uint64_t>(totalCycles);
@@ -732,38 +388,6 @@ int GBA::Step() {
   totalCyclesExecuted.fetch_add((uint64_t)totalCycles,
                                 std::memory_order_relaxed);
 
-  // Optional: periodic PC sampling for regression triage.
-  // Enable with: AIO_TRACE_PC_EVERY_CYCLES=<N>
-  // Example: AIO_TRACE_PC_EVERY_CYCLES=16777216 (roughly 1 second)
-  {
-    static bool parsed = false;
-    static uint64_t every = 0;
-    static uint64_t nextAt = 0;
-    if (!parsed) {
-      parsed = true;
-      if (const char *s = std::getenv("AIO_TRACE_PC_EVERY_CYCLES")) {
-        const long long v = std::atoll(s);
-        if (v > 0) {
-          every = (uint64_t)v;
-          nextAt = every;
-        }
-      }
-    }
-    if (every != 0) {
-      const uint64_t nowCycles =
-          totalCyclesExecuted.load(std::memory_order_relaxed);
-      if (nowCycles >= nextAt) {
-        nextAt += every;
-        const uint32_t pc = GetPC();
-        const bool thumb = IsThumbMode();
-        Common::Logger::Instance().LogFmt(
-            Common::LogLevel::Info, "GBA",
-            "PC_SAMPLE cycles=%llu PC=0x%08X Thumb=%d halted=%d",
-            (unsigned long long)nowCycles, (unsigned)pc, thumb ? 1 : 0,
-            (IsCPUHalted() ? 1 : 0));
-      }
-    }
-  }
   return totalCycles;
 }
 

@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <emulator/common/Logger.h>
 #include <emulator/gba/APU.h>
 #include <emulator/gba/ARM7TDMI.h>
 #include <emulator/gba/GBA.h>
@@ -12,8 +11,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -93,124 +90,6 @@ template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
   return val;
 }
 
-// Hot-path trace gate: must be extremely cheap when disabled.
-bool TraceGbaSpam() {
-  static const bool enabled = EnvTruthy(std::getenv("AIO_TRACE_GBA_SPAM"));
-  return enabled;
-}
-
-inline bool IsPpuIoOffset(uint32_t offAligned) {
-  switch (offAligned) {
-  case 0x000: // DISPCNT
-  case 0x008: // BG0CNT
-  case 0x00A: // BG1CNT
-  case 0x00C: // BG2CNT
-  case 0x00E: // BG3CNT
-  case 0x010: // BG0HOFS
-  case 0x012: // BG0VOFS
-  case 0x014: // BG1HOFS
-  case 0x016: // BG1VOFS
-  case 0x018: // BG2HOFS
-  case 0x01A: // BG2VOFS
-  case 0x01C: // BG3HOFS
-  case 0x01E: // BG3VOFS
-  case 0x040: // WIN0H
-  case 0x042: // WIN1H
-  case 0x044: // WIN0V
-  case 0x046: // WIN1V
-  case 0x048: // WININ
-  case 0x04A: // WINOUT
-  case 0x04C: // MOSAIC
-  case 0x050: // BLDCNT
-  case 0x052: // BLDALPHA
-  case 0x054: // BLDY
-    return true;
-  default:
-    return false;
-  }
-}
-
-inline void TracePpuIoWrite8(uint32_t address, uint8_t value, uint32_t pc) {
-  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
-  if (!trace)
-    return;
-  if ((address & 0xFF000000u) != 0x04000000u)
-    return;
-  const uint32_t off = address & 0x3FFu;
-  const uint32_t offAligned = off & ~1u;
-  if (!IsPpuIoOffset(offAligned))
-    return;
-
-  static uint8_t last8[0x400] = {};
-  static bool seen8[0x400] = {};
-  if (seen8[off] && last8[off] == value)
-    return;
-  seen8[off] = true;
-  last8[off] = value;
-
-  static int logs = 0;
-  if (logs++ >= 50000)
-    return;
-  AIO::Emulator::Common::Logger::Instance().LogFmt(
-      AIO::Emulator::Common::LogLevel::Info, "PPU_IO",
-      "W8 off=0x%03x addr=0x%08x val=0x%02x PC=0x%08x", (unsigned)off,
-      (unsigned)address, (unsigned)value, (unsigned)pc);
-}
-
-inline void TracePpuIoWrite16(uint32_t address, uint16_t value, uint32_t pc) {
-  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
-  if (!trace)
-    return;
-  if ((address & 0xFF000000u) != 0x04000000u)
-    return;
-  const uint32_t offAligned = (address & 0x3FFu) & ~1u;
-  if (!IsPpuIoOffset(offAligned))
-    return;
-
-  static uint16_t last16[0x400 / 2] = {};
-  static bool seen16[0x400 / 2] = {};
-  const uint32_t idx = offAligned >> 1;
-  if (seen16[idx] && last16[idx] == value)
-    return;
-  seen16[idx] = true;
-  last16[idx] = value;
-
-  static int logs = 0;
-  if (logs++ >= 50000)
-    return;
-  AIO::Emulator::Common::Logger::Instance().LogFmt(
-      AIO::Emulator::Common::LogLevel::Info, "PPU_IO",
-      "W16 off=0x%03x addr=0x%08x val=0x%04x PC=0x%08x", (unsigned)offAligned,
-      (unsigned)address, (unsigned)value, (unsigned)pc);
-}
-
-inline void TracePpuIoWrite32(uint32_t address, uint32_t value, uint32_t pc) {
-  static const bool trace = EnvTruthy(std::getenv("AIO_TRACE_PPU_IO_WRITES"));
-  if (!trace)
-    return;
-  if ((address & 0xFF000000u) != 0x04000000u)
-    return;
-  const uint32_t offAligned = (address & 0x3FFu) & ~3u;
-  if (!IsPpuIoOffset(offAligned & ~1u) &&
-      !IsPpuIoOffset((offAligned + 2u) & ~1u))
-    return;
-
-  static uint32_t last32[0x400 / 4] = {};
-  static bool seen32[0x400 / 4] = {};
-  const uint32_t idx = offAligned >> 2;
-  if (seen32[idx] && last32[idx] == value)
-    return;
-  seen32[idx] = true;
-  last32[idx] = value;
-
-  static int logs = 0;
-  if (logs++ >= 50000)
-    return;
-  AIO::Emulator::Common::Logger::Instance().LogFmt(
-      AIO::Emulator::Common::LogLevel::Info, "PPU_IO",
-      "W32 off=0x%03x addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)offAligned,
-      (unsigned)address, (unsigned)value, (unsigned)pc);
-}
 } // namespace
 
 GBAMemory::GBAMemory() {
@@ -578,13 +457,6 @@ void GBAMemory::Reset() {
     io_regs[0x205] = 0x43;
   }
 
-  if (EnvFlagCached("AIO_TRACE_WAITCNT")) {
-    const uint16_t waitcnt = (uint16_t)(io_regs[0x204] | (io_regs[0x205] << 8));
-    AIO::Emulator::Common::Logger::Instance().LogFmt(
-        AIO::Emulator::Common::LogLevel::Info, "WAITCNT",
-        "BOOT WAITCNT init = 0x%04x", (unsigned)waitcnt);
-  }
-
   eepromState = EEPROMState::Idle;
   eepromBitCounter = 0;
   eepromBuffer = 0;
@@ -944,17 +816,12 @@ void GBAMemory::SetSavePath(const std::string &path) { savePath = path; }
 
 void GBAMemory::SetSaveType(SaveType type) {
   configuredSaveType = type;
-  if (verboseLogs) {
-    std::cout << "[GBAMemory] Configuring save type" << std::endl;
-  }
 
   const std::vector<uint8_t> existingEeprom = eepromData;
   const std::vector<uint8_t> existingSram = sram;
 
   switch (type) {
   case SaveType::SRAM:
-    if (verboseLogs)
-      std::cout << "SRAM" << std::endl;
     hasSRAM = true;
     isFlash = false;
     flashBank = 0;
@@ -967,8 +834,6 @@ void GBAMemory::SetSaveType(SaveType type) {
     }
     break;
   case SaveType::Flash512:
-    if (verboseLogs)
-      std::cout << "Flash 512K" << std::endl;
     hasSRAM = true;
     isFlash = true;
     flashBank = 0;
@@ -981,8 +846,6 @@ void GBAMemory::SetSaveType(SaveType type) {
     }
     break;
   case SaveType::Flash1M:
-    if (verboseLogs)
-      std::cout << "Flash 1M" << std::endl;
     hasSRAM = true;
     isFlash = true;
     flashBank = 0;
@@ -995,8 +858,6 @@ void GBAMemory::SetSaveType(SaveType type) {
     }
     break;
   case SaveType::EEPROM_4K:
-    if (verboseLogs)
-      std::cout << "EEPROM 4K" << std::endl;
     hasSRAM = false;
     isFlash = false;
     eepromIs64Kbit = false;
@@ -1010,51 +871,22 @@ void GBAMemory::SetSaveType(SaveType type) {
     }
     break;
   case SaveType::EEPROM_64K:
-    if (verboseLogs)
-      std::cout << "EEPROM 64K" << std::endl;
     hasSRAM = false;
     isFlash = false;
     eepromIs64Kbit = true;
     if (eepromData.size() != 8192) {
-      if (verboseLogs)
-        std::cout << "[SetSaveType] Resizing from " << eepromData.size()
-                  << " to 8192" << std::endl;
       eepromData.resize(8192, 0xFF); // 64Kbit EEPROM
       if (!existingEeprom.empty()) {
         size_t copySize = std::min(existingEeprom.size(), eepromData.size());
-        if (verboseLogs)
-          std::cout << "[SetSaveType] Copying " << copySize
-                    << " bytes from existingData" << std::endl;
         std::copy(existingEeprom.begin(), existingEeprom.begin() + copySize,
                   eepromData.begin());
       }
     } else {
-      if (verboseLogs)
-        std::cout
-            << "[SetSaveType] Size already correct (8192), no resize needed"
-            << std::endl;
     }
     break;
   case SaveType::Auto:
-    if (verboseLogs)
-      std::cout << "Auto-detect (no change)" << std::endl;
     break;
   default:
-    if (verboseLogs)
-      std::cout << "Unknown" << std::endl;
-  }
-
-  if (verboseLogs) {
-    std::cout << "[SetSaveType] Final eepromData.size() = " << eepromData.size()
-              << std::endl;
-    if (!eepromData.empty()) {
-      std::cout << "[SetSaveType] Final first 16 bytes: " << std::hex;
-      for (size_t i = 0; i < std::min(eepromData.size(), size_t(16)); i++) {
-        std::cout << std::setw(2) << std::setfill('0') << (int)eepromData[i]
-                  << " ";
-      }
-      std::cout << std::dec << std::endl;
-    }
   }
 
   saveTypeLocked = true; // Prevent further dynamic detection
@@ -1079,11 +911,6 @@ void GBAMemory::FlushSave() {
 }
 
 void GBAMemory::EvaluateKeypadIRQ() {
-  static int keypadIrqDebug = -1;
-  if (keypadIrqDebug < 0) {
-    keypadIrqDebug = EnvFlagCached("AIO_KEYPAD_IRQ_DEBUG") ? 1 : 0;
-  }
-
   if (io_regs.size() <= IORegs::KEYCNT + 1 ||
       io_regs.size() <= IORegs::KEYINPUT + 1 ||
       io_regs.size() <= IORegs::IF + 1) {
@@ -1119,17 +946,6 @@ void GBAMemory::EvaluateKeypadIRQ() {
     return;
   }
 
-  if (keypadIrqDebug) {
-    static int logCount = 0;
-    if (logCount < 200) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Debug, "GBA/KEYPAD",
-          "KEYCNT=0x%04x KEYINPUT=0x%04x pressed=0x%04x mask=0x%04x mode=%s",
-          keycnt, keyinput, pressed, mask, andMode ? "AND" : "OR");
-      logCount++;
-    }
-  }
-
   // Hardware requests keypad interrupt by setting IF bit 12.
   uint16_t if_reg = io_regs[IORegs::IF] | (io_regs[IORegs::IF + 1] << 8);
   if_reg |= InterruptFlags::KEYPAD;
@@ -1148,20 +964,6 @@ void GBAMemory::SetKeyInput(uint16_t value) {
     // prompt input, request the KEYPAD interrupt when KEYCNT conditions are
     // met.
     EvaluateKeypadIRQ();
-
-    // Targeted input trace for SMA2: helps confirm that A/B/Start etc are
-    // reaching the core when stuck at "saved data is corrupt".
-    if ((gameCode == "AMQE" || gameCode == "AMQP" || gameCode == "AMQJ" ||
-         gameCode == "AA2E") &&
-        old != value) {
-      static int keyLogCount = 0;
-      if (keyLogCount < 80) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "GBA/KEYINPUT",
-            "game=%s old=0x%04x new=0x%04x", gameCode.c_str(), old, value);
-        keyLogCount++;
-      }
-    }
   }
 }
 
@@ -1463,14 +1265,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
   }
 
-  static const bool traceSma2HeaderReads =
-      EnvTruthy(std::getenv("AIO_TRACE_SMA2_HEADER_READS"));
-  static const bool traceDma3Reads =
-      EnvTruthy(std::getenv("AIO_TRACE_DMA3_READS"));
-  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
-  static const bool traceBiosRead =
-      EnvTruthy(std::getenv("AIO_TRACE_BIOS_READ"));
-
   uint8_t region = (address >> 24);
   switch (region) {
   case 0x00: // BIOS (GBATEK: 0x00000000-0x00003FFF)
@@ -1482,17 +1276,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
       // Classic NES Series games check this value as anti-emulation protection.
       if (cpu && cpu->GetRegister(15) >= 0x00004000) {
         uint8_t result = (biosPrefetch >> ((address & 3u) * 8u)) & 0xFFu;
-        if (traceBiosRead) {
-          static int biosReadCount = 0;
-          if (biosReadCount++ < 100) {
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "BIOS_READ",
-                "BIOS read from outside BIOS: addr=0x%08x PC=0x%08x thumb=%d "
-                "biosPrefetch=0x%08x result=0x%02x",
-                address, cpu->GetRegister(15), cpu->IsThumbModeFlag() ? 1 : 0,
-                biosPrefetch, result);
-          }
-        }
         return result;
       }
       // CPU is inside BIOS - return actual BIOS data
@@ -1504,38 +1287,12 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     {
       uint32_t openBus = GetOpenBusValue();
       uint8_t result = (openBus >> ((address & 3u) * 8u)) & 0xFFu;
-      if (traceBiosRead && cpu) {
-        static int region0Reads = 0;
-        if (region0Reads++ < 100) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "BIOS_READ",
-              "Region0 above BIOS: addr=0x%08x PC=0x%08x thumb=%d "
-              "openBus=0x%08x -> 0x%02x",
-              address, cpu->GetRegister(15), cpu->IsThumbModeFlag() ? 1 : 0,
-              openBus, result);
-        }
-      }
       return result;
     }
   case 0x02: // WRAM (Board) (GBATEK: 0x02000000-0x0203FFFF)
   {
     const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
     const uint8_t v = wram_board[off];
-    // SMA2 investigation: trace reads of the 8-byte header staging area.
-    // Enable with: AIO_TRACE_SMA2_HEADER_READS=1
-    if (traceSma2HeaderReads && cpu) {
-      if (off >= 0x03C0u && off < 0x03C8u) {
-        static int hdrReads = 0;
-        if (hdrReads < 400) {
-          const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SMA2",
-              "HDR_READ addr=0x%08x off=0x%04x val=0x%02x PC=0x%08x",
-              (unsigned)address, (unsigned)off, (unsigned)v, (unsigned)pc);
-          hdrReads++;
-        }
-      }
-    }
     return v;
   }
   case 0x03: // WRAM (Chip) (GBATEK: 0x03000000-0x03007FFF)
@@ -1622,24 +1379,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
           (offset - IORegs::TM0CNT_L) % IORegs::TIMER_CHANNEL_SIZE;
 
       // Trace ALL timer byte reads to find NES emulator timing mechanism
-      {
-        static const bool traceTimerReads =
-            EnvTruthy(std::getenv("AIO_TRACE_ALL_TIMER_READS"));
-        if (traceTimerReads) {
-          static int tReadLogs = 0;
-          const int frame = ppu ? ppu->GetFrameCount() : -1;
-          if (frame >= 30 && frame <= 32 && tReadLogs < 500) {
-            const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "TIMER_READ8",
-                "Timer%d byte%d read: counter=0x%04x PC=0x%08x frame=%d "
-                "scanline=%d",
-                timerIdx, byteInChannel, (unsigned)timerCounters[timerIdx],
-                (unsigned)pc, frame, ppuTimingScanline);
-            tReadLogs++;
-          }
-        }
-      }
 
       if (byteInChannel < 2) {
         if (gba)
@@ -1661,52 +1400,9 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     }
 
     // DMA3 read trace (useful for save validation loops that poll DMA regs)
-    if (traceDma3Reads && offset >= 0xD4 && offset <= 0xDF) {
-      static int dma3ReadLogs = 0;
-      if (dma3ReadLogs < 400) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "DMA3",
-            "Read8 off=0x%03x val=0x%02x PC=0x%08x", (unsigned)offset,
-            (unsigned)val, (unsigned)pc);
-        dma3ReadLogs++;
-      }
-    }
 
     // Generic IO polling trace (8-bit). Useful for diagnosing games stuck in
     // init loops while DISPCNT remains forced blank.
-    // Enable with: AIO_TRACE_IO_POLL=1
-    if (traceIoPoll && cpu) {
-      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-      if (pc >= 0x03000000u && pc < 0x03008000u) {
-        static uint32_t lastOffset8 = 0xFFFFFFFFu;
-        static uint8_t lastVal8 = 0xFFu;
-        static uint32_t repeats8 = 0;
-        static int logs8 = 0;
-        if (logs8 < 800) {
-          if (offset == lastOffset8 && val == lastVal8) {
-            repeats8++;
-            if (repeats8 == 1u || (repeats8 % 4096u) == 0u) {
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
-                  "IO poll8 repeat off=0x%03x val=0x%02x PC=0x%08x repeats=%u",
-                  (unsigned)offset, (unsigned)val, (unsigned)pc,
-                  (unsigned)repeats8);
-              logs8++;
-            }
-          } else {
-            repeats8 = 0;
-            lastOffset8 = offset;
-            lastVal8 = val;
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
-                "IO poll8 off=0x%03x val=0x%02x PC=0x%08x", (unsigned)offset,
-                (unsigned)val, (unsigned)pc);
-            logs8++;
-          }
-        }
-      }
-    }
 
     return val;
   }
@@ -1714,10 +1410,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
-    static const bool traceDkcPalZero =
-        EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
-    static const bool tracePalWrites =
-        EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
     if (offset < palette_ram.size())
       return palette_ram[offset];
     break;
@@ -1782,50 +1474,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
-  {
-    static const bool traceSramAccess =
-        EnvTruthy(std::getenv("AIO_TRACE_SRAM_ACCESS"));
-
-    if (!hasSRAM) {
-      // EEPROM-only cartridges have no SRAM/Flash chip.
-      // Classic NES games check for SRAM by writing a value and reading it
-      // back. If they detect SRAM (value echoes), they REFUSE TO RUN. So for
-      // EEPROM carts, we must NOT echo writes - return open bus instead.
-      if (traceSramAccess) {
-        static int sramReadLogs = 0;
-        if (sramReadLogs++ < 50) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SRAM",
-              "Read8 from SRAM region (no SRAM): addr=0x%08x PC=0x%08x "
-              "returning 0xFF",
-              address, pc);
-        }
-      }
-      return EEPROM::ERASED_VALUE;
-    }
-
-    if (isFlash && flashState == 3) { // ID Mode
-      uint32_t offset = address & 0xFFFF;
-      if (offset == 0)
-        return SaveTypes::FLASH_MAKER_ID; // Maker: Macronix
-      if (offset == 1)
-        return SaveTypes::FLASH_DEVICE_512K; // Device: 512K (TODO: Handle
-                                             // 1Mbit)
-      return 0;
-    }
-    // Normal Read
-    uint32_t offset = address & 0xFFFF;
-    // Handle 1Mbit banking if needed (offset > 64K)
-    // But standard addressing is 64K window.
-    // If sram.size() > 64K, use flashBank.
-    if (sram.size() > SaveTypes::FLASH_512K_SIZE) {
-      offset += (flashBank * SaveTypes::FLASH_512K_SIZE);
-    }
-    if (offset < sram.size())
-      return sram[offset];
-    return EEPROM::ERASED_VALUE; // Open bus / erased
-  }
   }
   return 0;
 }
@@ -1848,36 +1496,10 @@ uint16_t GBAMemory::Read16(uint32_t address) {
     ~NestGuard() { --d; }
   } nestGuard{dataAccessNestDepth};
 
-  static const bool traceIoUnaligned =
-      EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
-      EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
-  static const bool traceSma2SaveobjRead =
-      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
-  static const bool traceDkcWaitflag =
-      EnvTruthy(std::getenv("AIO_TRACE_DKC_WAITFLAG"));
-  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
-  static const bool traceSma2EepDmaBufReads =
-      EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
-
   // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
   if (region == 0x0D && (!hasSRAM && !isFlash)) {
     return ReadEEPROM();
-  }
-
-  // Diagnostics: detect unaligned IO halfword reads.
-  // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
-  // AIO_TRACE_IO_ODD_HALFWORD=1)
-  if (traceIoUnaligned && region == 0x04 && (address & 1u)) {
-    static int unalignedIoRead16Logs = 0;
-    if (unalignedIoRead16Logs < 400) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "IO",
-          "UNALIGNED Read16 addr=0x%08x PC=0x%08x", (unsigned)address,
-          (unsigned)pc);
-      unalignedIoRead16Logs++;
-    }
   }
 
   // GBA IO registers are fundamentally 16-bit; halfword accesses are aligned.
@@ -1902,129 +1524,18 @@ uint16_t GBAMemory::Read16(uint32_t address) {
     }
 
     // Trace DISPSTAT/VCOUNT reads to understand NES emulator pacing
-    static const bool traceVcountReads =
-        EnvTruthy(std::getenv("AIO_TRACE_VCOUNT_READS"));
-    if (traceVcountReads &&
-        (offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT)) {
-      static int vcountLogs = 0;
-      if (vcountLogs < 2000) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        uint8_t vcount =
-            io_regs.size() > IORegs::VCOUNT ? io_regs[IORegs::VCOUNT] : 0xFF;
-        uint16_t dispstat = (io_regs.size() > IORegs::DISPSTAT + 1)
-                                ? (io_regs[IORegs::DISPSTAT] |
-                                   (io_regs[IORegs::DISPSTAT + 1] << 8))
-                                : 0xFFFF;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "VCOUNT_RD",
-            "Read16 %s offset=0x%03x VCOUNT=%u DISPSTAT=0x%04x "
-            "PC=0x%08x",
-            (offset == IORegs::VCOUNT) ? "VCOUNT" : "DISPSTAT",
-            (unsigned)offset, (unsigned)vcount, (unsigned)dispstat,
-            (unsigned)pc);
-        vcountLogs++;
-      }
-    }
-  }
-
-  // SMA2 investigation: trace reads of the save/validator object pointer.
-  // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
-  if (traceSma2SaveobjRead) {
-    if ((address & 0xFFFFFFFCu) == 0x03007BC8u) {
-      static int readLogs16 = 0;
-      if (readLogs16 < 400) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "SAVEOBJ Read16 addr=0x%08x val=0x%04x PC=0x%08x",
-            (unsigned)address,
-            (unsigned)(Read8(address) | (Read8(address + 1) << 8)),
-            (unsigned)pc);
-        readLogs16++;
-      }
-    }
   }
 
   uint16_t val = Read8(address) | (Read8(address + 1) << 8);
 
-  // DKC black-screen investigation: the title can spin in a Thumb loop polling
   // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
   // and where reads come from.
-  // Enable with: AIO_TRACE_DKC_WAITFLAG=1
-  if (traceDkcWaitflag && cpu && region == 0x03 &&
-      ((address & ~1u) == 0x03000064u)) {
-    static uint16_t lastVal = 0xFFFFu;
-    static uint32_t repeats = 0;
-    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-    if (val == lastVal) {
-      repeats++;
-      if (repeats == 1u || (repeats % 4096u) == 0u) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "DKC",
-            "WAITFLAG R16 addr=0x%08x val=0x%04x PC=0x%08x repeats=%u",
-            (unsigned)(address & ~1u), (unsigned)val, (unsigned)pc,
-            (unsigned)repeats);
-      }
-    } else {
-      repeats = 0;
-      lastVal = val;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "WAITFLAG R16 addr=0x%08x val=0x%04x PC=0x%08x",
-          (unsigned)(address & ~1u), (unsigned)val, (unsigned)pc);
-    }
-  }
 
   // Trace tight IO polling loops (diagnostic for "stuck in forced blank").
-  // Enable with: AIO_TRACE_IO_POLL=1
   // This is intentionally very low-volume (change-triggered + periodic).
-  if (traceIoPoll && cpu && region == 0x04 &&
-      (address & 0xFF000000u) == 0x04000000u) {
-    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-    // Many titles run hot loops from IWRAM; focus there to keep signal high.
-    if (pc >= 0x03000000u && pc < 0x03008000u) {
-      const uint32_t offset = address & 0x3FFu;
-      static uint32_t lastOffset = 0xFFFFFFFFu;
-      static uint16_t lastVal = 0xFFFFu;
-      static uint32_t repeats = 0;
 
-      if (offset == lastOffset && val == lastVal) {
-        repeats++;
-        if (repeats == 1u || (repeats % 4096u) == 0u) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
-              "IO poll repeat off=0x%03x val=0x%04x PC=0x%08x repeats=%u",
-              (unsigned)offset, (unsigned)val, (unsigned)pc, (unsigned)repeats);
-        }
-      } else {
-        repeats = 0;
-        lastOffset = offset;
-        lastVal = val;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
-            "IO poll off=0x%03x val=0x%04x PC=0x%08x", (unsigned)offset,
-            (unsigned)val, (unsigned)pc);
-      }
-    }
-  }
-
-  // SMA2 investigation: trace reads from the EEPROM DMA destination buffers in
-  // IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1 This helps confirm
   // whether the game is actually consuming the expected 0xFFFE/0xFFFF bitstream
   // halfwords after DMA completes.
-  if (traceSma2EepDmaBufReads && cpu) {
-    if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
-      static int eepBufR16 = 0;
-      if (eepBufR16 < 1200) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "EEPDMA R16 addr=0x%08x val=0x%04x PC=0x%08x", (unsigned)address,
-            (unsigned)val, (unsigned)pc);
-        eepBufR16++;
-      }
-    }
-  }
 
   // Timer Counters (Read from internal state)
   if ((address & 0xFF000000) == IORegs::BASE) {
@@ -2034,43 +1545,9 @@ uint16_t GBAMemory::Read16(uint32_t address) {
       int timerIdx = (offset - IORegs::TM0CNT_L) / IORegs::TIMER_CHANNEL_SIZE;
       if ((offset % IORegs::TIMER_CHANNEL_SIZE) == 0) {
         // Trace ALL timer 16-bit reads
-        {
-          static const bool traceTimerReads =
-              EnvTruthy(std::getenv("AIO_TRACE_ALL_TIMER_READS"));
-          if (traceTimerReads) {
-            static int tReadLogs16 = 0;
-            const int frame = ppu ? ppu->GetFrameCount() : -1;
-            if (frame >= 30 && frame <= 32 && tReadLogs16 < 500) {
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "TIMER_READ16",
-                  "Timer%d read16: counter=0x%04x PC=0x%08x frame=%d "
-                  "scanline=%d",
-                  timerIdx, (unsigned)timerCounters[timerIdx], (unsigned)pc,
-                  frame, ppuTimingScanline);
-              tReadLogs16++;
-            }
-          }
-        }
 
         // Trace Timer0 reads to understand NES emulator timing behavior
         if (timerIdx == 0) {
-          static const bool traceT0Reads =
-              EnvTruthy(std::getenv("AIO_TRACE_TIMER0_READS"));
-          if (traceT0Reads) {
-            static int t0ReadLogs = 0;
-            const int frame = ppu ? ppu->GetFrameCount() : -1;
-            if (frame >= 30 && frame <= 32 && t0ReadLogs < 2000) {
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "T0READ",
-                  "Timer0 read: counter=0x%04x (%u) PC=0x%08x frame=%d "
-                  "scanline=%d",
-                  (unsigned)timerCounters[0], (unsigned)timerCounters[0],
-                  (unsigned)pc, frame, ppuTimingScanline);
-              t0ReadLogs++;
-            }
-          }
         }
         return timerCounters[timerIdx];
       }
@@ -2102,24 +1579,10 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
       uint8_t b1 = wram_chip[offset + 1];
       uint16_t result = b0 | (b1 << 8);
       // Debug: log fetches from suspect address (disabled by default)
-      // Enable with: AIO_TRACE_IWRAM_FETCH=1
-      if (EnvTruthy(std::getenv("AIO_TRACE_IWRAM_FETCH")) &&
-          address == 0x03002e40 && result == 0x0000) {
-        fprintf(stderr,
-                "[DEBUG] ReadInstruction16(0x%08x) offset=0x%04x b0=0x%02x "
-                "b1=0x%02x result=0x%04x\n",
-                address, offset, b0, b1, result);
-      }
       return result;
     }
     // If we get here, something is very wrong
     // Keep this behind a flag to avoid I/O stalls if it triggers frequently.
-    if (EnvTruthy(std::getenv("AIO_TRACE_IWRAM_FETCH"))) {
-      fprintf(stderr,
-              "[ERROR] ReadInstruction16(0x%08x) offset=0x%04x exceeds "
-              "wram_chip.size()=%zu\n",
-              address, offset, wram_chip.size());
-    }
   }
   // Handle EWRAM instruction fetch
   else if ((address & 0xFF000000u) == 0x02000000u) {
@@ -2152,15 +1615,6 @@ uint32_t GBAMemory::Read32(uint32_t address) {
     ~NestGuard() { --d; }
   } nestGuard{dataAccessNestDepth};
 
-  static const bool traceIoUnaligned =
-      EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
-      EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
-  static const bool traceSma2SaveobjRead =
-      EnvTruthy(std::getenv("AIO_TRACE_SMA2_SAVEOBJ_READ"));
-  static const bool traceIoPoll = EnvTruthy(std::getenv("AIO_TRACE_IO_POLL"));
-  static const bool traceSma2EepDmaBufReads =
-      EnvTruthy(std::getenv("AIO_TRACE_SMA2_EEPDMA_BUF_READS"));
-
   // EEPROM Handling - 32-bit read performs two 16-bit reads for EEPROM-save
   // cartridges only.
   uint8_t region = (address >> 24);
@@ -2170,95 +1624,15 @@ uint32_t GBAMemory::Read32(uint32_t address) {
     return low | (high << 16);
   }
 
-  // Diagnostics: detect unaligned IO word reads.
-  // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
-  // AIO_TRACE_IO_ODD_HALFWORD=1)
-  if (traceIoUnaligned && region == 0x04 && (address & 3u)) {
-    static int unalignedIoRead32Logs = 0;
-    if (unalignedIoRead32Logs < 400) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "IO",
-          "UNALIGNED Read32 addr=0x%08x PC=0x%08x", (unsigned)address,
-          (unsigned)pc);
-      unalignedIoRead32Logs++;
-    }
-  }
-
   // IO space word accesses are aligned on hardware.
   if (region == 0x04 && (address & 3u)) {
     address &= ~3u;
-  }
-
-  // SMA2 investigation: trace reads of the save/validator object pointer.
-  // Enable with: AIO_TRACE_SMA2_SAVEOBJ_READ=1
-  if (traceSma2SaveobjRead) {
-    if (address == 0x03007BC8u) {
-      static int readLogs32 = 0;
-      if (readLogs32 < 400) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        const uint32_t v = Read8(address) | (Read8(address + 1) << 8) |
-                           (Read8(address + 2) << 16) |
-                           (Read8(address + 3) << 24);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "SAVEOBJ Read32 addr=0x%08x val=0x%08x PC=0x%08x",
-            (unsigned)address, (unsigned)v, (unsigned)pc);
-        readLogs32++;
-      }
-    }
   }
 
   uint32_t val = Read8(address) | (Read8(address + 1) << 8) |
                  (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
 
   // Trace tight IO polling loops via 32-bit reads.
-  // Enable with: AIO_TRACE_IO_POLL=1
-  if (traceIoPoll && cpu && region == 0x04 &&
-      (address & 0xFF000000u) == 0x04000000u) {
-    const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-    if (pc >= 0x03000000u && pc < 0x03008000u) {
-      const uint32_t offset = address & 0x3FFu;
-      static uint32_t lastOffset32 = 0xFFFFFFFFu;
-      static uint32_t lastVal32 = 0xFFFFFFFFu;
-      static uint32_t repeats32 = 0;
-
-      if (offset == lastOffset32 && val == lastVal32) {
-        repeats32++;
-        if (repeats32 == 1u || (repeats32 % 4096u) == 0u) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
-              "IO poll32 repeat off=0x%03x val=0x%08x PC=0x%08x repeats=%u",
-              (unsigned)offset, (unsigned)val, (unsigned)pc,
-              (unsigned)repeats32);
-        }
-      } else {
-        repeats32 = 0;
-        lastOffset32 = offset;
-        lastVal32 = val;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "IOPOLL",
-            "IO poll32 off=0x%03x val=0x%08x PC=0x%08x", (unsigned)offset,
-            (unsigned)val, (unsigned)pc);
-      }
-    }
-  }
-
-  // SMA2 investigation: trace 32-bit reads from the EEPROM DMA destination
-  // buffers in IWRAM. Enable with: AIO_TRACE_SMA2_EEPDMA_BUF_READS=1
-  if (traceSma2EepDmaBufReads && cpu) {
-    if (region == 0x03 && address >= 0x03007C80u && address < 0x03007D80u) {
-      static int eepBufR32 = 0;
-      if (eepBufR32 < 800) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "EEPDMA R32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
-            (unsigned)val, (unsigned)pc);
-        eepBufR32++;
-      }
-    }
-  }
 
   return val;
 }
@@ -2312,39 +1686,8 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
 
-    static const bool traceDkcPalZero =
-        EnvTruthy(std::getenv("AIO_TRACE_DKC_PAL_ZERO"));
-    static const bool tracePalWrites =
-        EnvTruthy(std::getenv("AIO_TRACE_PAL_WRITE"));
-
-    // DKC diagnostic: log palette writes that set BG palette to 0 during the
     // observed problem window.
     const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
-    if (traceDkcPalZero && frame >= 2200 && frame <= 2395 && offset < 32 &&
-        value == 0) {
-      std::cout << "[DKC_DIAG] Frame " << frame
-                << " PALETTE ZERO WRITE: offset=0x" << std::hex << offset
-                << " (BG palette index " << std::dec << (offset / 2) << ")"
-                << " PC=0x" << std::hex << (cpu ? cpu->GetRegister(15) : 0)
-                << std::dec << std::endl;
-    }
-
-    if (tracePalWrites) {
-      static int palWriteCount = 0;
-      if (palWriteCount < 500) {
-        palWriteCount++;
-        const char *state =
-            ppuTimingValid
-                ? (ppuTimingScanline >= 160
-                       ? "VBLANK"
-                       : (ppuTimingCycle >= 960 ? "HBLANK" : "VISIBLE"))
-                : "NO_TIMING";
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "PAL_WRITE",
-            "frame=%d offset=0x%03x val=0x%02x state=%s scanline=%d", frame,
-            offset, value, state, ppuTimingScanline);
-      }
-    }
 
     if (offset < palette_ram.size()) {
       palette_ram[offset] = value;
@@ -2361,74 +1704,9 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       offset -= 0x8000u;
     }
 
-    // Trace Write8 to NES scroll table in VRAM
-    if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
-      if ((offset >= 0x3514 && offset < 0x3794) ||
-          (offset >= 0x6B14 && offset < 0x6D94)) {
-        static int scrollW8Logs = 0;
-        if (scrollW8Logs < 200) {
-          int entry = (offset >= 0x6B14) ? (offset - 0x6B14) / 4
-                                         : (offset - 0x3514) / 4;
-          int buf = (offset >= 0x6B14) ? 2 : 1;
-          int byteIdx = offset & 3;
-          const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          Common::Logger::Instance().LogFmt(
-              Common::LogLevel::Info, "SCROLL",
-              "W8 buf%d entry=%d byte=%d val=0x%02x off=0x%05x PC=0x%08x", buf,
-              entry, byteIdx, value, offset, wpc);
-          scrollW8Logs++;
-        }
-      }
-    }
-
-    // Trace Write8Internal to VRAM staging area - catch 0x10000-0x10020
-    static const bool traceVramStage =
-        EnvTruthy(std::getenv("AIO_TRACE_VRAM_STAGING"));
-    if (traceVramStage && offset >= 0x10000u && offset < 0x10020u) {
-      static int w8intLogs = 0;
-      if (w8intLogs++ < 300) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "VRAM",
-            "VRAM_STAGE W8INT addr=0x%08x offset=0x%05x val=0x%02x PC=0x%08x",
-            (unsigned)address, (unsigned)offset, (unsigned)value, (unsigned)pc);
-      }
-    }
-
-    // DKC diagnostic: Log VRAM writes during problem frames
     const int frame = ppu ? ppu->GetFrameCount() : -1;
 
-    // DEBUG: Trace writes to BG character area 0 (first 16KB: 0x0000-0x3FFF)
-    if (TraceGbaSpam()) {
-      static int vramCharWriteCount = 0;
-      if (offset < 0x4000 && value != 0) {
-        vramCharWriteCount++;
-        if (vramCharWriteCount <= 20) {
-          std::cout << "[VRAM Char0 Write] offset=0x" << std::hex << offset
-                    << " val=0x" << (int)value;
-          if (cpu)
-            std::cout << " PC=0x" << cpu->GetRegister(15);
-          std::cout << std::dec << std::endl;
-        }
-      }
-    }
-
     if (offset < vram.size()) {
-      // Trace ANY write to scroll table range (catch all paths)
-      if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
-        if ((offset >= 0x3514 && offset < 0x3794) ||
-            (offset >= 0x6B14 && offset < 0x6D94)) {
-          static int scrollRawLogs = 0;
-          if (scrollRawLogs < 100) {
-            const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            Common::Logger::Instance().LogFmt(
-                Common::LogLevel::Info, "SCROLL_RAW",
-                "VRAM[0x%05x]=0x%02x (Write8) PC=0x%08x addr=0x%08x", offset,
-                value, wpc, address);
-            scrollRawLogs++;
-          }
-        }
-      }
       vram[offset] = value;
       // Keep shadow coherent for later deferred apply.
       if (offset < vram_shadow.size())
@@ -2454,28 +1732,10 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
 
       if (!forcedBlank) {
         if (inVisible) {
-          if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
-            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "OAM",
-                "OAM CPU W8 BLOCKED addr=0x%08x val=0x%02x PC=0x%08x "
-                "scanline=%d cycle=%d",
-                (unsigned)address, (unsigned)value, (unsigned)pc2,
-                ppuTimingScanline, ppuTimingCycle);
-          }
           // Block write silently.
           break;
         }
         if (inHBlank && !hBlankIntervalFree) {
-          if (EnvFlagCached("AIO_TRACE_OAM_CPU_WRITES")) {
-            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "OAM",
-                "OAM CPU W8 BLOCKED HBLANK addr=0x%08x val=0x%02x PC=0x%08x "
-                "scanline=%d cycle=%d",
-                (unsigned)address, (unsigned)value, (unsigned)pc2,
-                ppuTimingScanline, ppuTimingCycle);
-          }
           // Block write during HBlank when H-Blank Interval Free is disabled.
           break;
         }
@@ -2504,169 +1764,16 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     }
   }
 
-  const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-  TracePpuIoWrite8(address, value, pc);
-
-  // DKC crash investigation: trace byte writes into the EWRAM window that
-  // later gets executed via mirrored targets around 0x02FCD8xx/0x0238D8xx.
-  // Enable with: AIO_TRACE_DKC_EWRAM_CODE=1
-  if (EnvFlagCached("AIO_TRACE_DKC_EWRAM_CODE") && cpu &&
-      ((address & 0xFF000000u) == 0x02000000u)) {
-    const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
-    const bool inLowWin = (off >= 0x08D800u && off < 0x08E200u);
-    const bool inHighWin = (off >= 0x3CD800u && off < 0x3CE200u);
-    if (inLowWin || inHighWin) {
-      static int dkcEwramW8 = 0;
-      if (dkcEwramW8++ < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "DKC",
-            "DKC_EWRAM_W8  bus=0x%08x off=0x%05x val=0x%02x PC=0x%08x",
-            (unsigned)address, (unsigned)off, (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-  const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIwram = IsIwramMappedAddress(address);
   const uint32_t iwramOff = address & 0x7FFFu;
   const bool isIrqHandPtrByte =
       isIwram && (iwramOff >= 0x7FFCu) && (iwramOff <= 0x7FFFu);
-  const uint32_t oldIrqHandWord =
-      (traceIrqHandWrites && isIrqHandPtrByte) ? Read32(0x03007FFCu) : 0u;
-  // DEBUG: Trace writes to IWRAM literal pool area 0x3003460-0x3003480
-  // (disabled) if (address >= 0x03003460 && address < 0x03003480) {
-  //     std::cout << "[POOL WRITE] 0x" << std::hex << address
-  //               << " = 0x" << (int)value;
-  //     if (cpu) {
-  //         std::cout << " PC=0x" << cpu->GetRegister(15);
-  //     }
-  //     std::cout << std::dec << std::endl;
-  // }
-
-  // Trace ALL writes to 0x3001500 area (disabled for performance)
-  // if ((address >> 24) == 0x03 && (address & 0x7FFF) >= 0x1500 && (address &
-  // 0x7FFF) < 0x1508) {
-  //     std::cout << "[MIXBUF] Write8 0x" << std::hex << address
-  //               << " = 0x" << (int)value;
-  //     if (cpu) {
-  //         std::cout << " PC=0x" << cpu->GetRegister(15);
-  //     }
-  //     std::cout << std::dec << std::endl;
-  // }
-
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEVALID_WRITES") && cpu) {
-    if (address >= 0x03007B80u && address < 0x03007C80u) {
-      static int wlogs8 = 0;
-      if (wlogs8 < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "SAVEVALID W8 addr=0x%08x val=0x%02x PC=0x%08x", (unsigned)address,
-            (unsigned)value, cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        wlogs8++;
-      }
-    }
-  }
-
-  // DKC audio investigation: trace writes into the jump-table / state region
-  // around 0x03003378-0x0300337F used by the IWRAM audio driver.
-  if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && cpu) {
-    if (address >= 0x03003378u && address <= 0x0300337Fu) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "DKC_W8 addr=0x%08x val=0x%02x PC=0x%08x", (unsigned)address,
-          (unsigned)value, (unsigned)pc);
-    }
-  }
-
-  // SMA2 investigation: trace non-zero writes into the header staging buffer in
-  // EWRAM. Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_STAGE_WRITES") && cpu) {
-    if (address >= 0x020003C0u && address < 0x02000440u && value != 0) {
-      static int stage8 = 0;
-      if (stage8 < 500) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "STAGE W8 addr=0x%08x val=0x%02x PC=0x%08x", (unsigned)address,
-            (unsigned)value, (unsigned)cpu->GetRegister(15));
-        stage8++;
-      }
-    }
-  }
 
   switch (address >> 24) {
   case 0x02: // WRAM (Board)
   {
     const uint32_t offset = address & 0x3FFFF;
     wram_board[offset] = value;
-
-    // SMA2 investigation: trace the *exact writes* to the header staging bytes.
-    // Enable with: AIO_TRACE_SMA2_HEADER_WRITES=1
-    if (EnvFlagCached("AIO_TRACE_SMA2_HEADER_WRITES") && (offset >= 0x03C0) &&
-        (offset < 0x03C8) && cpu) {
-      static int headerWriteLogs = 0;
-      if (headerWriteLogs < 300) {
-        const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-        const uint32_t lr = (uint32_t)cpu->GetRegister(14);
-        const uint32_t sp = (uint32_t)cpu->GetRegister(13);
-        const uint32_t cpsr = (uint32_t)cpu->GetCPSR();
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "HDR_WRITE addr=0x%08x off=0x%04x val=0x%02x PC=0x%08x LR=0x%08x "
-            "SP=0x%08x CPSR=0x%08x R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x",
-            (unsigned)address, (unsigned)offset, (unsigned)value, (unsigned)pc,
-            (unsigned)lr, (unsigned)sp, (unsigned)cpsr,
-            (unsigned)cpu->GetRegister(0), (unsigned)cpu->GetRegister(1),
-            (unsigned)cpu->GetRegister(2), (unsigned)cpu->GetRegister(3));
-        headerWriteLogs++;
-      }
-    }
-
-    // SMA2 investigation: trace when the save header staging bytes in EWRAM
-    // change. Enable with: AIO_TRACE_SMA2_HEADER=1 Watches
-    // 0x020003C0..0x020003C7 (8 bytes).
-    if (EnvFlagCached("AIO_TRACE_SMA2_HEADER") && (offset >= 0x03C0) &&
-        (offset < 0x0400)) {
-      static bool initialized = false;
-      static uint64_t lastHeaderLE = 0;
-
-      constexpr uint32_t kHeaderBase = 0x03C0;
-      if (kHeaderBase + 7 < wram_board.size()) {
-        uint64_t headerLE = 0;
-        for (int i = 0; i < 8; ++i) {
-          headerLE |= (uint64_t)wram_board[kHeaderBase + (uint32_t)i]
-                      << (i * 8);
-        }
-
-        if (!initialized) {
-          initialized = true;
-          lastHeaderLE = headerLE;
-        } else if (headerLE != lastHeaderLE) {
-          constexpr uint64_t kRef = 0xFEB801010101DA69ULL;
-          constexpr uint64_t kOut = 0xFEBC00000000DA69ULL;
-          const bool logAll = EnvFlagCached("AIO_TRACE_SMA2_HEADER_ALL");
-          const bool interesting = (headerLE == kRef) || (headerLE == kOut) ||
-                                   (lastHeaderLE == kRef) ||
-                                   (lastHeaderLE == kOut);
-          if (logAll || interesting) {
-            static int headerAllLogs = 0;
-            // Keep spam bounded when logging intermediates.
-            if (!logAll || headerAllLogs < 400) {
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-              const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "SMA2",
-                  "EWRAM header @0x020003C0 old=0x%016llx new=0x%016llx "
-                  "PC=0x%08x LR=0x%08x SP=0x%08x",
-                  (unsigned long long)lastHeaderLE,
-                  (unsigned long long)headerLE, (unsigned)pc, (unsigned)lr,
-                  (unsigned)sp);
-              headerAllLogs++;
-            }
-          }
-          lastHeaderLE = headerLE;
-        }
-      }
-    }
     break;
   }
   case 0x03: // WRAM (Chip)
@@ -2715,57 +1822,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
                           0; // Bit 7 of high byte = bit 15 of full 16-bit
         bool willBeEnabled = (value & 0x80) != 0;
 
-        // Trace DMA enable transitions for sound channels
-        if (TraceGbaSpam() && (dmaChannel == 1 || dmaChannel == 2)) {
-          static int enableTransitionLogs = 0;
-          if (enableTransitionLogs < 50) {
-            enableTransitionLogs++;
-            std::cout << "[DMA_ENABLE_TRANS] ch=" << dmaChannel
-                      << " wasEnabled=" << wasEnabled
-                      << " willBeEnabled=" << willBeEnabled << " value=0x"
-                      << std::hex << (int)value << " PC=0x";
-            if (cpu)
-              std::cout << cpu->GetRegister(15);
-            std::cout << std::dec << std::endl;
-          }
-        }
-
-        // Trace DMA0/DMA2 enable transitions for Classic NES scroll debugging
-        static const bool traceDmaEnable =
-            EnvTruthy(std::getenv("AIO_TRACE_DMA0_ENABLE"));
-        if (traceDmaEnable && (dmaChannel == 0 || dmaChannel == 2)) {
-          static int dmaEnableLogs = 0;
-          if (dmaEnableLogs < 400) {
-            dmaEnableLogs++;
-            const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
-            uint32_t dmaBase =
-                IORegs::DMA0SAD + (dmaChannel * IORegs::DMA_CHANNEL_SIZE);
-            uint32_t sad = io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
-                           (io_regs[dmaBase + 2] << 16) |
-                           (io_regs[dmaBase + 3] << 24);
-            uint32_t dad = io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
-                           (io_regs[dmaBase + 6] << 16) |
-                           (io_regs[dmaBase + 7] << 24);
-            uint16_t cntL = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
-            uint16_t cntH =
-                io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
-            uint16_t newCntH =
-                (io_regs[dmaBase + 10] & 0xFF) | ((uint16_t)value << 8);
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "DMA_ENABLE",
-                "ch=%d frame=%d sl=%d was=%d will=%d SAD=0x%08x DAD=0x%08x "
-                "CNT_L=0x%04x oldCNT_H=0x%04x newCNT_H=0x%04x "
-                "internalSrc=0x%08x internalDst=0x%08x latch=%d PC=0x%08x",
-                dmaChannel, frame, ppuTimingScanline, (int)wasEnabled,
-                (int)willBeEnabled, (unsigned)sad, (unsigned)dad,
-                (unsigned)cntL, (unsigned)cntH, (unsigned)newCntH,
-                (unsigned)dmaInternalSrc[dmaChannel],
-                (unsigned)dmaInternalDst[dmaChannel],
-                (int)(!wasEnabled && willBeEnabled),
-                cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-          }
-        }
-
         if (!wasEnabled && willBeEnabled) {
           dmaLatchNeeded = true;
         }
@@ -2791,23 +1847,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           bool isEnabled = (ctrl & DMAControl::ENABLE) != 0;
           int timing = (ctrl >> 12) & 3;
 
-          // Trace ALL writes to DMA1/2 SAD (not just when enabled)
-          if (TraceGbaSpam()) {
-            static int sadWriteLogs = 0;
-            if (sadWriteLogs < 100 && (channel == 1 || channel == 2) &&
-                byteInChannel < 4) {
-              sadWriteLogs++;
-              std::cout << "[DMA_SAD_WRITE] ch=" << channel
-                        << " byte=" << byteInChannel << " val=0x" << std::hex
-                        << (int)value << " isEnabled=" << isEnabled
-                        << " timing=" << std::dec << timing << " PC=0x"
-                        << std::hex;
-              if (cpu)
-                std::cout << cpu->GetRegister(15);
-              std::cout << std::dec << std::endl;
-            }
-          }
-
           // For sound DMA (timing=3) that's already enabled, mark for relatch
           // IMPORTANT: Only relatch when the HIGH byte (byte 3) is written.
           if (isEnabled && timing == 3 && byteInChannel == 3) {
@@ -2825,200 +1864,9 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
       }
 
       if (offset < io_regs.size()) {
-        // Trace BG3VOFS writes: capture PC, LR, CPSR mode, and all BG scroll
         // regs
-        static const bool traceBg3Vofs =
-            EnvTruthy(std::getenv("AIO_TRACE_BG3VOFS_DETAIL"));
-        if (traceBg3Vofs && (offset >= 0x10 && offset <= 0x1F)) {
-          static int vLogs = 0;
-          if (vLogs < 4000) {
-            vLogs++;
-            const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
-            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-            const uint32_t cpsr = cpu ? cpu->GetCPSR() : 0u;
-            const bool thumb = (cpsr >> 5) & 1;
-            // Name the register
-            static const char *regNames[] = {
-                "BG0HOFS", "BG0HOFS+1", "BG0VOFS", "BG0VOFS+1",
-                "BG1HOFS", "BG1HOFS+1", "BG1VOFS", "BG1VOFS+1",
-                "BG2HOFS", "BG2HOFS+1", "BG2VOFS", "BG2VOFS+1",
-                "BG3HOFS", "BG3HOFS+1", "BG3VOFS", "BG3VOFS+1"};
-            const char *name = regNames[offset - 0x10];
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "BGSCROLL",
-                "frame=%d sl=%d cy=%d %s val=0x%02x PC=0x%08x LR=0x%08x %s",
-                frame, ppuTimingScanline, ppuTimingCycle, name, (unsigned)value,
-                (unsigned)pc2, (unsigned)lr, thumb ? "THUMB" : "ARM");
-
-            // Dump CPU registers when framework overwrites BG3VOFS with 0x05
-            if (offset == 0x1E && value == 0x05 && cpu &&
-                ((frame >= 9 && frame <= 14) || frame == 30 || frame == 60)) {
-              static int fwDumps = 0;
-              if (fwDumps < 5) {
-                fwDumps++;
-                // Dump exact DMA source addresses for BG3VOFS
-                for (uint32_t srcAddr :
-                     {0x060036A2u, 0x060036A4u, 0x06006CA2u, 0x06006CA4u}) {
-                  uint16_t val16 = Read8(srcAddr) | (Read8(srcAddr + 1) << 8);
-                  AIO::Emulator::Common::Logger::Instance().LogFmt(
-                      AIO::Emulator::Common::LogLevel::Info, "FWSCROLL",
-                      "frame=%d VRAM[0x%08x]=0x%04x(%d)", frame,
-                      (unsigned)srcAddr, (unsigned)val16, (int)val16);
-                }
-                // Also dump the full scroll table (0x86 bytes each, 16-bit
-                // entries)
-                uint32_t base = 0x06003686;
-                for (int i = 0; i < 16; i++) {
-                  uint32_t a = base + i * 2;
-                  uint16_t v = Read8(a) | (Read8(a + 1) << 8);
-                  static const char *rnames[] = {
-                      "BG0H[0]", "BG0H[1]", "BG0V[0]", "BG0V[1]",
-                      "BG1H[0]", "BG1H[1]", "BG1V[0]", "BG1V[1]",
-                      "BG2H[0]", "BG2H[1]", "BG2V[0]", "BG2V[1]",
-                      "BG3H[0]", "BG3H[1]", "BG3V[0]", "BG3V[1]"};
-                  AIO::Emulator::Common::Logger::Instance().LogFmt(
-                      AIO::Emulator::Common::LogLevel::Info, "FWSCROLL",
-                      "frame=%d scrollTab[%d] %s = 0x%04x(%d) @0x%08x", frame,
-                      i, rnames[i], (unsigned)v, (int)v, (unsigned)a);
-                }
-              }
-            }
-
-            // Dump CPU registers when NES emulator writes BG3VOFS (offset 0x1E)
-            if (offset == 0x1E && pc2 == 0x03005200 && cpu &&
-                ((frame >= 9 && frame <= 14) || frame == 30 || frame == 60)) {
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "NESSCROLL",
-                  "frame=%d R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x "
-                  "R4=0x%08x R5=0x%08x R6=0x%08x R7=0x%08x "
-                  "R8=0x%08x R9=0x%08x R10=0x%08x R11=0x%08x R12=0x%08x",
-                  frame, (unsigned)cpu->GetRegister(0),
-                  (unsigned)cpu->GetRegister(1), (unsigned)cpu->GetRegister(2),
-                  (unsigned)cpu->GetRegister(3), (unsigned)cpu->GetRegister(4),
-                  (unsigned)cpu->GetRegister(5), (unsigned)cpu->GetRegister(6),
-                  (unsigned)cpu->GetRegister(7), (unsigned)cpu->GetRegister(8),
-                  (unsigned)cpu->GetRegister(9), (unsigned)cpu->GetRegister(10),
-                  (unsigned)cpu->GetRegister(11),
-                  (unsigned)cpu->GetRegister(12));
-
-              // Dump IWRAM code at 0x03005200 (32 instructions before)
-              static bool codeDumped = false;
-              if (!codeDumped && frame == 13) {
-                codeDumped = true;
-                // Dump 64 ARM words (256 bytes) starting 128 bytes before PC
-                uint32_t dumpBase = 0x030051C0;
-                for (int w = 0; w < 32; w++) {
-                  uint32_t addr = dumpBase + w * 4;
-                  uint32_t word = Read8(addr) | (Read8(addr + 1) << 8) |
-                                  (Read8(addr + 2) << 16) |
-                                  (Read8(addr + 3) << 24);
-                  AIO::Emulator::Common::Logger::Instance().LogFmt(
-                      AIO::Emulator::Common::LogLevel::Info, "IWCODE",
-                      "0x%08x: 0x%08x", addr, word);
-                }
-              }
-
-              // Dump NES PPU scroll state from IWRAM at [R0]
-              uint32_t stateBase = cpu->GetRegister(0);
-              uint8_t scrollData[64];
-              for (int b = 0; b < 64; b++) {
-                scrollData[b] = Read8(stateBase + b);
-              }
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "NESSTATE",
-                  "frame=%d [R0+0..63]=%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x "
-                  "%02x %02x %02x %02x %02x %02x %02x %02x",
-                  frame, scrollData[0], scrollData[1], scrollData[2],
-                  scrollData[3], scrollData[4], scrollData[5], scrollData[6],
-                  scrollData[7], scrollData[8], scrollData[9], scrollData[10],
-                  scrollData[11], scrollData[12], scrollData[13],
-                  scrollData[14], scrollData[15], scrollData[16],
-                  scrollData[17], scrollData[18], scrollData[19],
-                  scrollData[20], scrollData[21], scrollData[22],
-                  scrollData[23], scrollData[24], scrollData[25],
-                  scrollData[26], scrollData[27], scrollData[28],
-                  scrollData[29], scrollData[30], scrollData[31],
-                  scrollData[32], scrollData[33], scrollData[34],
-                  scrollData[35], scrollData[36], scrollData[37],
-                  scrollData[38], scrollData[39], scrollData[40],
-                  scrollData[41], scrollData[42], scrollData[43],
-                  scrollData[44], scrollData[45], scrollData[46],
-                  scrollData[47], scrollData[48], scrollData[49],
-                  scrollData[50], scrollData[51], scrollData[52],
-                  scrollData[53], scrollData[54], scrollData[55],
-                  scrollData[56], scrollData[57], scrollData[58],
-                  scrollData[59], scrollData[60], scrollData[61],
-                  scrollData[62], scrollData[63]);
-
-              // One-shot dump of BG3 tilemap at frame 30
-              // BG3CNT: screenBase=4 → VRAM 0x06002000, 32×32 tiles
-              static bool tilemapDumped = false;
-              if (!tilemapDumped && frame == 30) {
-                tilemapDumped = true;
-                const uint32_t screenBaseAddr = 0x06002000;
-                // Dump rows 0-31 (32 tiles per row = 64 bytes per row)
-                for (int row = 0; row < 32; row++) {
-                  char buf[512];
-                  int pos = 0;
-                  pos +=
-                      snprintf(buf + pos, sizeof(buf) - pos, "row%02d:", row);
-                  bool hasNonZero = false;
-                  for (int col = 0; col < 32; col++) {
-                    uint32_t addr = screenBaseAddr + row * 64 + col * 2;
-                    uint16_t tile = Read8(addr) | (Read8(addr + 1) << 8);
-                    uint16_t tileIndex = tile & 0x3FF;
-                    if (tileIndex != 0)
-                      hasNonZero = true;
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, " %03x",
-                                    tileIndex);
-                  }
-                  if (hasNonZero) {
-                    AIO::Emulator::Common::Logger::Instance().LogFmt(
-                        AIO::Emulator::Common::LogLevel::Info, "BG3MAP", "%s",
-                        buf);
-                  }
-                }
-              }
-            }
-          }
-        }
 
         io_regs[offset] = value;
-      }
-
-      // Trace writes to BG0CNT (offset 0x08-0x09) from any path
-      if (offset == 0x08 || offset == 0x09) {
-        static int bg0cntW8Logs = 0;
-        if (bg0cntW8Logs < 50) {
-          bg0cntW8Logs++;
-          const uint16_t fullVal = io_regs[0x08] | (io_regs[0x09] << 8);
-          const int charBase = (fullVal >> 2) & 0x3;
-          const int screenBase = (fullVal >> 8) & 0x1F;
-          const int priority = fullVal & 0x3;
-          const int bpp = (fullVal >> 7) & 1;
-          // OGDK: stderr trace for BG0CNT
-          const bool isClassicNes =
-              gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "BGCNT",
-              "BG0CNT_WRITE8 offset=0x%02x val=0x%02x full=0x%04x charBase=%d "
-              "screenBase=%d PC=0x%08x",
-              (unsigned)offset, (unsigned)value, (unsigned)fullVal, charBase,
-              screenBase, cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        }
-      }
-
-      // Trace writes to BG3CNT (offset 0x0E-0x0F) for Classic NES
-      if (offset == 0x0E || offset == 0x0F) {
-        // Log removed
       }
 
       // KEYCNT changes can make the keypad IRQ condition become true without
@@ -3037,17 +1885,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
                           (io_regs[sadDmaBase + 2] << 16) |
                           (io_regs[sadDmaBase + 3] << 24);
 
-        if (TraceGbaSpam()) {
-          static int sadRelatchLogs = 0;
-          if (sadRelatchLogs < 20) {
-            sadRelatchLogs++;
-            std::cout << "[SOUND_DMA_RELATCH] ch=" << dmaSadChannel
-                      << " oldSrc=0x" << std::hex
-                      << dmaInternalSrc[dmaSadChannel] << " newSrc=0x" << newSrc
-                      << std::dec << std::endl;
-          }
-        }
-
         dmaInternalSrc[dmaSadChannel] = newSrc;
       }
 
@@ -3063,76 +1900,9 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
             io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
             (io_regs[dmaBase + 6] << 16) | (io_regs[dmaBase + 7] << 24);
 
-        // Trace relatch for sound DMA channels
-        if (TraceGbaSpam() && (dmaChannel == 1 || dmaChannel == 2)) {
-          static int relatchLogs = 0;
-          if (relatchLogs < 20) {
-            relatchLogs++;
-            std::cout << "[DMA_RELATCH] ch=" << dmaChannel << " oldSrc=0x"
-                      << std::hex << oldInternalSrc << " newSrc=0x"
-                      << dmaInternalSrc[dmaChannel] << " io_regs_SAD=0x"
-                      << (io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
-                          (io_regs[dmaBase + 2] << 16) |
-                          (io_regs[dmaBase + 3] << 24))
-                      << std::dec << std::endl;
-          }
-        }
-
-        static int dmaStartLogs[4] = {0, 0, 0, 0};
-        if (verboseLogs && dmaStartLogs[dmaChannel] < 8) {
-          uint16_t ctrl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
-          uint16_t cnt = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
-          dmaStartLogs[dmaChannel]++;
-          std::cout << "[DMA" << dmaChannel << " START] Src=0x" << std::hex
-                    << dmaInternalSrc[dmaChannel] << " Dst=0x"
-                    << dmaInternalDst[dmaChannel] << " Cnt=0x" << cnt
-                    << " Ctrl=0x" << ctrl << " timing=" << std::dec
-                    << ((ctrl >> 12) & 3) << " repeat=" << ((ctrl >> 9) & 1)
-                    << " width="
-                    << (((ctrl & DMAControl::TRANSFER_32BIT) != 0) ? 32 : 16)
-                    << (cpu ? " PC=0x" : "") << std::hex;
-          if (cpu)
-            std::cout << cpu->GetRegister(15);
-          std::cout << std::dec << std::endl;
-        }
-
-        // DEBUG: Trace DMA setup when dst/src is around 0x3001500
-        // Enable with: AIO_TRACE_DMA_3001500=1
-        if (EnvFlagCached("AIO_TRACE_DMA_3001500")) {
-          uint16_t ctrl = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
-          uint16_t cnt = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
-          uint32_t dst = dmaInternalDst[dmaChannel];
-          uint32_t src = dmaInternalSrc[dmaChannel];
-          if (dst == 0x3001500 || src == 0x3001500) {
-            // Also show the raw DAD register bytes
-            std::cout << "[DMA" << dmaChannel << " SETUP] "
-                      << "Src=0x" << std::hex << src << " Dst=0x" << dst
-                      << " (raw DAD: ";
-            for (int i = 4; i < 8; i++) {
-              std::cout << std::hex << std::setw(2) << std::setfill('0')
-                        << (int)io_regs[dmaBase + i];
-              if (i < 7)
-                std::cout << " ";
-            }
-            std::cout << ")"
-                      << " Cnt=0x" << cnt << " Ctrl=0x" << ctrl
-                      << " (raw CNT_H: " << std::hex << std::setw(2)
-                      << std::setfill('0') << (int)io_regs[dmaBase + 10] << " "
-                      << std::setw(2) << std::setfill('0')
-                      << (int)io_regs[dmaBase + 11] << ")"
-                      << " DstCtrl=" << std::dec << ((ctrl >> 5) & 3)
-                      << " SrcCtrl=" << ((ctrl >> 7) & 3) << " PC=0x"
-                      << std::hex;
-            if (cpu)
-              std::cout << cpu->GetRegister(15);
-            std::cout << std::dec << std::endl;
-          }
-        }
-
         uint16_t control = io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
         int timing = (control >> 12) & 3;
 
-        // OG-DK: Trace DMA triggered to palette - Removed
         if (timing == 0)
           PerformDMA(dmaChannel);
       }
@@ -3183,22 +1953,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     // standard GBA behavior.
     uint32_t alignedOffset = offset & ~1;
     if (alignedOffset + 1 < vram.size()) {
-      // Trace Write8 to VRAM staging area - catch 0x10000-0x10020
-      static const bool traceVramStaging =
-          EnvTruthy(std::getenv("AIO_TRACE_VRAM_STAGING"));
-      if (traceVramStaging && alignedOffset >= 0x10000 &&
-          alignedOffset < 0x10020) {
-        static int logs = 0;
-        if (logs++ < 300) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "VRAM",
-              "VRAM_STAGE W8 addr=0x%08x offset=0x%05x val=0x%02x "
-              "(dup=0x%04x) PC=0x%08x",
-              (unsigned)address, (unsigned)alignedOffset, (unsigned)value,
-              (unsigned)(value | (value << 8)), (unsigned)pc);
-        }
-      }
       vram[alignedOffset] = value;
       vram[alignedOffset + 1] = value;
       if (alignedOffset + 1 < vram_shadow.size()) {
@@ -3215,155 +1969,11 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     break;
   }
   case 0x0E: // SRAM/Flash
-  {
-    static const bool traceSramAccess =
-        EnvTruthy(std::getenv("AIO_TRACE_SRAM_ACCESS"));
-
-    if (!hasSRAM) {
-      // Classic NES games write to SRAM to test for its presence.
-      // If write echoes on read, they detect SRAM and refuse to run.
-      // For EEPROM carts, writes are ignored (no SRAM chip present).
-      if (traceSramAccess) {
-        static int sramWriteLogs = 0;
-        if (sramWriteLogs++ < 50) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SRAM",
-              "Write8 to SRAM region (no SRAM): addr=0x%08x val=0x%02x "
-              "PC=0x%08x IGNORED",
-              address, value, pc);
-        }
-      }
-      return; // Ignore writes if no SRAM/Flash present
-    }
-
-    uint32_t offset = address & 0xFFFF;
-
-    if (!isFlash) {
-      // SRAM Write
-      if (offset < sram.size()) {
-        sram[offset] = value;
-      }
-      return;
-    }
-
-    // Flash Command State Machine
-    // Handle Reset (0xF0) at any time
-    if (value == 0xF0) {
-      flashState = 0;
-      return;
-    }
-
-    switch (flashState) {
-    case 0: // Idle
-      if (offset == 0x5555 && value == 0xAA)
-        flashState = 1;
-      break;
-    case 1: // Seen 0xAA
-      if (offset == 0x2AAA && value == 0x55)
-        flashState = 2;
-      else
-        flashState = 0; // Reset on error
-      break;
-    case 2: // Seen 0x55, Expecting Command
-      if (offset == 0x5555) {
-        if (value == 0x90)
-          flashState = 3; // ID Mode
-        else if (value == 0x80)
-          flashState = 5; // Erase Setup
-        else if (value == 0xA0)
-          flashState = 8; // Program
-        else if (value == 0xB0)
-          flashState = 9; // Bank Switch
-        else
-          flashState = 0;
-      } else {
-        flashState = 0;
-      }
-      break;
-    case 3: // ID Mode
-      // Writes in ID mode might reset? 0xF0 handled above.
-      break;
-    case 5: // Erase Setup (Seen 0x80), Expecting 0xAA
-      if (offset == 0x5555 && value == 0xAA)
-        flashState = 6;
-      else
-        flashState = 0;
-      break;
-    case 6: // Erase Cmd 1 (Seen 0xAA), Expecting 0x55
-      if (offset == 0x2AAA && value == 0x55)
-        flashState = 7;
-      else
-        flashState = 0;
-      break;
-    case 7: // Erase Cmd 2 (Seen 0x55), Expecting Action
-      if (offset == 0x5555 && value == 0x10) {
-        // Chip Erase
-        std::fill(sram.begin(), sram.end(), 0xFF);
-        flashState = 0;
-      } else if (value == 0x30) {
-        // Sector Erase (4KB)
-        // Address determines sector
-        uint32_t sectorBase = offset & 0xF000;
-        if (sram.size() > 65536)
-          sectorBase += (flashBank * 65536);
-
-        if (sectorBase < sram.size()) {
-          size_t end = std::min((size_t)sectorBase + 4096, sram.size());
-          std::fill(sram.begin() + sectorBase, sram.begin() + end, 0xFF);
-        }
-        flashState = 0;
-      } else {
-        flashState = 0;
-      }
-      break;
-    case 8: // Program Byte
-    {
-      uint32_t target = offset;
-      if (sram.size() > 65536)
-        target += (flashBank * 65536);
-
-      if (target < sram.size()) {
-        sram[target] = value;
-      }
-      flashState = 0;
-      break;
-    }
-    case 9: // Bank Switch
-      if (offset == 0) {
-        flashBank = value & 1;
-      }
-      flashState = 0;
-      break;
-    }
-    break;
-  }
   case 0x0D: // EEPROM - ignore 8-bit writes
     // Some titles may clock the EEPROM serial interface via byte writes.
     // Treat this as a normal EEPROM bit write (D0).
     WriteEEPROM(value);
     break;
-  }
-
-  if (traceIrqHandWrites && isIrqHandPtrByte) {
-    const uint32_t newIrqHandWord = Read32(0x03007FFCu);
-    if (newIrqHandWord != oldIrqHandWord) {
-      static int logs = 0;
-      if (logs++ < 300) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-        const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
-        const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
-        const uint32_t byteIndex = iwramOff - 0x7FFCu;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "IRQHAND",
-            "IRQHAND_WRITE8 addr=0x%08x byte=%u val=0x%02x old=0x%08x "
-            "new=0x%08x PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x",
-            (unsigned)address, (unsigned)byteIndex, (unsigned)value,
-            (unsigned)oldIrqHandWord, (unsigned)newIrqHandWord, (unsigned)pc,
-            (unsigned)lr, (unsigned)sp, (unsigned)cpsr);
-      }
-    }
   }
 
   if (isIrqHandPtrByte) {
@@ -3389,49 +1999,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     ~NestGuard() { --d; }
   } nestGuard{dataAccessNestDepth};
 
-  // Trace writes to NES scroll table in VRAM
-  if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE") && (address >> 24) == 0x06) {
-    const uint32_t voff = address & 0x1FFFF;
-    if ((voff >= 0x3514 && voff < 0x3794) ||
-        (voff >= 0x6B14 && voff < 0x6D94)) {
-      static int scrollW16Logs = 0;
-      if (scrollW16Logs < 5000) {
-        int entry =
-            (voff >= 0x6B14) ? (voff - 0x6B14) / 4 : (voff - 0x3514) / 4;
-        int buf = (voff >= 0x6B14) ? 2 : 1;
-        int half = (voff & 2) ? 1 : 0;
-        const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SCROLL",
-            "W16 buf%d entry=%d half=%d val=0x%04x PC=0x%08x", buf, entry, half,
-            value, wpc);
-        scrollW16Logs++;
-      }
-    }
-  }
-
-  // DKC black-screen investigation: trace writes to the polled wait flag.
-  // Enable with: AIO_TRACE_DKC_WAITFLAG=1
-  if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu &&
-      ((address & ~1u) == 0x03000064u)) {
-    static int wLogs = 0;
-    if (wLogs++ < 400) {
-      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "WAITFLAG W16 addr=0x%08x val=0x%04x PC=0x%08x",
-          (unsigned)(address & ~1u), (unsigned)value, (unsigned)pc);
-    }
-  }
-
-  // OG-DK: Trace writes to the NES palette buffer region in IWRAM - Removed
-
-  const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIwram = IsIwramMappedAddress(address);
   const uint32_t iwramOff = address & 0x7FFFu;
   const bool isIrqHandPtrHalf = isIwram && ((iwramOff & ~1u) == 0x7FFCu);
-  const uint32_t oldIrqHandWord =
-      (traceIrqHandWrites && isIrqHandPtrHalf) ? Read32(0x03007FFCu) : 0u;
 
   // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
@@ -3441,94 +2011,12 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     return;
   }
 
-  // Diagnostics: detect unaligned IO halfword writes.
-  // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
-  // AIO_TRACE_IO_ODD_HALFWORD=1)
-  const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") ||
-                                EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
-  if (traceIoUnaligned && region == 0x04 && (address & 1u)) {
-    static int unalignedIoWrite16Logs = 0;
-    if (unalignedIoWrite16Logs < 400) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "IO",
-          "UNALIGNED Write16 addr=0x%08x val=0x%04x PC=0x%08x",
-          (unsigned)address, (unsigned)value, (unsigned)pc);
-      unalignedIoWrite16Logs++;
-    }
-  }
-
   // GBA IO registers are fundamentally 16-bit; halfword accesses are aligned.
   // Some titles issue unaligned halfword stores into IO space; on hardware
   // these behave like aligned accesses.
   if (region == 0x04 && (address & 1u)) {
     address &= ~1u;
   }
-
-  const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-  TracePpuIoWrite16(address, value, pc);
-
-  // DKC crash investigation: trace writes into the EWRAM window that later
-  // gets executed via the mirrored targets around 0x02FCD8xx/0x0238D8xx.
-  // Enable with: AIO_TRACE_DKC_EWRAM_CODE=1
-  if (EnvFlagCached("AIO_TRACE_DKC_EWRAM_CODE") && cpu &&
-      ((address & 0xFF000000u) == 0x02000000u)) {
-    const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
-    const bool inLowWin = (off >= 0x08D800u && off < 0x08E200u);
-    const bool inHighWin = (off >= 0x3CD800u && off < 0x3CE200u);
-    if (inLowWin || inHighWin) {
-      static int dkcEwramW16 = 0;
-      if (dkcEwramW16++ < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "DKC",
-            "DKC_EWRAM_W16 bus=0x%08x off=0x%05x val=0x%04x PC=0x%08x",
-            (unsigned)address, (unsigned)off, (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-
-  // SMA2 investigation: trace non-zero writes into the header staging buffer in
-  // EWRAM. Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_STAGE_WRITES") && cpu) {
-    if (address >= 0x020003C0u && address < 0x02000440u && value != 0) {
-      static int stage16 = 0;
-      if (stage16 < 500) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "STAGE W16 addr=0x%08x val=0x%04x PC=0x%08x", (unsigned)address,
-            (unsigned)value, (unsigned)cpu->GetRegister(15));
-        stage16++;
-      }
-    }
-  }
-
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEVALID_WRITES") && cpu) {
-    if (address >= 0x03007B80u && address < 0x03007C80u) {
-      static int wlogs16 = 0;
-      if (wlogs16 < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "SAVEVALID W16 addr=0x%08x val=0x%04x PC=0x%08x", (unsigned)address,
-            (unsigned)value, cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        wlogs16++;
-      }
-    }
-  }
-
-  // DKC audio investigation: trace halfword writes that might touch the
-  // 0x03003378-0x0300337F jump-table region.
-  if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && cpu) {
-    if (address >= 0x03003378u && address <= 0x0300337Eu) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "DKC_W16 addr=0x%08x val=0x%04x PC=0x%08x", (unsigned)address,
-          (unsigned)value, (unsigned)pc);
-    }
-  }
-
-  const bool traceSMA2DMABuf = EnvFlagCached("AIO_TRACE_SMA2_DMABUF");
-  const bool isIWRAM = ((address >> 24) == 0x03);
-  const uint32_t addrNoAlign = address;
 
   if ((address & 0xFF000000) == 0x04000000) {
     uint32_t offset = address & 0x3FF;
@@ -3543,125 +2031,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       io_regs[IORegs::IF] = (uint8_t)(cleared & 0xFFu);
       io_regs[IORegs::IF + 1] = (uint8_t)((cleared >> 8) & 0xFFu);
       return;
-    }
-
-    if (EnvFlagCached("AIO_TRACE_WAITCNT") && (offset == 0x204)) {
-      static uint32_t lastPc = 0xFFFFFFFFu;
-      static uint16_t lastVal = 0xFFFFu;
-      static uint32_t suppressed = 0;
-
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      const uint16_t oldVal =
-          (uint16_t)(io_regs[0x204] | (io_regs[0x205] << 8));
-
-      if (pc == lastPc && value == lastVal) {
-        suppressed++;
-        // Still provide some signal in case this is a tight loop.
-        if (suppressed == 1 || (suppressed % 1024u) == 0u) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "WAITCNT",
-              "WAITCNT write16 repeat val=0x%04x PC=0x%08x repeats=%u "
-              "(old=0x%04x)",
-              (unsigned)value, (unsigned)pc, (unsigned)suppressed,
-              (unsigned)oldVal);
-        }
-      } else {
-        if (suppressed > 0) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "WAITCNT",
-              "WAITCNT write16 repeats summary val=0x%04x PC=0x%08x repeats=%u",
-              (unsigned)lastVal, (unsigned)lastPc, (unsigned)suppressed);
-        }
-        suppressed = 0;
-        lastPc = pc;
-        lastVal = value;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "WAITCNT",
-            "WAITCNT write16 old=0x%04x new=0x%04x PC=0x%08x", (unsigned)oldVal,
-            (unsigned)value, (unsigned)pc);
-      }
-    }
-
-    // Instrument IE/IME writes to confirm interrupt enablement timing
-    if (offset == IORegs::IE || offset == IORegs::IE + 1 ||
-        offset == IORegs::IME || offset == IORegs::IME + 1) {
-      static int irqLogCount = 0;
-      if (irqLogCount < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Debug, "IRQ",
-            "IRQ REG WRITE16 #%d offset=0x%03x val=0x%04x PC=0x%08x",
-            irqLogCount, (unsigned)offset, (unsigned)value,
-            cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        irqLogCount++;
-      }
-    }
-
-    // Log early display configuration writes (limited to keep noise down)
-    static int dispcntLogs = 0;
-    static int bgcntLogs = 0;
-    static int bghofsLogs = 0;
-    static int bgvofsLogs = 0;
-
-    auto logReg = [&](const char *name) {
-      if (!TraceGbaSpam())
-        return;
-      std::cout << "[IO] " << name << " write16: 0x" << std::hex << value;
-      if (cpu)
-        std::cout << " PC=0x" << cpu->GetRegister(15);
-      std::cout << std::dec << std::endl;
-    };
-
-    // OGDK: Trace DISPCNT writes - Removed
-    /*
-    const bool isClassicNesReg =
-        gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-    if (isClassicNesReg && offset == IORegs::DISPCNT) {
-       // Removed
-    }
-    */
-
-    if (offset == IORegs::DISPCNT && dispcntLogs < 8) {
-      dispcntLogs++;
-      logReg("DISPCNT");
-    }
-    if ((offset >= 0x08 && offset <= 0x0E) && bgcntLogs < 16) {
-      // BG0CNT, BG1CNT, BG2CNT, BG3CNT
-      bgcntLogs++;
-      std::ostringstream name;
-      name << "BG" << ((offset - 0x08) / 2) << "CNT";
-      logReg(name.str().c_str());
-    }
-    // Always log BGCNT - Removed
-    /*
-    static int bgcntDetailLogs = 0;
-    if (isClassicNesReg && offset >= 0x08 && offset <= 0x0E &&
-        offset % 2 == 0 && bgcntDetailLogs < 50) {
-      // Removed
-    }
-    */
-    if ((offset == 0x10 || offset == 0x12 || offset == 0x14 ||
-         offset == 0x16) &&
-        bghofsLogs < 16) {
-      // BGxHOFS
-      bghofsLogs++;
-      std::ostringstream name;
-      name << "BG" << ((offset - 0x10) / 2) << "HOFS";
-      logReg(name.str().c_str());
-    }
-    // OGDK: Trace BG0 scroll offsets - Removed
-    /*
-    if (isClassicNesReg && (offset == 0x10 || offset == 0x12)) {
-      // Removed
-    }
-    */
-    if ((offset == 0x11 || offset == 0x13 || offset == 0x15 ||
-         offset == 0x17) &&
-        bgvofsLogs < 16) {
-      // BGxVOFS
-      bgvofsLogs++;
-      std::ostringstream name;
-      name << "BG" << ((offset - 0x11) / 2) << "VOFS";
-      logReg(name.str().c_str());
     }
 
     // DISPSTAT Write Masking - preserve read-only bits
@@ -3681,18 +2050,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
           apu->ResetFIFO_B();
       }
       value &= ~0x8800; // Clear reset bits
-
-      // Preserve DMA channel config (bits 8-10, 12-14) when the new value
-      // has ALL of them zero. Classic NES Series games have an embedded NES
-      // emulator whose Write32 to 0x04000080 decomposes into Write16(0x82,
-      // high16) with values that zero the entire DMA config byte while
-      // keeping volume/prescaler bits correct. When any DMA config bit IS
-      // set, the write is a legitimate reconfiguration and is applied fully.
-      constexpr uint16_t kDmaConfigMask = 0x7700; // bits 8-10, 12-14
-      if ((value & kDmaConfigMask) == 0) {
-        uint16_t currentVal = io_regs[offset] | (io_regs[offset + 1] << 8);
-        value = (value & ~kDmaConfigMask) | (currentVal & kDmaConfigMask);
-      }
     }
 
     // SOUNDCNT_X - preserve status bits
@@ -3745,21 +2102,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   // ppuTimingScanline/ppuTimingCycle) previously caused valid game writes to be
   // dropped, corrupting VRAM.
 
-  // Optional: trace CPU halfword writes into Palette RAM.
-  // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
-  if (region == 0x05 && EnvFlagCached("AIO_TRACE_PALETTE_CPU_WRITES") && cpu) {
-    static int palW16Logs = 0;
-    if (palW16Logs < 2000) {
-      const uint32_t pc2 = (uint32_t)cpu->GetRegister(15);
-      const uint32_t lr2 = (uint32_t)cpu->GetRegister(14);
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "PAL",
-          "CPU W16 pal addr=0x%08x val=0x%04x PC=0x%08x LR=0x%08x",
-          (unsigned)address, (unsigned)value, (unsigned)pc2, (unsigned)lr2);
-      palW16Logs++;
-    }
-  }
-
   // IMPORTANT: Don't implement halfword writes via two Write8() calls for RAM.
   // Write8() has IRQ handler clamping logic and must not run on intermediate
   // byte states.
@@ -3775,25 +2117,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       ClampIrqHandlerWord();
     }
 
-    if (traceIrqHandWrites && isIrqHandPtrHalf) {
-      const uint32_t newIrqHandWord = Read32(0x03007FFCu);
-      if (newIrqHandWord != oldIrqHandWord) {
-        static int logs = 0;
-        if (logs++ < 300) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-          const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
-          const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "IRQHAND",
-              "IRQHAND_WRITE16 addr=0x%08x val=0x%04x old=0x%08x new=0x%08x "
-              "PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x",
-              (unsigned)address, (unsigned)value, (unsigned)oldIrqHandWord,
-              (unsigned)newIrqHandWord, (unsigned)pc, (unsigned)lr,
-              (unsigned)sp, (unsigned)cpsr);
-        }
-      }
-    }
     return;
   } else if (region == 0x02) {
     const uint32_t off0 = address & 0x3FFFFu;
@@ -3826,61 +2149,7 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
         offset -= 0x8000u;
 
-      // Trace writes to BG3 tilemap (screenBase=4, VRAM offset 0x2000-0x27FF)
-      // Non-zero tile writes reveal which rows the NES emulator populates
-      static const bool traceBg3Tilemap =
-          EnvTruthy(std::getenv("AIO_TRACE_BG3_TILEMAP"));
-      if (traceBg3Tilemap && offset >= 0x2000u && offset < 0x2800u &&
-          value != 0) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        // Skip initial code copy at PC=0x03007484 (CpuFastSet init)
-        if (pc != 0x03007484u) {
-          static int bg3TilemapW16Logs = 0;
-          if (bg3TilemapW16Logs < 2000) {
-            bg3TilemapW16Logs++;
-            const uint32_t mapOff = offset - 0x2000u;
-            const int row = (int)(mapOff / 64);
-            const int col = (int)((mapOff % 64) / 2);
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "BG3TILE",
-                "BG3_W16 row=%d col=%d tile=0x%04x addr=0x%08x PC=0x%08x", row,
-                col, (unsigned)value, (unsigned)address, (unsigned)pc);
-          }
-        }
-      }
-
-      // Trace CPU writes to staging area - catch writes to 0x10000-0x10020
-      static const bool traceVramStage =
-          EnvTruthy(std::getenv("AIO_TRACE_VRAM_STAGING"));
-      if (traceVramStage && offset >= 0x10000u && offset < 0x10020u) {
-        static int vramStageLogs = 0;
-        if (vramStageLogs < 500) {
-          vramStageLogs++;
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "VRAM",
-              "VRAM_STAGE W16 addr=0x%08x offset=0x%05x val=0x%04x PC=0x%08x",
-              (unsigned)address, (unsigned)offset, (unsigned)value,
-              (unsigned)pc);
-        }
-      }
-
       if (offset + 1 < vram.size()) {
-        // Trace ANY Write16 to scroll table range
-        if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
-          if ((offset >= 0x3514 && offset < 0x3794) ||
-              (offset >= 0x6B14 && offset < 0x6D94)) {
-            static int scrollRawW16 = 0;
-            if (scrollRawW16 < 100) {
-              const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              Common::Logger::Instance().LogFmt(
-                  Common::LogLevel::Info, "SCROLL_RAW",
-                  "VRAM[0x%05x]=0x%04x (Write16) PC=0x%08x addr=0x%08x", offset,
-                  value, wpc, address);
-              scrollRawW16++;
-            }
-          }
-        }
         vram[offset] = b0;
         vram[offset + 1] = b1;
         if (offset + 1 < vram_shadow.size()) {
@@ -3910,109 +2179,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     Write8(address + 1, (value >> 8) & 0xFF);
   }
 
-  // SMA2 investigation: detect when the EEPROM write DMA bitstream buffer is
-  // constructed. Enable with: AIO_TRACE_SMA2_DMABUF=1 Known DMA3 SAD during
-  // EEPROM writes (from rewrite tracer): 0x03007CBC, count=0x51 halfwords.
-  if (traceSMA2DMABuf && isIWRAM) {
-    constexpr uint32_t kBufBase = 0x03007CBC;
-    constexpr uint32_t kBufSizeBytes = 0x51u * 2u;
-
-    const uint32_t a = (addrNoAlign & ~1u);
-    if (a >= kBufBase && a < (kBufBase + kBufSizeBytes)) {
-      auto chip16 = [&](uint32_t addr) -> uint16_t {
-        const uint32_t off = addr & 0x7FFF;
-        if (off + 1 >= wram_chip.size())
-          return 0;
-        return (uint16_t)(wram_chip[off] | (wram_chip[off + 1] << 8));
-      };
-
-      // Decode current buffer state (LSB per halfword = serial bit).
-      uint8_t bits[0x51];
-      for (uint32_t i = 0; i < 0x51; ++i) {
-        bits[i] = (uint8_t)(chip16(kBufBase + i * 2) & 1);
-      }
-
-      const uint8_t start = bits[0];
-      const uint8_t cmd = bits[1];
-      uint32_t addr14 = 0;
-      for (uint32_t i = 0; i < 14; ++i) {
-        addr14 = (addr14 << 1) | bits[2 + i];
-      }
-      uint64_t data64 = 0;
-      for (uint32_t i = 0; i < 64; ++i) {
-        data64 = (data64 << 1) | bits[2 + 14 + i];
-      }
-      const uint8_t term = bits[2 + 14 + 64];
-      const uint32_t block = (addr14 & 0x3FF);
-
-      // Only log when this is plausibly an EEPROM write request.
-      if (start == 1 && cmd == 0 && term == 0) {
-        static bool initialized = false;
-        static uint32_t lastBlock = 0xFFFFFFFFu;
-        static uint64_t lastData = 0;
-        static uint8_t lastCmd = 0xFF;
-        static uint32_t lastPc = 0xFFFFFFFFu;
-        static uint32_t lastLr = 0xFFFFFFFFu;
-
-        if (!initialized) {
-          initialized = true;
-          lastBlock = block;
-          lastData = data64;
-          lastCmd = cmd;
-          lastPc = 0xFFFFFFFFu;
-          lastLr = 0xFFFFFFFFu;
-        }
-
-        // Log on payload change (or new call-site) for the interesting
-        // block(s).
-        if (block == 2) {
-          constexpr uint64_t kRef = 0xFEB801010101DA69ULL;
-          constexpr uint64_t kOut = 0xFEBC00000000DA69ULL;
-          if (data64 == kRef || data64 == kOut) {
-            const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-            const bool siteChanged = (pc != lastPc) || (lr != lastLr);
-            const bool payloadChanged = (data64 != lastData);
-            if (siteChanged || payloadChanged) {
-              lastPc = pc;
-              lastLr = lr;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "SMA2",
-                  "DMA3 EEPROM buf decode: block=%u data=0x%016llx PC=0x%08x "
-                  "LR=0x%08x",
-                  (unsigned)block, (unsigned long long)data64, (unsigned)pc,
-                  (unsigned)lr);
-            }
-          }
-        }
-
-        lastBlock = block;
-        lastData = data64;
-        lastCmd = cmd;
-      }
-    }
-  }
-
-  if (traceIrqHandWrites && isIrqHandPtrHalf) {
-    const uint32_t newIrqHandWord = Read32(0x03007FFCu);
-    if (newIrqHandWord != oldIrqHandWord) {
-      static int logs = 0;
-      if (logs++ < 300) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-        const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
-        const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "IRQHAND",
-            "IRQHAND_WRITE16 addr=0x%08x val=0x%04x old=0x%08x new=0x%08x "
-            "PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x",
-            (unsigned)address, (unsigned)value, (unsigned)oldIrqHandWord,
-            (unsigned)newIrqHandWord, (unsigned)pc, (unsigned)lr, (unsigned)sp,
-            (unsigned)cpsr);
-      }
-    }
-  }
-
   if (isIrqHandPtrHalf) {
     ClampIrqHandlerWord();
   }
@@ -4036,28 +2202,8 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     ~NestGuard() { --d; }
   } nestGuard{dataAccessNestDepth};
 
-  const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIrqHandPtrWord =
       IsIwramMappedAddress(address) && ((address & 0x7FFFu) == 0x7FFCu);
-  const uint32_t oldIrqHandWord =
-      (traceIrqHandWrites && isIrqHandPtrWord) ? Read32(0x03007FFCu) : 0u;
-
-  // Diagnostics: detect unaligned IO word writes.
-  // Enable with: AIO_TRACE_IO_UNALIGNED=1 (or legacy
-  // AIO_TRACE_IO_ODD_HALFWORD=1)
-  const bool traceIoUnaligned = EnvFlagCached("AIO_TRACE_IO_UNALIGNED") ||
-                                EnvFlagCached("AIO_TRACE_IO_ODD_HALFWORD");
-  if (traceIoUnaligned && ((address >> 24) == 0x04) && (address & 3u)) {
-    static int unalignedIoWrite32Logs = 0;
-    if (unalignedIoWrite32Logs < 400) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "IO",
-          "UNALIGNED Write32 addr=0x%08x val=0x%08x PC=0x%08x",
-          (unsigned)address, (unsigned)value, (unsigned)pc);
-      unalignedIoWrite32Logs++;
-    }
-  }
 
   // IO space word accesses are aligned on hardware.
   if (((address >> 24) == 0x04) && (address & 3u)) {
@@ -4077,87 +2223,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     }
   }
 
-  const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-  TracePpuIoWrite32(address, value, pc);
-
-  // Trace writes to NES scroll table in VRAM (buf1: 0x3514, buf2: 0x6B14)
-  if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE") && (address >> 24) == 0x06) {
-    const uint32_t voff = address & 0x1FFFF;
-    if ((voff >= 0x3514 && voff < 0x3794) ||
-        (voff >= 0x6B14 && voff < 0x6D94)) {
-      static int scrollWriteLogs = 0;
-      if (scrollWriteLogs < 500) {
-        int entry =
-            (voff >= 0x6B14) ? (voff - 0x6B14) / 4 : (voff - 0x3514) / 4;
-        int buf = (voff >= 0x6B14) ? 2 : 1;
-        uint16_t hofs = value & 0xFFFF;
-        uint16_t vofs = (value >> 16) & 0xFFFF;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SCROLL",
-            "buf%d entry=%d HOFS=%u VOFS=%u val=0x%08x PC=0x%08x", buf, entry,
-            hofs, vofs, value, pc);
-        scrollWriteLogs++;
-      }
-    }
-  }
-
-  // DKC crash investigation: trace writes into the EWRAM window that later
-  // gets executed via the mirrored targets around 0x02FCD8xx/0x0238D8xx.
-  // Enable with: AIO_TRACE_DKC_EWRAM_CODE=1
-  if (EnvFlagCached("AIO_TRACE_DKC_EWRAM_CODE") && cpu &&
-      ((address & 0xFF000000u) == 0x02000000u)) {
-    const uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
-    const bool inLowWin = (off >= 0x08D800u && off < 0x08E200u);
-    const bool inHighWin = (off >= 0x3CD800u && off < 0x3CE200u);
-    if (inLowWin || inHighWin) {
-      static int dkcEwramW32 = 0;
-      if (dkcEwramW32++ < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "DKC",
-            "DKC_EWRAM_W32 bus=0x%08x off=0x%05x val=0x%08x PC=0x%08x",
-            (unsigned)address, (unsigned)off, (unsigned)value, (unsigned)pc);
-      }
-    }
-  }
-
-  // DKC audio investigation: trace word writes that might touch the
-  // 0x03003378-0x0300337F jump-table region.
-  if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && cpu) {
-    if (address >= 0x03003378u && address <= 0x0300337Cu) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "DKC_W32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
-          (unsigned)value, (unsigned)pc);
-    }
-  }
-
-  // Instrument IE/IME writes done via 32-bit access
-  if ((address & 0xFF000000) == 0x04000000) {
-    uint32_t offset = address & 0x3FF;
-
-    if (EnvFlagCached("AIO_TRACE_WAITCNT") && (offset == 0x204)) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "WAITCNT",
-          "WAITCNT write32 val=0x%08x (low16=0x%04x) PC=0x%08x",
-          (unsigned)value, (unsigned)(value & 0xFFFFu),
-          cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-    }
-
-    if ((offset == IORegs::IE) || (offset == IORegs::IE + 1) ||
-        (offset == IORegs::IME) || (offset == IORegs::IME + 1) ||
-        (offset == IORegs::IE - 2) || (offset == IORegs::IME - 2)) {
-      static int irqLog32 = 0;
-      if (irqLog32 < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Debug, "IRQ",
-            "IRQ REG WRITE32 #%d offset=0x%03x val=0x%08x PC=0x%08x", irqLog32,
-            (unsigned)offset, (unsigned)value,
-            cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        irqLog32++;
-      }
-    }
-  }
-
   // EEPROM Handling - only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
   if (region == 0x0D && (!hasSRAM && !isFlash)) {
@@ -4166,117 +2231,13 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     return;
   }
 
-  // SMA2 investigation: trace non-zero writes into the header staging buffer in
-  // EWRAM. Enable with: AIO_TRACE_SMA2_STAGE_WRITES=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_STAGE_WRITES") && cpu) {
-    if (address >= 0x020003C0u && address < 0x02000440u && value != 0) {
-      static int stage32 = 0;
-      if (stage32 < 500) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "STAGE W32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
-            (unsigned)value, (unsigned)cpu->GetRegister(15));
-        stage32++;
-      }
-    }
-  }
-
-  if (EnvFlagCached("AIO_TRACE_SMA2_SAVEVALID_WRITES") && cpu) {
-    if (address >= 0x03007B80u && address < 0x03007C80u) {
-      static int wlogs32 = 0;
-      if (wlogs32 < 400) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "SAVEVALID W32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
-            (unsigned)value, cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        wlogs32++;
-      }
-    }
-  }
-
-  // DKC audio investigation: trace word writes that might populate the
-  // function-pointer/jump-table slot used by the IWRAM audio driver. This
-  // region is read via unaligned LDR at 0x03003308.
-  if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && cpu) {
-    if (address >= 0x03003378u && address <= 0x0300337Cu) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "DKC_W32 addr=0x%08x val=0x%08x PC=0x%08x", (unsigned)address,
-          (unsigned)value, (unsigned)pc);
-    }
-  }
-
-  // Instrument key IO register writes to diagnose display/IRQ state
-  if (TraceGbaSpam() && (address & 0xFF000000) == IORegs::BASE) {
-    uint32_t offset = address & MemoryMap::IO_REG_MASK;
-    switch (offset) {
-    case IORegs::DISPCNT:
-      if (TraceGbaSpam()) {
-        std::cout << "[IO] DISPCNT write32: 0x" << std::hex << value << std::dec
-                  << std::endl;
-      }
-      break;
-    case IORegs::DISPSTAT:
-      if (TraceGbaSpam()) {
-        std::cout << "[IO] DISPSTAT write32: 0x" << std::hex << value
-                  << std::dec << std::endl;
-      }
-      break;
-    case IORegs::VCOUNT:
-      if (TraceGbaSpam()) {
-        std::cout << "[IO] VCOUNT write32: 0x" << std::hex << value << std::dec
-                  << std::endl;
-      }
-      break;
-    case IORegs::IE:
-      if (TraceGbaSpam()) {
-        std::cout << "[IO] IE write32: 0x" << std::hex << value << std::dec
-                  << std::endl;
-      }
-      break;
-    case IORegs::IF:
-      if (TraceGbaSpam()) {
-        std::cout << "[IO] IF write32: 0x" << std::hex << value << std::dec
-                  << std::endl;
-      }
-      break;
-    case IORegs::IME:
-      if (TraceGbaSpam()) {
-        std::cout << "[IO] IME write32: 0x" << std::hex << value << std::dec
-                  << std::endl;
-      }
-      break;
-    default:
-      break;
-    }
-  }
-
   // Sound FIFO writes (FIFO_A = 0x40000A0, FIFO_B = 0x40000A4)
   if (address == 0x040000A0) {
-    static int fifoACount = 0;
-    fifoACount++;
-    if (TraceGbaSpam() && (fifoACount <= 20 || (fifoACount % 10000 == 0))) {
-      std::cout << "[FIFO_A Write #" << fifoACount << "] val=0x" << std::hex
-                << value;
-      if (cpu)
-        std::cout << " PC=0x" << cpu->GetRegister(15) << " LR=0x"
-                  << cpu->GetRegister(14);
-      std::cout << std::dec << std::endl;
-    }
     if (apu)
       apu->WriteFIFO_A(value);
     return;
   }
   if (address == 0x040000A4) {
-    static int fifoBCount = 0;
-    fifoBCount++;
-    if (TraceGbaSpam() && (fifoBCount <= 10 || (fifoBCount % 10000 == 0))) {
-      std::cout << "[FIFO_B Write #" << fifoBCount << "] val=0x" << std::hex
-                << value;
-      if (cpu)
-        std::cout << " PC=0x" << cpu->GetRegister(15);
-      std::cout << std::dec << std::endl;
-    }
     if (apu)
       apu->WriteFIFO_B(value);
     return;
@@ -4290,21 +2251,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
 
   // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
   // (Same as Write16 - see comment there.)
-
-  // Optional: trace CPU word writes into Palette RAM.
-  // Enable with: AIO_TRACE_PALETTE_CPU_WRITES=1
-  if (region == 0x05 && EnvFlagCached("AIO_TRACE_PALETTE_CPU_WRITES") && cpu) {
-    static int palW32Logs = 0;
-    if (palW32Logs < 2000) {
-      const uint32_t pc2 = (uint32_t)cpu->GetRegister(15);
-      const uint32_t lr2 = (uint32_t)cpu->GetRegister(14);
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "PAL",
-          "CPU W32 pal addr=0x%08x val=0x%08x PC=0x%08x LR=0x%08x",
-          (unsigned)address, (unsigned)value, (unsigned)pc2, (unsigned)lr2);
-      palW32Logs++;
-    }
-  }
 
   // IMPORTANT: Don't implement word writes via four Write8() calls for RAM.
   // Write8() has IRQ handler clamping logic and must not run on intermediate
@@ -4327,32 +2273,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
       ClampIrqHandlerWord();
     }
 
-    if (traceIrqHandWrites && isIrqHandPtrWord) {
-      const uint32_t newIrqHandWord = Read32(0x03007FFCu);
-      if (newIrqHandWord != oldIrqHandWord) {
-        static int logs = 0;
-        if (logs++ < 300) {
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-          const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
-          const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
-          const uint32_t r0 = cpu ? (uint32_t)cpu->GetRegister(0) : 0u;
-          const uint32_t r1 = cpu ? (uint32_t)cpu->GetRegister(1) : 0u;
-          const uint32_t r2 = cpu ? (uint32_t)cpu->GetRegister(2) : 0u;
-          const uint32_t r3 = cpu ? (uint32_t)cpu->GetRegister(3) : 0u;
-          const uint32_t r12 = cpu ? (uint32_t)cpu->GetRegister(12) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "IRQHAND",
-              "IRQHAND_WRITE32 addr=0x%08x val=0x%08x old=0x%08x new=0x%08x "
-              "PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x R0=0x%08x R1=0x%08x "
-              "R2=0x%08x R3=0x%08x R12=0x%08x",
-              (unsigned)address, (unsigned)value, (unsigned)oldIrqHandWord,
-              (unsigned)newIrqHandWord, (unsigned)pc, (unsigned)lr,
-              (unsigned)sp, (unsigned)cpsr, (unsigned)r0, (unsigned)r1,
-              (unsigned)r2, (unsigned)r3, (unsigned)r12);
-        }
-      }
-    }
     return;
   } else if (region == 0x02) {
     const uint32_t off0 = (address + 0u) & 0x3FFFFu;
@@ -4395,112 +2315,14 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
       if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
         offset -= 0x8000u;
 
-      // Trace writes to NES scroll table in VRAM
-      if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
-        if ((offset >= 0x3514 && offset < 0x3794) ||
-            (offset >= 0x6B14 && offset < 0x6D94)) {
-          static int scrollVramLogs = 0;
-          if (scrollVramLogs < 500) {
-            int entry = (offset >= 0x6B14) ? (offset - 0x6B14) / 4
-                                           : (offset - 0x3514) / 4;
-            int buf = (offset >= 0x6B14) ? 2 : 1;
-            uint16_t hofs = value & 0xFFFF;
-            uint16_t vofs = (value >> 16) & 0xFFFF;
-            const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "SCROLL",
-                "W32 buf%d entry=%d HOFS=%u VOFS=%u val=0x%08x off=0x%05x "
-                "PC=0x%08x",
-                buf, entry, hofs, vofs, value, offset, wpc);
-            scrollVramLogs++;
-          }
-        }
-      }
-
-      // Trace CPU writes to staging area - catch writes to 0x10004 which
       // mysteriously changes
-      static const bool traceVramStage =
-          EnvTruthy(std::getenv("AIO_TRACE_VRAM_STAGING"));
-
-      // Trace writes to BG3 tilemap (screenBase=4, VRAM offset 0x2000-0x27FF)
-      static const bool traceBg3Tilemap32 =
-          EnvTruthy(std::getenv("AIO_TRACE_BG3_TILEMAP"));
-      if (traceBg3Tilemap32 && offset >= 0x2000u && offset < 0x2800u &&
-          value != 0) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        // Skip initial code copy at PC=0x03007484 (CpuFastSet init)
-        if (pc != 0x03007484u) {
-          static int bg3TilemapW32Logs = 0;
-          if (bg3TilemapW32Logs < 2000) {
-            bg3TilemapW32Logs++;
-            const uint32_t mapOff = offset - 0x2000u;
-            const int row = (int)(mapOff / 64);
-            const int col = (int)((mapOff % 64) / 2);
-            const uint16_t tile0 = (uint16_t)(value & 0xFFFF);
-            const uint16_t tile1 = (uint16_t)(value >> 16);
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Info, "BG3TILE",
-                "BG3_W32 row=%d col=%d tile0=0x%04x tile1=0x%04x addr=0x%08x "
-                "PC=0x%08x",
-                row, col, (unsigned)tile0, (unsigned)tile1, (unsigned)address,
-                (unsigned)pc);
-          }
-        }
-      }
-      if (traceVramStage && offset >= 0x10000u && offset < 0x10020u) {
-        static int vramStage32Logs = 0;
-        if (vramStage32Logs < 500) {
-          vramStage32Logs++;
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          // Log BEFORE write - check what's currently at this location
-          const uint32_t oldVal =
-              (offset + 3 < vram.size())
-                  ? (vram[offset] | (vram[offset + 1] << 8) |
-                     (vram[offset + 2] << 16) | (vram[offset + 3] << 24))
-                  : 0;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "VRAM",
-              "VRAM_STAGE W32 addr=0x%08x offset=0x%05x oldVal=0x%08x "
-              "newVal=0x%08x PC=0x%08x",
-              (unsigned)address, (unsigned)offset, (unsigned)oldVal,
-              (unsigned)value, (unsigned)pc);
-        }
-      }
 
       if (offset + 3 < vram.size()) {
-        // Trace ANY Write32 to scroll table range
-        if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
-          if ((offset >= 0x3514 && offset < 0x3794) ||
-              (offset >= 0x6B14 && offset < 0x6D94)) {
-            static int scrollRawW32 = 0;
-            if (scrollRawW32 < 100) {
-              const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              Common::Logger::Instance().LogFmt(
-                  Common::LogLevel::Info, "SCROLL_RAW",
-                  "VRAM[0x%05x]=0x%08x (Write32) PC=0x%08x addr=0x%08x", offset,
-                  value, wpc, address);
-              scrollRawW32++;
-            }
-          }
-        }
         vram[offset] = b0;
         vram[offset + 1] = b1;
         vram[offset + 2] = b2;
         vram[offset + 3] = b3;
 
-        // Verify write took effect
-        if (traceVramStage && offset >= 0x12000u && offset < 0x12010u) {
-          const uint32_t verifyVal = vram[offset] | (vram[offset + 1] << 8) |
-                                     (vram[offset + 2] << 16) |
-                                     (vram[offset + 3] << 24);
-          if (verifyVal != value) {
-            AIO::Emulator::Common::Logger::Instance().LogFmt(
-                AIO::Emulator::Common::LogLevel::Error, "VRAM",
-                "VRAM_STAGE W32 VERIFY FAIL offset=0x%05x expected=0x%08x "
-                "got=0x%08x",
-                (unsigned)offset, (unsigned)value, (unsigned)verifyVal);
-          }
-        }
         if (offset + 3 < vram_shadow.size()) {
           vram_shadow[offset] = b0;
           vram_shadow[offset + 1] = b1;
@@ -4550,33 +2372,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         uint16_t reload = value & 0xFFFF;
         timerCounters[timerIdx] = reload;
         timerPrescalerCounters[timerIdx] = 0;
-      }
-    }
-  }
-
-  if (traceIrqHandWrites && isIrqHandPtrWord) {
-    const uint32_t newIrqHandWord = Read32(0x03007FFCu);
-    if (newIrqHandWord != oldIrqHandWord) {
-      static int logs = 0;
-      if (logs++ < 300) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
-        const uint32_t sp = cpu ? (uint32_t)cpu->GetRegister(13) : 0u;
-        const uint32_t cpsr = cpu ? (uint32_t)cpu->GetCPSR() : 0u;
-        const uint32_t r0 = cpu ? (uint32_t)cpu->GetRegister(0) : 0u;
-        const uint32_t r1 = cpu ? (uint32_t)cpu->GetRegister(1) : 0u;
-        const uint32_t r2 = cpu ? (uint32_t)cpu->GetRegister(2) : 0u;
-        const uint32_t r3 = cpu ? (uint32_t)cpu->GetRegister(3) : 0u;
-        const uint32_t r12 = cpu ? (uint32_t)cpu->GetRegister(12) : 0u;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "IRQHAND",
-            "IRQHAND_WRITE32 addr=0x%08x val=0x%08x old=0x%08x new=0x%08x "
-            "PC=0x%08x LR=0x%08x SP=0x%08x CPSR=0x%08x R0=0x%08x R1=0x%08x "
-            "R2=0x%08x R3=0x%08x R12=0x%08x",
-            (unsigned)address, (unsigned)value, (unsigned)oldIrqHandWord,
-            (unsigned)newIrqHandWord, (unsigned)pc, (unsigned)lr, (unsigned)sp,
-            (unsigned)cpsr, (unsigned)r0, (unsigned)r1, (unsigned)r2,
-            (unsigned)r3, (unsigned)r12);
       }
     }
   }
@@ -4636,45 +2431,8 @@ uint16_t GBAMemory::ReadIORegister16Internal(uint32_t offset) const {
 }
 
 void GBAMemory::CheckDMA(int timing) {
-  // DKC diagnostic: Log VBlank DMA checks during problem frames
-  const int frame = ppu ? ppu->GetFrameCount() : -1;
-  const bool isDiagFrame =
-      (frame >= 1655 && frame <= 1665) || (frame >= 1885 && frame <= 1895) ||
-      (frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399);
-
-  if (isDiagFrame && timing == 1) {
-    std::cout << "[DKC_DIAG] Frame " << frame
-              << " CheckDMA timing=1 (VBlank) called" << std::endl;
-  }
-
   if (dmaInProgress) {
-    if (isDiagFrame && timing == 1) {
-      std::cout << "[DKC_DIAG] Frame " << frame
-                << " VBlank DMA blocked - dmaInProgress=true" << std::endl;
-    }
     return;
-  }
-  // One-shot DMA state dump at frame 30
-  static bool dmaDumped = false;
-  if (!dmaDumped && frame == 30 && timing == 2) {
-    dmaDumped = true;
-    for (int ch = 0; ch < 4; ch++) {
-      uint32_t base = IORegs::DMA0SAD + (ch * IORegs::DMA_CHANNEL_SIZE);
-      uint32_t sad = io_regs[base] | (io_regs[base + 1] << 8) |
-                     (io_regs[base + 2] << 16) | (io_regs[base + 3] << 24);
-      uint32_t dad = io_regs[base + 4] | (io_regs[base + 5] << 8) |
-                     (io_regs[base + 6] << 16) | (io_regs[base + 7] << 24);
-      uint16_t cnt_l = io_regs[base + 8] | (io_regs[base + 9] << 8);
-      uint16_t cnt_h = io_regs[base + 10] | (io_regs[base + 11] << 8);
-      bool en = (cnt_h >> 15) & 1;
-      int t = (cnt_h >> 12) & 3;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DMA_STATE",
-          "frame=%d DMA%d: SAD=0x%08x DAD=0x%08x CNT_L=0x%04x CNT_H=0x%04x "
-          "en=%d timing=%d 32bit=%d repeat=%d destCtrl=%d srcCtrl=%d",
-          frame, ch, sad, dad, cnt_l, cnt_h, en, t, (cnt_h >> 10) & 1,
-          (cnt_h >> 9) & 1, (cnt_h >> 5) & 3, (cnt_h >> 7) & 3);
-    }
   }
 
   for (int i = 0; i < 4; ++i) {
@@ -4685,10 +2443,6 @@ void GBAMemory::CheckDMA(int timing) {
     if (control & DMAControl::ENABLE) {
       int dmaTiming = (control >> 12) & 3;
       if (dmaTiming == timing) {
-        if (isDiagFrame) {
-          std::cout << "[DKC_DIAG] Frame " << frame << " Found enabled DMA ch"
-                    << i << " with timing=" << timing << std::endl;
-        }
         PerformDMA(i);
       }
     }
@@ -4696,9 +2450,7 @@ void GBAMemory::CheckDMA(int timing) {
 }
 
 void GBAMemory::PerformDMA(int channel) {
-  static int dmaSeq = 0;
-  static bool inImmediateDMA = false; // Only guard immediate DMAs
-  dmaSeq++;
+  static bool inImmediateDMA = false;
 
   if (dmaInProgress) {
     return;
@@ -4741,127 +2493,13 @@ void GBAMemory::PerformDMA(int channel) {
   uint32_t dst = dmaInternalDst[channel];
   uint32_t src = dmaInternalSrc[channel];
 
-  // DEBUG: Trace DMA targeting VRAM (disabled)
-  // if ((dst & 0xFF000000) == 0x06000000 && (dst & 0xFFFF0000) == 0x06000000) {
-  //     uint32_t srcVal = is32Bit ? Read32(src) : Read16(src);
-  //     std::cout << "[DMA#" << std::dec << dmaSeq << " ch" << channel << " to
-  //     BG_VRAM] Src=0x" << std::hex << src
-  //               << " Dst=0x" << dst
-  //               << " Count=" << std::dec << count
-  //               << " 32bit=" << is32Bit
-  //               << " srcCtrl=" << srcCtrl
-  //               << " srcVal=0x" << std::hex << srcVal << std::dec <<
-  //               std::endl;
-  // }
-
-  // Classic NES: Trace ALL DMA to VRAM to find where tilemap data comes from
-  const bool isClassicNesDma =
-      gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-
-  // Trace DMA to VRAM for Classic NES games to debug graphics corruption
-  const bool traceDmaVram = EnvFlagCached("AIO_TRACE_DMA_VRAM");
-
   bool irq = (control >> 14) & 1;
 
   uint32_t currentSrc = dmaInternalSrc[channel];
   uint32_t currentDst = dmaInternalDst[channel];
 
-  // Log DMA to VRAM for Classic NES debugging
-  const bool dstIsVram =
-      (currentDst >= 0x06000000u && currentDst < 0x06018000u);
-  if (traceDmaVram && isClassicNesDma && dstIsVram) {
-    static int dmaVramLogs = 0;
-    if (dmaVramLogs < 200) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      // Read first few bytes from source to see what's being copied
-      uint32_t srcPreview = 0;
-      if ((currentSrc >= 0x02000000u && currentSrc < 0x04000000u) ||
-          (currentSrc >= 0x06000000u && currentSrc < 0x08000000u) ||
-          (currentSrc >= 0x08000000u && currentSrc < 0x0E000000u)) {
-        srcPreview = Read32(currentSrc);
-      }
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DMA/VRAM",
-          "DMA ch=%d src=0x%08x dst=0x%08x count=%u width=%u srcCtrl=%d "
-          "dstCtrl=%d srcPreview=0x%08x PC=0x%08x",
-          channel, (unsigned)currentSrc, (unsigned)currentDst, (unsigned)count,
-          (unsigned)(is32Bit ? 32 : 16), srcCtrl, destCtrl,
-          (unsigned)srcPreview, (unsigned)pc);
-      dmaVramLogs++;
-    }
-  }
-
-  // Trace DMAs that cover the scroll table region in VRAM
-  if (dstIsVram) {
-    uint32_t dmaBytes = (uint32_t)count * (is32Bit ? 4u : 2u);
-    uint32_t dstOff = currentDst & 0x1FFFFu;
-    uint32_t dstEnd = dstOff + dmaBytes;
-    // Check if DMA range overlaps scroll table buffer 1 (0x3514-0x3794) or
-    // buffer 2 (0x6B14-0x6D94)
-    bool hitsScroll = (dstOff < 0x3794 && dstEnd > 0x3514) ||
-                      (dstOff < 0x6D94 && dstEnd > 0x6B14);
-    if (hitsScroll) {
-      static int scrollDmaLogs = 0;
-      if (scrollDmaLogs < 100) {
-        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-        Common::Logger::Instance().LogFmt(
-            Common::LogLevel::Info, "DMA/SCROLL",
-            "DMA COVERS SCROLL TABLE ch=%d src=0x%08x dst=0x%08x count=%u "
-            "width=%u "
-            "srcCtrl=%d dstCtrl=%d dstOff=0x%05x-0x%05x PC=0x%08x",
-            channel, (unsigned)currentSrc, (unsigned)currentDst,
-            (unsigned)count, (unsigned)(is32Bit ? 32 : 16), srcCtrl, destCtrl,
-            (unsigned)dstOff, (unsigned)dstEnd, (unsigned)pc);
-        scrollDmaLogs++;
-      }
-    }
-  }
-
-  const bool traceDmaPalette = EnvFlagCached("AIO_TRACE_DMA_PALETTE");
   const bool dstIsPalette =
       (currentDst >= 0x05000000u && currentDst < 0x05000400u);
-
-  // Trace DMA targeting IO registers (scroll, etc.)
-  const bool dstIsIO = (currentDst >= 0x04000000u && currentDst < 0x04000400u);
-  if (dstIsIO) {
-    static int dmaIoLogs = 0;
-    if (dmaIoLogs < 8000) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      // Only log scroll-register targets (0x04000010-0x0400001F) and BLDALPHA
-      if ((currentDst >= 0x04000010u && currentDst <= 0x0400001Fu) ||
-          currentDst == 0x04000052u) {
-        // Read the value that will be written to the IO register
-        uint32_t srcVal = is32Bit ? Read32(currentSrc) : Read16(currentSrc);
-        uint16_t hofs = srcVal & 0xFFFF;
-        uint16_t vofs = (srcVal >> 16) & 0xFFFF;
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "DMA/IO",
-            "DMA->IO ch=%d src=0x%08x dst=0x%08x count=%u width=%u "
-            "timing=%d scanline=%d cycle=%d val=0x%08x HOFS=%u VOFS=%u "
-            "PC=0x%08x",
-            channel, (unsigned)currentSrc, (unsigned)currentDst,
-            (unsigned)count, (unsigned)(is32Bit ? 32 : 16), timing,
-            ppuTimingScanline, ppuTimingCycle, (unsigned)srcVal, (unsigned)hofs,
-            (unsigned)vofs, (unsigned)pc);
-        dmaIoLogs++;
-      }
-    }
-  }
-
-  if (traceDmaPalette && dstIsPalette) {
-    static int dmaPalStartLogs = 0;
-    if (dmaPalStartLogs < 64) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DMA/PALETTE",
-          "DMA start ch=%d src=0x%08x dst=0x%08x count=%u width=%u srcCtrl=%d "
-          "dstCtrl=%d timing=%d ctrl=0x%04x PC=0x%08x",
-          channel, (unsigned)currentSrc, (unsigned)currentDst, (unsigned)count,
-          (unsigned)(is32Bit ? 32 : 16), srcCtrl, destCtrl, timing,
-          (unsigned)control, (unsigned)pc);
-      dmaPalStartLogs++;
-    }
-  }
 
   // EEPROM Size Detection via DMA Count
   // 4Kbit EEPROM uses 6-bit address -> 9 bits total (2 cmd + 6 addr + 1 stop)
@@ -4920,18 +2558,6 @@ void GBAMemory::PerformDMA(int channel) {
     dst &= mask;
   }
 
-  // DEBUG: Post-mask trace for DMA to 0x3001500
-  if ((currentDst & 0x7FFF) == 0x1500 && (currentDst >> 24) == 0x03) {
-    uint32_t currentVal = Read32(0x3001500);
-    uint32_t firstVal = Read32(currentSrc);
-    std::cout << "[DMA#" << std::dec << dmaSeq << " ch" << channel
-              << " EXECUTE 0x3001500] "
-              << "Count(masked)=" << count << " 32bit=" << is32Bit
-              << " FirstSrcValue=0x" << std::hex << firstVal
-              << " destCtrl=" << std::dec << destCtrl << " BEFORE=0x"
-              << std::hex << currentVal << std::endl;
-  }
-
   // WORKAROUND: DKC sound engine sets destCtrl=2 (Fixed) for DMA to IWRAM.
   // With Fixed destination, all values write to the same address repeatedly.
   // For large counts, this is audio streaming - we skip the actual writes
@@ -4943,19 +2569,6 @@ void GBAMemory::PerformDMA(int channel) {
   const bool allowFixedIWRAMSkip =
       EnvFlagCached("AIO_DKC_DMA_FIXED_IWRAM_SKIP") || isDKC;
   if (allowFixedIWRAMSkip && destCtrl == 2 && dstIsIWRAM && count > 100) {
-    // DKC diagnostic: Log skips during problem frames
-    const int frame = ppu ? ppu->GetFrameCount() : -1;
-    if ((frame >= 2195 && frame <= 2205) || (frame >= 2389 && frame <= 2399)) {
-      std::cout << "[DKC_DIAG] Frame " << frame
-                << " DMA SKIP: Fixed-dest IWRAM dst=0x" << std::hex
-                << currentDst << " count=" << std::dec << count << std::endl;
-    }
-
-    if (TraceGbaSpam() || verboseLogs) {
-      std::cout << "[DMA SKIP] destCtrl=2 IWRAM 0x" << std::hex << currentDst
-                << " count=" << std::dec << count
-                << " (Fixed dest - preserving existing value)" << std::endl;
-    }
     // Update timing as if full DMA happened using proper wait states
     int step = is32Bit ? 4 : 2;
     const uint32_t srcRegion = (src >> 24) & 0xF;
@@ -4992,124 +2605,6 @@ void GBAMemory::PerformDMA(int channel) {
   bool srcIsEEPROM = (currentSrc >= 0x0D000000 && currentSrc < 0x0E000000);
   bool dstIsEEPROM = (currentDst >= 0x0D000000 && currentDst < 0x0E000000);
 
-  // DKC audio investigation: trace any DMA that writes into or across the
-  // IWRAM jump-table slot at 0x03003378-0x0300337F. Prior logs show that this
-  // region is populated with 0xFFFFFCA4/0xFFFFFD0C with PC=0x0803234C when
-  // enabling the DMA channel. Here we capture the DMA parameters and the
-  // first source word to understand where these values originate.
-  if (EnvFlagCached("AIO_TRACE_DKC_AUDIO")) {
-    const uint32_t dmaBytes = count * (is32Bit ? 4u : 2u);
-    const uint32_t dstStart = currentDst;
-    const uint32_t dstEnd = dstStart + (dmaBytes ? (dmaBytes - 1u) : 0u);
-    const uint32_t dkcLo = 0x03003378u;
-    const uint32_t dkcHi = 0x0300337Fu;
-    const bool touchesDkcSlot =
-        (dstStart <= dkcHi) && (dstEnd >= dkcLo) &&
-        ((dstStart >> 24) == 0x03 || (dstEnd >> 24) == 0x03);
-    if (touchesDkcSlot) {
-      uint32_t firstWord = 0;
-      if (is32Bit) {
-        firstWord = Read32(currentSrc & ~3u);
-      } else {
-        // For 16-bit DMA, read the first halfword and mirror it into the
-        // upper bits for easier comparison.
-        const uint16_t hw = Read16(currentSrc & ~1u);
-        firstWord = (uint32_t)hw | ((uint32_t)hw << 16);
-      }
-      const uint32_t pcNow = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DKC",
-          "DKC_DMA_SLOT ch=%d src=0x%08x dst=0x%08x count=%u width=%u "
-          "srcCtrl=%d dstCtrl=%d timing=%u firstWord=0x%08x PC=0x%08x",
-          channel, (unsigned)currentSrc, (unsigned)currentDst, (unsigned)count,
-          (unsigned)(is32Bit ? 32 : 16), srcCtrl, destCtrl, (unsigned)timing,
-          (unsigned)firstWord, (unsigned)pcNow);
-    }
-  }
-
-  if (EnvFlagCached("AIO_TRACE_EEPROM_DMA") && (srcIsEEPROM || dstIsEEPROM)) {
-    static int eepDmaLogs = 0;
-    if (eepDmaLogs < 200) {
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "EEPROM_DMA",
-          "DMA ch=%d src=0x%08x dst=0x%08x count=%u width=%u timing=%u "
-          "PC=0x%08x",
-          channel, (unsigned)currentSrc, (unsigned)currentDst, (unsigned)count,
-          (unsigned)(is32Bit ? 32 : 16), (unsigned)timing,
-          cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-      eepDmaLogs++;
-    }
-  }
-
-  // SMA2 investigation: confirm whether the game performs an EEPROM->EWRAM DMA
-  // read into its header staging buffer before validating. Enable with:
-  // AIO_TRACE_SMA2_EEPROM_READ=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_EEPROM_READ") && srcIsEEPROM) {
-    if (currentDst >= 0x020003C0 && currentDst < 0x02000400) {
-      static int logs = 0;
-      if (logs < 40) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "EEPROM DMA READ: ch=%d src=0x%08x dst=0x%08x count=%u ctrl=0x%04x "
-            "PC=0x%08x",
-            channel, (unsigned)currentSrc, (unsigned)currentDst,
-            (unsigned)count, (unsigned)control,
-            cpu ? (unsigned)cpu->GetRegister(15) : 0u);
-        logs++;
-      }
-    }
-  }
-
-  // SMA2 investigation: correlate EEPROM DMA reads with CPU SP to detect stack
-  // overlap. Enable with: AIO_TRACE_SMA2_DMA_STACK=1
-  if (EnvFlagCached("AIO_TRACE_SMA2_DMA_STACK") && cpu && channel == 3 &&
-      srcIsEEPROM && !is32Bit) {
-    if (count == 68 || count == 64 || count == 66) {
-      const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-      const uint32_t sp = (uint32_t)cpu->GetRegister(13);
-      const uint32_t lr = (uint32_t)cpu->GetRegister(14);
-      const uint32_t dmaBytes = count * 2;
-      const uint32_t dstStart = currentDst;
-      const uint32_t dstEnd = dstStart + dmaBytes;
-
-      // Heuristic: treat "near stack" as within +/- 0x200 bytes of SP.
-      const uint32_t spLo = (sp >= 0x200u) ? (sp - 0x200u) : 0u;
-      const uint32_t spHi = sp + 0x200u;
-      const bool overlaps = !(dstEnd <= spLo || dstStart >= spHi);
-
-      static int stackLogs = 0;
-      if (stackLogs < 200) {
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "SMA2",
-            "EEPROM DMA_STACK ch=%d count=%u dst=0x%08x..0x%08x SP=0x%08x "
-            "LR=0x%08x overlap=%u PC=0x%08x",
-            channel, (unsigned)count, (unsigned)dstStart, (unsigned)dstEnd,
-            (unsigned)sp, (unsigned)lr, (unsigned)(overlaps ? 1 : 0),
-            (unsigned)pc);
-        stackLogs++;
-      }
-    }
-  }
-
-  // Debug: Log EEPROM check
-  // if (srcIsEEPROM || dstIsEEPROM) {
-  //     std::cout << "[EEPROM DMA CHECK] src=0x" << std::hex << currentSrc
-  //               << " dst=0x" << currentDst
-  //               << " count=" << std::dec << count
-  //               << " srcIsEEPROM=" << srcIsEEPROM
-  //               << " dstIsEEPROM=" << dstIsEEPROM
-  //               << " count>=68=" << (count >= 68) << std::endl;
-  // }
-
-  // DEBUG (guarded): Log when we check fast-path condition
-  if (verboseLogs && (srcIsEEPROM || dstIsEEPROM)) {
-    std::ofstream debugFile("/tmp/eeprom_debug.txt", std::ios::app);
-    debugFile << "[DMA CHECK] srcEEP=" << srcIsEEPROM
-              << " dstEEP=" << dstIsEEPROM << " count=" << count << " >= 68? "
-              << (count >= 68) << std::endl;
-    debugFile.close();
-  }
-
   // Fast-path for EEPROM reads - only if buffer already prepared AND validated
   bool startingAtDataPhase = (eepromState == EEPROMState::ReadData);
   bool inReadSequence = (eepromState == EEPROMState::ReadDummy ||
@@ -5120,47 +2615,9 @@ void GBAMemory::PerformDMA(int channel) {
   bool canFastPath = !disableFastPath && srcIsEEPROM && inReadSequence &&
                      eepromBufferValid && count >= 4;
 
-  // Debug: Trace DMA branch for VRAM staging area
-  // NOTE: NOT using EnvFlagCached because it caches on first call, which might
-  // be before environment is ready. Using direct getenv instead.
-  static const bool traceDmaVramStageBranch =
-      EnvTruthy(std::getenv("AIO_TRACE_DMA_VRAM_STAGING"));
-
-  // Direct check to debug env var reading
-  static bool envDebugPrinted = false;
-  if (!envDebugPrinted) {
-    const char *envVal = std::getenv("AIO_TRACE_DMA_VRAM_STAGING");
-    AIO::Emulator::Common::Logger::Instance().LogFmt(
-        AIO::Emulator::Common::LogLevel::Info, "DEBUG",
-        "AIO_TRACE_DMA_VRAM_STAGING env=%s cached=%d",
-        envVal ? envVal : "(null)", (int)traceDmaVramStageBranch);
-    envDebugPrinted = true;
-  }
-
-  if (traceDmaVramStageBranch &&
-      ((currentDst >= 0x06010000u && currentDst < 0x06018000u) ||
-       (currentSrc >= 0x06010000u && currentSrc < 0x06018000u))) {
-    static int branchLogs = 0;
-    if (branchLogs < 20) {
-      branchLogs++;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DMA/BRANCH",
-          "VRAM staging DMA: src=0x%08x dst=0x%08x srcIsEEPROM=%d "
-          "dstIsEEPROM=%d canFastPath=%d count=%u",
-          (unsigned)currentSrc, (unsigned)currentDst, (int)srcIsEEPROM,
-          (int)dstIsEEPROM, (int)canFastPath, (unsigned)count);
-    }
-  }
-
-  // Fast-path validation (silent)
-
   if (canFastPath) {
     const bool lsbFirst = EnvFlagCached("AIO_EEPROM_LSB_FIRST");
     const bool dummyHigh = EnvFlagCached("AIO_EEPROM_DUMMY_HIGH");
-    if (verboseLogs) {
-      std::cout << "[EEPROM FAST-PATH] Activating for count=" << count
-                << " src=0x" << std::hex << currentSrc << std::dec << std::endl;
-    }
 
     const EEPROMState startState = eepromState;
     const int startBitCounter = eepromBitCounter;
@@ -5256,140 +2713,13 @@ void GBAMemory::PerformDMA(int channel) {
     totalCycles += count * 2;
 
     // DEBUG: Log what bits were transferred
-    if (verboseLogs &&
-        eepromAddress == 2) { // Only log block 2 (the header block)
-      std::cout << "[EEPROM FAST-PATH] Block 2 read: debugBits=0x" << std::hex
-                << debugBits << std::dec << std::endl;
-    }
 
-    // SMA2 investigation: dump the *actual halfwords* written by the DMA read.
     // This is useful because games sometimes validate the raw 16-bit words (not
-    // just D0). Enable with: AIO_TRACE_SMA2_EEPROM_DMAWORDS=1
-    if (EnvFlagCached("AIO_TRACE_SMA2_EEPROM_DMAWORDS") && cpu) {
-      if ((eepromAddress == 2 || eepromAddress == 4) && !is32Bit &&
-          count == 68) {
-        static int dmaWordDumps = 0;
-        if (dmaWordDumps < 40) {
-          const uint32_t dstStart = initialDst;
-          const uint8_t dstRegion = dstStart >> 24;
-          std::ostringstream oss;
-          oss << "EEPROM DMAWORDS: block=" << std::dec
-              << (unsigned)eepromAddress << " dst=0x" << std::hex
-              << std::setw(8) << std::setfill('0') << dstStart
-              << " count=" << std::dec << (unsigned)count
-              << " bus0=" << std::hex << std::setw(4) << std::setfill('0')
-              << (unsigned)(d0OnlyDMASamples ? 0x0000 : EEPROMConsts::BUSY_LOW)
-              << " PC=0x" << std::hex << std::setw(8) << std::setfill('0')
-              << (unsigned)cpu->GetRegister(15) << " words=";
-
-          auto readWordAt = [&](uint32_t addr) -> uint16_t {
-            const uint8_t region = addr >> 24;
-            if (region == 0x02) {
-              const uint32_t off = addr & MemoryMap::WRAM_BOARD_MASK;
-              if (off + 1 < wram_board.size()) {
-                return (uint16_t)(wram_board[off] | (wram_board[off + 1] << 8));
-              }
-              return 0;
-            }
-            if (region == 0x03) {
-              const uint32_t off = addr & MemoryMap::WRAM_CHIP_MASK;
-              if (off + 1 < wram_chip.size()) {
-                return (uint16_t)(wram_chip[off] | (wram_chip[off + 1] << 8));
-              }
-              return 0;
-            }
-            // Fallback (shouldn't happen for SMA2): use bus read.
-            return Read16(addr);
-          };
-
-          // Dump the first 24 halfwords (4 dummy + first 20 data bits) – enough
-          // to see the word-shape without spamming logs.
-          const uint32_t dumpN = (count < 24) ? count : 24;
-          for (uint32_t i = 0; i < dumpN; ++i) {
-            const uint16_t w = readWordAt(dstStart + i * 2);
-            if (i == 0) {
-              oss << std::hex;
-            }
-            oss << ((i == 0) ? "" : ",") << std::setw(4) << std::setfill('0')
-                << (unsigned)w;
-          }
-
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SMA2", "%s",
-              oss.str().c_str());
-
-          dmaWordDumps++;
-        }
-      }
-    }
-
-    // SMA2 investigation: always log the reconstructed 64 data bits for key
-    // blocks. Enable with: AIO_TRACE_SMA2_EEPROM_READBITS=1
-    if (EnvFlagCached("AIO_TRACE_SMA2_EEPROM_READBITS") && cpu) {
-      if (eepromAddress == 2 || eepromAddress == 4) {
-        static int readBitsLogs = 0;
-        if (readBitsLogs < 80) {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "SMA2",
-              "EEPROM READBITS: block=%u dst=0x%08x count=%u startState=%d "
-              "startBit=%d bufValidStart=%u buffer=0x%016llx "
-              "dataBits=0x%016llx PC=0x%08x",
-              (unsigned)eepromAddress, (unsigned)initialDst, (unsigned)count,
-              (int)startState, (int)startBitCounter,
-              (unsigned)(eepromBufferValid ? 1 : 0),
-              (unsigned long long)eepromBuffer, (unsigned long long)debugBits,
-              (unsigned)cpu->GetRegister(15));
-          readBitsLogs++;
-        }
-      }
-    }
 
     // Targeted correctness check for SMA2 save validation.
     // Confirms that the 64 data bits the game receives via DMA match the EEPROM
     // buffer we prepared.
-    if (verboseLogs && (gameCode == "AMQE" || gameCode == "AMQP" ||
-                        gameCode == "AMQJ" || gameCode == "AA2E")) {
-      if (eepromAddress == 2 || eepromAddress == 4 || eepromAddress == 32) {
-        static int sma2FastChecksLogged = 0;
-        if (sma2FastChecksLogged < 40) {
-          std::cerr << "[EEPROM FASTCHK] game=" << gameCode
-                    << " block=" << eepromAddress << " count=" << count
-                    << " startState=" << (int)startState
-                    << " startBit=" << startBitCounter
-                    << " bufValid=" << (eepromBufferValid ? 1 : 0)
-                    << " buffer=0x" << std::hex << std::setw(16)
-                    << std::setfill('0') << eepromBuffer << " dataBits=0x"
-                    << std::setw(16) << debugBits << std::dec << std::endl;
-          sma2FastChecksLogged++;
-        }
-      }
-    }
 
-    // DEBUG (guarded): Log fast-path completion
-    if (verboseLogs) {
-      std::ofstream debugFile("/tmp/eeprom_debug.txt", std::ios::app);
-      debugFile << "[FAST-PATH] Block=" << eepromAddress << " Count=" << count
-                << " Buffer=0x" << std::hex << eepromBuffer << std::dec
-                << std::endl;
-      debugFile << "  Dst=0x" << std::hex << initialDst << " First 16 words:";
-      uint32_t dumpOffset = initialDst - 0x03000000;
-      for (int i = 0; i < 16 && i < (int)count &&
-                      dumpOffset + i * 2 + 1 < wram_chip.size();
-           ++i) {
-        uint16_t word = wram_chip[dumpOffset + i * 2] |
-                        (wram_chip[dumpOffset + i * 2 + 1] << 8);
-        if (i % 8 == 0)
-          debugFile << std::endl << "    ";
-        debugFile << std::setw(4) << std::setfill('0') << word << " ";
-      }
-      debugFile << std::dec << std::endl;
-      debugFile.close();
-    }
-
-    if (verboseLogs) {
-      std::cout << "[EEPROM FAST-PATH] Complete - returned to Idle state"
-                << std::endl;
-    }
   }
   // Fast-path for EEPROM writes
   else if (dstIsEEPROM && count > 1) {
@@ -5412,18 +2742,6 @@ void GBAMemory::PerformDMA(int channel) {
       for (uint32_t i = 0; i < count; ++i) {
         uint16_t val = ReadEEPROM();
 
-        // Log if writing EEPROM data to critical regions
-        if (currentDst >= 0x05000000 && currentDst < 0x05000400) {
-          std::cerr << "[EEPROM->PALETTE] Writing 0x" << std::hex << val
-                    << " to 0x" << currentDst << std::dec << std::endl;
-        } else if (currentDst >= 0x06000000 && currentDst < 0x06018000) {
-          std::cerr << "[EEPROM->VRAM] Writing 0x" << std::hex << val
-                    << " to 0x" << currentDst << std::dec << std::endl;
-        } else if (currentDst >= 0x07000000 && currentDst < 0x07000400) {
-          std::cerr << "[EEPROM->OAM] Writing 0x" << std::hex << val << " to 0x"
-                    << currentDst << std::dec << std::endl;
-        }
-
         Write16(currentDst, val);
         totalCycles += 2;
         if (destCtrl == 0 || destCtrl == 3)
@@ -5444,115 +2762,19 @@ void GBAMemory::PerformDMA(int channel) {
       }
     } else {
       // Normal memory-to-memory DMA
-      // Calculate cycles using proper memory region wait states (GBATEK)
       const uint32_t srcRegion = (src >> 24) & 0xF;
       const uint32_t dstRegion = (dst >> 24) & 0xF;
-
-      // Trace DMA writes specifically to VRAM staging area for OG-DK debug
-      // NOTE: Using direct EnvTruthy check instead of EnvFlagCached to avoid
-      // caching issues
-      static const bool traceDmaVramStage =
-          EnvTruthy(std::getenv("AIO_TRACE_DMA_VRAM_STAGING"));
-
-      // Debug: Log when we enter this path with staging trace enabled
-      if (traceDmaVramStage &&
-          ((currentDst >= 0x06010000u && currentDst < 0x06018000u) ||
-           (currentSrc >= 0x06010000u && currentSrc < 0x06018000u))) {
-        static int entryLogs = 0;
-        if (entryLogs < 20) {
-          entryLogs++;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "DMA/VRAM_STAGE",
-              "ENTERING DMA loop: src=0x%08x dst=0x%08x count=%u is32Bit=%d",
-              (unsigned)currentSrc, (unsigned)currentDst, (unsigned)count,
-              (int)is32Bit);
-        }
-      }
 
       for (uint32_t i = 0; i < count; ++i) {
         if (is32Bit) {
           uint32_t val = Read32(currentSrc);
-
-          // Log DMA reads from VRAM staging area (0x06010000-0x06017FFF)
-          if (traceDmaVramStage &&
-              (currentSrc >= 0x06010000u && currentSrc < 0x06018000u)) {
-            static int dmaVramStageRead32Logs = 0;
-            if (dmaVramStageRead32Logs < 50 ||
-                (currentSrc >= 0x06012000u && currentSrc < 0x06012010u)) {
-              dmaVramStageRead32Logs++;
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              uint32_t offset = currentSrc & 0x1FFFFu;
-              if (offset >= 0x18000u)
-                offset -= 0x8000u;
-              // Also read directly from vram array to verify
-              const uint32_t rawVram =
-                  (offset + 3 < vram.size())
-                      ? (vram[offset] | (vram[offset + 1] << 8) |
-                         (vram[offset + 2] << 16) | (vram[offset + 3] << 24))
-                      : 0xDEADBEEF;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "DMA/VRAM_STAGE",
-                  "DMA R32 src=0x%08x offset=0x%05x Read32=0x%08x "
-                  "rawVram=0x%08x dst=0x%08x i=%u PC=0x%08x",
-                  (unsigned)currentSrc, (unsigned)offset, (unsigned)val,
-                  (unsigned)rawVram, (unsigned)currentDst, (unsigned)i,
-                  (unsigned)pc);
-            }
-          }
-
           Write32(currentDst, val);
-
-          // Log DMA writes to VRAM staging area (0x06010000-0x06017FFF)
-          if (traceDmaVramStage &&
-              (currentDst >= 0x06010000u && currentDst < 0x06018000u)) {
-            static int dmaVramStage32Logs = 0;
-            if (dmaVramStage32Logs < 50 ||
-                (currentDst >= 0x06012000u && currentDst < 0x06012010u)) {
-              dmaVramStage32Logs++;
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              const uint32_t offset = currentDst & 0x1FFFFu;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "DMA/VRAM_STAGE",
-                  "DMA W32 dst=0x%08x offset=0x%05x val=0x%08x src=0x%08x i=%u "
-                  "PC=0x%08x",
-                  (unsigned)currentDst, (unsigned)offset, (unsigned)val,
-                  (unsigned)currentSrc, (unsigned)i, (unsigned)pc);
-            }
-          }
-
-          if (traceDmaPalette &&
-              (currentDst >= 0x05000000u && currentDst < 0x05000400u)) {
-            static int dmaPalWordLogs = 0;
-            if (dmaPalWordLogs < 256) {
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "DMA/PALETTE",
-                  "W32 dst=0x%08x val=0x%08x src=0x%08x i=%u PC=0x%08x",
-                  (unsigned)currentDst, (unsigned)val, (unsigned)currentSrc,
-                  (unsigned)i, (unsigned)pc);
-              dmaPalWordLogs++;
-            }
-          }
 
           totalCycles +=
               GetDmaCyclesPerWord(srcRegion, dstRegion, true, i == 0);
         } else {
           uint16_t val = Read16(currentSrc);
           Write16(currentDst, val);
-
-          if (traceDmaPalette &&
-              (currentDst >= 0x05000000u && currentDst < 0x05000400u)) {
-            static int dmaPalHalfLogs = 0;
-            if (dmaPalHalfLogs < 512) {
-              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "DMA/PALETTE",
-                  "W16 dst=0x%08x val=0x%04x src=0x%08x i=%u PC=0x%08x",
-                  (unsigned)currentDst, (unsigned)val, (unsigned)currentSrc,
-                  (unsigned)i, (unsigned)pc);
-              dmaPalHalfLogs++;
-            }
-          }
 
           totalCycles +=
               GetDmaCyclesPerWord(srcRegion, dstRegion, false, i == 0);
@@ -5587,8 +2809,6 @@ void GBAMemory::PerformDMA(int channel) {
     apu->Update(totalCycles);
   if (ppu)
     ppu->Update(totalCycles);
-
-  // OG-DK: Trace palette state after VRAM DMA - Removed
 
   // Save updated internal addresses
   dmaInternalSrc[channel] = currentSrc;
@@ -5676,28 +2896,6 @@ void GBAMemory::UpdateTimers(int cycles) {
   }
 
   // One-time timer state dump at frame 30
-  if (EnvFlagCached("AIO_TRACE_TIMER1_IRQ")) {
-    static bool timerDumped = false;
-    const int frame = ppu ? ppu->GetFrameCount() : -1;
-    if (!timerDumped && frame >= 30) {
-      timerDumped = true;
-      for (int t = 0; t < 4; t++) {
-        uint32_t base = IORegs::TM0CNT_L + (t * IORegs::TIMER_CHANNEL_SIZE);
-        uint16_t reload = io_regs[base] | (io_regs[base + 1] << 8);
-        uint16_t ctrl = io_regs[base + 2] | (io_regs[base + 3] << 8);
-        AIO::Emulator::Common::Logger::Instance().LogFmt(
-            AIO::Emulator::Common::LogLevel::Info, "TIMER_STATE",
-            "Timer%d: reload=0x%04x ctrl=0x%04x enabled=%d cascade=%d irq=%d "
-            "prescaler=%d counter=0x%04x",
-            t, (unsigned)reload, (unsigned)ctrl,
-            (ctrl & TimerControl::ENABLE) ? 1 : 0,
-            (ctrl & TimerControl::COUNT_UP) ? 1 : 0,
-            (ctrl & TimerControl::IRQ_ENABLE) ? 1 : 0,
-            (int)(ctrl & TimerControl::PRESCALER_MASK),
-            (unsigned)timerCounters[t]);
-      }
-    }
-  }
 
   int previousOverflows = 0;
 
@@ -5749,34 +2947,15 @@ void GBAMemory::UpdateTimers(int cycles) {
             overflowCount++;
             counter = reload;
 
-            // Notify APU of timer overflow (for sound sample consumption).
-            // Suppress during active DMA to prevent FIFO drain during the
-            // same DMA that refills it — the DMA transfer cycles are accounted
-            // by UpdateTimers and would otherwise cause pathological re-drain.
-            if (!dmaInProgress && apu && (i == 0 || i == 1)) {
+            // Notify APU of timer overflow (always — sample consumption must
+            // not be suppressed during DMA, only the DMA re-trigger is
+            // guarded by dmaInProgress below).
+            if (apu && (i == 0 || i == 1)) {
               apu->OnTimerOverflow(i);
             }
 
             // Trace Timer0 overflow rate per frame
             if (i == 0) {
-              static const bool traceT0Rate =
-                  EnvTruthy(std::getenv("AIO_TRACE_TIMER0_RATE"));
-              if (traceT0Rate) {
-                static int t0OverflowCount = 0;
-                static int lastFrame = -1;
-                const int frame = ppu ? ppu->GetFrameCount() : -1;
-                if (frame != lastFrame) {
-                  if (lastFrame >= 25 && lastFrame <= 40) {
-                    AIO::Emulator::Common::Logger::Instance().LogFmt(
-                        AIO::Emulator::Common::LogLevel::Info, "TIMER0_RATE",
-                        "Frame %d: Timer0 overflows=%d (expected ~549)",
-                        lastFrame, t0OverflowCount);
-                  }
-                  t0OverflowCount = 0;
-                  lastFrame = frame;
-                }
-                t0OverflowCount += 1;
-              }
             }
 
             // IRQ
@@ -5788,19 +2967,6 @@ void GBAMemory::UpdateTimers(int cycles) {
               io_regs[IORegs::IF + 1] = (if_reg >> 8) & 0xFF;
 
               // Trace Timer1 IRQ for NES scroll table debugging
-              if (i == 1 && EnvFlagCached("AIO_TRACE_TIMER1_IRQ")) {
-                static int t1IrqLogs = 0;
-                if (t1IrqLogs < 500) {
-                  const int frame = ppu ? ppu->GetFrameCount() : -1;
-                  AIO::Emulator::Common::Logger::Instance().LogFmt(
-                      AIO::Emulator::Common::LogLevel::Info, "TIMER1",
-                      "Timer1 IRQ overflow frame=%d scanline=%d cycle=%d "
-                      "counter_was=0x%04x reload=0x%04x",
-                      frame, ppuTimingScanline, ppuTimingCycle,
-                      (unsigned)counter, (unsigned)reload);
-                  t1IrqLogs++;
-                }
-              }
             }
 
             // Sound DMA trigger (Timer 0 and Timer 1 only)
@@ -5864,14 +3030,7 @@ void GBAMemory::UpdateTimers(int cycles) {
 
 void GBAMemory::AdvanceCycles(int cycles) {
   // DIAGNOSTIC: Trace AdvanceCycles
-  static const bool traceAdvance = EnvFlagCached("AIO_TRACE_NES_PALETTE");
   static int advanceTraces = 0;
-  if (traceAdvance && advanceTraces < 5) {
-    advanceTraces++;
-    std::cerr << "[ADVANCE_CYCLES] cycles=" << cycles
-              << " ppu=" << (ppu ? "valid" : "null") << std::endl;
-    std::cerr.flush();
-  }
 
   UpdateTimers(cycles);
   if (ppu)
@@ -5884,22 +3043,6 @@ void GBAMemory::ApplyDeferredWrites() {
   if (palette_dirtyList.empty() && vram_dirtyList.empty() &&
       oam_dirtyList.empty()) {
     return;
-  }
-
-  // Enable with: AIO_TRACE_DEFER_APPLY=1
-  static const bool traceDeferApply =
-      EnvTruthy(std::getenv("AIO_TRACE_DEFER_APPLY"));
-  if (traceDeferApply) {
-    static int applyCount = 0;
-    if (applyCount < 10) {
-      applyCount++;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "DEFER",
-          "[APPLY_DEFERRED] palBlocks=%zu vramBlocks=%zu oamBlocks=%zu "
-          "scanline=%d cycle=%d",
-          palette_dirtyList.size(), vram_dirtyList.size(), oam_dirtyList.size(),
-          ppuTimingScanline, ppuTimingCycle);
-    }
   }
 
   auto applyBlocks =
@@ -5948,41 +3091,14 @@ uint16_t GBAMemory::GetTimerControl(int timerIdx) const {
 uint16_t GBAMemory::ReadEEPROM() {
   static const bool lsbFirst = EnvFlagCached("AIO_EEPROM_LSB_FIRST");
   static const bool dummyHigh = EnvFlagCached("AIO_EEPROM_DUMMY_HIGH");
-  if (EnvFlagCached("AIO_TRACE_EEPROM_IO")) {
-    static int readLogs = 0;
-    if (readLogs < 200) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "EEPROM_IO",
-          "Read state=%d bit=%d delay=%d PC=0x%08x", (int)eepromState,
-          (int)eepromBitCounter, (int)eepromWriteDelay, (unsigned)pc);
-      readLogs++;
-    }
-  }
 
   uint16_t ret = EEPROMConsts::READY_HIGH; // Default to Ready (high)
 
   if (eepromWriteDelay > 0) {
     static int busyReads = 0;
-    if (verboseLogs && busyReads < 10) {
-      std::cerr << "[EEPROM] Still busy, delay=" << eepromWriteDelay
-                << std::endl;
-      busyReads++;
-    }
     return EEPROMConsts::BUSY_LOW; // Busy
   }
 
-  if (verboseLogs) {
-    static int readCount = 0;
-    if (readCount < 50) {
-      readCount++;
-      if (readCount % 10 == 0) {
-        std::cout << "[EEPROM READ] state=" << (int)eepromState
-                  << " bitCounter=" << eepromBitCounter << " returning=" << ret
-                  << std::endl;
-      }
-    }
-  }
   if (eepromState == EEPROMState::ReadDummy) {
     ret = dummyHigh ? EEPROMConsts::READY_HIGH : EEPROMConsts::BUSY_LOW;
     eepromBitCounter++;
@@ -6012,18 +3128,6 @@ uint16_t GBAMemory::ReadEEPROM() {
 }
 
 void GBAMemory::WriteEEPROM(uint16_t value) {
-  if (EnvFlagCached("AIO_TRACE_EEPROM_IO")) {
-    static int writeLogs = 0;
-    if (writeLogs < 400) {
-      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-      AIO::Emulator::Common::Logger::Instance().LogFmt(
-          AIO::Emulator::Common::LogLevel::Info, "EEPROM_IO",
-          "Write bit=%u state=%d bit=%d delay=%d PC=0x%08x",
-          (unsigned)(value & EEPROMConsts::BIT_MASK), (int)eepromState,
-          (int)eepromBitCounter, (int)eepromWriteDelay, (unsigned)pc);
-      writeLogs++;
-    }
-  }
 
   if (eepromWriteDelay > 0) {
     return;
@@ -6066,71 +3170,16 @@ void GBAMemory::WriteEEPROM(uint16_t value) {
       uint32_t offset = eepromAddress * EEPROMConsts::BYTES_PER_BLOCK;
       eepromBuffer = 0;
 
-      if (verboseLogs) {
-        static bool sizeLogged = false;
-        if (!sizeLogged) {
-          std::cerr << "[EEPROM DEBUG] eepromData.size()=" << eepromData.size()
-                    << std::endl;
-          sizeLogged = true;
-        }
-      }
-
       if (offset + (EEPROMConsts::BYTES_PER_BLOCK - 1) < eepromData.size()) {
         // Per GBATEK: "64 bits data (conventionally MSB first)"
         // Build big-endian buffer (MSB = byte 0)
-
-        if (verboseLogs) {
-          static int firstByteLog = 0;
-          if (firstByteLog < 5) {
-            std::cerr << "[EEPROM BYTE ACCESS] offset=" << offset
-                      << " eepromData[" << offset << "]=" << std::hex
-                      << (int)eepromData[offset] << " eepromData["
-                      << (offset + 1) << "]=" << (int)eepromData[offset + 1]
-                      << std::dec << std::endl;
-            firstByteLog++;
-          }
-        }
 
         for (int i = 0; i < (int)EEPROMConsts::BYTES_PER_BLOCK; ++i) {
           eepromBuffer |= ((uint64_t)eepromData[offset + i] << (56 - i * 8));
         }
 
-        // SMA2 investigation: log read transactions (block + payload) so we can
         // identify which block triggers the game's "repair/format" path.
-        // Enable with: AIO_TRACE_EEPROM_READ_TXN=1
-        if (cpu && EnvFlagCached("AIO_TRACE_EEPROM_READ_TXN")) {
-          // Keep this low-noise: only log AA2E and only the first N reads.
-          if (gameCode == "AA2E") {
-            static int txnLogs = 0;
-            if (txnLogs < 300) {
-              const uint32_t pc = (uint32_t)cpu->GetRegister(15);
-              AIO::Emulator::Common::Logger::Instance().LogFmt(
-                  AIO::Emulator::Common::LogLevel::Info, "SMA2",
-                  "EEPROM READ TXN: block=%u offset=0x%04x data=0x%016llx "
-                  "PC=0x%08x",
-                  (unsigned)eepromAddress, (unsigned)offset,
-                  (unsigned long long)eepromBuffer, (unsigned)pc);
-              txnLogs++;
-            }
-          }
-        }
 
-        if (verboseLogs) {
-          static int readLogCount = 0;
-          if (readLogCount < 20) {
-            std::cerr << "[EEPROM READ PREP] Block=" << eepromAddress
-                      << " Offset=0x" << std::hex << offset << std::dec;
-            std::cerr << " Bytes[0x" << std::hex << offset << "]=";
-            for (int i = 0; i < (int)EEPROMConsts::BYTES_PER_BLOCK && i < 8;
-                 ++i) {
-              std::cerr << std::setw(2) << std::setfill('0')
-                        << (int)eepromData[offset + i];
-            }
-            std::cerr << " Data=0x" << std::setw(16) << eepromBuffer << std::dec
-                      << std::endl;
-            readLogCount++;
-          }
-        }
       } else {
         eepromBuffer = 0xFFFFFFFFFFFFFFFFULL;
       }
@@ -6199,128 +3248,9 @@ void GBAMemory::WriteEEPROM(uint16_t value) {
         for (int i = 0; i < (int)EEPROMConsts::BYTES_PER_BLOCK; ++i) {
           existingData |= ((uint64_t)eepromData[offset + i] << (56 - i * 8));
         }
-        if (verboseLogs && existingData != eepromBuffer && eepromAddress == 2) {
-          isMismatch = true;
-          std::cerr << "[EEPROM MISMATCH!] Block 2: read=0x" << std::hex
-                    << existingData << " but writing=0x" << eepromBuffer
-                    << std::dec << std::endl;
-        }
       }
 
       // Root-cause tracer: capture the exact CPU context at the moment SMA2
-      // decides to rewrite the EEPROM header block. Enable with:
-      // AIO_TRACE_EEPROM_REWRITE=1
-      const bool traceRewrite = EnvFlagCached("AIO_TRACE_EEPROM_REWRITE");
-      if (traceRewrite && cpu && eepromAddress == 2) {
-        // Known divergence observed vs mGBA reference.
-        static bool loggedKnownRewrite = false;
-        constexpr uint64_t kRef = 0xFEB801010101DA69ULL;
-        constexpr uint64_t kOut = 0xFEBC00000000DA69ULL;
-        if (!loggedKnownRewrite && existingData == kRef &&
-            eepromBuffer == kOut) {
-          loggedKnownRewrite = true;
-          std::cerr << "[EEPROM REWRITE DETECTED] block=2 offset=0x" << std::hex
-                    << offset << " existing=0x" << existingData << " new=0x"
-                    << eepromBuffer << " termBit=" << std::dec << (int)bit
-                    << "\n";
-
-          // Snapshot DMA3 registers (common path for EEPROM transfers).
-          auto io32 = [&](uint32_t ioOffset) -> uint32_t {
-            if (ioOffset + 3 >= io_regs.size())
-              return 0;
-            return (uint32_t)io_regs[ioOffset] |
-                   ((uint32_t)io_regs[ioOffset + 1] << 8) |
-                   ((uint32_t)io_regs[ioOffset + 2] << 16) |
-                   ((uint32_t)io_regs[ioOffset + 3] << 24);
-          };
-          const uint32_t dma3sad = io32(0x00D4);
-          const uint32_t dma3dad = io32(0x00D8);
-          const uint32_t dma3cnt = io32(0x00DC);
-          std::cerr << "[DMA3] SAD=0x" << std::hex << dma3sad << " DAD=0x"
-                    << dma3dad << " CNT=0x" << dma3cnt << std::dec << "\n";
-
-          // Dump a short preview of the source buffer (typically 0x51 halfwords
-          // for EEPROM write). Guarded to RAM regions to avoid re-entrancy
-          // surprises.
-          if ((dma3sad >= 0x02000000 && dma3sad < 0x04000000)) {
-            std::cerr << "[DMA3 SRC PREVIEW]";
-            for (int i = 0; i < 16; ++i) {
-              const uint16_t hw = Read16(dma3sad + (uint32_t)(i * 2));
-              std::cerr << " " << std::hex << std::setw(4) << std::setfill('0')
-                        << hw;
-            }
-            std::cerr << std::dec << "\n";
-
-            // If this looks like an EEPROM write transfer (81 halfwords),
-            // decode it. Expected (GBATEK): start(1) + cmd(1) + addr(14) +
-            // data(64) + term(1) = 81 bits.
-            const uint32_t count = (dma3cnt & 0xFFFF);
-            if (count == 0x51) {
-              uint8_t bits[0x51];
-              for (uint32_t i = 0; i < 0x51; ++i) {
-                bits[i] = (uint8_t)(Read16(dma3sad + i * 2) & 1);
-              }
-
-              const uint8_t start = bits[0];
-              const uint8_t cmd = bits[1];
-              uint32_t addr14 = 0;
-              for (uint32_t i = 0; i < 14; ++i) {
-                addr14 = (addr14 << 1) | bits[2 + i];
-              }
-              uint64_t data64 = 0;
-              for (uint32_t i = 0; i < 64; ++i) {
-                data64 = (data64 << 1) | bits[2 + 14 + i];
-              }
-              const uint8_t term = bits[2 + 14 + 64];
-
-              // For 64Kbit EEPROM, upper 4 address bits are ignored; lower 10
-              // bits select the 8-byte block.
-              const uint32_t block = (addr14 & 0x3FF);
-              std::cerr << "[EEPROM DMA DECODE] start=" << (int)start
-                        << " cmd=" << (int)cmd << " addr14=0x" << std::hex
-                        << addr14 << " block=" << std::dec << block
-                        << " data=0x" << std::hex << std::setw(16)
-                        << std::setfill('0') << data64 << " term=" << std::dec
-                        << (int)term << "\n";
-            }
-          }
-
-          cpu->DumpState(std::cerr);
-
-          // Extra caller context: LR window + stack words.
-          const uint32_t lr = cpu->GetRegister(14);
-          const uint32_t sp = cpu->GetRegister(13);
-          std::cerr << std::hex;
-          std::cerr << "LR=0x" << lr << " SP=0x" << sp << std::dec << "\n";
-
-          const uint32_t lrAligned = (lr & ~1u);
-          if (lrAligned >= 0x08000000) {
-            std::cerr << "Disasm window around LR:" << "\n";
-            for (int i = -16; i <= 16; i += 2) {
-              const uint32_t addr = lrAligned + (uint32_t)i;
-              const uint16_t op = Read16(addr);
-              std::cerr << "  0x" << std::hex << addr << ": 0x" << op
-                        << ((i == 0) ? " <--" : "") << std::dec << "\n";
-            }
-          }
-
-          if ((sp >= 0x02000000 && sp < 0x04000000)) {
-            std::cerr << "Stack words:" << "\n";
-            for (int i = 0; i < 8; ++i) {
-              const uint32_t addr = sp + (uint32_t)(i * 4);
-              const uint32_t val = Read32(addr);
-              std::cerr << "  [0x" << std::hex << addr << "] = 0x" << val
-                        << std::dec << "\n";
-            }
-          }
-        }
-      }
-
-      if (verboseLogs && (eepromAddress == 2 || isMismatch)) {
-        std::cerr << "[EEPROM WRITE] Block=" << eepromAddress << " Data=0x"
-                  << std::hex << std::setfill('0') << std::setw(16)
-                  << eepromBuffer << std::dec << std::endl;
-      }
 
       if (offset + (EEPROMConsts::BYTES_PER_BLOCK - 1) < eepromData.size()) {
         for (int i = 0; i < (int)EEPROMConsts::BYTES_PER_BLOCK; ++i) {
@@ -6332,18 +3262,6 @@ void GBAMemory::WriteEEPROM(uint16_t value) {
       // Targeted trace for SMA2 save validation/repair loops.
       // Helps confirm whether the game is attempting to rewrite key blocks and
       // whether writes are being committed at all.
-      if (verboseLogs && (gameCode == "AMQE" || gameCode == "AMQP" ||
-                          gameCode == "AMQJ" || gameCode == "AA2E")) {
-        static int sma2WriteCommitsLogged = 0;
-        if (sma2WriteCommitsLogged < 80) {
-          std::cerr << "[EEPROM COMMIT] game=" << gameCode
-                    << " termBit=" << (int)bit << " block=" << eepromAddress
-                    << " data=0x" << std::hex << std::setw(16)
-                    << std::setfill('0') << eepromBuffer << std::dec
-                    << std::endl;
-          sma2WriteCommitsLogged++;
-        }
-      }
 
       FlushSave();
       // Stable timing that prevents crashes

@@ -51,11 +51,14 @@ void APU::Reset() {
   // Reset sample accumulator
   sampleAccumulator = 0.0f;
   smoothedFillError = 0.0f;
+  prevLeft = 0;
+  prevRight = 0;
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
-  // Push the sample multiple times based on the upsample ratio
-  // This converts from game's timer-based sample rate to our output rate
+  // Linearly interpolate between previous and current sample to fill
+  // the output ring buffer. This avoids the "whirly" aliasing artifacts
+  // that nearest-neighbor duplication causes when output rate != input rate.
   sampleAccumulator += currentUpsampleRatio;
 
   while (sampleAccumulator >= 1.0f) {
@@ -67,15 +70,29 @@ void APU::PushSample(int16_t left, int16_t right) {
     if (nextWp == rp) {
       stats.ringOverrunDrops.fetch_add(1, std::memory_order_relaxed);
       sampleAccumulator = 0.0f;
+      prevLeft = left;
+      prevRight = right;
       return;
     }
 
-    ringBuffer[wp] = left;
-    ringBuffer[wp + 1] = right;
+    // Linear interpolation: t=0 is previous sample, t=1 is current sample.
+    // sampleAccumulator tells us how far through the current input sample
+    // we are — higher values mean we're closer to the previous sample.
+    float t = 1.0f -
+              (sampleAccumulator - 1.0f) / std::max(currentUpsampleRatio, 1.0f);
+    t = std::clamp(t, 0.0f, 1.0f);
+    int16_t interpL = (int16_t)((1.0f - t) * prevLeft + t * left);
+    int16_t interpR = (int16_t)((1.0f - t) * prevRight + t * right);
+
+    ringBuffer[wp] = interpL;
+    ringBuffer[wp + 1] = interpR;
     writePos.store(nextWp, std::memory_order_release);
 
     sampleAccumulator -= 1.0f;
   }
+
+  prevLeft = left;
+  prevRight = right;
 }
 
 void APU::Update(int cycles) {
@@ -320,21 +337,13 @@ void APU::ResetFIFO_B() {
 int APU::GetSamples(int16_t *buffer, int numSamples) {
   int samplesWritten = 0;
 
-  // Optional: periodic diagnostics from the audio callback thread.
-  const bool traceAudioStats =
-      (std::getenv("AIO_TRACE_AUDIO_STATS") != nullptr);
-  static uint32_t samplesSinceLastLog = 0;
-  uint32_t localUnderruns = 0;
-
   for (int i = 0; i < numSamples; i++) {
     int rp = readPos.load(std::memory_order_relaxed);
     int wp = writePos.load(std::memory_order_acquire);
 
     if (rp == wp) {
-      // Buffer empty - fill rest with silence
       buffer[i * 2] = 0;
       buffer[i * 2 + 1] = 0;
-      localUnderruns++;
     } else {
       buffer[i * 2] = ringBuffer[rp];
       buffer[i * 2 + 1] = ringBuffer[rp + 1];
@@ -342,45 +351,6 @@ int APU::GetSamples(int16_t *buffer, int numSamples) {
       int nextRp = (rp + 2) % (RING_BUFFER_SIZE * 2);
       readPos.store(nextRp, std::memory_order_release);
       samplesWritten++;
-    }
-  }
-
-  if (localUnderruns != 0) {
-    stats.ringUnderrunSamples.fetch_add(localUnderruns,
-                                        std::memory_order_relaxed);
-  }
-
-  if (traceAudioStats) {
-    samplesSinceLastLog += (uint32_t)numSamples;
-    if (samplesSinceLastLog >= (uint32_t)OUTPUT_SAMPLE_RATE) {
-      samplesSinceLastLog = 0;
-      const uint64_t underruns =
-          stats.ringUnderrunSamples.exchange(0, std::memory_order_relaxed);
-      const uint64_t drops =
-          stats.ringOverrunDrops.exchange(0, std::memory_order_relaxed);
-      const uint64_t ufa =
-          stats.fifoAUnderflows.exchange(0, std::memory_order_relaxed);
-      const uint64_t ufb =
-          stats.fifoBUnderflows.exchange(0, std::memory_order_relaxed);
-      const uint64_t pushes =
-          stats.pushCalls.exchange(0, std::memory_order_relaxed);
-      const uint64_t pushNZ =
-          stats.pushNonZero.exchange(0, std::memory_order_relaxed);
-
-      const int rp = readPos.load(std::memory_order_relaxed);
-      const int wp = writePos.load(std::memory_order_relaxed);
-      int fillSamples = wp - rp;
-      if (fillSamples < 0)
-        fillSamples += (RING_BUFFER_SIZE * 2);
-      fillSamples /= 2;
-
-      std::cout << "[AUDIO] underrunSamples/s=" << underruns
-                << " ringDrops/s=" << drops << " fifoAUnderflow/s=" << ufa
-                << " fifoBUnderflow/s=" << ufb << " ringFill=" << fillSamples
-                << "/" << RING_BUFFER_SIZE
-                << " upsample=" << currentUpsampleRatio
-                << " fifoA=" << fifoA_Count << " fifoB=" << fifoB_Count
-                << " push/s=" << pushes << " pushNZ/s=" << pushNZ << std::endl;
     }
   }
 
