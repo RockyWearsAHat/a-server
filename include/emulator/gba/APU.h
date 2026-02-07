@@ -76,6 +76,8 @@ public:
     std::atomic<uint64_t> ringOverrunDrops{0};
     std::atomic<uint64_t> fifoAUnderflows{0};
     std::atomic<uint64_t> fifoBUnderflows{0};
+    std::atomic<uint64_t> pushCalls{0};
+    std::atomic<uint64_t> pushNonZero{0};
   } stats;
 
 private:
@@ -254,6 +256,7 @@ private:
   // Sample rate conversion
   float sampleAccumulator = 0.0f;
   float currentUpsampleRatio = 2.45f; // Default, updated based on timer
+  float smoothedFillError = 0.0f;     // EMA of (target_fill - actual_fill)
   static constexpr float OUTPUT_SAMPLE_RATE = 32768.0f;
   float outputSampleRate = OUTPUT_SAMPLE_RATE;
   static constexpr float GBA_CPU_FREQ = 16777216.0f;

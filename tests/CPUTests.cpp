@@ -3948,7 +3948,9 @@ TEST_F(CPUTest, SWI_RegisterRamReset_IORegisters) {
   cpu.SetRegister(0, 0x80); // Reset IO registers flag
   RunInstr(0xEF000001);
 
-  EXPECT_EQ(memory.Read16(0x04000004), 0x0000); // DISPSTAT
+  EXPECT_EQ(memory.Read16(0x04000004) & 0xFFF8,
+            0x0000); // DISPSTAT writable bits cleared (bits 0-2 are read-only
+                     // PPU status)
   EXPECT_EQ(memory.Read16(0x04000008), 0x0000); // BG0CNT
 }
 

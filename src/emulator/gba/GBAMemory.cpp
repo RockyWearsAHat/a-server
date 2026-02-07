@@ -81,8 +81,16 @@ inline bool EnvTruthy(const char *v) {
 }
 
 template <size_t N> inline bool EnvFlagCached(const char (&name)[N]) {
-  static const bool enabled = EnvTruthy(std::getenv(name));
-  return enabled;
+  // NOTE: Each unique string literal needs a unique static.
+  // The previous template-by-N approach caused collisions between
+  // different env vars of the same length. Using a runtime approach instead.
+  static thread_local std::unordered_map<std::string, bool> cache;
+  auto it = cache.find(name);
+  if (it != cache.end())
+    return it->second;
+  bool val = EnvTruthy(std::getenv(name));
+  cache[name] = val;
+  return val;
 }
 
 // Hot-path trace gate: must be extremely cheap when disabled.
@@ -520,6 +528,15 @@ void GBAMemory::Reset() {
   if (!lleBiosLoaded && io_regs.size() > IORegs::VCOUNT + 1) {
     io_regs[IORegs::VCOUNT] = 0x7E;     // Low byte = 126
     io_regs[IORegs::VCOUNT + 1] = 0x00; // High byte = 0
+
+    // Set DISPSTAT VBlank flag to match — scanline 126 is in VBlank
+    if (io_regs.size() > IORegs::DISPSTAT + 1) {
+      uint16_t dispstat =
+          io_regs[IORegs::DISPSTAT] | (io_regs[IORegs::DISPSTAT + 1] << 8);
+      dispstat |= 1; // VBlank flag
+      io_regs[IORegs::DISPSTAT] = dispstat & 0xFF;
+      io_regs[IORegs::DISPSTAT + 1] = (dispstat >> 8) & 0xFF;
+    }
   }
 
   // Initialize DMA Registers to Safe Defaults
@@ -1431,6 +1448,21 @@ int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
 }
 
 uint8_t GBAMemory::Read8(uint32_t address) {
+  if (trackCpuDataAccess && dataAccessNestDepth == 0) {
+    const uint8_t rgn = (uint8_t)(address >> 24);
+    if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
+      int c = GetAccessCycles(address, 1);
+      cpuDataAccessCycles += c;
+      if (rgn >= 0x08 && rgn <= 0x0D) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      } else if (rgn == 0x0E) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      }
+    }
+  }
+
   static const bool traceSma2HeaderReads =
       EnvTruthy(std::getenv("AIO_TRACE_SMA2_HEADER_READS"));
   static const bool traceDma3Reads =
@@ -1579,6 +1611,42 @@ uint8_t GBAMemory::Read8(uint32_t address) {
           (offset >= 0xD0 && offset <= 0xD1) ||
           (offset >= 0xDC && offset <= 0xDD)) {
         return 0;
+      }
+    }
+
+    // Timer counter bytes: return live value from timerCounters[]
+    // TMxCNT_L offsets: 0x100, 0x104, 0x108, 0x10C (low/high bytes)
+    if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
+      int timerIdx = (offset - IORegs::TM0CNT_L) / IORegs::TIMER_CHANNEL_SIZE;
+      int byteInChannel =
+          (offset - IORegs::TM0CNT_L) % IORegs::TIMER_CHANNEL_SIZE;
+
+      // Trace ALL timer byte reads to find NES emulator timing mechanism
+      {
+        static const bool traceTimerReads =
+            EnvTruthy(std::getenv("AIO_TRACE_ALL_TIMER_READS"));
+        if (traceTimerReads) {
+          static int tReadLogs = 0;
+          const int frame = ppu ? ppu->GetFrameCount() : -1;
+          if (frame >= 30 && frame <= 32 && tReadLogs < 500) {
+            const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "TIMER_READ8",
+                "Timer%d byte%d read: counter=0x%04x PC=0x%08x frame=%d "
+                "scanline=%d",
+                timerIdx, byteInChannel, (unsigned)timerCounters[timerIdx],
+                (unsigned)pc, frame, ppuTimingScanline);
+            tReadLogs++;
+          }
+        }
+      }
+
+      if (byteInChannel < 2) {
+        if (gba)
+          gba->FlushPendingPeripheralCycles();
+        uint16_t counter = timerCounters[timerIdx];
+        return (byteInChannel == 0) ? (counter & 0xFF)
+                                    : ((counter >> 8) & 0xFF);
       }
     }
 
@@ -1763,6 +1831,23 @@ uint8_t GBAMemory::Read8(uint32_t address) {
 }
 
 uint16_t GBAMemory::Read16(uint32_t address) {
+  if (trackCpuDataAccess && dataAccessNestDepth == 0) {
+    const uint8_t rgn = (uint8_t)(address >> 24);
+    if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
+      int c = GetAccessCycles(address, 2);
+      cpuDataAccessCycles += c;
+      if (rgn >= 0x08 && rgn <= 0x0E) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      }
+    }
+  }
+  ++dataAccessNestDepth;
+  struct NestGuard {
+    int &d;
+    ~NestGuard() { --d; }
+  } nestGuard{dataAccessNestDepth};
+
   static const bool traceIoUnaligned =
       EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
       EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
@@ -1806,9 +1891,39 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   // compliance)
   if (region == 0x04) {
     const uint32_t offset = address & 0x3FFu;
-    // DISPSTAT (0x004) and VCOUNT (0x006) require up-to-date PPU state
-    if ((offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT) && gba) {
-      gba->FlushPendingPeripheralCycles();
+    // DISPSTAT/VCOUNT require up-to-date PPU state; timer counters require
+    // up-to-date timer state
+    if (gba) {
+      if (offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT) {
+        gba->FlushPendingPeripheralCycles();
+      } else if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
+        gba->FlushPendingPeripheralCycles();
+      }
+    }
+
+    // Trace DISPSTAT/VCOUNT reads to understand NES emulator pacing
+    static const bool traceVcountReads =
+        EnvTruthy(std::getenv("AIO_TRACE_VCOUNT_READS"));
+    if (traceVcountReads &&
+        (offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT)) {
+      static int vcountLogs = 0;
+      if (vcountLogs < 2000) {
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        uint8_t vcount =
+            io_regs.size() > IORegs::VCOUNT ? io_regs[IORegs::VCOUNT] : 0xFF;
+        uint16_t dispstat = (io_regs.size() > IORegs::DISPSTAT + 1)
+                                ? (io_regs[IORegs::DISPSTAT] |
+                                   (io_regs[IORegs::DISPSTAT + 1] << 8))
+                                : 0xFFFF;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "VCOUNT_RD",
+            "Read16 %s offset=0x%03x VCOUNT=%u DISPSTAT=0x%04x "
+            "PC=0x%08x",
+            (offset == IORegs::VCOUNT) ? "VCOUNT" : "DISPSTAT",
+            (unsigned)offset, (unsigned)vcount, (unsigned)dispstat,
+            (unsigned)pc);
+        vcountLogs++;
+      }
     }
   }
 
@@ -1918,6 +2033,45 @@ uint16_t GBAMemory::Read16(uint32_t address) {
     if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
       int timerIdx = (offset - IORegs::TM0CNT_L) / IORegs::TIMER_CHANNEL_SIZE;
       if ((offset % IORegs::TIMER_CHANNEL_SIZE) == 0) {
+        // Trace ALL timer 16-bit reads
+        {
+          static const bool traceTimerReads =
+              EnvTruthy(std::getenv("AIO_TRACE_ALL_TIMER_READS"));
+          if (traceTimerReads) {
+            static int tReadLogs16 = 0;
+            const int frame = ppu ? ppu->GetFrameCount() : -1;
+            if (frame >= 30 && frame <= 32 && tReadLogs16 < 500) {
+              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "TIMER_READ16",
+                  "Timer%d read16: counter=0x%04x PC=0x%08x frame=%d "
+                  "scanline=%d",
+                  timerIdx, (unsigned)timerCounters[timerIdx], (unsigned)pc,
+                  frame, ppuTimingScanline);
+              tReadLogs16++;
+            }
+          }
+        }
+
+        // Trace Timer0 reads to understand NES emulator timing behavior
+        if (timerIdx == 0) {
+          static const bool traceT0Reads =
+              EnvTruthy(std::getenv("AIO_TRACE_TIMER0_READS"));
+          if (traceT0Reads) {
+            static int t0ReadLogs = 0;
+            const int frame = ppu ? ppu->GetFrameCount() : -1;
+            if (frame >= 30 && frame <= 32 && t0ReadLogs < 2000) {
+              const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "T0READ",
+                  "Timer0 read: counter=0x%04x (%u) PC=0x%08x frame=%d "
+                  "scanline=%d",
+                  (unsigned)timerCounters[0], (unsigned)timerCounters[0],
+                  (unsigned)pc, frame, ppuTimingScanline);
+              t0ReadLogs++;
+            }
+          }
+        }
         return timerCounters[timerIdx];
       }
     }
@@ -1981,6 +2135,23 @@ uint16_t GBAMemory::ReadInstruction16(uint32_t address) {
 }
 
 uint32_t GBAMemory::Read32(uint32_t address) {
+  if (trackCpuDataAccess && dataAccessNestDepth == 0) {
+    const uint8_t rgn = (uint8_t)(address >> 24);
+    if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
+      int c = GetAccessCycles(address, 4);
+      cpuDataAccessCycles += c;
+      if (rgn >= 0x08 && rgn <= 0x0E) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      }
+    }
+  }
+  ++dataAccessNestDepth;
+  struct NestGuard {
+    int &d;
+    ~NestGuard() { --d; }
+  } nestGuard{dataAccessNestDepth};
+
   static const bool traceIoUnaligned =
       EnvTruthy(std::getenv("AIO_TRACE_IO_UNALIGNED")) ||
       EnvTruthy(std::getenv("AIO_TRACE_IO_ODD_HALFWORD"));
@@ -2190,6 +2361,26 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
       offset -= 0x8000u;
     }
 
+    // Trace Write8 to NES scroll table in VRAM
+    if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
+      if ((offset >= 0x3514 && offset < 0x3794) ||
+          (offset >= 0x6B14 && offset < 0x6D94)) {
+        static int scrollW8Logs = 0;
+        if (scrollW8Logs < 200) {
+          int entry = (offset >= 0x6B14) ? (offset - 0x6B14) / 4
+                                         : (offset - 0x3514) / 4;
+          int buf = (offset >= 0x6B14) ? 2 : 1;
+          int byteIdx = offset & 3;
+          const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+          Common::Logger::Instance().LogFmt(
+              Common::LogLevel::Info, "SCROLL",
+              "W8 buf%d entry=%d byte=%d val=0x%02x off=0x%05x PC=0x%08x", buf,
+              entry, byteIdx, value, offset, wpc);
+          scrollW8Logs++;
+        }
+      }
+    }
+
     // Trace Write8Internal to VRAM staging area - catch 0x10000-0x10020
     static const bool traceVramStage =
         EnvTruthy(std::getenv("AIO_TRACE_VRAM_STAGING"));
@@ -2223,6 +2414,21 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
     }
 
     if (offset < vram.size()) {
+      // Trace ANY write to scroll table range (catch all paths)
+      if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
+        if ((offset >= 0x3514 && offset < 0x3794) ||
+            (offset >= 0x6B14 && offset < 0x6D94)) {
+          static int scrollRawLogs = 0;
+          if (scrollRawLogs < 100) {
+            const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            Common::Logger::Instance().LogFmt(
+                Common::LogLevel::Info, "SCROLL_RAW",
+                "VRAM[0x%05x]=0x%02x (Write8) PC=0x%08x addr=0x%08x", offset,
+                value, wpc, address);
+            scrollRawLogs++;
+          }
+        }
+      }
       vram[offset] = value;
       // Keep shadow coherent for later deferred apply.
       if (offset < vram_shadow.size())
@@ -2286,6 +2492,18 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
 }
 
 void GBAMemory::Write8(uint32_t address, uint8_t value) {
+  if (trackCpuDataAccess && dataAccessNestDepth == 0) {
+    const uint8_t rgn = (uint8_t)(address >> 24);
+    if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
+      int c = GetAccessCycles(address, 1);
+      cpuDataAccessCycles += c;
+      if (rgn >= 0x08 && rgn <= 0x0E) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      }
+    }
+  }
+
   const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
   TracePpuIoWrite8(address, value, pc);
 
@@ -2512,6 +2730,42 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           }
         }
 
+        // Trace DMA0/DMA2 enable transitions for Classic NES scroll debugging
+        static const bool traceDmaEnable =
+            EnvTruthy(std::getenv("AIO_TRACE_DMA0_ENABLE"));
+        if (traceDmaEnable && (dmaChannel == 0 || dmaChannel == 2)) {
+          static int dmaEnableLogs = 0;
+          if (dmaEnableLogs < 400) {
+            dmaEnableLogs++;
+            const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
+            uint32_t dmaBase =
+                IORegs::DMA0SAD + (dmaChannel * IORegs::DMA_CHANNEL_SIZE);
+            uint32_t sad = io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
+                           (io_regs[dmaBase + 2] << 16) |
+                           (io_regs[dmaBase + 3] << 24);
+            uint32_t dad = io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
+                           (io_regs[dmaBase + 6] << 16) |
+                           (io_regs[dmaBase + 7] << 24);
+            uint16_t cntL = io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
+            uint16_t cntH =
+                io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
+            uint16_t newCntH =
+                (io_regs[dmaBase + 10] & 0xFF) | ((uint16_t)value << 8);
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "DMA_ENABLE",
+                "ch=%d frame=%d sl=%d was=%d will=%d SAD=0x%08x DAD=0x%08x "
+                "CNT_L=0x%04x oldCNT_H=0x%04x newCNT_H=0x%04x "
+                "internalSrc=0x%08x internalDst=0x%08x latch=%d PC=0x%08x",
+                dmaChannel, frame, ppuTimingScanline, (int)wasEnabled,
+                (int)willBeEnabled, (unsigned)sad, (unsigned)dad,
+                (unsigned)cntL, (unsigned)cntH, (unsigned)newCntH,
+                (unsigned)dmaInternalSrc[dmaChannel],
+                (unsigned)dmaInternalDst[dmaChannel],
+                (int)(!wasEnabled && willBeEnabled),
+                cpu ? (unsigned)cpu->GetRegister(15) : 0u);
+          }
+        }
+
         if (!wasEnabled && willBeEnabled) {
           dmaLatchNeeded = true;
         }
@@ -2559,37 +2813,183 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           if (isEnabled && timing == 3 && byteInChannel == 3) {
             dmaSadChannel = channel;
           }
-
-          // OGDK: Trace ALL DMA3 register writes (SAD, DAD, CNT_L, CNT_H)
-          const bool isClassicNes =
-              gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
-          if (isClassicNes && channel == 3) {
-            static int dma3WriteLogs = 0;
-            if (dma3WriteLogs < 300) {
-              dma3WriteLogs++;
-              int dma3Frame = ppu ? (int)ppu->GetFrameCount() : -1;
-              uint32_t currentSad =
-                  io_regs[dmaBase] | (io_regs[dmaBase + 1] << 8) |
-                  (io_regs[dmaBase + 2] << 16) | (io_regs[dmaBase + 3] << 24);
-              uint32_t currentDad =
-                  io_regs[dmaBase + 4] | (io_regs[dmaBase + 5] << 8) |
-                  (io_regs[dmaBase + 6] << 16) | (io_regs[dmaBase + 7] << 24);
-              uint16_t cntL =
-                  io_regs[dmaBase + 8] | (io_regs[dmaBase + 9] << 8);
-              uint16_t cntH =
-                  io_regs[dmaBase + 10] | (io_regs[dmaBase + 11] << 8);
-              bool nowEnabled = (cntH >> 15) & 1;
-              int nowTiming = (cntH >> 12) & 3;
-              const char *regName = (byteInChannel < 4)    ? "SAD"
-                                    : (byteInChannel < 8)  ? "DAD"
-                                    : (byteInChannel < 10) ? "CNT_L"
-                                                           : "CNT_H";
-            }
-          }
         }
       }
 
+      // SOUNDCNT_X (0x84): only bit 7 (master enable) is writable; bits 0-3
+      // are read-only channel-active status. Byte 0x85 is entirely read-only.
+      if (offset == IORegs::SOUNDCNT_X) {
+        value = (value & 0x80) | (io_regs[IORegs::SOUNDCNT_X] & 0x7F);
+      } else if (offset == IORegs::SOUNDCNT_X + 1) {
+        return; // high byte of SOUNDCNT_X is read-only
+      }
+
       if (offset < io_regs.size()) {
+        // Trace BG3VOFS writes: capture PC, LR, CPSR mode, and all BG scroll
+        // regs
+        static const bool traceBg3Vofs =
+            EnvTruthy(std::getenv("AIO_TRACE_BG3VOFS_DETAIL"));
+        if (traceBg3Vofs && (offset >= 0x10 && offset <= 0x1F)) {
+          static int vLogs = 0;
+          if (vLogs < 4000) {
+            vLogs++;
+            const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
+            const uint32_t pc2 = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            const uint32_t lr = cpu ? (uint32_t)cpu->GetRegister(14) : 0u;
+            const uint32_t cpsr = cpu ? cpu->GetCPSR() : 0u;
+            const bool thumb = (cpsr >> 5) & 1;
+            // Name the register
+            static const char *regNames[] = {
+                "BG0HOFS", "BG0HOFS+1", "BG0VOFS", "BG0VOFS+1",
+                "BG1HOFS", "BG1HOFS+1", "BG1VOFS", "BG1VOFS+1",
+                "BG2HOFS", "BG2HOFS+1", "BG2VOFS", "BG2VOFS+1",
+                "BG3HOFS", "BG3HOFS+1", "BG3VOFS", "BG3VOFS+1"};
+            const char *name = regNames[offset - 0x10];
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "BGSCROLL",
+                "frame=%d sl=%d cy=%d %s val=0x%02x PC=0x%08x LR=0x%08x %s",
+                frame, ppuTimingScanline, ppuTimingCycle, name, (unsigned)value,
+                (unsigned)pc2, (unsigned)lr, thumb ? "THUMB" : "ARM");
+
+            // Dump CPU registers when framework overwrites BG3VOFS with 0x05
+            if (offset == 0x1E && value == 0x05 && cpu &&
+                ((frame >= 9 && frame <= 14) || frame == 30 || frame == 60)) {
+              static int fwDumps = 0;
+              if (fwDumps < 5) {
+                fwDumps++;
+                // Dump exact DMA source addresses for BG3VOFS
+                for (uint32_t srcAddr :
+                     {0x060036A2u, 0x060036A4u, 0x06006CA2u, 0x06006CA4u}) {
+                  uint16_t val16 = Read8(srcAddr) | (Read8(srcAddr + 1) << 8);
+                  AIO::Emulator::Common::Logger::Instance().LogFmt(
+                      AIO::Emulator::Common::LogLevel::Info, "FWSCROLL",
+                      "frame=%d VRAM[0x%08x]=0x%04x(%d)", frame,
+                      (unsigned)srcAddr, (unsigned)val16, (int)val16);
+                }
+                // Also dump the full scroll table (0x86 bytes each, 16-bit
+                // entries)
+                uint32_t base = 0x06003686;
+                for (int i = 0; i < 16; i++) {
+                  uint32_t a = base + i * 2;
+                  uint16_t v = Read8(a) | (Read8(a + 1) << 8);
+                  static const char *rnames[] = {
+                      "BG0H[0]", "BG0H[1]", "BG0V[0]", "BG0V[1]",
+                      "BG1H[0]", "BG1H[1]", "BG1V[0]", "BG1V[1]",
+                      "BG2H[0]", "BG2H[1]", "BG2V[0]", "BG2V[1]",
+                      "BG3H[0]", "BG3H[1]", "BG3V[0]", "BG3V[1]"};
+                  AIO::Emulator::Common::Logger::Instance().LogFmt(
+                      AIO::Emulator::Common::LogLevel::Info, "FWSCROLL",
+                      "frame=%d scrollTab[%d] %s = 0x%04x(%d) @0x%08x", frame,
+                      i, rnames[i], (unsigned)v, (int)v, (unsigned)a);
+                }
+              }
+            }
+
+            // Dump CPU registers when NES emulator writes BG3VOFS (offset 0x1E)
+            if (offset == 0x1E && pc2 == 0x03005200 && cpu &&
+                ((frame >= 9 && frame <= 14) || frame == 30 || frame == 60)) {
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "NESSCROLL",
+                  "frame=%d R0=0x%08x R1=0x%08x R2=0x%08x R3=0x%08x "
+                  "R4=0x%08x R5=0x%08x R6=0x%08x R7=0x%08x "
+                  "R8=0x%08x R9=0x%08x R10=0x%08x R11=0x%08x R12=0x%08x",
+                  frame, (unsigned)cpu->GetRegister(0),
+                  (unsigned)cpu->GetRegister(1), (unsigned)cpu->GetRegister(2),
+                  (unsigned)cpu->GetRegister(3), (unsigned)cpu->GetRegister(4),
+                  (unsigned)cpu->GetRegister(5), (unsigned)cpu->GetRegister(6),
+                  (unsigned)cpu->GetRegister(7), (unsigned)cpu->GetRegister(8),
+                  (unsigned)cpu->GetRegister(9), (unsigned)cpu->GetRegister(10),
+                  (unsigned)cpu->GetRegister(11),
+                  (unsigned)cpu->GetRegister(12));
+
+              // Dump IWRAM code at 0x03005200 (32 instructions before)
+              static bool codeDumped = false;
+              if (!codeDumped && frame == 13) {
+                codeDumped = true;
+                // Dump 64 ARM words (256 bytes) starting 128 bytes before PC
+                uint32_t dumpBase = 0x030051C0;
+                for (int w = 0; w < 32; w++) {
+                  uint32_t addr = dumpBase + w * 4;
+                  uint32_t word = Read8(addr) | (Read8(addr + 1) << 8) |
+                                  (Read8(addr + 2) << 16) |
+                                  (Read8(addr + 3) << 24);
+                  AIO::Emulator::Common::Logger::Instance().LogFmt(
+                      AIO::Emulator::Common::LogLevel::Info, "IWCODE",
+                      "0x%08x: 0x%08x", addr, word);
+                }
+              }
+
+              // Dump NES PPU scroll state from IWRAM at [R0]
+              uint32_t stateBase = cpu->GetRegister(0);
+              uint8_t scrollData[64];
+              for (int b = 0; b < 64; b++) {
+                scrollData[b] = Read8(stateBase + b);
+              }
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "NESSTATE",
+                  "frame=%d [R0+0..63]=%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x "
+                  "%02x %02x %02x %02x %02x %02x %02x %02x",
+                  frame, scrollData[0], scrollData[1], scrollData[2],
+                  scrollData[3], scrollData[4], scrollData[5], scrollData[6],
+                  scrollData[7], scrollData[8], scrollData[9], scrollData[10],
+                  scrollData[11], scrollData[12], scrollData[13],
+                  scrollData[14], scrollData[15], scrollData[16],
+                  scrollData[17], scrollData[18], scrollData[19],
+                  scrollData[20], scrollData[21], scrollData[22],
+                  scrollData[23], scrollData[24], scrollData[25],
+                  scrollData[26], scrollData[27], scrollData[28],
+                  scrollData[29], scrollData[30], scrollData[31],
+                  scrollData[32], scrollData[33], scrollData[34],
+                  scrollData[35], scrollData[36], scrollData[37],
+                  scrollData[38], scrollData[39], scrollData[40],
+                  scrollData[41], scrollData[42], scrollData[43],
+                  scrollData[44], scrollData[45], scrollData[46],
+                  scrollData[47], scrollData[48], scrollData[49],
+                  scrollData[50], scrollData[51], scrollData[52],
+                  scrollData[53], scrollData[54], scrollData[55],
+                  scrollData[56], scrollData[57], scrollData[58],
+                  scrollData[59], scrollData[60], scrollData[61],
+                  scrollData[62], scrollData[63]);
+
+              // One-shot dump of BG3 tilemap at frame 30
+              // BG3CNT: screenBase=4 → VRAM 0x06002000, 32×32 tiles
+              static bool tilemapDumped = false;
+              if (!tilemapDumped && frame == 30) {
+                tilemapDumped = true;
+                const uint32_t screenBaseAddr = 0x06002000;
+                // Dump rows 0-31 (32 tiles per row = 64 bytes per row)
+                for (int row = 0; row < 32; row++) {
+                  char buf[512];
+                  int pos = 0;
+                  pos +=
+                      snprintf(buf + pos, sizeof(buf) - pos, "row%02d:", row);
+                  bool hasNonZero = false;
+                  for (int col = 0; col < 32; col++) {
+                    uint32_t addr = screenBaseAddr + row * 64 + col * 2;
+                    uint16_t tile = Read8(addr) | (Read8(addr + 1) << 8);
+                    uint16_t tileIndex = tile & 0x3FF;
+                    if (tileIndex != 0)
+                      hasNonZero = true;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos, " %03x",
+                                    tileIndex);
+                  }
+                  if (hasNonZero) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info, "BG3MAP", "%s",
+                        buf);
+                  }
+                }
+              }
+            }
+          }
+        }
+
         io_regs[offset] = value;
       }
 
@@ -2972,6 +3372,44 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
 }
 
 void GBAMemory::Write16(uint32_t address, uint16_t value) {
+  if (trackCpuDataAccess && dataAccessNestDepth == 0) {
+    const uint8_t rgn = (uint8_t)(address >> 24);
+    if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
+      int c = GetAccessCycles(address, 2);
+      cpuDataAccessCycles += c;
+      if (rgn >= 0x08 && rgn <= 0x0E) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      }
+    }
+  }
+  ++dataAccessNestDepth;
+  struct NestGuard {
+    int &d;
+    ~NestGuard() { --d; }
+  } nestGuard{dataAccessNestDepth};
+
+  // Trace writes to NES scroll table in VRAM
+  if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE") && (address >> 24) == 0x06) {
+    const uint32_t voff = address & 0x1FFFF;
+    if ((voff >= 0x3514 && voff < 0x3794) ||
+        (voff >= 0x6B14 && voff < 0x6D94)) {
+      static int scrollW16Logs = 0;
+      if (scrollW16Logs < 5000) {
+        int entry =
+            (voff >= 0x6B14) ? (voff - 0x6B14) / 4 : (voff - 0x3514) / 4;
+        int buf = (voff >= 0x6B14) ? 2 : 1;
+        int half = (voff & 2) ? 1 : 0;
+        const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "SCROLL",
+            "W16 buf%d entry=%d half=%d val=0x%04x PC=0x%08x", buf, entry, half,
+            value, wpc);
+        scrollW16Logs++;
+      }
+    }
+  }
+
   // DKC black-screen investigation: trace writes to the polled wait flag.
   // Enable with: AIO_TRACE_DKC_WAITFLAG=1
   if (EnvFlagCached("AIO_TRACE_DKC_WAITFLAG") && cpu &&
@@ -3243,6 +3681,18 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
           apu->ResetFIFO_B();
       }
       value &= ~0x8800; // Clear reset bits
+
+      // Preserve DMA channel config (bits 8-10, 12-14) when the new value
+      // has ALL of them zero. Classic NES Series games have an embedded NES
+      // emulator whose Write32 to 0x04000080 decomposes into Write16(0x82,
+      // high16) with values that zero the entire DMA config byte while
+      // keeping volume/prescaler bits correct. When any DMA config bit IS
+      // set, the write is a legitimate reconfiguration and is applied fully.
+      constexpr uint16_t kDmaConfigMask = 0x7700; // bits 8-10, 12-14
+      if ((value & kDmaConfigMask) == 0) {
+        uint16_t currentVal = io_regs[offset] | (io_regs[offset + 1] << 8);
+        value = (value & ~kDmaConfigMask) | (currentVal & kDmaConfigMask);
+      }
     }
 
     // SOUNDCNT_X - preserve status bits
@@ -3376,20 +3826,26 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
         offset -= 0x8000u;
 
-      // DEBUG: Trace writes to tilemap area for OG-DK corruption diagnosis
-      // screenBase 13 = 0x6800, trace writes in that region
-      static const bool traceTilemapWrites =
-          EnvTruthy(std::getenv("AIO_TRACE_TILEMAP_WRITES"));
-      if (traceTilemapWrites && offset >= 0x6800u && offset < 0x7000u) {
-        static int tilemapWriteLogs = 0;
-        if (tilemapWriteLogs < 200) {
-          tilemapWriteLogs++;
-          const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "TILEMAP",
-              "TILEMAP_W16 addr=0x%08x offset=0x%05x val=0x%04x PC=0x%08x",
-              (unsigned)address, (unsigned)offset, (unsigned)value,
-              (unsigned)pc);
+      // Trace writes to BG3 tilemap (screenBase=4, VRAM offset 0x2000-0x27FF)
+      // Non-zero tile writes reveal which rows the NES emulator populates
+      static const bool traceBg3Tilemap =
+          EnvTruthy(std::getenv("AIO_TRACE_BG3_TILEMAP"));
+      if (traceBg3Tilemap && offset >= 0x2000u && offset < 0x2800u &&
+          value != 0) {
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        // Skip initial code copy at PC=0x03007484 (CpuFastSet init)
+        if (pc != 0x03007484u) {
+          static int bg3TilemapW16Logs = 0;
+          if (bg3TilemapW16Logs < 2000) {
+            bg3TilemapW16Logs++;
+            const uint32_t mapOff = offset - 0x2000u;
+            const int row = (int)(mapOff / 64);
+            const int col = (int)((mapOff % 64) / 2);
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "BG3TILE",
+                "BG3_W16 row=%d col=%d tile=0x%04x addr=0x%08x PC=0x%08x", row,
+                col, (unsigned)value, (unsigned)address, (unsigned)pc);
+          }
         }
       }
 
@@ -3410,6 +3866,21 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       }
 
       if (offset + 1 < vram.size()) {
+        // Trace ANY Write16 to scroll table range
+        if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
+          if ((offset >= 0x3514 && offset < 0x3794) ||
+              (offset >= 0x6B14 && offset < 0x6D94)) {
+            static int scrollRawW16 = 0;
+            if (scrollRawW16 < 100) {
+              const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+              Common::Logger::Instance().LogFmt(
+                  Common::LogLevel::Info, "SCROLL_RAW",
+                  "VRAM[0x%05x]=0x%04x (Write16) PC=0x%08x addr=0x%08x", offset,
+                  value, wpc, address);
+              scrollRawW16++;
+            }
+          }
+        }
         vram[offset] = b0;
         vram[offset + 1] = b1;
         if (offset + 1 < vram_shadow.size()) {
@@ -3548,6 +4019,23 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
 }
 
 void GBAMemory::Write32(uint32_t address, uint32_t value) {
+  if (trackCpuDataAccess && dataAccessNestDepth == 0) {
+    const uint8_t rgn = (uint8_t)(address >> 24);
+    if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
+      int c = GetAccessCycles(address, 4);
+      cpuDataAccessCycles += c;
+      if (rgn >= 0x08 && rgn <= 0x0E) {
+        diagDataRomCycles += c;
+        diagDataRomReads++;
+      }
+    }
+  }
+  ++dataAccessNestDepth;
+  struct NestGuard {
+    int &d;
+    ~NestGuard() { --d; }
+  } nestGuard{dataAccessNestDepth};
+
   const bool traceIrqHandWrites = EnvFlagCached("AIO_TRACE_IRQHAND_WRITES");
   const bool isIrqHandPtrWord =
       IsIwramMappedAddress(address) && ((address & 0x7FFFu) == 0x7FFCu);
@@ -3591,6 +4079,27 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
 
   const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
   TracePpuIoWrite32(address, value, pc);
+
+  // Trace writes to NES scroll table in VRAM (buf1: 0x3514, buf2: 0x6B14)
+  if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE") && (address >> 24) == 0x06) {
+    const uint32_t voff = address & 0x1FFFF;
+    if ((voff >= 0x3514 && voff < 0x3794) ||
+        (voff >= 0x6B14 && voff < 0x6D94)) {
+      static int scrollWriteLogs = 0;
+      if (scrollWriteLogs < 500) {
+        int entry =
+            (voff >= 0x6B14) ? (voff - 0x6B14) / 4 : (voff - 0x3514) / 4;
+        int buf = (voff >= 0x6B14) ? 2 : 1;
+        uint16_t hofs = value & 0xFFFF;
+        uint16_t vofs = (value >> 16) & 0xFFFF;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "SCROLL",
+            "buf%d entry=%d HOFS=%u VOFS=%u val=0x%08x PC=0x%08x", buf, entry,
+            hofs, vofs, value, pc);
+        scrollWriteLogs++;
+      }
+    }
+  }
 
   // DKC crash investigation: trace writes into the EWRAM window that later
   // gets executed via the mirrored targets around 0x02FCD8xx/0x0238D8xx.
@@ -3886,10 +4395,58 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
       if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
         offset -= 0x8000u;
 
+      // Trace writes to NES scroll table in VRAM
+      if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
+        if ((offset >= 0x3514 && offset < 0x3794) ||
+            (offset >= 0x6B14 && offset < 0x6D94)) {
+          static int scrollVramLogs = 0;
+          if (scrollVramLogs < 500) {
+            int entry = (offset >= 0x6B14) ? (offset - 0x6B14) / 4
+                                           : (offset - 0x3514) / 4;
+            int buf = (offset >= 0x6B14) ? 2 : 1;
+            uint16_t hofs = value & 0xFFFF;
+            uint16_t vofs = (value >> 16) & 0xFFFF;
+            const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "SCROLL",
+                "W32 buf%d entry=%d HOFS=%u VOFS=%u val=0x%08x off=0x%05x "
+                "PC=0x%08x",
+                buf, entry, hofs, vofs, value, offset, wpc);
+            scrollVramLogs++;
+          }
+        }
+      }
+
       // Trace CPU writes to staging area - catch writes to 0x10004 which
       // mysteriously changes
       static const bool traceVramStage =
           EnvTruthy(std::getenv("AIO_TRACE_VRAM_STAGING"));
+
+      // Trace writes to BG3 tilemap (screenBase=4, VRAM offset 0x2000-0x27FF)
+      static const bool traceBg3Tilemap32 =
+          EnvTruthy(std::getenv("AIO_TRACE_BG3_TILEMAP"));
+      if (traceBg3Tilemap32 && offset >= 0x2000u && offset < 0x2800u &&
+          value != 0) {
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        // Skip initial code copy at PC=0x03007484 (CpuFastSet init)
+        if (pc != 0x03007484u) {
+          static int bg3TilemapW32Logs = 0;
+          if (bg3TilemapW32Logs < 2000) {
+            bg3TilemapW32Logs++;
+            const uint32_t mapOff = offset - 0x2000u;
+            const int row = (int)(mapOff / 64);
+            const int col = (int)((mapOff % 64) / 2);
+            const uint16_t tile0 = (uint16_t)(value & 0xFFFF);
+            const uint16_t tile1 = (uint16_t)(value >> 16);
+            AIO::Emulator::Common::Logger::Instance().LogFmt(
+                AIO::Emulator::Common::LogLevel::Info, "BG3TILE",
+                "BG3_W32 row=%d col=%d tile0=0x%04x tile1=0x%04x addr=0x%08x "
+                "PC=0x%08x",
+                row, col, (unsigned)tile0, (unsigned)tile1, (unsigned)address,
+                (unsigned)pc);
+          }
+        }
+      }
       if (traceVramStage && offset >= 0x10000u && offset < 0x10020u) {
         static int vramStage32Logs = 0;
         if (vramStage32Logs < 500) {
@@ -3911,6 +4468,21 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
       }
 
       if (offset + 3 < vram.size()) {
+        // Trace ANY Write32 to scroll table range
+        if (EnvFlagCached("AIO_TRACE_SCROLL_TABLE")) {
+          if ((offset >= 0x3514 && offset < 0x3794) ||
+              (offset >= 0x6B14 && offset < 0x6D94)) {
+            static int scrollRawW32 = 0;
+            if (scrollRawW32 < 100) {
+              const uint32_t wpc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+              Common::Logger::Instance().LogFmt(
+                  Common::LogLevel::Info, "SCROLL_RAW",
+                  "VRAM[0x%05x]=0x%08x (Write32) PC=0x%08x addr=0x%08x", offset,
+                  value, wpc, address);
+              scrollRawW32++;
+            }
+          }
+        }
         vram[offset] = b0;
         vram[offset + 1] = b1;
         vram[offset + 2] = b2;
@@ -3951,6 +4523,10 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         }
       }
     }
+  } else if (region == 0x04) {
+    // IO space: use 2x Write16 to preserve register-specific masking
+    Write16(address, (uint16_t)(value & 0xFFFF));
+    Write16(address + 2, (uint16_t)((value >> 16) & 0xFFFF));
   } else {
     Write8(address, value & 0xFF);
     Write8(address + 1, (value >> 8) & 0xFF);
@@ -4078,6 +4654,29 @@ void GBAMemory::CheckDMA(int timing) {
     }
     return;
   }
+  // One-shot DMA state dump at frame 30
+  static bool dmaDumped = false;
+  if (!dmaDumped && frame == 30 && timing == 2) {
+    dmaDumped = true;
+    for (int ch = 0; ch < 4; ch++) {
+      uint32_t base = IORegs::DMA0SAD + (ch * IORegs::DMA_CHANNEL_SIZE);
+      uint32_t sad = io_regs[base] | (io_regs[base + 1] << 8) |
+                     (io_regs[base + 2] << 16) | (io_regs[base + 3] << 24);
+      uint32_t dad = io_regs[base + 4] | (io_regs[base + 5] << 8) |
+                     (io_regs[base + 6] << 16) | (io_regs[base + 7] << 24);
+      uint16_t cnt_l = io_regs[base + 8] | (io_regs[base + 9] << 8);
+      uint16_t cnt_h = io_regs[base + 10] | (io_regs[base + 11] << 8);
+      bool en = (cnt_h >> 15) & 1;
+      int t = (cnt_h >> 12) & 3;
+      AIO::Emulator::Common::Logger::Instance().LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "DMA_STATE",
+          "frame=%d DMA%d: SAD=0x%08x DAD=0x%08x CNT_L=0x%04x CNT_H=0x%04x "
+          "en=%d timing=%d 32bit=%d repeat=%d destCtrl=%d srcCtrl=%d",
+          frame, ch, sad, dad, cnt_l, cnt_h, en, t, (cnt_h >> 10) & 1,
+          (cnt_h >> 9) & 1, (cnt_h >> 5) & 3, (cnt_h >> 7) & 3);
+    }
+  }
+
   for (int i = 0; i < 4; ++i) {
     uint32_t baseOffset = IORegs::DMA0SAD + (i * IORegs::DMA_CHANNEL_SIZE);
     uint16_t control =
@@ -4192,9 +4791,62 @@ void GBAMemory::PerformDMA(int channel) {
     }
   }
 
+  // Trace DMAs that cover the scroll table region in VRAM
+  if (dstIsVram) {
+    uint32_t dmaBytes = (uint32_t)count * (is32Bit ? 4u : 2u);
+    uint32_t dstOff = currentDst & 0x1FFFFu;
+    uint32_t dstEnd = dstOff + dmaBytes;
+    // Check if DMA range overlaps scroll table buffer 1 (0x3514-0x3794) or
+    // buffer 2 (0x6B14-0x6D94)
+    bool hitsScroll = (dstOff < 0x3794 && dstEnd > 0x3514) ||
+                      (dstOff < 0x6D94 && dstEnd > 0x6B14);
+    if (hitsScroll) {
+      static int scrollDmaLogs = 0;
+      if (scrollDmaLogs < 100) {
+        const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+        Common::Logger::Instance().LogFmt(
+            Common::LogLevel::Info, "DMA/SCROLL",
+            "DMA COVERS SCROLL TABLE ch=%d src=0x%08x dst=0x%08x count=%u "
+            "width=%u "
+            "srcCtrl=%d dstCtrl=%d dstOff=0x%05x-0x%05x PC=0x%08x",
+            channel, (unsigned)currentSrc, (unsigned)currentDst,
+            (unsigned)count, (unsigned)(is32Bit ? 32 : 16), srcCtrl, destCtrl,
+            (unsigned)dstOff, (unsigned)dstEnd, (unsigned)pc);
+        scrollDmaLogs++;
+      }
+    }
+  }
+
   const bool traceDmaPalette = EnvFlagCached("AIO_TRACE_DMA_PALETTE");
   const bool dstIsPalette =
       (currentDst >= 0x05000000u && currentDst < 0x05000400u);
+
+  // Trace DMA targeting IO registers (scroll, etc.)
+  const bool dstIsIO = (currentDst >= 0x04000000u && currentDst < 0x04000400u);
+  if (dstIsIO) {
+    static int dmaIoLogs = 0;
+    if (dmaIoLogs < 8000) {
+      const uint32_t pc = cpu ? (uint32_t)cpu->GetRegister(15) : 0u;
+      // Only log scroll-register targets (0x04000010-0x0400001F) and BLDALPHA
+      if ((currentDst >= 0x04000010u && currentDst <= 0x0400001Fu) ||
+          currentDst == 0x04000052u) {
+        // Read the value that will be written to the IO register
+        uint32_t srcVal = is32Bit ? Read32(currentSrc) : Read16(currentSrc);
+        uint16_t hofs = srcVal & 0xFFFF;
+        uint16_t vofs = (srcVal >> 16) & 0xFFFF;
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "DMA/IO",
+            "DMA->IO ch=%d src=0x%08x dst=0x%08x count=%u width=%u "
+            "timing=%d scanline=%d cycle=%d val=0x%08x HOFS=%u VOFS=%u "
+            "PC=0x%08x",
+            channel, (unsigned)currentSrc, (unsigned)currentDst,
+            (unsigned)count, (unsigned)(is32Bit ? 32 : 16), timing,
+            ppuTimingScanline, ppuTimingCycle, (unsigned)srcVal, (unsigned)hofs,
+            (unsigned)vofs, (unsigned)pc);
+        dmaIoLogs++;
+      }
+    }
+  }
 
   if (traceDmaPalette && dstIsPalette) {
     static int dmaPalStartLogs = 0;
@@ -4979,6 +5631,9 @@ void GBAMemory::PerformDMA(int channel) {
   // Also, for sound FIFO DMAs (timing=3), games rely on the SAD register
   // retaining its original value so that re-enabling DMA restarts from
   // the audio buffer start, not from the advanced position.
+  // CRITICAL: For repeat DMA with destCtrl=3 (Inc/Reload), do NOT write back
+  // the advanced destination to io_regs. The reload reads DAD from io_regs,
+  // so corrupting it causes destination drift on subsequent HBlank triggers.
   if (!srcIsEEPROM && !dstIsEEPROM && timing != 3) {
     auto writeIo32 = [&](uint32_t off, uint32_t v) {
       if (off + 3 >= io_regs.size())
@@ -4989,7 +5644,9 @@ void GBAMemory::PerformDMA(int channel) {
       io_regs[off + 3] = (uint8_t)((v >> 24) & 0xFF);
     };
     writeIo32(baseOffset + 0, currentSrc);
-    writeIo32(baseOffset + 4, currentDst);
+    if (!(repeat && destCtrl == 3)) {
+      writeIo32(baseOffset + 4, currentDst);
+    }
   }
 
   // Per GBA spec: Immediate timing always clears Enable bit after first
@@ -5016,6 +5673,30 @@ void GBAMemory::UpdateTimers(int cycles) {
     eepromWriteDelay -= cycles;
     if (eepromWriteDelay < 0)
       eepromWriteDelay = 0;
+  }
+
+  // One-time timer state dump at frame 30
+  if (EnvFlagCached("AIO_TRACE_TIMER1_IRQ")) {
+    static bool timerDumped = false;
+    const int frame = ppu ? ppu->GetFrameCount() : -1;
+    if (!timerDumped && frame >= 30) {
+      timerDumped = true;
+      for (int t = 0; t < 4; t++) {
+        uint32_t base = IORegs::TM0CNT_L + (t * IORegs::TIMER_CHANNEL_SIZE);
+        uint16_t reload = io_regs[base] | (io_regs[base + 1] << 8);
+        uint16_t ctrl = io_regs[base + 2] | (io_regs[base + 3] << 8);
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "TIMER_STATE",
+            "Timer%d: reload=0x%04x ctrl=0x%04x enabled=%d cascade=%d irq=%d "
+            "prescaler=%d counter=0x%04x",
+            t, (unsigned)reload, (unsigned)ctrl,
+            (ctrl & TimerControl::ENABLE) ? 1 : 0,
+            (ctrl & TimerControl::COUNT_UP) ? 1 : 0,
+            (ctrl & TimerControl::IRQ_ENABLE) ? 1 : 0,
+            (int)(ctrl & TimerControl::PRESCALER_MASK),
+            (unsigned)timerCounters[t]);
+      }
+    }
   }
 
   int previousOverflows = 0;
@@ -5069,19 +5750,32 @@ void GBAMemory::UpdateTimers(int cycles) {
             counter = reload;
 
             // Notify APU of timer overflow (for sound sample consumption).
-            // While a DMA is executing, GBAMemory accounts cycles by calling
-            // UpdateTimers(); suppressing the APU tick during that internal
-            // accounting prevents the sound FIFO from being drained during the
-            // DMA itself (which otherwise causes pathological re-requests).
+            // Suppress during active DMA to prevent FIFO drain during the
+            // same DMA that refills it — the DMA transfer cycles are accounted
+            // by UpdateTimers and would otherwise cause pathological re-drain.
             if (!dmaInProgress && apu && (i == 0 || i == 1)) {
               apu->OnTimerOverflow(i);
-            } else if (TraceGbaSpam() && (i == 0 || i == 1)) {
-              static int suppressedCount = 0;
-              suppressedCount++;
-              if (suppressedCount <= 10) {
-                std::cout << "[TIMER_OVF_SUPPRESSED] Timer " << i
-                          << " dmaInProgress=" << dmaInProgress
-                          << " apu=" << (apu ? "yes" : "null") << std::endl;
+            }
+
+            // Trace Timer0 overflow rate per frame
+            if (i == 0) {
+              static const bool traceT0Rate =
+                  EnvTruthy(std::getenv("AIO_TRACE_TIMER0_RATE"));
+              if (traceT0Rate) {
+                static int t0OverflowCount = 0;
+                static int lastFrame = -1;
+                const int frame = ppu ? ppu->GetFrameCount() : -1;
+                if (frame != lastFrame) {
+                  if (lastFrame >= 25 && lastFrame <= 40) {
+                    AIO::Emulator::Common::Logger::Instance().LogFmt(
+                        AIO::Emulator::Common::LogLevel::Info, "TIMER0_RATE",
+                        "Frame %d: Timer0 overflows=%d (expected ~549)",
+                        lastFrame, t0OverflowCount);
+                  }
+                  t0OverflowCount = 0;
+                  lastFrame = frame;
+                }
+                t0OverflowCount += 1;
               }
             }
 
@@ -5092,6 +5786,21 @@ void GBAMemory::UpdateTimers(int cycles) {
               if_reg |= (InterruptFlags::TIMER0 << i);
               io_regs[IORegs::IF] = if_reg & 0xFF;
               io_regs[IORegs::IF + 1] = (if_reg >> 8) & 0xFF;
+
+              // Trace Timer1 IRQ for NES scroll table debugging
+              if (i == 1 && EnvFlagCached("AIO_TRACE_TIMER1_IRQ")) {
+                static int t1IrqLogs = 0;
+                if (t1IrqLogs < 500) {
+                  const int frame = ppu ? ppu->GetFrameCount() : -1;
+                  AIO::Emulator::Common::Logger::Instance().LogFmt(
+                      AIO::Emulator::Common::LogLevel::Info, "TIMER1",
+                      "Timer1 IRQ overflow frame=%d scanline=%d cycle=%d "
+                      "counter_was=0x%04x reload=0x%04x",
+                      frame, ppuTimingScanline, ppuTimingCycle,
+                      (unsigned)counter, (unsigned)reload);
+                  t1IrqLogs++;
+                }
+              }
             }
 
             // Sound DMA trigger (Timer 0 and Timer 1 only)

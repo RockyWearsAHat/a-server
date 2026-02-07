@@ -1922,6 +1922,10 @@ void ARM7TDMI::Decode(uint32_t instruction) {
            ARMInstructionFormat::MULL_PATTERN) {
     ExecuteMultiplyLong(instruction);
   }
+  // SWP/SWPB: xxxx 0001 0x00 xxxx xxxx 0000 1001 xxxx
+  else if ((instruction & 0x0FB00FF0) == 0x01000090) {
+    ExecuteSWP(instruction);
+  }
   // Halfword / Signed Data Transfer: (bits27-25=000, bits7=1, bit4=1)
   else if ((instruction & 0x0E000090) == 0x00000090) {
     ExecuteHalfwordDataTransfer(instruction);
@@ -2060,6 +2064,11 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       shiftAmount = registers[rs] & 0xFF;
     } else {
       shiftAmount = ExtractBits(instruction, 7, 0x1F);
+      // Immediate shift: encoding of 0 means 32 for LSR and ASR
+      if (shiftAmount == 0 &&
+          (shiftType == Shift::LSR || shiftType == Shift::ASR)) {
+        shiftAmount = 32;
+      }
     }
 
     // Use a temp CPSR to compute shifter carry without mutating flags yet
@@ -2139,17 +2148,14 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
     }
     break;
   case DPOpcode::ADC: // ADC
-    result = rnVal + op2 + carry;
-    cOut = (rnVal + op2 < rnVal) ||
-           (rnVal + op2 + carry <
-            rnVal + op2); // Carry if either addition overflows
-    {
-      bool sign1 = (rnVal >> 31) & 1;
-      bool sign2 = (op2 >> 31) & 1;
-      bool signR = (result >> 31) & 1;
-      overflow = (sign1 == sign2 && sign1 != signR);
-    }
+  {
+    uint64_t result64 =
+        static_cast<uint64_t>(rnVal) + static_cast<uint64_t>(op2) + carry;
+    result = static_cast<uint32_t>(result64);
+    cOut = result64 > 0xFFFFFFFFULL;
+    overflow = ((rnVal ^ result) & (op2 ^ result)) >> 31;
     break;
+  }
   case DPOpcode::SBC: // SBC
     result = rnVal - op2 - !carry;
     cOut = (rnVal >= (uint64_t)op2 + !carry); // No Borrow
@@ -2428,6 +2434,11 @@ void ARM7TDMI::ExecuteSingleDataTransfer(uint32_t instruction) {
       shiftAmount = registers[rs] & 0xFFu;
     } else {
       shiftAmount = (instruction >> 7) & 0x1Fu;
+      // Immediate shift: encoding of 0 means 32 for LSR and ASR
+      if (shiftAmount == 0 &&
+          (shiftType == Shift::LSR || shiftType == Shift::ASR)) {
+        shiftAmount = 32;
+      }
     }
 
     offset = ARM7TDMIHelpers::BarrelShift(registers[rm], shiftType, shiftAmount,
@@ -2894,15 +2905,14 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
   if (L) {
     // Load
     if (opcode == 1) { // LDRH (Unsigned Halfword)
-      uint16_t value = memory.Read16(targetAddr);
-      // Log LDRH at 0x188 specifically
-      if (registers[15] == 0x190) { // PC is already +8 when we execute
-        std::cerr << "[LDRH at 0x188] targetAddr=0x" << std::hex << targetAddr
-                  << " value=0x" << value << " rd=" << rd
-                  << " Current PC after fetch=0x" << registers[15] << std::dec
-                  << std::endl;
+      // ARM7TDMI: LDRH from odd address reads aligned halfword and rotates by 8
+      if (targetAddr & 1) {
+        uint16_t value = memory.Read16(targetAddr & ~1u);
+        registers[rd] = (value >> 8) | (value << 24);
+      } else {
+        uint16_t value = memory.Read16(targetAddr);
+        registers[rd] = value;
       }
-      registers[rd] = value;
       if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
         const uint32_t pc = currentInstrAddr;
         if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
@@ -2914,7 +2924,8 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
               "DKC_R0_WRITE(LDRH) pc=0x%08x instr=0x%08x rn=R%u addr=0x%08x "
               "val=0x%08x newR0=0x%08x",
               (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
-              (unsigned)targetAddr, (unsigned)value, (unsigned)registers[0]);
+              (unsigned)targetAddr, (unsigned)registers[rd],
+              (unsigned)registers[0]);
         }
       }
     } else if (opcode == 2) { // LDRSB (Signed Byte)
@@ -2936,8 +2947,14 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
         }
       }
     } else if (opcode == 3) { // LDRSH (Signed Halfword)
-      int16_t val = (int16_t)memory.Read16(targetAddr);
-      registers[rd] = (int32_t)val;
+      // ARM7TDMI: LDRSH from odd address behaves as LDRSB
+      if (targetAddr & 1) {
+        int8_t val = (int8_t)memory.Read8(targetAddr);
+        registers[rd] = (int32_t)val;
+      } else {
+        int16_t val = (int16_t)memory.Read16(targetAddr);
+        registers[rd] = (int32_t)val;
+      }
       if (EnvFlagCached("AIO_TRACE_DKC_AUDIO") && rd == 0) {
         const uint32_t pc = currentInstrAddr;
         if ((pc >= 0x03002C00u && pc <= 0x03003800u) ||
@@ -2949,7 +2966,7 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
               "DKC_R0_WRITE(LDRSH) pc=0x%08x instr=0x%08x rn=R%u addr=0x%08x "
               "val=0x%08x newR0=0x%08x",
               (unsigned)pc, (unsigned)tracedInstr, (unsigned)rn,
-              (unsigned)targetAddr, (unsigned)(int32_t)val,
+              (unsigned)targetAddr, (unsigned)registers[rd],
               (unsigned)registers[0]);
         }
       }
@@ -4506,19 +4523,20 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
       res = static_cast<uint32_t>(result64);
       UpdateNZFlags(cpsr, res);
       SetCPSRFlag(cpsr, CPSR::FLAG_C, result64 > 0xFFFFFFFFULL);
-      SetCPSRFlag(cpsr, CPSR::FLAG_V,
-                  DetectAddOverflow(val, op2 + carryIn, res));
+      // V flag: signed overflow if both inputs had same sign but result differs
+      // Must consider val+op2 first, then +carry, to avoid uint32 wraparound
+      SetCPSRFlag(cpsr, CPSR::FLAG_V, ((val ^ res) & (op2 ^ res)) >> 31);
       registers[rd] = res;
       break;
     }
     case 0x6: // SBC
     {
       bool carryIn = CarryFlagSet(cpsr);
-      uint32_t operand = op2 + static_cast<uint32_t>(!carryIn);
-      res = val - operand;
+      res = val - op2 - static_cast<uint32_t>(!carryIn);
       UpdateNZFlags(cpsr, res);
-      SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(val, operand));
-      SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, operand, res));
+      SetCPSRFlag(cpsr, CPSR::FLAG_C,
+                  val >= static_cast<uint64_t>(op2) + !carryIn);
+      SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(val, op2, res));
       registers[rd] = res;
       break;
     }
@@ -4552,6 +4570,8 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     case 0x9: // NEG (RSB Rd, Rs, #0)
       res = 0 - op2;
       UpdateNZFlags(cpsr, res);
+      SetCPSRFlag(cpsr, CPSR::FLAG_C, !DetectSubBorrow(0u, op2));
+      SetCPSRFlag(cpsr, CPSR::FLAG_V, DetectSubOverflow(0u, op2, res));
       registers[rd] = res;
       break;
     case 0xA: // CMP
@@ -4604,11 +4624,10 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     uint32_t regM = rm | (h2 << 3);
 
     if (opcode == 0) { // ADD Rd, Rm
-      // PC as source needs +2 adjustment in Thumb mode
       uint32_t rmVal = (regM == 15) ? pcValue : registers[regM];
       if (regD == 15) {
-        // For ADD PC, Rm: PC is destination, use current registers[15]
-        uint32_t newPC = registers[15] + rmVal;
+        // ARM7TDMI: when PC is read as Rd, it returns instrAddr+4 (pcValue)
+        uint32_t newPC = pcValue + rmVal;
         if (newPC >= 0x08125C00 && newPC < 0x08127000) {
           Logger::Instance().LogFmt(
               LogLevel::Error, "CPU",
@@ -4811,15 +4830,27 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
 
     if (S) {
       if (H) { // LDRSH
-        int16_t val = (int16_t)memory.Read16(addr);
-        registers[rd] = (int32_t)val;
+        // ARM7TDMI: LDRSH from odd address behaves as LDRSB
+        if (addr & 1) {
+          int8_t val = (int8_t)memory.Read8(addr);
+          registers[rd] = (int32_t)val;
+        } else {
+          int16_t val = (int16_t)memory.Read16(addr);
+          registers[rd] = (int32_t)val;
+        }
       } else { // LDRSB
         int8_t val = (int8_t)memory.Read8(addr);
         registers[rd] = (int32_t)val;
       }
     } else {
       if (H) { // LDRH
-        registers[rd] = memory.Read16(addr);
+        // ARM7TDMI: LDRH from odd address reads aligned halfword rotated by 8
+        if (addr & 1) {
+          uint32_t value = memory.Read16(addr & ~1u);
+          registers[rd] = (value >> 8) | (value << 24);
+        } else {
+          registers[rd] = memory.Read16(addr);
+        }
       } else { // STRH
         memory.Write16(addr, registers[rd] & 0xFFFF);
       }
@@ -4891,7 +4922,13 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     uint32_t addr = registers[rn] + (imm * 2);
 
     if (L) {
-      registers[rd] = memory.Read16(addr);
+      // ARM7TDMI: LDRH from odd address reads aligned halfword rotated by 8
+      if (addr & 1) {
+        uint32_t value = memory.Read16(addr & ~1u);
+        registers[rd] = (value >> 8) | (value << 24);
+      } else {
+        registers[rd] = memory.Read16(addr);
+      }
     } else {
       // Debug STRH to button state memory at 0x3002b94 - DISABLED
       /*
@@ -4989,12 +5026,12 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
     }
 
     // Write-back (debug disabled)
-    // if (traceMixbuf) {
-    //     std::cout << "  Writeback R" << std::dec << rb << ": 0x" << std::hex
-    //     << startAddr
-    //               << " -> 0x" << addr << std::dec << std::endl;
-    // }
-    registers[rb] = addr;
+    // ARM7TDMI: For LDMIA, if Rb is in the register list, loaded value wins
+    if (L && ((rList >> rb) & 1)) {
+      // Rb was loaded from memory — don't overwrite with writeback
+    } else {
+      registers[rb] = addr;
+    }
   }
   // Format 13: Add Offset to Stack Pointer
   // 1011 0000 xxxx xxxx
@@ -5225,6 +5262,28 @@ void ARM7TDMI::SetZN(uint32_t result) {
 bool ARM7TDMI::CheckCondition(uint32_t cond) {
   // Use the centralized helper function from ARM7TDMIHelpers
   return ConditionSatisfied(cond, cpsr);
+}
+
+void ARM7TDMI::ExecuteSWP(uint32_t instruction) {
+  const bool B = (instruction >> 22) & 1;
+  const uint32_t rn = ExtractRegisterField(instruction, 16);
+  const uint32_t rd = ExtractRegisterField(instruction, 12);
+  const uint32_t rm = ExtractRegisterField(instruction, 0);
+  const uint32_t addr = registers[rn];
+
+  if (B) {
+    uint8_t temp = memory.Read8(addr);
+    memory.Write8(addr, registers[rm] & 0xFF);
+    registers[rd] = temp;
+  } else {
+    // Word swap: reads are rotated if misaligned (like LDR)
+    uint32_t temp = memory.Read32(addr & ~3u);
+    int rot = (addr & 3) * 8;
+    if (rot)
+      temp = (temp >> rot) | (temp << (32 - rot));
+    memory.Write32(addr & ~3u, registers[rm]);
+    registers[rd] = temp;
+  }
 }
 
 void ARM7TDMI::ExecuteMultiply(uint32_t instruction) {

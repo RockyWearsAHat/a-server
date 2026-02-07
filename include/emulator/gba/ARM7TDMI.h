@@ -122,6 +122,7 @@ private:
   void ExecuteDataProcessing(uint32_t instruction);
   void ExecuteMultiply(uint32_t instruction);
   void ExecuteMultiplyLong(uint32_t instruction);
+  void ExecuteSWP(uint32_t instruction);
   void ExecuteSingleDataTransfer(uint32_t instruction);
   void ExecuteHalfwordDataTransfer(uint32_t instruction);
   void ExecuteBlockDataTransfer(uint32_t instruction);

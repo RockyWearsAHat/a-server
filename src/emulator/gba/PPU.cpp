@@ -440,9 +440,14 @@ PPU::~PPU() = default;
 void PPU::Reset() {
   // Reset timing state
   cycleCounter = 0;
-  scanline = 0;
   frameCount = 0;
-  prevVBlankState = false;
+
+  // Sync PPU scanline with VCOUNT set by memory (HLE BIOS sets 0x7E = 126).
+  // Without this, PPU starts at scanline 0 (visible) while VCOUNT says 126
+  // (VBlank), causing the game to render offset frames.
+  uint16_t vcount = memory.ReadIORegister16Internal(0x06);
+  scanline = vcount;
+  prevVBlankState = (scanline >= 160 && scanline <= 227);
 
   // Reset internal affine counters
   bg2x_internal = 0;
@@ -527,14 +532,56 @@ void PPU::Update(int cycles) {
       if (dispstat & 0x10) { // HBlank IRQ Enable (Bit 4)
         uint16_t if_reg = memory.ReadIORegister16Internal(0x202);
         if_reg |= 2; // HBlank IRQ bit (Bit 1)
-        // IF is write-1-to-clear when written by the CPU.
-        // When an interrupt occurs, hardware sets IF bits.
         memory.WriteIORegisterInternal(0x202, if_reg);
       }
 
-      // Trigger HBlank DMA after flags/IRQs are visible. This also avoids
-      // stale writes if DMA advances PPU time (re-entrant Update()).
-      memory.CheckDMA(2);
+      // Trace DISPSTAT during visible scanlines to check HBlank IRQ status
+      {
+        static int dispstatLogs = 0;
+        if (dispstatLogs < 5 && scanline < 160 && frameCount >= 13) {
+          dispstatLogs++;
+          uint16_t ie = memory.ReadIORegister16Internal(0x200);
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "DISPSTAT_CHECK",
+              "frame=%d scanline=%d DISPSTAT=0x%04x IE=0x%04x "
+              "hblankIRQen=%d vblankIRQen=%d vcntIRQen=%d",
+              (int)frameCount, scanline, (unsigned)dispstat, (unsigned)ie,
+              (dispstat & 0x10) ? 1 : 0, (dispstat & 0x08) ? 1 : 0,
+              (dispstat & 0x20) ? 1 : 0);
+        }
+      }
+
+      // One-shot dump of timer configuration for Classic NES scroll debugging
+      static bool timerDumpDone = false;
+      if (!timerDumpDone && frameCount >= 10 && scanline == 80) {
+        timerDumpDone = true;
+        for (int t = 0; t < 4; t++) {
+          uint16_t reload = memory.GetTimerReload(t);
+          uint16_t ctrl = memory.GetTimerControl(t);
+          bool enabled = (ctrl & 0x80) != 0;
+          int prescaler = ctrl & 3;
+          bool countUp = (ctrl & 0x04) != 0;
+          bool irqEn = (ctrl & 0x40) != 0;
+          int prescalerVal = (prescaler == 0)   ? 1
+                             : (prescaler == 1) ? 64
+                             : (prescaler == 2) ? 256
+                                                : 1024;
+          int overflowCycles =
+              countUp ? 0 : (0x10000 - (int)reload) * prescalerVal;
+          AIO::Emulator::Common::Logger::Instance().LogFmt(
+              AIO::Emulator::Common::LogLevel::Info, "TIMER_CFG",
+              "Timer%d: reload=0x%04x ctrl=0x%04x enabled=%d prescaler=%d "
+              "(F/%d) countUp=%d irqEn=%d overflowCycles=%d",
+              t, (unsigned)reload, (unsigned)ctrl, enabled, prescaler,
+              prescalerVal, countUp, irqEn, overflowCycles);
+        }
+      }
+
+      // HBlank DMA fires only during visible scanlines (GBATEK: "paused
+      // during V-Blank"). HBlank flag/IRQ still fire every scanline above.
+      if (scanline < 160) {
+        memory.CheckDMA(2);
+      }
     } else if (cycleCounter >= 1232) {
       // End of Line
       cycleCounter = 0;
@@ -2198,6 +2245,23 @@ void PPU::RenderBackground(int bgIndex) {
   const uint8_t *palData = memory.GetPaletteData();
   const size_t palSize = memory.GetPaletteSize();
 
+  // TEMP DEBUG: Dump VRAM at scanline 92 of frame 60 to compare with scanline 0
+  static bool vramDumpedSl92 = false;
+  if (!vramDumpedSl92 && classicNesMode && bgIndex == 3 && frameCount >= 20 &&
+      scanline == 92) {
+    vramDumpedSl92 = true;
+    FILE *f = fopen("/tmp/vram_raw_f60_sl92.bin", "wb");
+    if (f) {
+      fwrite(vramData, 1, vramSize, f);
+      fclose(f);
+    }
+    FILE *p = fopen("/tmp/palette_raw_f60_sl92.bin", "wb");
+    if (p) {
+      fwrite(palData, 1, palSize, p);
+      fclose(p);
+    }
+  }
+
   // TEMP DEBUG: Dump raw VRAM to binary file at frames 5, 7, 60 to capture
   // before/after the problematic Frame 6 DMA and during gameplay
   static bool vramDumped5 = false;
@@ -2240,6 +2304,17 @@ void PPU::RenderBackground(int bgIndex) {
       fclose(palBin);
     }
 
+    // Dump raw OAM to binary file for offline analysis
+    char oamPath[64];
+    snprintf(oamPath, sizeof(oamPath), "/tmp/oam_raw%s.bin", dumpSuffix);
+    const uint8_t *oamDumpData = memory.GetOAMData();
+    const size_t oamDumpSize = memory.GetOAMSize();
+    FILE *oamBin = fopen(oamPath, "wb");
+    if (oamBin) {
+      fwrite(oamDumpData, 1, oamDumpSize, oamBin);
+      fclose(oamBin);
+    }
+
     // Dump human-readable info
     FILE *f = fopen(txtPath, "w");
     if (f) {
@@ -2278,9 +2353,66 @@ void PPU::RenderBackground(int bgIndex) {
       }
 
       uint16_t dispcnt = memory.Read16(0x04000000);
-      fprintf(f, "\n[DISPCNT] 0x%04x mode=%d BGs: %d%d%d%d\n", dispcnt,
-              dispcnt & 7, (dispcnt >> 8) & 1, (dispcnt >> 9) & 1,
-              (dispcnt >> 10) & 1, (dispcnt >> 11) & 1);
+      fprintf(f, "\n[DISPCNT] 0x%04x mode=%d BGs: %d%d%d%d OBJ=%d map1D=%d\n",
+              dispcnt, dispcnt & 7, (dispcnt >> 8) & 1, (dispcnt >> 9) & 1,
+              (dispcnt >> 10) & 1, (dispcnt >> 11) & 1, (dispcnt >> 12) & 1,
+              (dispcnt >> 6) & 1);
+
+      // Dump OAM entries (non-disabled sprites)
+      fprintf(f, "\n[OAM] Active sprites (non-disabled):\n");
+      int activeObjCount = 0;
+      for (int obj = 0; obj < 128; obj++) {
+        uint32_t off = obj * 8;
+        uint16_t a0 = oamDumpData[off] | (oamDumpData[off + 1] << 8);
+        uint16_t a1 = oamDumpData[off + 2] | (oamDumpData[off + 3] << 8);
+        uint16_t a2 = oamDumpData[off + 4] | (oamDumpData[off + 5] << 8);
+        bool objAffine = ((a0 >> 8) & 1) != 0;
+        bool objDisable = ((a0 >> 9) & 1) != 0;
+        if (!objAffine && objDisable)
+          continue;
+        int objY = a0 & 0xFF;
+        int objX = a1 & 0x1FF;
+        if (objX >= 256)
+          objX -= 512;
+        if (objY > 160)
+          objY -= 256;
+        int objShape = (a0 >> 14) & 0x3;
+        int objSize = (a1 >> 14) & 0x3;
+        int objTile = a2 & 0x3FF;
+        int objPri = (a2 >> 10) & 0x3;
+        int objPal = (a2 >> 12) & 0xF;
+        int objMode = (a0 >> 10) & 0x3;
+        bool obj8bpp = (a0 >> 13) & 1;
+        static const int szTable[3][4][2] = {
+            {{8, 8}, {16, 16}, {32, 32}, {64, 64}},
+            {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
+            {{8, 16}, {8, 32}, {16, 32}, {32, 64}}};
+        int w = szTable[objShape][objSize][0];
+        int h = szTable[objShape][objSize][1];
+        fprintf(f,
+                "  OBJ %3d: y=%d x=%d %dx%d tile=%d pri=%d pal=%d "
+                "mode=%d 8bpp=%d affine=%d attr0=0x%04x attr1=0x%04x "
+                "attr2=0x%04x\n",
+                obj, objY, objX, w, h, objTile, objPri, objPal, objMode,
+                obj8bpp ? 1 : 0, objAffine ? 1 : 0, a0, a1, a2);
+        activeObjCount++;
+      }
+      fprintf(f, "  Total active: %d\n", activeObjCount);
+
+      // Dump OBJ palette (0x200-0x3FF in palette RAM)
+      fprintf(f, "\n[OBJ_PALETTE] OBJ Palette banks:\n");
+      for (int bank = 0; bank < 16; bank++) {
+        fprintf(f, "  Bank %2d: ", bank);
+        bool allZero = true;
+        for (int c = 0; c < 16; c++) {
+          uint16_t color = palData[0x200 + bank * 32 + c * 2] |
+                           (palData[0x200 + bank * 32 + c * 2 + 1] << 8);
+          if (color != 0)
+            allZero = false;
+          fprintf(f, "%04x ", color);
+        }
+        fprintf(f, "%s\n", allZero ? "(all zero)" : "");
+      }
 
       // Dump tilemap at different offsets to find the right one
       fprintf(f, "\n[TILEMAP SEARCH] Looking for valid tilemap data:\n");
@@ -2390,6 +2522,66 @@ void PPU::RenderBackground(int bgIndex) {
     if (vramDump) {
       fwrite(vramData, 1, vramSize, vramDump);
       fclose(vramDump);
+    }
+  }
+
+  // TEMP DEBUG: Trace BG3 rendering at scanline 92
+  static bool bg3Sl92Traced = false;
+  if (!bg3Sl92Traced && bgIndex == 3 && scanline == 92 && frameCount >= 20 &&
+      classicNesMode) {
+    bg3Sl92Traced = true;
+    FILE *f = fopen("/tmp/bg3_sl92_trace.txt", "w");
+    if (f) {
+      fprintf(f, "BG3 render at frame %d, scanline %d\n", frameCount, scanline);
+      fprintf(f, "bgcnt=0x%04X charBase=%d screenBase=%d screenSize=%d\n",
+              bgcnt, charBaseBlock, screenBaseBlock, screenSize);
+      fprintf(f, "mapWidth=%d mapHeight=%d wrapX=%d wrapY=%d\n", mapWidth,
+              mapHeight, wrapX, wrapY);
+      fprintf(f, "bghofs=%d bgvofs=%d\n", bghofs, bgvofs);
+      fprintf(f, "mapBase=0x%08X tileBase=0x%08X\n", mapBase, tileBase);
+      fprintf(f, "classicNesActive=%d\n", classicNesActive ? 1 : 0);
+      fprintf(f, "\nFirst 20 pixels:\n");
+      for (int px = 0; px < 20; px++) {
+        int sX = (px + bghofs) & wrapX;
+        int sY = (scanline + bgvofs) & wrapY;
+        int txx = sX / 8;
+        int tyy = sY / 8;
+        int bX = (txx >= 32) ? 1 : 0;
+        int bY = (tyy >= 32) ? 1 : 0;
+        int ltx = txx & 31;
+        int lty = tyy & 31;
+        int blkOff = 0;
+        switch (screenSize) {
+        case 1:
+          blkOff = bX * 2048;
+          break;
+        case 2:
+          blkOff = bY * 2048;
+          break;
+        case 3:
+          blkOff = bX * 2048 + bY * 4096;
+          break;
+        }
+        uint32_t mAddr =
+            (screenBaseBlock * 2048) + blkOff + (lty * 32 + ltx) * 2;
+        uint16_t entry = ReadBgVram16(vramData, vramSize, mAddr);
+        int ti = entry & 0x3FF;
+        if (classicNesActive)
+          ti &= 0xFF;
+        int iTX = sX % 8;
+        int iTY = sY % 8;
+        uint32_t tOff =
+            (charBaseBlock * 16384) + (uint32_t)ti * 32 + iTY * 4 + iTX / 2;
+        uint8_t tb = (tOff < vramSize) ? vramData[tOff] : 0;
+        uint8_t ci = (iTX & 1) ? ((tb >> 4) & 0xF) : (tb & 0xF);
+        fprintf(f,
+                "  px=%d sX=%d sY=%d tx=%d ty=%d bX=%d bY=%d mapOff=0x%04X "
+                "entry=0x%04X tile=%d iTX=%d iTY=%d tOff=0x%04X byte=0x%02X "
+                "ci=%d\n",
+                px, sX, sY, txx, tyy, bX, bY, mAddr, entry, ti, iTX, iTY, tOff,
+                tb, ci);
+      }
+      fclose(f);
     }
   }
 

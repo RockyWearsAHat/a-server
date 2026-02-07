@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <emulator/gba/APU.h>
@@ -6,13 +7,6 @@
 #include <iostream>
 
 namespace AIO::Emulator::GBA {
-
-namespace {
-bool TraceGbaSpam() {
-  static const bool enabled = (std::getenv("AIO_TRACE_GBA_SPAM") != nullptr);
-  return enabled;
-}
-} // namespace
 
 APU::APU(GBAMemory &mem) : memory(mem) { Reset(); }
 
@@ -56,6 +50,7 @@ void APU::Reset() {
 
   // Reset sample accumulator
   sampleAccumulator = 0.0f;
+  smoothedFillError = 0.0f;
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
@@ -63,22 +58,14 @@ void APU::PushSample(int16_t left, int16_t right) {
   // This converts from game's timer-based sample rate to our output rate
   sampleAccumulator += currentUpsampleRatio;
 
-  static int pushCount = 0;
-  pushCount++;
-
   while (sampleAccumulator >= 1.0f) {
     int wp = writePos.load(std::memory_order_relaxed);
     int rp = readPos.load(std::memory_order_acquire);
 
-    // Calculate next write position
     int nextWp = (wp + 2) % (RING_BUFFER_SIZE * 2);
 
-    // Check if buffer is full (leave one slot empty)
     if (nextWp == rp) {
-      // Buffer full, drop sample
       stats.ringOverrunDrops.fetch_add(1, std::memory_order_relaxed);
-      // Avoid spinning if we're far behind; drop accumulated output for this
-      // input sample.
       sampleAccumulator = 0.0f;
       return;
     }
@@ -86,12 +73,6 @@ void APU::PushSample(int16_t left, int16_t right) {
     ringBuffer[wp] = left;
     ringBuffer[wp + 1] = right;
     writePos.store(nextWp, std::memory_order_release);
-
-    // Trace non-zero samples being pushed
-    if (TraceGbaSpam() && (left != 0 || right != 0) && pushCount <= 50) {
-      std::cout << "[PUSH_NZ] #" << pushCount << " L=" << left << " R=" << right
-                << " upsample=" << currentUpsampleRatio << std::endl;
-    }
 
     sampleAccumulator -= 1.0f;
   }
@@ -187,37 +168,19 @@ void APU::SetPSGNoiseParams(int periodSamples, bool shortMode, int volume) {
 }
 
 void APU::OnTimerOverflow(int timer) {
-  static int overflowCount = 0;
-  overflowCount++;
-
-  // Read SOUNDCNT_H to check which timer each FIFO uses
   uint16_t scntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
 
-  // FIFO A uses timer specified in bit 10 (0=Timer0, 1=Timer1)
   int fifoATimer = (scntH >> 10) & 1;
-  // FIFO B uses timer specified in bit 14 (0=Timer0, 1=Timer1)
   int fifoBTimer = (scntH >> 14) & 1;
 
-  // Early exit if this timer isn't used for audio
   if (timer != fifoATimer && timer != fifoBTimer) {
-    if (TraceGbaSpam() && overflowCount <= 10) {
-      std::cout << "[APU] Timer " << timer << " overflow #" << overflowCount
-                << " SKIPPED (not audio timer) scntH=0x" << std::hex << scntH
-                << std::dec << " fifoATimer=" << fifoATimer
-                << " fifoBTimer=" << fifoBTimer << std::endl;
-    }
     return;
   }
 
-  // Read Timer 0 registers (or Timer 1 depending on which is used for audio)
   int audioTimer = timer;
-  // IMPORTANT: TMxCNT_L reads return the *current counter* on real hardware
-  // (and in our IO emulation). For sample-rate calculation we must use the
-  // programmed reload value.
   const uint16_t tmReload = memory.GetTimerReload(audioTimer);
   const uint16_t tmControl = memory.GetTimerControl(audioTimer);
 
-  // Calculate the actual sample rate from timer configuration
   int prescaler = 1;
   switch (tmControl & 3) {
   case 0:
@@ -236,123 +199,87 @@ void APU::OnTimerOverflow(int timer) {
   const int cyclesPerSample = (0x10000 - tmReload) * prescaler;
   const float inputSampleRate =
       (cyclesPerSample > 0) ? (GBA_CPU_FREQ / (float)cyclesPerSample) : 0.0f;
-  currentUpsampleRatio =
+  float baseRatio =
       (inputSampleRate > 0.0f) ? (outputSampleRate / inputSampleRate) : 0.0f;
 
-  if (TraceGbaSpam() && (overflowCount <= 3 || overflowCount % 100000 == 0)) {
-    std::cout << "[APU] Timer " << timer << " overflow #" << overflowCount
-              << " FIFO_A count=" << fifoA_Count
-              << " FIFO_B count=" << fifoB_Count
-              << " inputRate=" << (int)inputSampleRate
-              << " upsample=" << currentUpsampleRatio << std::endl;
-  }
+  // Adaptive rate control via exponential moving average of the buffer
+  // fill error. The EMA smooths out per-sample noise to give a stable
+  // correction signal, preventing the pitch jitter that plagued earlier
+  // approaches. We target 50% fill (4096 samples) with a very slow
+  // response — the large prefill buffer absorbs short-term jitter.
+  const float fill = GetRingBufferFillRatio();
+  constexpr float kTargetFill = 0.50f;
+  constexpr float kMinRatio = 0.5f;
+  constexpr float kMaxRatio = 8.0f;
 
-  bool consumedA = false;
-  bool consumedB = false;
+  float error = kTargetFill - fill;
 
-  // When the associated timer overflows, consume a sample from FIFO
+  // Exponential moving average of error (smooths over ~2000 samples)
+  constexpr float kEmaAlpha = 0.0005f;
+  smoothedFillError =
+      smoothedFillError * (1.0f - kEmaAlpha) + error * kEmaAlpha;
+
+  // Ratio = base * (1 + gain * smoothedError)
+  // At 50% speed: fill stays near 0, error ≈ 0.5, smoothedError → 0.5,
+  // so ratio ≈ 1.0 * (1 + 4.0 * 0.5) = 3.0 — overproduces slightly,
+  // which fills buffer, which reduces error, which reduces ratio toward 2.0
+  currentUpsampleRatio = baseRatio * (1.0f + 4.0f * smoothedFillError);
+  currentUpsampleRatio = std::clamp(currentUpsampleRatio, kMinRatio, kMaxRatio);
+
   if (timer == fifoATimer && fifoA_Count > 0) {
     currentSampleA = fifoA[fifoA_ReadPos];
-    if (TraceGbaSpam() && currentSampleA != 0) {
-      std::cout << "[FIFO_A_CONSUME] sample=" << (int)currentSampleA
-                << " readPos=" << fifoA_ReadPos << " count=" << fifoA_Count
-                << std::endl;
-    }
     fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
     fifoA_Count--;
-    consumedA = true;
   } else if (timer == fifoATimer) {
-    // FIFO underflow: output silence.
-    currentSampleA = 0;
+    // Hold last sample on underflow (hardware DAC latches last value)
     stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
   }
 
   if (timer == fifoBTimer && fifoB_Count > 0) {
     currentSampleB = fifoB[fifoB_ReadPos];
-    if (TraceGbaSpam() && currentSampleB != 0) {
-      std::cout << "[FIFO_B_CONSUME] sample=" << (int)currentSampleB
-                << " readPos=" << fifoB_ReadPos << " count=" << fifoB_Count
-                << std::endl;
-    }
     fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
     fifoB_Count--;
-    consumedB = true;
   } else if (timer == fifoBTimer) {
-    // FIFO underflow: output silence.
-    currentSampleB = 0;
+    // Hold last sample on underflow (hardware DAC latches last value)
     stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
   }
 
-  // Check if master sound is enabled
-  uint16_t scntX = memory.Read16(IORegs::REG_SOUNDCNT_X);
-  if (!(scntX & 0x80)) {
-    PushSample(0, 0);
-    return;
-  }
+  // GBA DAC model: int8 samples are shifted left by 1 (50%) or 2 (100%)
+  // into a 10-bit signed range (±512). Scale to int16 matches mGBA's
+  // _applyBias.
+  constexpr int kDacToInt16 =
+      48; // mGBA: (masterVolume * 3) >> 4 = (256*3)/16 = 48
+
+  const int volShiftA = (scntH & 0x04) ? 2 : 1;
+  const int volShiftB = (scntH & 0x08) ? 2 : 1;
 
   int32_t left = 0;
   int32_t right = 0;
 
-  // FIFO A volume (bit 2: 0=50%, 1=100%)
-  const int volA = (scntH & 0x04) ? 2 : 1;
-  // FIFO B volume (bit 3: 0=50%, 1=100%)
-  const int volB = (scntH & 0x08) ? 2 : 1;
+  int32_t dacA = (int32_t)currentSampleA << volShiftA;
+  int32_t dacB = (int32_t)currentSampleB << volShiftB;
 
-  // FIFO A enable left/right (bits 9, 8)
   if (scntH & 0x200)
-    left += (int32_t)currentSampleA * volA * 64;
+    left += dacA;
   if (scntH & 0x100)
-    right += (int32_t)currentSampleA * volA * 64;
+    right += dacA;
 
-  // FIFO B enable left/right (bits 13, 12)
   if (scntH & 0x2000)
-    left += (int32_t)currentSampleB * volB * 64;
+    left += dacB;
   if (scntH & 0x1000)
-    right += (int32_t)currentSampleB * volB * 64;
+    right += dacB;
 
-  // Clamp to signed 16-bit to avoid wraparound distortion.
-  if (left < -32768)
-    left = -32768;
-  if (left > 32767)
-    left = 32767;
-  if (right < -32768)
-    right = -32768;
-  if (right > 32767)
-    right = 32767;
-
-  // DEBUG: Trace output samples - log non-zero samples
-  if (TraceGbaSpam()) {
-    static int sampleLogCount = 0;
-    static int nonZeroLogCount = 0;
-    sampleLogCount++;
-
-    // Log first 50 samples always, then any non-zero samples up to 100 more
-    bool shouldLog = (sampleLogCount <= 50) ||
-                     ((left != 0 || right != 0) && nonZeroLogCount < 100);
-
-    if (shouldLog && (left != 0 || right != 0)) {
-      nonZeroLogCount++;
-      std::cout << "[APU_OUT_NZ] #" << sampleLogCount
-                << " sampleA=" << (int)currentSampleA
-                << " sampleB=" << (int)currentSampleB << " left=" << left
-                << " right=" << right << " volA=" << volA << " volB=" << volB
-                << " scntH=0x" << std::hex << scntH << std::dec << std::endl;
-    }
-  }
+  // Clamp to 10-bit DAC range, then scale to int16
+  left = std::clamp(left, -512, 511) * kDacToInt16;
+  right = std::clamp(right, -512, 511) * kDacToInt16;
 
   PushSample((int16_t)left, (int16_t)right);
+  stats.pushCalls.fetch_add(1, std::memory_order_relaxed);
+  if (left != 0 || right != 0)
+    stats.pushNonZero.fetch_add(1, std::memory_order_relaxed);
 }
 
 void APU::WriteFIFO_A(uint32_t value) {
-  // Write 4 bytes (samples) to FIFO A
-  // GBA FIFO samples are signed 8-bit PCM (-128 to +127)
-  static int writeCountA = 0;
-  static int nonZeroWriteCountA = 0;
-  writeCountA++;
-  bool hasNonZero = (value != 0);
-  if (hasNonZero)
-    nonZeroWriteCountA++;
-
   for (int i = 0; i < 4; i++) {
     if (fifoA_Count < 32) {
       int8_t sample = static_cast<int8_t>((value >> (i * 8)) & 0xFF);
@@ -361,23 +288,9 @@ void APU::WriteFIFO_A(uint32_t value) {
       fifoA_Count++;
     }
   }
-
-  // Log all non-zero writes (first 100), and first 20 of any write
-  if (TraceGbaSpam() &&
-      ((hasNonZero && nonZeroWriteCountA <= 100) || writeCountA <= 20)) {
-    std::cout << "[FIFO_A_WRITE #" << writeCountA << "] value=0x" << std::hex
-              << value << std::dec << " count=" << fifoA_Count
-              << " writePos=" << fifoA_WritePos << std::endl;
-  }
 }
 
 void APU::WriteFIFO_B(uint32_t value) {
-  // Write 4 bytes (samples) to FIFO B
-  // GBA FIFO samples are signed 8-bit PCM (-128 to +127)
-  static int writeCountB = 0;
-  writeCountB++;
-  bool hasNonZero = (value != 0);
-
   for (int i = 0; i < 4; i++) {
     if (fifoB_Count < 32) {
       int8_t sample = static_cast<int8_t>((value >> (i * 8)) & 0xFF);
@@ -385,12 +298,6 @@ void APU::WriteFIFO_B(uint32_t value) {
       fifoB_WritePos = (fifoB_WritePos + 1) % 32;
       fifoB_Count++;
     }
-  }
-
-  if (TraceGbaSpam() && hasNonZero && writeCountB <= 20) {
-    std::cout << "[FIFO_B_WRITE] value=0x" << std::hex << value << std::dec
-              << " count=" << fifoB_Count << " writePos=" << fifoB_WritePos
-              << std::endl;
   }
 }
 
@@ -455,6 +362,10 @@ int APU::GetSamples(int16_t *buffer, int numSamples) {
           stats.fifoAUnderflows.exchange(0, std::memory_order_relaxed);
       const uint64_t ufb =
           stats.fifoBUnderflows.exchange(0, std::memory_order_relaxed);
+      const uint64_t pushes =
+          stats.pushCalls.exchange(0, std::memory_order_relaxed);
+      const uint64_t pushNZ =
+          stats.pushNonZero.exchange(0, std::memory_order_relaxed);
 
       const int rp = readPos.load(std::memory_order_relaxed);
       const int wp = writePos.load(std::memory_order_relaxed);
@@ -469,7 +380,7 @@ int APU::GetSamples(int16_t *buffer, int numSamples) {
                 << "/" << RING_BUFFER_SIZE
                 << " upsample=" << currentUpsampleRatio
                 << " fifoA=" << fifoA_Count << " fifoB=" << fifoB_Count
-                << std::endl;
+                << " push/s=" << pushes << " pushNZ/s=" << pushNZ << std::endl;
     }
   }
 

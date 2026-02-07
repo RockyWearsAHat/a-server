@@ -123,6 +123,35 @@ public:
     return c;
   }
 
+  // CPU data-access cycle tracking for Load/Store wait states.
+  // GBA.cpp sets the flag before cpu->Step() and clears it after. While set,
+  // Read/Write calls accumulate wait-state costs so the outer loop can charge
+  // them against timers/PPU. DMA and HLE bulk transfers bypass this.
+  void BeginCpuDataAccess() {
+    trackCpuDataAccess = true;
+    cpuDataAccessCycles = 0;
+    diagDataRomCycles = 0;
+    diagDataRomReads = 0;
+    diagDataVramCycles = 0;
+    diagDataVramReads = 0;
+    diagDataIoCycles = 0;
+    diagDataIoReads = 0;
+  }
+  int EndCpuDataAccess() {
+    trackCpuDataAccess = false;
+    int c = cpuDataAccessCycles;
+    cpuDataAccessCycles = 0;
+    return c;
+  }
+
+  // TEMPORARY: per-instruction data-access breakdown by region
+  int diagDataRomCycles = 0;
+  int diagDataRomReads = 0;
+  int diagDataVramCycles = 0;
+  int diagDataVramReads = 0;
+  int diagDataIoCycles = 0;
+  int diagDataIoReads = 0;
+
   // Control verbose internal logging (default: false)
   void SetVerboseLogs(bool enabled) { verboseLogs = enabled; }
 
@@ -194,6 +223,9 @@ private:
   };
 
   int lastDMACycles = 0;
+  int cpuDataAccessCycles = 0;
+  bool trackCpuDataAccess = false;
+  int dataAccessNestDepth = 0;
   int cycleCount = 0;
   int timerPrescalerCounters[4] = {0};
   uint16_t timerCounters[4] = {0};

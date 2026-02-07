@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <emulator/common/Logger.h>
 #include <emulator/gba/APU.h>
@@ -452,22 +453,22 @@ int GBA::Step() {
 
   // Step CPU by one instruction
   uint32_t pcBefore = cpu->GetRegister(15);
+  memory->BeginCpuDataAccess();
   cpu->Step();
+  int dataAccessCycles = memory->EndCpuDataAccess();
 
   // Some HLE paths (notably BIOS SWIs) may advance peripheral time in bulk.
   // Account those cycles in the frame budget so we don't overrun CPU work.
   const int hleCycles = cpu->ConsumeHLECycles();
 
-  // Calculate actual instruction cycles with memory wait states:
-  // 1. Base instruction execution (Thumb=1, ARM=1 for most operations)
-  // 2. Memory access penalties based on region (ROM is slow, IWRAM is fast)
-  // 3. Pipeline refill penalties for branches
-
+  // ARM7TDMI is a 3-stage pipeline (Fetch/Decode/Execute). Stages overlap,
+  // so the visible wall-clock cost per instruction is just the FETCH of the
+  // next instruction — there is no separate "execute" cycle to charge.
   const bool isThumb = cpu->IsThumbModeFlag();
-  int cpuCycles = isThumb ? 1 : 1; // Base execution cycle
+  int cpuCycles = memory->GetAccessCycles(pcBefore, isThumb ? 2 : 4);
 
-  // Add memory access cycles for instruction fetch from the PC before execution
-  cpuCycles += memory->GetAccessCycles(pcBefore, isThumb ? 2 : 4);
+  // Add data access wait states (LDR/STR to slow regions like ROM)
+  cpuCycles += dataAccessCycles;
 
   // Add branch penalty if PC changed non-sequentially (taken branch/jump)
   uint32_t pcAfter = cpu->GetRegister(15);
@@ -486,11 +487,216 @@ int GBA::Step() {
 
   int peripheralCycles = cpuCycles + hleCycles;
   if (cpu->IsHalted()) {
-    // OGDK FIX: Do NOT jump 1 scanline at a time. This breaks precise timing
-    // for NES emulation. Instead, let the standard cycle accumulation (or the
-    // explicit AdvanceCycles in ARM7TDMI) handle it. If we advance too fast, we
-    // miss the VBlank trigger window or race with it. totalCycles = 1232;
-    // peripheralCycles = totalCycles;
+    // During HALT, ARM7TDMI::Step() already advances peripherals by 1 cycle.
+    // The CPU doesn't execute instructions, so cpuCycles shouldn't be added
+    // again — that would double-count and make timers/PPU run too fast.
+    peripheralCycles = 0;
+    totalCycles = 1 + dmaCycles + hleCycles;
+  }
+
+  // TEMPORARY: Log DMA config at frame transition
+  {
+    static int dmaConfigFrame = -1;
+    static int dmaConfigPrevScanline = -1;
+    int dmaConfigScanline = (int)memory->Read8(0x04000006);
+    if (dmaConfigScanline == 0 && dmaConfigPrevScanline != 0)
+      dmaConfigFrame++;
+    dmaConfigPrevScanline = dmaConfigScanline;
+
+    static bool dmaConfigLogged = false;
+    if (dmaConfigFrame == 30 && !dmaConfigLogged) {
+      dmaConfigLogged = true;
+      for (int ch = 0; ch < 4; ch++) {
+        uint32_t base = 0x040000B0 + ch * 12;
+        uint32_t srcLo = memory->Read16(base);
+        uint32_t srcHi = memory->Read16(base + 2);
+        uint32_t src = srcLo | (srcHi << 16);
+        uint32_t dstLo = memory->Read16(base + 4);
+        uint32_t dstHi = memory->Read16(base + 6);
+        uint32_t dst = dstLo | (dstHi << 16);
+        uint16_t cnt = memory->Read16(base + 8);
+        uint16_t ctl = memory->Read16(base + 10);
+        Common::Logger::Instance().LogFmt(
+            Common::LogLevel::Info, "DMA_CONFIG",
+            "Frame %d DMA%d: src=0x%08x dst=0x%08x cnt=%u ctl=0x%04x "
+            "en=%d timing=%d wordSz=%d repeat=%d srcCtl=%d dstCtl=%d",
+            dmaConfigFrame, ch, src, dst, cnt, ctl, (ctl >> 15) & 1,
+            (ctl >> 12) & 3, (ctl >> 10) & 1, (ctl >> 9) & 1, (ctl >> 7) & 3,
+            (ctl >> 5) & 3);
+      }
+    }
+  }
+
+  // TEMPORARY: Dump VRAM scroll table contents at frame 30
+  {
+    static bool scrollTableDumped = false;
+    int dumpFrame = 30;
+    static int scrollDumpFrame = -1;
+    static int scrollDumpPrevScanline = -1;
+    int scrollDumpScanline = (int)memory->Read8(0x04000006);
+    if (scrollDumpScanline == 0 && scrollDumpPrevScanline != 0)
+      scrollDumpFrame++;
+    scrollDumpPrevScanline = scrollDumpScanline;
+
+    if (scrollDumpFrame == dumpFrame && !scrollTableDumped) {
+      scrollTableDumped = true;
+      const auto *vram = memory->GetVRAMData();
+      const size_t vramSize = memory->GetVRAMSize();
+
+      // Dump ALL 160 entries of both scroll table buffers
+      for (int buf = 1; buf <= 2; buf++) {
+        uint32_t baseOffset = (buf == 1) ? 0x3514 : 0x6B14;
+        Common::Logger::Instance().LogFmt(
+            Common::LogLevel::Info, "SCROLL_DUMP",
+            "Buffer %d (VRAM offset 0x%04x) at frame %d:", buf, baseOffset,
+            dumpFrame);
+        for (int i = 0; i < 160; i++) {
+          uint32_t off = baseOffset + i * 4;
+          if (off + 3 < vramSize) {
+            uint32_t val = vram[off] | (vram[off + 1] << 8) |
+                           (vram[off + 2] << 16) | (vram[off + 3] << 24);
+            uint16_t hofs = val & 0xFFFF;
+            uint16_t vofs = (val >> 16) & 0xFFFF;
+            Common::Logger::Instance().LogFmt(
+                Common::LogLevel::Info, "SCROLL_DUMP",
+                "  buf%d[%3d] off=0x%05x HOFS=%5u VOFS=%5u raw=0x%08x", buf, i,
+                off, hofs, vofs, val);
+          }
+        }
+      }
+
+      // Also check if there's any non-zero data in the range
+      for (int buf = 1; buf <= 2; buf++) {
+        uint32_t baseOffset = (buf == 1) ? 0x3514 : 0x6B14;
+        int nonZeroCount = 0;
+        int totalEntries = 160;
+        for (int i = 0; i < totalEntries; i++) {
+          uint32_t off = baseOffset + i * 4;
+          if (off + 3 < vramSize) {
+            uint32_t val = vram[off] | (vram[off + 1] << 8) |
+                           (vram[off + 2] << 16) | (vram[off + 3] << 24);
+            if (val != 0)
+              nonZeroCount++;
+          }
+        }
+        Common::Logger::Instance().LogFmt(Common::LogLevel::Info, "SCROLL_DUMP",
+                                          "Buffer %d: %d/%d entries non-zero",
+                                          buf, nonZeroCount, totalEntries);
+      }
+    }
+  }
+
+  // TEMPORARY: HALT work-window diagnostic — tracks cycles/instructions
+  // between each HALT-exit (IRQ wakes CPU) and next HALT-enter, plus
+  // data access and branch/fetch breakdown. Includes PC histogram.
+  {
+    static bool wasHalted = false;
+    static uint64_t windowCycles = 0;
+    static uint64_t windowInstrs = 0;
+    static uint64_t windowDataCycles = 0;
+    static uint64_t windowBranches = 0;
+    static uint64_t windowFetchCycles = 0;
+    static uint64_t windowBranchPenCycles = 0;
+    static int windowLogs = 0;
+    static int diagFrame2 = -1;
+    static int prevScanline2 = -1;
+    static std::unordered_map<uint32_t, uint32_t> pcHistogram;
+    static uint64_t windowIwramLoads = 0;
+    static uint64_t windowIwramStores = 0;
+    static uint64_t windowIoAccesses = 0;
+    static uint64_t windowVramAccesses = 0;
+
+    int scanline2 = (int)memory->Read8(0x04000006);
+    if (scanline2 == 0 && prevScanline2 != 0)
+      diagFrame2++;
+    prevScanline2 = scanline2;
+
+    const bool isHalted = cpu->IsHalted();
+    const bool isBranch = ((pcAfter & ~0x1) != expectedNextPC);
+
+    if (wasHalted && !isHalted) {
+      windowCycles = 0;
+      windowInstrs = 0;
+      windowDataCycles = 0;
+      windowBranches = 0;
+      windowFetchCycles = 0;
+      windowBranchPenCycles = 0;
+      pcHistogram.clear();
+      windowIwramLoads = 0;
+      windowIwramStores = 0;
+      windowIoAccesses = 0;
+      windowVramAccesses = 0;
+    }
+
+    if (!isHalted) {
+      int fetchCost = memory->GetAccessCycles(pcBefore, isThumb ? 2 : 4);
+      windowCycles += cpuCycles;
+      windowInstrs++;
+      windowDataCycles += dataAccessCycles;
+      windowFetchCycles += fetchCost;
+      pcHistogram[pcBefore & ~1u]++;
+      if (isBranch) {
+        windowBranches++;
+        windowBranchPenCycles += 2;
+      }
+    }
+
+    if (!wasHalted && isHalted && diagFrame2 >= 30 && diagFrame2 <= 35 &&
+        windowLogs < 50) {
+      Common::Logger::Instance().LogFmt(
+          Common::LogLevel::Info, "WORK_WINDOW",
+          "Frame %d scanline=%d: instrs=%llu cycles=%llu "
+          "fetch=%llu data=%llu branches=%llu branchPen=%llu "
+          "avgCycPerInstr=%.3f unaccounted=%lld uniquePCs=%zu",
+          diagFrame2, scanline2, (unsigned long long)windowInstrs,
+          (unsigned long long)windowCycles,
+          (unsigned long long)windowFetchCycles,
+          (unsigned long long)windowDataCycles,
+          (unsigned long long)windowBranches,
+          (unsigned long long)windowBranchPenCycles,
+          windowInstrs > 0 ? (double)windowCycles / windowInstrs : 0.0,
+          (long long)(windowCycles - windowFetchCycles - windowDataCycles -
+                      windowBranchPenCycles),
+          pcHistogram.size());
+
+      // Log top 20 hottest PCs
+      std::vector<std::pair<uint32_t, uint32_t>> sorted(pcHistogram.begin(),
+                                                        pcHistogram.end());
+      std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) {
+        return a.second > b.second;
+      });
+      for (size_t i = 0; i < std::min(sorted.size(), (size_t)20); i++) {
+        uint8_t pcRegion = (uint8_t)(sorted[i].first >> 24);
+        Common::Logger::Instance().LogFmt(
+            Common::LogLevel::Info, "WORK_WINDOW",
+            "  HOT_PC #%zu: 0x%08x count=%u (%.1f%%) rgn=0x%02x", i + 1,
+            sorted[i].first, sorted[i].second,
+            100.0 * sorted[i].second / windowInstrs, pcRegion);
+      }
+      windowLogs++;
+
+      // One-shot dump of the NES emulator inner loop at 0x03004A00-0x03004A60
+      // Read as 32-bit ARM instructions
+      static bool dumpedIWRAM = false;
+      if (!dumpedIWRAM) {
+        dumpedIWRAM = true;
+        for (uint32_t addr = 0x03004A00; addr <= 0x03004A60; addr += 4) {
+          uint32_t opcode = memory->Read32(addr);
+          Common::Logger::Instance().LogFmt(
+              Common::LogLevel::Info, "WORK_WINDOW",
+              "IWRAM_ARM: 0x%08x: 0x%08x", addr, opcode);
+        }
+        // Also dump the dispatcher at 0x03005300-0x03005320
+        for (uint32_t addr = 0x03005300; addr <= 0x03005320; addr += 4) {
+          uint32_t opcode = memory->Read32(addr);
+          Common::Logger::Instance().LogFmt(
+              Common::LogLevel::Info, "WORK_WINDOW",
+              "IWRAM_ARM_DISP: 0x%08x: 0x%08x", addr, opcode);
+        }
+      }
+    }
+
+    wasHalted = isHalted;
   }
 
   uint32_t currPc = cpu->GetRegister(15);
