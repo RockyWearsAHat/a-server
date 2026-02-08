@@ -1891,21 +1891,17 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
     }
 
     biosIF = memory.Read16(0x03007FF8);
+
     if (biosIF & waitFlags) {
       memory.Write16(0x03007FF8, biosIF & ~waitFlags);
     } else {
-      // Condition not met. Enable interrupts and halt until an IRQ happens.
       memory.Write16(IORegs::REG_IME, 1);
-      // BIOS IntrWait must ensure the requested IRQ sources are enabled.
-      // Games that direct-call BIOS (common in DirectBoot) may rely on BIOS
-      // to OR waitFlags into IE, same as the SWI 0x04 implementation.
       uint16_t ie = memory.Read16(IORegs::REG_IE);
       memory.Write16(IORegs::REG_IE, (uint16_t)(ie | (waitFlags & 0xFFFF)));
-      cpsr &= ~0x80; // Clear CPSR I-bit (enable IRQ)
+      cpsr &= ~0x80;
       halted = true;
       sleepHalt = true;
 
-      // Re-run the BIOS call after waking.
       registers[15] = biosPC;
       return;
     }
@@ -2142,20 +2138,6 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   }
   case 0x02: // Halt
   {
-    // OGDK DEBUG: Log halt entry with interrupt state
-    /*
-    uint16_t ie = memory.Read16(IORegs::REG_IE);
-    uint16_t if_reg = memory.Read16(IORegs::REG_IF);
-    uint16_t ime = memory.Read16(IORegs::REG_IME);
-    static int haltLogs = 0;
-    if (haltLogs++ < 20) {
-      Logger::Instance().LogFmt(
-          LogLevel::Info, "OGDK_HALT",
-          "ENTRY PC=0x%08x IME=%d IE=0x%04x IF=0x%04x ie&if=0x%04x",
-          (unsigned)(registers[15] - 4), (int)(ime & 1), (unsigned)ie,
-          (unsigned)if_reg, (unsigned)(ie & if_reg));
-    }
-    */
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
@@ -2174,40 +2156,26 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
 
     if (clearOld) {
       uint16_t currentFlags = memory.Read16(0x03007FF8);
-      TraceWatchWrite32(
-          currentInstrAddr, currentInstrThumb,
-          currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, 0x03007FF8,
-          (uint16_t)(currentFlags & ~(waitFlags & 0xFFFF)), registers[13]);
       memory.Write16(0x03007FF8,
                      (uint16_t)(currentFlags & ~(waitFlags & 0xFFFF)));
-      registers[0] =
-          0; // Clear the "Clear Old" flag so we don't do it again on resume
+      registers[0] = 0;
     }
 
     uint16_t currentFlags = memory.Read16(0x03007FF8);
     if (currentFlags & (waitFlags & 0xFFFF)) {
-      // Condition met! Return.
-      // Acknowledge flags in BIOS_IF (Standard BIOS behavior)
-      TraceWatchWrite32(
-          currentInstrAddr, currentInstrThumb,
-          currentInstrThumb ? (uint32_t)currentOp16 : currentOp32, 0x03007FF8,
-          (uint16_t)(currentFlags & ~(waitFlags & 0xFFFF)), registers[13]);
       memory.Write16(0x03007FF8,
                      (uint16_t)(currentFlags & ~(waitFlags & 0xFFFF)));
       return;
     }
 
-    // Condition not met. Enable interrupts and Halt.
-    memory.Write16(IORegs::REG_IME, 1); // IME=1
+    memory.Write16(IORegs::REG_IME, 1);
     uint16_t ie = memory.Read16(IORegs::REG_IE);
-    memory.Write16(IORegs::REG_IE,
-                   ie | (waitFlags & 0xFFFF)); // Enable required IRQs
-    cpsr &= ~0x80;                             // Enable IRQ in CPSR
+    memory.Write16(IORegs::REG_IE, ie | (waitFlags & 0xFFFF));
+    cpsr &= ~0x80;
     halted = true;
     sleepHalt = true;
     debuggerHalt = false;
 
-    // Rewind PC to re-execute this SWI instruction
     if (thumbMode)
       registers[15] -= 2;
     else

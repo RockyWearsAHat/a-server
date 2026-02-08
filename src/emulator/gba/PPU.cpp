@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/PPU.h>
 #include <mutex>
@@ -140,42 +141,19 @@ inline uint32_t MapBgVramOffset(uint32_t offset) {
   return offset & 0xFFFFu;
 }
 
-inline uint8_t ReadBgVram8(const uint8_t *vram, size_t vramSize,
+// Fast BG VRAM accessor — caller guarantees vram is non-null and vramSize >=
+// 0x10000 (always true for GBA VRAM). The 16-bit mask in MapBgVramOffset
+// guarantees the index stays within 64KB, well under the 96KB allocation.
+inline uint8_t ReadBgVram8(const uint8_t *vram, size_t /*vramSize*/,
                            uint32_t offset) {
-  if (!vram || vramSize == 0)
-    return 0;
-  const uint32_t mapped =
-      MapBgVramOffset(offset) % static_cast<uint32_t>(vramSize);
-  return vram[mapped];
+  return vram[offset & 0xFFFFu];
 }
 
-inline uint16_t ReadBgVram16(const uint8_t *vram, size_t vramSize,
+inline uint16_t ReadBgVram16(const uint8_t *vram, size_t /*vramSize*/,
                              uint32_t offset) {
-  if (!vram || vramSize == 0)
-    return 0;
-  const uint32_t o0 = MapBgVramOffset(offset) % static_cast<uint32_t>(vramSize);
-  const uint32_t o1 =
-      MapBgVramOffset(offset + 1u) % static_cast<uint32_t>(vramSize);
-  return (uint16_t)(vram[o0] | (vram[o1] << 8));
-}
-
-inline bool ShouldUseClassicNesTilemap(const uint8_t *vram, size_t vramSize,
-                                       uint32_t mapBaseOffset) {
-  if (!vram || vramSize == 0)
-    return false;
-  int oddZero = 0;
-  int oddTotal = 0;
-  for (int i = 0; i < 128; ++i) {
-    const uint32_t off = mapBaseOffset + static_cast<uint32_t>(i * 2 + 1);
-    const uint8_t v = ReadBgVram8(vram, vramSize, off);
-    if (v == 0)
-      oddZero++;
-    oddTotal++;
-  }
-  if (oddTotal == 0)
-    return false;
-  const float oddZeroRatio = static_cast<float>(oddZero) / oddTotal;
-  return oddZeroRatio <= 0.75f;
+  const uint32_t o0 = offset & 0xFFFFu;
+  const uint32_t o1 = (offset + 1u) & 0xFFFFu;
+  return static_cast<uint16_t>(vram[o0] | (vram[o1] << 8));
 }
 
 // Detect if a tilemap area looks like ARM THUMB code rather than valid tilemap
@@ -480,6 +458,22 @@ void PPU::Update(int cycles) {
             // Also set BIOS_IF for IntrWait/VBlankIntrWait
             uint16_t biosIF = memory.Read16(0x03007FF8) | 1;
             memory.Write16(0x03007FF8, biosIF);
+          }
+
+          // DIAG: count VBlank occurrences
+          {
+            static FILE *vbLog = nullptr;
+            static uint64_t vbCount = 0;
+            if (!vbLog)
+              vbLog = fopen("/tmp/vblank_diag.txt", "w");
+            vbCount++;
+            if (vbCount % 60 == 0 && vbLog) {
+              fprintf(vbLog, "VBlank #%llu dispstat_irq=%d ime=%d ie_vbl=%d\n",
+                      vbCount, (dispstat & 0x8) ? 1 : 0,
+                      (memory.ReadIORegister16Internal(0x208) & 1),
+                      (memory.ReadIORegister16Internal(0x200) & 1));
+              fflush(vbLog);
+            }
           }
 
           // Defer VBlank DMA until after all end-of-line bookkeeping
@@ -1332,15 +1326,21 @@ void PPU::RenderBackground(int bgIndex) {
   const bool classicNesActive =
       classicNesMode && !DisableAllClassicNesHandling();
   if (classicNesActive && bgIndex == 0 && screenBaseBlock >= 12) {
-    // Check if the tilemap area actually looks like code
     const uint8_t *vramData = memory.GetVRAMData();
     const size_t vramSize = memory.GetVRAMSize();
     uint32_t mapBaseOffset = screenBaseBlock * 2048;
-    bool looksLikeCode =
-        TilemapLooksLikeCode(vramData, vramSize, mapBaseOffset);
 
-    if (looksLikeCode) {
-      // BG0 tilemap contains executable code - skip to avoid garbage rendering
+    // Cache the code-detection result per frame to avoid scanning 64 entries
+    // on every scanline (160 calls/frame → 1 call/frame)
+    if (frameCount != cachedCodeCheckFrame ||
+        mapBaseOffset != cachedCodeCheckMapBase) {
+      cachedCodeCheckResult =
+          TilemapLooksLikeCode(vramData, vramSize, mapBaseOffset);
+      cachedCodeCheckFrame = frameCount;
+      cachedCodeCheckMapBase = mapBaseOffset;
+    }
+
+    if (cachedCodeCheckResult) {
       return;
     }
   }
@@ -1562,10 +1562,10 @@ void PPU::SwapBuffers() {
   std::swap(frontBuffer, backBuffer);
 }
 
-void PPU::RestoreFramebuffer(const std::vector<uint32_t> &buffer) {
+void PPU::RestoreFramebuffer(const uint32_t *data, size_t count) {
   std::lock_guard<std::mutex> lock(bufferMutex);
-  if (buffer.size() == frontBuffer.size()) {
-    frontBuffer = buffer;
+  if (count == frontBuffer.size()) {
+    std::memcpy(frontBuffer.data(), data, count * sizeof(uint32_t));
   }
 }
 

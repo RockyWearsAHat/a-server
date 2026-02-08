@@ -11,7 +11,9 @@
 #include <QStackedWidget>
 #include <QTimer>
 #include <SDL2/SDL.h>
+#include <array>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <termios.h>
@@ -256,7 +258,7 @@ private:
   // SDL Audio
   SDL_AudioDeviceID audioDevice = 0;
   static constexpr int AUDIO_SAMPLE_RATE = 32768;
-  static constexpr int AUDIO_BUFFER_SIZE = 2048;
+  static constexpr int AUDIO_BUFFER_SIZE = 512;
 
   // Audio recording for development/testing
   AIO::Common::AudioRecorder audioRecorder_;
@@ -274,21 +276,34 @@ private:
   std::mutex emulatorStateMutex;
 
   // Frame history for step-back (simple serialized states)
+  // Fixed-size arrays match GBA hardware memory map exactly,
+  // avoiding per-frame heap allocation (~536KB * 60fps = 32MB/s).
   struct FrameSnapshot {
-    std::vector<uint8_t> iwram;
-    std::vector<uint8_t> ewram;
-    std::vector<uint8_t> vram;
-    std::vector<uint8_t> oam;
-    std::vector<uint8_t> palette;
-    std::vector<uint8_t> ioRegs;
-    std::vector<uint32_t> framebuffer; // PPU front buffer (display)
-    uint32_t cpuRegisters[16];         // R0-R15
-    uint32_t cpsr;
+    static constexpr size_t IWRAM_SIZE = 0x8000;  // 32KB
+    static constexpr size_t EWRAM_SIZE = 0x40000; // 256KB
+    static constexpr size_t VRAM_SIZE = 0x18000;  // 96KB
+    static constexpr size_t OAM_SIZE = 0x400;     // 1KB
+    static constexpr size_t PALETTE_SIZE = 0x400; // 1KB
+    static constexpr size_t IO_SIZE = 0x400;      // 1KB
+    static constexpr size_t FB_SIZE = 240 * 160;  // 38400 pixels
+
+    std::array<uint8_t, IWRAM_SIZE> iwram;
+    std::array<uint8_t, EWRAM_SIZE> ewram;
+    std::array<uint8_t, VRAM_SIZE> vram;
+    std::array<uint8_t, OAM_SIZE> oam;
+    std::array<uint8_t, PALETTE_SIZE> palette;
+    std::array<uint8_t, IO_SIZE> ioRegs;
+    std::array<uint32_t, FB_SIZE> framebuffer;
+    uint32_t cpuRegisters[16]{};
+    uint32_t cpsr = 0;
     uint64_t frameNum = 0;
   };
-  std::vector<FrameSnapshot> frameHistory;
+  // Heap-allocated to avoid blowing the stack (~53MB total)
+  std::unique_ptr<std::array<FrameSnapshot, 100>> frameHistory =
+      std::make_unique<std::array<FrameSnapshot, 100>>();
   static constexpr size_t MAX_FRAME_HISTORY = 100;
   size_t frameHistoryIndex = 0;
+  size_t frameHistoryWritten = 0;
 
   // Debugger flags
   bool debuggerEnabled = false;

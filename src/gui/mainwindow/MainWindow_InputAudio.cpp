@@ -40,7 +40,8 @@ void MainWindow::initAudio() {
   want.callback = audioCallback;
   want.userdata = this;
 
-  audioDevice = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+  audioDevice = SDL_OpenAudioDevice(nullptr, 0, &want, &have,
+                                    SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
   if (audioDevice == 0) {
     ::std::cerr << "SDL audio device open failed: " << SDL_GetError()
                 << ::std::endl;

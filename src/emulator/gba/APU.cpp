@@ -26,69 +26,48 @@ void APU::Reset() {
   currentSampleB = 0;
 
   ringBuffer.fill(0);
-
-  // Prefill the ring buffer with silence to prevent initial underruns.
-  // This provides a buffer against timing jitter between the emulator
-  // (which may have variable frame timing) and the audio callback
-  // (which runs on a precise real-time schedule).
-  // Prefill with ~125ms of silence (about 4096 stereo samples at 32768 Hz).
-  // This gives significant headroom for timing variations.
-  constexpr int PREFILL_SAMPLES = RING_BUFFER_SIZE / 2; // ~4096 samples
-  writePos = PREFILL_SAMPLES * 2; // Each sample is 2 int16s (stereo)
+  writePos = 0;
   readPos = 0;
 
   soundcntH = 0;
   soundcntX = 0;
 
-  // Reset PSG channels
   for (auto &ch : psgChannels)
     ch.Reset();
-  // Reset Wave channel
   waveChannel.Reset();
-  // Reset Noise channel
   noiseChannel.Reset();
 
-  // Reset sample accumulator
   sampleAccumulator = 0.0f;
-  smoothedFillError = 0.0f;
   prevLeft = 0;
   prevRight = 0;
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
-  // Linearly interpolate between previous and current sample to fill
-  // the output ring buffer. This avoids the "whirly" aliasing artifacts
-  // that nearest-neighbor duplication causes when output rate != input rate.
+  // Linear interpolation resampler: converts from GBA sample rate to
+  // host output rate. Avoids the aliasing artifacts of nearest-neighbor.
   sampleAccumulator += currentUpsampleRatio;
 
   while (sampleAccumulator >= 1.0f) {
+    sampleAccumulator -= 1.0f;
+
     int wp = writePos.load(std::memory_order_relaxed);
     int rp = readPos.load(std::memory_order_acquire);
-
     int nextWp = (wp + 2) % (RING_BUFFER_SIZE * 2);
 
     if (nextWp == rp) {
       stats.ringOverrunDrops.fetch_add(1, std::memory_order_relaxed);
       sampleAccumulator = 0.0f;
-      prevLeft = left;
-      prevRight = right;
-      return;
+      break;
     }
 
-    // Linear interpolation: t=0 is previous sample, t=1 is current sample.
-    // sampleAccumulator tells us how far through the current input sample
-    // we are — higher values mean we're closer to the previous sample.
-    float t = 1.0f -
-              (sampleAccumulator - 1.0f) / std::max(currentUpsampleRatio, 1.0f);
+    float t = 1.0f - sampleAccumulator / std::max(currentUpsampleRatio, 1.0f);
     t = std::clamp(t, 0.0f, 1.0f);
-    int16_t interpL = (int16_t)((1.0f - t) * prevLeft + t * left);
-    int16_t interpR = (int16_t)((1.0f - t) * prevRight + t * right);
+    int16_t interpL = static_cast<int16_t>((1.0f - t) * prevLeft + t * left);
+    int16_t interpR = static_cast<int16_t>((1.0f - t) * prevRight + t * right);
 
     ringBuffer[wp] = interpL;
     ringBuffer[wp + 1] = interpR;
     writePos.store(nextWp, std::memory_order_release);
-
-    sampleAccumulator -= 1.0f;
   }
 
   prevLeft = left;
@@ -185,19 +164,45 @@ void APU::SetPSGNoiseParams(int periodSamples, bool shortMode, int volume) {
 }
 
 void APU::OnTimerOverflow(int timer) {
+  // Master sound gate (SOUNDCNT_X bit 7)
+  if (!(memory.Read16(IORegs::REG_SOUNDCNT_X) & 0x80))
+    return;
+
   uint16_t scntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
 
   int fifoATimer = (scntH >> 10) & 1;
   int fifoBTimer = (scntH >> 14) & 1;
 
-  if (timer != fifoATimer && timer != fifoBTimer) {
+  bool isATimer = (timer == fifoATimer);
+  bool isBTimer = (timer == fifoBTimer);
+
+  if (!isATimer && !isBTimer)
     return;
+
+  // Consume FIFO samples for whichever channel(s) use this timer
+  if (isATimer && fifoA_Count > 0) {
+    currentSampleA = fifoA[fifoA_ReadPos];
+    fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
+    fifoA_Count--;
+  } else if (isATimer) {
+    stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
   }
 
-  int audioTimer = timer;
-  const uint16_t tmReload = memory.GetTimerReload(audioTimer);
-  const uint16_t tmControl = memory.GetTimerControl(audioTimer);
+  if (isBTimer && fifoB_Count > 0) {
+    currentSampleB = fifoB[fifoB_ReadPos];
+    fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
+    fifoB_Count--;
+  } else if (isBTimer) {
+    stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
+  }
 
+  // Push audio output using this timer's frequency as the clock source.
+  // When both FIFOs share a timer, every overflow produces one output.
+  // When they use different timers, each timer overflow pushes separately
+  // using its own frequency — avoids starving a FIFO whose timer fires less
+  // often.
+  const uint16_t tmReload = memory.GetTimerReload(timer);
+  const uint16_t tmControl = memory.GetTimerControl(timer);
   int prescaler = 1;
   switch (tmControl & 3) {
   case 0:
@@ -214,83 +219,39 @@ void APU::OnTimerOverflow(int timer) {
     break;
   }
   const int cyclesPerSample = (0x10000 - tmReload) * prescaler;
+  if (cyclesPerSample <= 0)
+    return;
+
   const float inputSampleRate =
-      (cyclesPerSample > 0) ? (GBA_CPU_FREQ / (float)cyclesPerSample) : 0.0f;
-  float baseRatio =
-      (inputSampleRate > 0.0f) ? (outputSampleRate / inputSampleRate) : 0.0f;
+      GBA_CPU_FREQ / static_cast<float>(cyclesPerSample);
+  currentUpsampleRatio = outputSampleRate / inputSampleRate;
 
-  // Adaptive rate control via exponential moving average of the buffer
-  // fill error. The EMA smooths out per-sample noise to give a stable
-  // correction signal, preventing the pitch jitter that plagued earlier
-  // approaches. We target 50% fill (4096 samples) with a very slow
-  // response — the large prefill buffer absorbs short-term jitter.
-  const float fill = GetRingBufferFillRatio();
-  constexpr float kTargetFill = 0.50f;
-  constexpr float kMinRatio = 0.5f;
-  constexpr float kMaxRatio = 8.0f;
-
-  float error = kTargetFill - fill;
-
-  // Exponential moving average of error (smooths over ~2000 samples)
-  constexpr float kEmaAlpha = 0.0005f;
-  smoothedFillError =
-      smoothedFillError * (1.0f - kEmaAlpha) + error * kEmaAlpha;
-
-  // Ratio = base * (1 + gain * smoothedError)
-  // At 50% speed: fill stays near 0, error ≈ 0.5, smoothedError → 0.5,
-  // so ratio ≈ 1.0 * (1 + 4.0 * 0.5) = 3.0 — overproduces slightly,
-  // which fills buffer, which reduces error, which reduces ratio toward 2.0
-  currentUpsampleRatio = baseRatio * (1.0f + 4.0f * smoothedFillError);
-  currentUpsampleRatio = std::clamp(currentUpsampleRatio, kMinRatio, kMaxRatio);
-
-  if (timer == fifoATimer && fifoA_Count > 0) {
-    currentSampleA = fifoA[fifoA_ReadPos];
-    fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
-    fifoA_Count--;
-  } else if (timer == fifoATimer) {
-    // Hold last sample on underflow (hardware DAC latches last value)
-    stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
-  }
-
-  if (timer == fifoBTimer && fifoB_Count > 0) {
-    currentSampleB = fifoB[fifoB_ReadPos];
-    fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
-    fifoB_Count--;
-  } else if (timer == fifoBTimer) {
-    // Hold last sample on underflow (hardware DAC latches last value)
-    stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
-  }
-
-  // GBA DAC model: int8 samples are shifted left by 1 (50%) or 2 (100%)
-  // into a 10-bit signed range (±512). Scale to int16 matches mGBA's
-  // _applyBias.
-  constexpr int kDacToInt16 =
-      48; // mGBA: (masterVolume * 3) >> 4 = (256*3)/16 = 48
-
+  // GBA DAC: int8 FIFO samples, volume-shifted, mixed to L/R, scaled to int16.
+  // Max per-FIFO: int8 (-128..127) << 2 = -512..508
+  // Two FIFOs summed: -1024..1016
+  constexpr int kDacToInt16 = 32;
   const int volShiftA = (scntH & 0x04) ? 2 : 1;
   const int volShiftB = (scntH & 0x08) ? 2 : 1;
 
   int32_t left = 0;
   int32_t right = 0;
 
-  int32_t dacA = (int32_t)currentSampleA << volShiftA;
-  int32_t dacB = (int32_t)currentSampleB << volShiftB;
+  int32_t dacA = static_cast<int32_t>(currentSampleA) << volShiftA;
+  int32_t dacB = static_cast<int32_t>(currentSampleB) << volShiftB;
 
   if (scntH & 0x200)
     left += dacA;
   if (scntH & 0x100)
     right += dacA;
-
   if (scntH & 0x2000)
     left += dacB;
   if (scntH & 0x1000)
     right += dacB;
 
-  // Clamp to 10-bit DAC range, then scale to int16
-  left = std::clamp(left, -512, 511) * kDacToInt16;
-  right = std::clamp(right, -512, 511) * kDacToInt16;
+  left = std::clamp(left, -1024, 1023) * kDacToInt16;
+  right = std::clamp(right, -1024, 1023) * kDacToInt16;
 
-  PushSample((int16_t)left, (int16_t)right);
+  PushSample(static_cast<int16_t>(left), static_cast<int16_t>(right));
   stats.pushCalls.fetch_add(1, std::memory_order_relaxed);
   if (left != 0 || right != 0)
     stats.pushNonZero.fetch_add(1, std::memory_order_relaxed);
@@ -335,25 +296,29 @@ void APU::ResetFIFO_B() {
 }
 
 int APU::GetSamples(int16_t *buffer, int numSamples) {
+  int rp = readPos.load(std::memory_order_relaxed);
+  int wp = writePos.load(std::memory_order_acquire);
+
   int samplesWritten = 0;
-
   for (int i = 0; i < numSamples; i++) {
-    int rp = readPos.load(std::memory_order_relaxed);
-    int wp = writePos.load(std::memory_order_acquire);
-
     if (rp == wp) {
-      buffer[i * 2] = 0;
-      buffer[i * 2 + 1] = 0;
+      // Underrun: hold last sample to avoid pops from zero insertion
+      if (samplesWritten > 0) {
+        buffer[i * 2] = buffer[(i - 1) * 2];
+        buffer[i * 2 + 1] = buffer[(i - 1) * 2 + 1];
+      } else {
+        buffer[i * 2] = 0;
+        buffer[i * 2 + 1] = 0;
+      }
     } else {
       buffer[i * 2] = ringBuffer[rp];
       buffer[i * 2 + 1] = ringBuffer[rp + 1];
-
-      int nextRp = (rp + 2) % (RING_BUFFER_SIZE * 2);
-      readPos.store(nextRp, std::memory_order_release);
+      rp = (rp + 2) % (RING_BUFFER_SIZE * 2);
       samplesWritten++;
     }
   }
 
+  readPos.store(rp, std::memory_order_release);
   return samplesWritten;
 }
 

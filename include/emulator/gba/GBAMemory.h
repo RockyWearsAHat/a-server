@@ -130,12 +130,6 @@ public:
   void BeginCpuDataAccess() {
     trackCpuDataAccess = true;
     cpuDataAccessCycles = 0;
-    diagDataRomCycles = 0;
-    diagDataRomReads = 0;
-    diagDataVramCycles = 0;
-    diagDataVramReads = 0;
-    diagDataIoCycles = 0;
-    diagDataIoReads = 0;
   }
   int EndCpuDataAccess() {
     trackCpuDataAccess = false;
@@ -144,16 +138,11 @@ public:
     return c;
   }
 
-  // TEMPORARY: per-instruction data-access breakdown by region
-  int diagDataRomCycles = 0;
-  int diagDataRomReads = 0;
-  int diagDataVramCycles = 0;
-  int diagDataVramReads = 0;
-  int diagDataIoCycles = 0;
-  int diagDataIoReads = 0;
-
-  // Cycle-accurate memory access timing
-  int GetAccessCycles(uint32_t address, int accessSize) const;
+  // Cycle-accurate memory access timing.
+  // isInstructionFetch=true uses separate sequential tracking for the
+  // instruction prefetch path so data accesses don't break fetch sequentiality.
+  int GetAccessCycles(uint32_t address, int accessSize,
+                      bool isInstructionFetch = false) const;
 
   // Timer helpers for audio and other timing-sensitive systems. These read the
   // programmed reload value and control bits for TM0-3 directly from IO
@@ -350,10 +339,13 @@ private:
   GBA *gba = nullptr;      // GBA pointer for flush callbacks
 
   // Track last Game Pak access to approximate sequential waitstate timing
-  // (WAITCNT). This is intentionally lightweight (no full bus prefetch
-  // emulation).
+  // (WAITCNT). Separate tracking for instruction fetches vs data accesses
+  // because on real hardware the prefetch buffer maintains its own
+  // sequentiality independent of data bus activity.
   mutable uint32_t lastGamePakAccessAddr = 0xFFFFFFFFu;
   mutable uint8_t lastGamePakAccessRegionGroup = 0xFFu;
+  mutable uint32_t lastFetchAddr = 0xFFFFFFFFu;
+  mutable uint8_t lastFetchRegionGroup = 0xFFu;
 };
 
 } // namespace AIO::Emulator::GBA

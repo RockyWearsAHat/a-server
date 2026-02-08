@@ -347,6 +347,8 @@ void GBAMemory::Reset() {
   // Reset timing state used by GetAccessCycles().
   lastGamePakAccessAddr = 0xFFFFFFFFu;
   lastGamePakAccessRegionGroup = 0xFFu;
+  lastFetchAddr = 0xFFFFFFFFu;
+  lastFetchRegionGroup = 0xFFu;
   std::fill(palette_ram.begin(), palette_ram.end(), 0);
   std::fill(vram.begin(), vram.end(), 0);
   std::fill(oam.begin(), oam.end(), 0);
@@ -1131,7 +1133,8 @@ uint32_t GBAMemory::GetOpenBusValue() const {
   return value;
 }
 
-int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
+int GBAMemory::GetAccessCycles(uint32_t address, int accessSize,
+                               bool isInstructionFetch) const {
   // GBA Memory Access Timing (GBATEK)
   // Returns cycles for the given access size (1=8bit, 2=16bit, 4=32bit)
   const uint8_t region = (uint8_t)(address >> 24);
@@ -1177,12 +1180,25 @@ int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
   const bool isGamePak = (group == 0x08 || group == 0x0A || group == 0x0C);
   const bool isSram = (group == 0x0E);
 
+  // WAITCNT bit 14: Game Pak Prefetch Buffer enable.
+  // When enabled, the prefetch buffer pre-fetches sequential ROM instructions
+  // during idle bus cycles, allowing sequential instruction fetches at 1
+  // internal cycle instead of 1+S.
+  const bool prefetchEnabled = (waitcnt & 0x4000) != 0;
+
   bool sequential = false;
   if (isGamePak || isSram) {
-    sequential = (lastGamePakAccessRegionGroup == group) &&
-                 (lastGamePakAccessAddr + (uint32_t)accessSize == address);
-    lastGamePakAccessAddr = address;
-    lastGamePakAccessRegionGroup = group;
+    if (isInstructionFetch) {
+      sequential = (lastFetchRegionGroup == group) &&
+                   (lastFetchAddr + (uint32_t)accessSize == address);
+      lastFetchAddr = address;
+      lastFetchRegionGroup = group;
+    } else {
+      sequential = (lastGamePakAccessRegionGroup == group) &&
+                   (lastGamePakAccessAddr + (uint32_t)accessSize == address);
+      lastGamePakAccessAddr = address;
+      lastGamePakAccessRegionGroup = group;
+    }
   }
 
   switch (region) {
@@ -1226,7 +1242,17 @@ int GBAMemory::GetAccessCycles(uint32_t address, int accessSize) const {
       sWait = decodeSeqWait((waitcnt >> 10) & 1u);
     }
 
-    // Base 1 cycle + configured wait.
+    // Prefetch buffer optimization: when enabled and this is a sequential
+    // instruction fetch, the prefetch buffer has already loaded the opcode
+    // during prior idle bus cycles, costing only 1 internal cycle.
+    if (prefetchEnabled && isInstructionFetch && sequential) {
+      if (accessSize == 4) {
+        return 2; // Two 16-bit prefetched halfwords = 2 internal cycles
+      }
+      return 1; // Single prefetched halfword = 1 internal cycle
+    }
+
+    // Non-prefetched access: base 1 cycle + configured wait.
     // For 32-bit on a 16-bit bus, this becomes two 16-bit accesses: first
     // nonseq/seq, second seq.
     const int first = 1 + (sequential ? sWait : nWait);
@@ -1255,13 +1281,6 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
       int c = GetAccessCycles(address, 1);
       cpuDataAccessCycles += c;
-      if (rgn >= 0x08 && rgn <= 0x0D) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      } else if (rgn == 0x0E) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      }
     }
   }
 
@@ -1484,10 +1503,6 @@ uint16_t GBAMemory::Read16(uint32_t address) {
     if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
       int c = GetAccessCycles(address, 2);
       cpuDataAccessCycles += c;
-      if (rgn >= 0x08 && rgn <= 0x0E) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      }
     }
   }
   ++dataAccessNestDepth;
@@ -1603,10 +1618,6 @@ uint32_t GBAMemory::Read32(uint32_t address) {
     if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
       int c = GetAccessCycles(address, 4);
       cpuDataAccessCycles += c;
-      if (rgn >= 0x08 && rgn <= 0x0E) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      }
     }
   }
   ++dataAccessNestDepth;
@@ -1757,10 +1768,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
       int c = GetAccessCycles(address, 1);
       cpuDataAccessCycles += c;
-      if (rgn >= 0x08 && rgn <= 0x0E) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      }
     }
   }
 
@@ -1847,9 +1854,13 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           bool isEnabled = (ctrl & DMAControl::ENABLE) != 0;
           int timing = (ctrl >> 12) & 3;
 
-          // For sound DMA (timing=3) that's already enabled, mark for relatch
-          // IMPORTANT: Only relatch when the HIGH byte (byte 3) is written.
-          if (isEnabled && timing == 3 && byteInChannel == 3) {
+          // For sound DMA (timing=3) that's already enabled, mark for relatch.
+          // Relatch on the last byte of either halfword (1 or 3) so that both
+          // 16-bit STRH and 32-bit STR writes to SAD trigger a buffer swap.
+          // The Sappy/m4a engine often only writes the low halfword when the
+          // high half (0x0300) doesn't change between buffer swaps.
+          if (isEnabled && timing == 3 &&
+              (byteInChannel == 1 || byteInChannel == 3)) {
             dmaSadChannel = channel;
           }
         }
@@ -1987,10 +1998,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
       int c = GetAccessCycles(address, 2);
       cpuDataAccessCycles += c;
-      if (rgn >= 0x08 && rgn <= 0x0E) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      }
     }
   }
   ++dataAccessNestDepth;
@@ -2190,10 +2197,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     if (rgn == 0x02 || (rgn >= 0x08 && rgn <= 0x0E)) {
       int c = GetAccessCycles(address, 4);
       cpuDataAccessCycles += c;
-      if (rgn >= 0x08 && rgn <= 0x0E) {
-        diagDataRomCycles += c;
-        diagDataRomReads++;
-      }
     }
   }
   ++dataAccessNestDepth;

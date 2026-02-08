@@ -28,7 +28,7 @@ public:
   static uint32_t ApplyBrightnessDecrease(uint32_t colorARGB, int evyRaw);
 
   // For frame step-back: restore a saved framebuffer
-  void RestoreFramebuffer(const std::vector<uint32_t> &buffer);
+  void RestoreFramebuffer(const uint32_t *data, size_t count);
 
   // Classic NES Series palette mapping workaround
   // These games store colors at palette indices 9-14 but use paletteBank=8
@@ -103,6 +103,11 @@ private:
 
   // Classic NES Series palette mapping mode
   bool classicNesMode = false;
+
+  // Per-frame cache for TilemapLooksLikeCode (avoid 160 redundant scans/frame)
+  int cachedCodeCheckFrame = -1;
+  uint32_t cachedCodeCheckMapBase = 0;
+  bool cachedCodeCheckResult = false;
 };
 
 } // namespace AIO::Emulator::GBA

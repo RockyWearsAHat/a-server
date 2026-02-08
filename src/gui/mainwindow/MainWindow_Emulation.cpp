@@ -445,70 +445,40 @@ void MainWindow::EmulatorThreadMain() {
     // Handle step-back request FIRST (before pause check)
     int stepBackCount = emulatorStepBack.exchange(0, std::memory_order_relaxed);
     if (stepBackCount > 0) {
-      std::cout << "[STEP_BACK] Request detected, history size="
-                << frameHistory.size() << " emulator="
-                << (currentEmulator == EmulatorType::GBA ? "GBA" : "other")
-                << std::endl;
+      if (frameHistoryWritten > 0 && currentEmulator == EmulatorType::GBA) {
+        // Walk back to the most recently written slot
+        size_t snapshotIdx =
+            (frameHistoryIndex + MAX_FRAME_HISTORY - 1) % MAX_FRAME_HISTORY;
 
-      if (!frameHistory.empty() && currentEmulator == EmulatorType::GBA) {
-        // Get the most recent snapshot from history
-        size_t snapshotIdx;
-        if (frameHistory.size() < MAX_FRAME_HISTORY) {
-          if (frameHistory.size() > 0) {
-            snapshotIdx = frameHistory.size() - 1;
-          } else {
-            snapshotIdx = 0;
-          }
-        } else {
-          snapshotIdx =
-              (frameHistoryIndex + MAX_FRAME_HISTORY - 1) % MAX_FRAME_HISTORY;
+        const auto &snap = (*frameHistory)[snapshotIdx];
+
+        auto &mem = gba.GetMemory();
+        std::memcpy(mem.GetIWRAM(), snap.iwram.data(),
+                    FrameSnapshot::IWRAM_SIZE);
+        std::memcpy(mem.GetEWRAM(), snap.ewram.data(),
+                    FrameSnapshot::EWRAM_SIZE);
+        std::memcpy(mem.GetVRAM(), snap.vram.data(), FrameSnapshot::VRAM_SIZE);
+        std::memcpy(mem.GetOAM(), snap.oam.data(), FrameSnapshot::OAM_SIZE);
+        std::memcpy(mem.GetPaletteRAM(), snap.palette.data(),
+                    FrameSnapshot::PALETTE_SIZE);
+        std::memcpy(mem.GetIORegs(), snap.ioRegs.data(),
+                    FrameSnapshot::IO_SIZE);
+
+        for (int i = 0; i < 16; i++) {
+          gba.SetRegister(i, snap.cpuRegisters[i]);
         }
 
-        if (frameHistory.size() > 0) {
-          const auto &snap = frameHistory[snapshotIdx];
-          std::cout << "[STEP_BACK] Restoring frame " << snap.frameNum
-                    << " (current=" << emulatorFrameNumber.load() << ")"
-                    << std::endl;
+        gba.GetPPU().RestoreFramebuffer(snap.framebuffer.data(),
+                                        FrameSnapshot::FB_SIZE);
 
-          // Restore memory
-          auto &mem = gba.GetMemory();
-          std::copy(snap.iwram.begin(), snap.iwram.end(), mem.GetIWRAM());
-          std::copy(snap.ewram.begin(), snap.ewram.end(), mem.GetEWRAM());
-          std::copy(snap.vram.begin(), snap.vram.end(), mem.GetVRAM());
-          std::copy(snap.oam.begin(), snap.oam.end(), mem.GetOAM());
-          std::copy(snap.palette.begin(), snap.palette.end(),
-                    mem.GetPaletteRAM());
-          std::copy(snap.ioRegs.begin(), snap.ioRegs.end(), mem.GetIORegs());
+        emulatorFrameNumber.store(snap.frameNum, std::memory_order_relaxed);
 
-          // Restore CPU state
-          for (int i = 0; i < 16; i++) {
-            gba.SetRegister(i, snap.cpuRegisters[i]);
-          }
-
-          // Restore framebuffer so display updates immediately
-          if (!snap.framebuffer.empty()) {
-            gba.GetPPU().RestoreFramebuffer(snap.framebuffer);
-          }
-
-          emulatorFrameNumber.store(snap.frameNum, std::memory_order_relaxed);
-
-          // Remove this snapshot from history
-          if (frameHistory.size() < MAX_FRAME_HISTORY) {
-            frameHistory.pop_back();
-          } else {
-            if (frameHistoryIndex > 0) {
-              frameHistoryIndex--;
-            } else {
-              frameHistoryIndex = MAX_FRAME_HISTORY - 1;
-            }
-          }
-
-          std::cout << "[STEP_BACK] Restore complete, staying paused"
-                    << std::endl;
-        }
+        // Rewind the ring index
+        frameHistoryIndex = snapshotIdx;
+        if (frameHistoryWritten > 0)
+          frameHistoryWritten--;
       }
 
-      // After step-back, update timing and continue (stay paused)
       nextFrame = Clock::now();
       continue;
     }
@@ -567,37 +537,31 @@ void MainWindow::EmulatorThreadMain() {
     // Always save frame snapshot for step-back capability (BEFORE incrementing
     // counter)
     if (currentEmulator == EmulatorType::GBA) {
-      FrameSnapshot snap;
+      auto &snap = (*frameHistory)[frameHistoryIndex];
       snap.frameNum = emulatorFrameNumber.load();
 
-      // Capture key memory regions
       const auto &mem = gba.GetMemory();
-      snap.iwram.assign(mem.GetIWRAM(), mem.GetIWRAM() + 0x8000);
-      snap.ewram.assign(mem.GetEWRAM(), mem.GetEWRAM() + 0x40000);
-      snap.vram.assign(mem.GetVRAMData(),
-                       mem.GetVRAMData() + mem.GetVRAMSize());
-      snap.oam.assign(mem.GetOAMData(), mem.GetOAMData() + mem.GetOAMSize());
-      snap.palette.assign(mem.GetPaletteData(),
-                          mem.GetPaletteData() + mem.GetPaletteSize());
-      snap.ioRegs.assign(mem.GetIORegs(), mem.GetIORegs() + 0x400);
+      std::memcpy(snap.iwram.data(), mem.GetIWRAM(), FrameSnapshot::IWRAM_SIZE);
+      std::memcpy(snap.ewram.data(), mem.GetEWRAM(), FrameSnapshot::EWRAM_SIZE);
+      std::memcpy(snap.vram.data(), mem.GetVRAMData(),
+                  FrameSnapshot::VRAM_SIZE);
+      std::memcpy(snap.oam.data(), mem.GetOAMData(), FrameSnapshot::OAM_SIZE);
+      std::memcpy(snap.palette.data(), mem.GetPaletteData(),
+                  FrameSnapshot::PALETTE_SIZE);
+      std::memcpy(snap.ioRegs.data(), mem.GetIORegs(), FrameSnapshot::IO_SIZE);
 
-      // Capture framebuffer for display
       const auto &fb = gba.GetPPU().GetFramebuffer();
-      snap.framebuffer.assign(fb.begin(), fb.end());
+      std::memcpy(snap.framebuffer.data(), fb.data(),
+                  FrameSnapshot::FB_SIZE * sizeof(uint32_t));
 
-      // Capture CPU state
       for (int i = 0; i < 16; i++) {
         snap.cpuRegisters[i] = gba.GetRegister(i);
       }
       snap.cpsr = gba.GetCPSR();
 
-      // Ring buffer for history
-      if (frameHistory.size() < MAX_FRAME_HISTORY) {
-        frameHistory.push_back(std::move(snap));
-      } else {
-        frameHistory[frameHistoryIndex] = std::move(snap);
-        frameHistoryIndex = (frameHistoryIndex + 1) % MAX_FRAME_HISTORY;
-      }
+      frameHistoryWritten =
+          std::min(frameHistoryWritten + 1, MAX_FRAME_HISTORY);
+      frameHistoryIndex = (frameHistoryIndex + 1) % MAX_FRAME_HISTORY;
     }
 
     // Increment frame counter
@@ -625,39 +589,12 @@ void MainWindow::EmulatorThreadMain() {
       nextFrame = now;
     }
 
-    // Audio-driven timing: adjust sleep behavior based on audio buffer level.
-    // This helps maintain smooth audio by ensuring the emulator produces
-    // samples fast enough to keep the audio buffer filled.
-    // The target is to keep the buffer around 40-60% full for stability.
-    if (currentEmulator == EmulatorType::GBA) {
-      const float bufferFill = gba.GetAPU().GetRingBufferFillRatio();
-
-      // If buffer is low (< 40%), skip sleep entirely to catch up quickly
-      if (bufferFill < 0.40f) {
-        // Run as fast as possible to refill buffer
-        continue;
-      }
-
-      // If buffer is moderately low (< 50%), reduce sleep time significantly
-      if (bufferFill < 0.50f && now < nextFrame) {
-        // Sleep for only a quarter of the remaining time
-        auto reducedSleep = (nextFrame - now) / 4;
-        if (reducedSleep > std::chrono::microseconds(100)) {
-          std::this_thread::sleep_for(reducedSleep);
-        }
-        continue;
-      }
-
-      // If buffer is getting too full (> 80%), sleep a bit longer to prevent
-      // overflow
-      if (bufferFill > 0.80f && now < nextFrame) {
-        // Add 10% to the sleep time
-        auto extraSleep = (nextFrame - now) / 10;
-        std::this_thread::sleep_until(nextFrame + extraSleep);
-        continue;
-      }
-    }
-
+    // Audio-sync frame pacing: the audio callback consumes samples at a
+    // fixed real-time rate, so the ring buffer fill level naturally tells
+    // us whether we're ahead or behind. We simply run frames at the
+    // deadline rate and let the ring buffer absorb jitter. If we fall
+    // very far behind (> 4 frames), we snap the deadline forward to
+    // avoid a burst of catch-up frames.
     if (now < nextFrame) {
       std::this_thread::sleep_until(nextFrame);
     }
