@@ -339,21 +339,22 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
 }
 
 void ARM7TDMI::CheckInterrupts() {
-  // Log if we're about to check interrupts during BIOS execution
+  // Hot path: use ReadIODirect16 for interrupt registers (no side effects,
+  // no access cycle tracking, no peripheral flush — just a 2-byte array read).
   if (kEnableHeavyCpuTraces && registers[15] >= 0x180 &&
       registers[15] < 0x1d0) {
-    uint16_t ie = memory.Read16(IORegs::REG_IE);
-    uint16_t if_reg = memory.Read16(IORegs::REG_IF);
-    uint16_t ime = memory.Read16(IORegs::REG_IME);
+    uint16_t ie = memory.ReadIODirect16(IORegs::IE);
+    uint16_t if_reg = memory.ReadIODirect16(IORegs::IF);
+    uint16_t ime = memory.ReadIODirect16(IORegs::IME);
     std::cerr << "[CheckInterrupts during BIOS] PC=0x" << std::hex
               << registers[15] << " IE=0x" << ie << " IF=0x" << if_reg
               << " IME=0x" << ime << " IRQDisabled=" << IRQDisabled(cpsr)
               << std::dec << std::endl;
   }
 
-  uint16_t ime = memory.Read16(IORegs::REG_IME);
-  uint16_t ie = memory.Read16(IORegs::REG_IE);
-  uint16_t if_reg = memory.Read16(IORegs::REG_IF);
+  uint16_t ime = memory.ReadIODirect16(IORegs::IME);
+  uint16_t ie = memory.ReadIODirect16(IORegs::IE);
+  uint16_t if_reg = memory.ReadIODirect16(IORegs::IF);
 
   // Wake from HALT/STOP/IntrWait if any enabled interrupt is pending.
   // Do NOT auto-resume debugger breakpoints/stepback halts.
@@ -501,37 +502,8 @@ void ARM7TDMI::Step() {
     // fall-through to instruction execution
   }
 
-  // Sanity Check SP - crash with detailed diagnostics
+  // SP corruption is fatal — halt, write crash log, and trigger popup
   if (registers[13] == 0) {
-    std::cerr << "\n[FATAL] SP is 0! CPSR=0x" << std::hex << cpsr << " Mode=0x"
-              << (cpsr & 0x1F) << std::dec << std::endl;
-    std::cerr << "Last PC: 0x" << std::hex << lastPC << std::dec << std::endl;
-    std::cerr << "Current PC: 0x" << std::hex << registers[15] << std::dec
-              << std::endl;
-    std::cerr << "Thumb mode: " << (thumbMode ? "YES" : "NO") << std::endl;
-    std::cerr << "r13_irq: 0x" << std::hex << r13_irq << std::dec << std::endl;
-    std::cerr << "r13_usr: 0x" << std::hex << r13_usr << std::dec << std::endl;
-
-    // Show the instruction that's about to execute
-    if (registers[15] < 0x4000) {
-      uint32_t opcode = memory.Read32(registers[15]);
-      std::cerr << "Next instruction at PC: 0x" << std::hex << opcode
-                << std::dec << std::endl;
-    }
-
-    // Dump memory around IRQ stack to see if it's been overwritten
-    std::cerr << "\nMemory at IRQ stack base (0x03007FA0):" << std::endl;
-    for (uint32_t addr = 0x03007FA0; addr < 0x03007FC0; addr += 4) {
-      uint32_t val = memory.Read32(addr);
-      std::cerr << "  0x" << std::hex << addr << ": 0x" << val << std::dec
-                << std::endl;
-    }
-
-    std::cerr
-        << "\n** SP CORRUPTION DETECTED - IRQ stack has been overwritten. **\n"
-        << std::endl;
-
-    // Write crash info to a log file (same pattern as invalid-PC handler).
     halted = true;
     FILE *logFile = fopen("crash_log.txt", "a");
     if (logFile) {
@@ -3679,23 +3651,6 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
 
     uint32_t addr = registers[rb];
     uint32_t startAddr = addr;
-
-    // DEBUG: Trace STMIA to DMA3 control registers (0x40000D4-0x40000DF)
-    // Classic NES games use STM ordering quirks to set up DMA
-    const bool isClassicNes = memory.IsClassicNES();
-    bool traceDMA3 =
-        isClassicNes && (!L && addr >= 0x40000D4 && addr <= 0x40000E0);
-    if (traceDMA3) {
-      fprintf(stderr, "[STMIA DMA3] PC=0x%08X R%d=0x%08X rList=0x%02X",
-              registers[15] - 2, rb, addr, rList);
-      for (int i = 0; i < 8; ++i) {
-        if ((rList >> i) & 1) {
-          fprintf(stderr, " R%d=0x%08X", i, registers[i]);
-        }
-      }
-      fprintf(stderr, "\n");
-      fflush(stderr);
-    }
 
     for (int i = 0; i < 8; ++i) {
       if ((rList >> i) & 1) {

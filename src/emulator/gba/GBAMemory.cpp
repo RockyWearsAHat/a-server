@@ -889,6 +889,7 @@ void GBAMemory::SetSaveType(SaveType type) {
   case SaveType::Auto:
     break;
   default:
+    break;
   }
 
   saveTypeLocked = true; // Prevent further dynamic detection
@@ -1493,6 +1494,13 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
+    if (hasSRAM && !sram.empty()) {
+      uint32_t offset = address & 0xFFFFu; // 64KB mirror
+      if (offset < sram.size()) {
+        return sram[offset];
+      }
+    }
+    break;
   }
   return 0;
 }
@@ -1505,11 +1513,6 @@ uint16_t GBAMemory::Read16(uint32_t address) {
       cpuDataAccessCycles += c;
     }
   }
-  ++dataAccessNestDepth;
-  struct NestGuard {
-    int &d;
-    ~NestGuard() { --d; }
-  } nestGuard{dataAccessNestDepth};
 
   // EEPROM Handling: only for EEPROM-save cartridges.
   uint8_t region = (address >> 24);
@@ -1518,57 +1521,86 @@ uint16_t GBAMemory::Read16(uint32_t address) {
   }
 
   // GBA IO registers are fundamentally 16-bit; halfword accesses are aligned.
-  // Some titles issue unaligned halfword loads/stores into IO space; on
-  // hardware these behave like aligned accesses.
   if (region == 0x04 && (address & 1u)) {
     address &= ~1u;
   }
 
-  // Flush pending peripheral cycles for timing-sensitive reads (GBATEK
-  // compliance)
-  if (region == 0x04) {
+  // Fast paths for common memory regions - avoid 2x Read8 overhead
+  switch (region) {
+  case 0x02: { // EWRAM
+    uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+    return wram_board[off] | (wram_board[off + 1] << 8);
+  }
+  case 0x03: { // IWRAM
+    if (IsIwramMappedAddress(address)) {
+      uint32_t off = address & MemoryMap::WRAM_CHIP_MASK;
+      return wram_chip[off] | (wram_chip[off + 1] << 8);
+    }
+    return 0;
+  }
+  case 0x05: { // Palette RAM
+    uint32_t off = address & MemoryMap::PALETTE_MASK;
+    if (off + 1 < palette_ram.size())
+      return palette_ram[off] | (palette_ram[off + 1] << 8);
+    return 0;
+  }
+  case 0x06: { // VRAM
+    uint32_t off = address & 0x1FFFFu;
+    if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
+      off -= 0x8000u;
+    if (off + 1 < vram.size())
+      return vram[off] | (vram[off + 1] << 8);
+    return 0;
+  }
+  case 0x07: { // OAM
+    uint32_t off = address & MemoryMap::OAM_MASK;
+    if (off + 1 < oam.size())
+      return oam[off] | (oam[off + 1] << 8);
+    return 0;
+  }
+  case 0x08:
+  case 0x09:
+  case 0x0A:
+  case 0x0B:
+  case 0x0C: { // ROM
+    if (romSize > 0) {
+      uint32_t off = address & romMask;
+      if (off + 1 < romSize)
+        return rom[off] | (rom[off + 1] << 8);
+    }
+    return (address >> 1) & 0xFFFF;
+  }
+  case 0x04: { // IO - needs special handling, fall through to Read8 path
+    // Flush pending peripheral cycles for timing-sensitive reads
     const uint32_t offset = address & 0x3FFu;
-    // DISPSTAT/VCOUNT require up-to-date PPU state; timer counters require
-    // up-to-date timer state
     if (gba) {
-      if (offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT) {
-        gba->FlushPendingPeripheralCycles();
-      } else if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
+      if (offset == IORegs::DISPSTAT || offset == IORegs::VCOUNT ||
+          (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H)) {
         gba->FlushPendingPeripheralCycles();
       }
     }
 
-    // Trace DISPSTAT/VCOUNT reads to understand NES emulator pacing
-  }
-
-  uint16_t val = Read8(address) | (Read8(address + 1) << 8);
-
-  // IWRAM halfword 0x03000064. This trace shows whether the value ever changes
-  // and where reads come from.
-
-  // Trace tight IO polling loops (diagnostic for "stuck in forced blank").
-  // This is intentionally very low-volume (change-triggered + periodic).
-
-  // whether the game is actually consuming the expected 0xFFFE/0xFFFF bitstream
-  // halfwords after DMA completes.
-
-  // Timer Counters (Read from internal state)
-  if ((address & 0xFF000000) == IORegs::BASE) {
-    uint32_t offset = address & MemoryMap::IO_REG_MASK;
-
+    // Timer counter fast path
     if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
       int timerIdx = (offset - IORegs::TM0CNT_L) / IORegs::TIMER_CHANNEL_SIZE;
       if ((offset % IORegs::TIMER_CHANNEL_SIZE) == 0) {
-        // Trace ALL timer 16-bit reads
-
-        // Trace Timer0 reads to understand NES emulator timing behavior
-        if (timerIdx == 0) {
-        }
         return timerCounters[timerIdx];
       }
     }
+    break; // Fall through to Read8 decomposition for IO
+  }
+  default:
+    break;
   }
 
+  // Fallback for IO and unusual regions
+  ++dataAccessNestDepth;
+  struct NestGuard {
+    int &d;
+    ~NestGuard() { --d; }
+  } nestGuard{dataAccessNestDepth};
+
+  uint16_t val = Read8(address) | (Read8(address + 1) << 8);
   return val;
 }
 
@@ -1620,11 +1652,6 @@ uint32_t GBAMemory::Read32(uint32_t address) {
       cpuDataAccessCycles += c;
     }
   }
-  ++dataAccessNestDepth;
-  struct NestGuard {
-    int &d;
-    ~NestGuard() { --d; }
-  } nestGuard{dataAccessNestDepth};
 
   // EEPROM Handling - 32-bit read performs two 16-bit reads for EEPROM-save
   // cartridges only.
@@ -1640,18 +1667,79 @@ uint32_t GBAMemory::Read32(uint32_t address) {
     address &= ~3u;
   }
 
+  // Fast paths for common memory regions - avoid 4x Read8 overhead
+  switch (region) {
+  case 0x02: { // EWRAM
+    uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+    return wram_board[off] | (wram_board[off + 1] << 8) |
+           (wram_board[off + 2] << 16) | (wram_board[off + 3] << 24);
+  }
+  case 0x03: { // IWRAM
+    if (IsIwramMappedAddress(address)) {
+      uint32_t off = address & MemoryMap::WRAM_CHIP_MASK;
+      return wram_chip[off] | (wram_chip[off + 1] << 8) |
+             (wram_chip[off + 2] << 16) | (wram_chip[off + 3] << 24);
+    }
+    return 0;
+  }
+  case 0x05: { // Palette RAM
+    uint32_t off = address & MemoryMap::PALETTE_MASK;
+    if (off + 3 < palette_ram.size())
+      return palette_ram[off] | (palette_ram[off + 1] << 8) |
+             (palette_ram[off + 2] << 16) | (palette_ram[off + 3] << 24);
+    return 0;
+  }
+  case 0x06: { // VRAM
+    uint32_t off = address & 0x1FFFFu;
+    if (off >= MemoryMap::VRAM_ACTUAL_SIZE)
+      off -= 0x8000u;
+    if (off + 3 < vram.size())
+      return vram[off] | (vram[off + 1] << 8) |
+             (vram[off + 2] << 16) | (vram[off + 3] << 24);
+    return 0;
+  }
+  case 0x07: { // OAM
+    uint32_t off = address & MemoryMap::OAM_MASK;
+    if (off + 3 < oam.size())
+      return oam[off] | (oam[off + 1] << 8) |
+             (oam[off + 2] << 16) | (oam[off + 3] << 24);
+    return 0;
+  }
+  case 0x08:
+  case 0x09:
+  case 0x0A:
+  case 0x0B:
+  case 0x0C: { // ROM
+    if (romSize > 0) {
+      uint32_t off = address & romMask;
+      if (off + 3 < romSize)
+        return rom[off] | (rom[off + 1] << 8) |
+               (rom[off + 2] << 16) | (rom[off + 3] << 24);
+    }
+    uint32_t aligned = address & ~3u;
+    return ((aligned >> 1) & 0xFFFF) | (((aligned + 2) >> 1) << 16);
+  }
+  default:
+    break;
+  }
+
+  // Fallback for IO and unusual regions
+  ++dataAccessNestDepth;
+  struct NestGuard {
+    int &d;
+    ~NestGuard() { --d; }
+  } nestGuard{dataAccessNestDepth};
+
   uint32_t val = Read8(address) | (Read8(address + 1) << 8) |
                  (Read8(address + 2) << 16) | (Read8(address + 3) << 24);
-
-  // Trace tight IO polling loops via 32-bit reads.
 
   return val;
 }
 
 uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
   // Direct ROM access for instruction fetch - bypass EEPROM and other checks
-  if ((address >> 24) >= 0x08 && (address >> 24) <= 0x0C) {
-    // Hardware-accurate ROM mirroring using power-of-two mask
+  uint8_t region = (address >> 24);
+  if (region >= 0x08 && region <= 0x0C) {
     uint32_t offset = address & romMask;
     if (offset + 3 < romSize) {
       uint8_t b0 = rom[offset];
@@ -1660,9 +1748,24 @@ uint32_t GBAMemory::ReadInstruction32(uint32_t address) {
       uint8_t b3 = rom[offset + 3u];
       return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
-    // Open bus: return address-based value (mGBA LOAD_CART behavior)
     uint32_t aligned = address & ~3u;
     return ((aligned >> 1) & 0xFFFF) | (((aligned + 2) >> 1) << 16);
+  }
+  // IWRAM
+  if (region == 0x03) {
+    uint32_t off = address & MemoryMap::WRAM_CHIP_MASK;
+    if (off + 3 < wram_chip.size())
+      return wram_chip[off] | (wram_chip[off + 1] << 8) |
+             (wram_chip[off + 2] << 16) | (wram_chip[off + 3] << 24);
+    return 0;
+  }
+  // EWRAM
+  if (region == 0x02) {
+    uint32_t off = address & MemoryMap::WRAM_BOARD_MASK;
+    if (off + 3 < wram_board.size())
+      return wram_board[off] | (wram_board[off + 1] << 8) |
+             (wram_board[off + 2] << 16) | (wram_board[off + 3] << 24);
+    return 0;
   }
   // Fallback
   return Read8(address) | (Read8(address + 1) << 8) |
@@ -1980,6 +2083,16 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     break;
   }
   case 0x0E: // SRAM/Flash
+    if (hasSRAM && !sram.empty()) {
+      uint32_t offset = address & 0xFFFFu; // 64KB mirror
+      if (offset < sram.size()) {
+        sram[offset] = value;
+      }
+    } else {
+      // EEPROM cartridge - forward to EEPROM state machine
+      WriteEEPROM(value);
+    }
+    break;
   case 0x0D: // EEPROM - ignore 8-bit writes
     // Some titles may clock the EEPROM serial interface via byte writes.
     // Treat this as a normal EEPROM bit write (D0).
@@ -2063,6 +2176,17 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     if (offset == IORegs::SOUNDCNT_X) {
       uint16_t currentVal = io_regs[offset] | (io_regs[offset + 1] << 8);
       value = (value & 0x80) | (currentVal & 0x0F);
+      if (apu)
+        apu->WriteRegister(offset, value);
+    }
+
+    // PSG sound registers → forward to APU for hardware-accurate emulation
+    if (apu) {
+      if ((offset >= IORegs::SOUND1CNT_L && offset <= IORegs::SOUND2CNT_H) ||
+          (offset >= IORegs::SOUND3CNT_L && offset <= IORegs::SOUND4CNT_H) ||
+          offset == IORegs::SOUNDCNT_L) {
+        apu->WriteRegister(offset, value);
+      }
     }
 
     // Timer Control (GBATEK timers 0-3)
@@ -2103,11 +2227,9 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     address &= ~1u;
   }
 
-  // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
-  // The current emulator relies on the PPU tests and game behavior as a
-  // practical guide; stricter timing (based on
-  // ppuTimingScanline/ppuTimingCycle) previously caused valid game writes to be
-  // dropped, corrupting VRAM.
+  // NOTE: VRAM/Palette timing restrictions are not enforced here.
+  // OAM timing restrictions ARE enforced in the region-specific Write16/Write32
+  // branches below.
 
   // IMPORTANT: Don't implement halfword writes via two Write8() calls for RAM.
   // Write8() has IRQ handler clamping logic and must not run on intermediate
@@ -2167,12 +2289,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     } else if (region == 0x07) { // OAM
       uint32_t offset = address & MemoryMap::OAM_MASK;
       if (offset + 1 < oam.size()) {
-        // OAM writes are blocked during visible scanlines (unless HBlank free)
-        // But reusing existing check logic is complex without helper.
-        // However, Write16 is typically allowed.
-        // We will trust the OAM visibility check isn't strictly required for
-        // bulk transfers or we should call WriteOam16 helper? For now, write
-        // direct to assume HBlank/VBlank transfer.
         oam[offset] = b0;
         oam[offset + 1] = b1;
         if (offset + 1 < oam_shadow.size()) {
@@ -2252,8 +2368,8 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
     address &= ~3u;
   }
 
-  // NOTE: VRAM/Palette/OAM timing restrictions are not enforced here.
-  // (Same as Write16 - see comment there.)
+  // NOTE: VRAM/Palette timing restrictions are not enforced for Write32.
+  // OAM timing restrictions ARE enforced below.
 
   // IMPORTANT: Don't implement word writes via four Write8() calls for RAM.
   // Write8() has IRQ handler clamping logic and must not run on intermediate
@@ -2455,26 +2571,26 @@ void GBAMemory::CheckDMA(int timing) {
 void GBAMemory::PerformDMA(int channel) {
   static bool inImmediateDMA = false;
 
-  if (dmaInProgress) {
+  uint32_t baseOffset = IORegs::DMA0SAD + (channel * IORegs::DMA_CHANNEL_SIZE);
+
+  uint16_t control = io_regs[baseOffset + 10] | (io_regs[baseOffset + 11] << 8);
+
+  int timing = (control & DMAControl::START_TIMING_MASK) >> 12;
+
+  // Sound FIFO DMA (timing 3) must never be blocked by other DMAs —
+  // on real hardware it has highest priority and cannot be starved.
+  if (dmaInProgress && timing != 3) {
     return;
   }
 
+  bool wasDmaInProgress = dmaInProgress;
   dmaInProgress = true;
   struct DMAGuard {
     bool &flag;
-    ~DMAGuard() { flag = false; }
-  } guard{dmaInProgress};
+    bool restore;
+    ~DMAGuard() { flag = restore; }
+  } guard{dmaInProgress, wasDmaInProgress};
 
-  uint32_t baseOffset = IORegs::DMA0SAD + (channel * IORegs::DMA_CHANNEL_SIZE);
-
-  // CNT_H (Control) - 16 bit
-  uint16_t control = io_regs[baseOffset + 10] | (io_regs[baseOffset + 11] << 8);
-
-  // Decode timing first
-  int timing = (control & DMAControl::START_TIMING_MASK) >> 12;
-
-  // Only guard immediate timing (timing=0) DMAs from recursion.
-  // Note: dmaInProgress already prevents nested DMAs across all timings.
   if (timing == 0 && inImmediateDMA) {
     return;
   }
@@ -2484,7 +2600,6 @@ void GBAMemory::PerformDMA(int channel) {
     inImmediateDMA = true;
   }
 
-  // CNT_L (Count) - 16 bit
   uint32_t count = io_regs[baseOffset + 8] | (io_regs[baseOffset + 9] << 8);
   bool repeat = (control >> 9) & 1;
 
@@ -2569,8 +2684,9 @@ void GBAMemory::PerformDMA(int channel) {
   bool dstIsIWRAM = (currentDst >> 24) == 0x03;
   const bool isDKC = (gameCode == "ADKE" || gameCode == "ADKP" ||
                       gameCode == "ADKJ" || gameCode == "ADKK");
-  const bool allowFixedIWRAMSkip =
-      EnvFlagCached("AIO_DKC_DMA_FIXED_IWRAM_SKIP") || isDKC;
+  static const bool envFixedIWRAMSkip =
+      EnvTruthy(std::getenv("AIO_DKC_DMA_FIXED_IWRAM_SKIP"));
+  const bool allowFixedIWRAMSkip = envFixedIWRAMSkip || isDKC;
   if (allowFixedIWRAMSkip && destCtrl == 2 && dstIsIWRAM && count > 100) {
     // Update timing as if full DMA happened using proper wait states
     int step = is32Bit ? 4 : 2;
@@ -2614,13 +2730,13 @@ void GBAMemory::PerformDMA(int channel) {
                          eepromState == EEPROMState::ReadData);
   // CRITICAL: Only fast-path if buffer is valid for THIS transaction (set after
   // address+stop bit)
-  const bool disableFastPath = EnvFlagCached("AIO_EEPROM_DISABLE_FASTPATH");
+  const bool disableFastPath = []{ static const bool v = EnvTruthy(std::getenv("AIO_EEPROM_DISABLE_FASTPATH")); return v; }();
   bool canFastPath = !disableFastPath && srcIsEEPROM && inReadSequence &&
                      eepromBufferValid && count >= 4;
 
   if (canFastPath) {
-    const bool lsbFirst = EnvFlagCached("AIO_EEPROM_LSB_FIRST");
-    const bool dummyHigh = EnvFlagCached("AIO_EEPROM_DUMMY_HIGH");
+    const bool lsbFirst = []{ static const bool v = EnvTruthy(std::getenv("AIO_EEPROM_LSB_FIRST")); return v; }();
+    const bool dummyHigh = []{ static const bool v = EnvTruthy(std::getenv("AIO_EEPROM_DUMMY_HIGH")); return v; }();
 
     const EEPROMState startState = eepromState;
     const int startBitCounter = eepromBitCounter;
@@ -2638,7 +2754,7 @@ void GBAMemory::PerformDMA(int channel) {
     // appear to treat the sampled halfword as a literal 0/1 value; allow a
     // D0-only mode for DMA behind an env var so we can validate behavior
     // without hard-coding game hacks.
-    const bool d0OnlyDMASamples = EnvFlagCached("AIO_EEPROM_DMA_D0_ONLY");
+    const bool d0OnlyDMASamples = []{ static const bool v = EnvTruthy(std::getenv("AIO_EEPROM_DMA_D0_ONLY")); return v; }();
     uint64_t debugBits = 0;
     for (uint32_t i = 0; i < count; ++i) {
       uint16_t word;
@@ -2898,36 +3014,33 @@ void GBAMemory::UpdateTimers(int cycles) {
       eepromWriteDelay = 0;
   }
 
-  // One-time timer state dump at frame 30
-
   int previousOverflows = 0;
 
   for (int i = 0; i < 4; ++i) {
     uint32_t baseOffset = IORegs::TM0CNT_L + (i * IORegs::TIMER_CHANNEL_SIZE);
     uint16_t control = io_regs[baseOffset + 2] | (io_regs[baseOffset + 3] << 8);
 
-    if (control & TimerControl::ENABLE) { // Timer Enabled
+    if (control & TimerControl::ENABLE) {
 
       int increments = 0;
-      if (control & TimerControl::COUNT_UP) { // Count-Up (Cascade)
+      if (control & TimerControl::COUNT_UP) {
         increments = previousOverflows;
       } else {
-        // Prescaler
         const int prescaler = control & TimerControl::PRESCALER_MASK;
         int threshold = 1;
         switch (prescaler) {
         case 0:
           threshold = 1;
-          break; // F/1
+          break;
         case 1:
           threshold = 64;
-          break; // F/64
+          break;
         case 2:
           threshold = 256;
-          break; // F/256
+          break;
         case 3:
           threshold = 1024;
-          break; // F/1024
+          break;
         }
 
         timerPrescalerCounters[i] += cycles;
@@ -2950,15 +3063,8 @@ void GBAMemory::UpdateTimers(int cycles) {
             overflowCount++;
             counter = reload;
 
-            // Notify APU of timer overflow (always — sample consumption must
-            // not be suppressed during DMA, only the DMA re-trigger is
-            // guarded by dmaInProgress below).
             if (apu && (i == 0 || i == 1)) {
               apu->OnTimerOverflow(i);
-            }
-
-            // Trace Timer0 overflow rate per frame
-            if (i == 0) {
             }
 
             // IRQ
@@ -3008,7 +3114,7 @@ void GBAMemory::UpdateTimers(int cycles) {
                       }
                     }
 
-                    if (shouldRequest && !dmaInProgress) {
+                    if (shouldRequest) {
                       PerformDMA(dma);
                     }
                   }
@@ -3032,14 +3138,11 @@ void GBAMemory::UpdateTimers(int cycles) {
 }
 
 void GBAMemory::AdvanceCycles(int cycles) {
-  // DIAGNOSTIC: Trace AdvanceCycles
-  static int advanceTraces = 0;
-
   UpdateTimers(cycles);
-  if (ppu)
-    ppu->Update(cycles);
   if (apu)
     apu->Update(cycles);
+  if (ppu)
+    ppu->Update(cycles);
 }
 
 void GBAMemory::ApplyDeferredWrites() {
@@ -3075,9 +3178,7 @@ uint16_t GBAMemory::GetTimerReload(int timerIdx) const {
     return 0;
   const uint32_t baseOffset =
       IORegs::TM0CNT_L + (uint32_t)timerIdx * IORegs::TIMER_CHANNEL_SIZE;
-  if (baseOffset + 1 >= io_regs.size())
-    return 0;
-  return (uint16_t)(io_regs[baseOffset] | (io_regs[baseOffset + 1] << 8));
+  return ReadIODirect16(baseOffset);
 }
 
 uint16_t GBAMemory::GetTimerControl(int timerIdx) const {
@@ -3085,10 +3186,7 @@ uint16_t GBAMemory::GetTimerControl(int timerIdx) const {
     return 0;
   const uint32_t baseOffset =
       IORegs::TM0CNT_L + (uint32_t)timerIdx * IORegs::TIMER_CHANNEL_SIZE;
-  const uint32_t ctrlOff = baseOffset + 2u;
-  if (ctrlOff + 1 >= io_regs.size())
-    return 0;
-  return (uint16_t)(io_regs[ctrlOff] | (io_regs[ctrlOff + 1] << 8));
+  return ReadIODirect16(baseOffset + 2u);
 }
 
 uint16_t GBAMemory::ReadEEPROM() {

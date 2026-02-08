@@ -67,27 +67,6 @@ std::atomic<uint64_t> g_ppuInstanceCounter{1};
 inline uint64_t NextPpuInstanceId() {
   return g_ppuInstanceCounter.fetch_add(1, std::memory_order_relaxed);
 }
-inline bool EnvTruthy(const char *v) {
-  return v != nullptr && v[0] != '\0' && v[0] != '0';
-}
-
-// Cache for env-flag lookups used by functional logic
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  bool enabled = EnvTruthy(std::getenv(name));
-  cache[name] = enabled;
-  return enabled;
-}
-
-bool DisableAllClassicNesHandling() {
-  static const bool disabled = EnvFlagCached("AIO_NO_NES_HANDLING");
-  return disabled;
-}
-
 inline uint16_t ReadLE16(const uint8_t *data, size_t size, uint32_t offset) {
   if (!data || size == 0)
     return 0;
@@ -156,106 +135,6 @@ inline uint16_t ReadBgVram16(const uint8_t *vram, size_t /*vramSize*/,
   return static_cast<uint16_t>(vram[o0] | (vram[o1] << 8));
 }
 
-// Detect if a tilemap area looks like ARM THUMB code rather than valid tilemap
-// data. Classic NES games store executable code in upper BG VRAM, and if BG0's
-// screenBase points there, the code bytes get interpreted as garbage tilemap
-// entries. This function scans the tilemap area looking for ARM THUMB
-// instruction patterns.
-inline bool TilemapLooksLikeCode(const uint8_t *vram, size_t vramSize,
-                                 uint32_t mapBaseOffset, int numEntries = 64) {
-  if (!vram || vramSize == 0)
-    return false;
-
-  int codePatternCount = 0;
-  int totalNonZero = 0;
-
-  for (int i = 0; i < numEntries; ++i) {
-    const uint32_t off = mapBaseOffset + static_cast<uint32_t>(i * 2);
-    if (off + 1 >= vramSize)
-      break;
-
-    uint16_t entry = ReadBgVram8(vram, vramSize, off) |
-                     (ReadBgVram8(vram, vramSize, off + 1) << 8);
-
-    if (entry == 0)
-      continue;
-    totalNonZero++;
-
-    // Check for common ARM THUMB instruction patterns in high byte
-    uint8_t hi = (entry >> 8) & 0xFF;
-
-    // PUSH/POP with registers
-    if ((hi & 0xFE) == 0xB4 || (hi & 0xFE) == 0xBC) {
-      codePatternCount++;
-      continue;
-    }
-    // BX/BLX register
-    if ((hi & 0xFF) == 0x47) {
-      codePatternCount++;
-      continue;
-    }
-    // BL prefix (F0xx, F7xx, F3xx, etc.)
-    if ((hi & 0xF8) == 0xF0 || (hi & 0xF8) == 0xF8) {
-      codePatternCount++;
-      continue;
-    }
-    // LDR Rd, [PC, #imm] (literal pool load) - 0x48-0x4F
-    if ((hi & 0xF8) == 0x48) {
-      codePatternCount++;
-      continue;
-    }
-    // Conditional branches (Bcc) - 0xD0-0xDF
-    if ((hi & 0xF0) == 0xD0) {
-      codePatternCount++;
-      continue;
-    }
-    // MOV Rd, #imm - 0x20-0x27
-    if ((hi & 0xF8) == 0x20) {
-      codePatternCount++;
-      continue;
-    }
-    // CMP Rn, #imm - 0x28-0x2F
-    if ((hi & 0xF8) == 0x28) {
-      codePatternCount++;
-      continue;
-    }
-    // ADD Rd, #imm - 0x30-0x37
-    if ((hi & 0xF8) == 0x30) {
-      codePatternCount++;
-      continue;
-    }
-    // SUB Rd, #imm - 0x38-0x3F
-    if ((hi & 0xF8) == 0x38) {
-      codePatternCount++;
-      continue;
-    }
-    // LDR/STR with register offset - 0x50-0x5F
-    if ((hi & 0xF0) == 0x50) {
-      codePatternCount++;
-      continue;
-    }
-    // LDR/STR halfword - 0x80-0x8F
-    if ((hi & 0xF0) == 0x80) {
-      codePatternCount++;
-      continue;
-    }
-    // STR/LDR SP-relative - 0x90-0x9F
-    if ((hi & 0xF0) == 0x90) {
-      codePatternCount++;
-      continue;
-    }
-    // ADD PC/SP - 0xA0-0xAF (but 0xA0 is also suspicious as tilemap)
-    if ((hi & 0xF0) == 0xA0 && (hi & 0x08)) {
-      codePatternCount++;
-      continue;
-    }
-  }
-
-  // If we found at least 3 strong code patterns among non-zero entries, it's
-  // code
-  return codePatternCount >= 3;
-}
-
 } // namespace
 
 PPU::PPU(GBAMemory &mem)
@@ -295,9 +174,6 @@ void PPU::Reset() {
 
   // Clear OBJ window mask
   objWindowMaskLine.fill(0);
-
-  // CRITICAL: Reset Classic NES mode flag (fixes state leakage between ROMs)
-  classicNesMode = false;
 
   // Clear framebuffers to black
   std::fill(backBuffer.begin(), backBuffer.end(), 0xFF000000);
@@ -458,22 +334,6 @@ void PPU::Update(int cycles) {
             // Also set BIOS_IF for IntrWait/VBlankIntrWait
             uint16_t biosIF = memory.Read16(0x03007FF8) | 1;
             memory.Write16(0x03007FF8, biosIF);
-          }
-
-          // DIAG: count VBlank occurrences
-          {
-            static FILE *vbLog = nullptr;
-            static uint64_t vbCount = 0;
-            if (!vbLog)
-              vbLog = fopen("/tmp/vblank_diag.txt", "w");
-            vbCount++;
-            if (vbCount % 60 == 0 && vbLog) {
-              fprintf(vbLog, "VBlank #%llu dispstat_irq=%d ime=%d ie_vbl=%d\n",
-                      vbCount, (dispstat & 0x8) ? 1 : 0,
-                      (memory.ReadIORegister16Internal(0x208) & 1),
-                      (memory.ReadIORegister16Internal(0x200) & 1));
-              fflush(vbLog);
-            }
           }
 
           // Defer VBlank DMA until after all end-of-line bookkeeping
@@ -1318,33 +1178,6 @@ void PPU::RenderBackground(int bgIndex) {
   int screenBaseBlock = (bgcnt >> 8) & 0x1F;
   bool is8bpp = ((bgcnt >> 7) & 1) != 0;
 
-  // Classic NES Series fix: The internal NES emulator stores executable code
-  // in upper BG VRAM. When a BG's tilemap points to this code region, the ARM
-  // THUMB instructions get interpreted as tilemap entries, causing severe
-  // graphics corruption. Detect if tilemap looks like code and skip rendering.
-  // BG3 (screenBase 4) contains the real tilemap and renders correctly.
-  const bool classicNesActive =
-      classicNesMode && !DisableAllClassicNesHandling();
-  if (classicNesActive && bgIndex == 0 && screenBaseBlock >= 12) {
-    const uint8_t *vramData = memory.GetVRAMData();
-    const size_t vramSize = memory.GetVRAMSize();
-    uint32_t mapBaseOffset = screenBaseBlock * 2048;
-
-    // Cache the code-detection result per frame to avoid scanning 64 entries
-    // on every scanline (160 calls/frame → 1 call/frame)
-    if (frameCount != cachedCodeCheckFrame ||
-        mapBaseOffset != cachedCodeCheckMapBase) {
-      cachedCodeCheckResult =
-          TilemapLooksLikeCode(vramData, vramSize, mapBaseOffset);
-      cachedCodeCheckFrame = frameCount;
-      cachedCodeCheckMapBase = mapBaseOffset;
-    }
-
-    if (cachedCodeCheckResult) {
-      return;
-    }
-  }
-
   // 2: 256x512 (32x64 tiles)
   // 3: 512x512 (64x64 tiles)
   int screenSize = (bgcnt >> 14) & 0x3;
@@ -1428,15 +1261,6 @@ void PPU::RenderBackground(int bgIndex) {
     vFlip = (tileEntry >> 11) & 1;
     paletteBank = (tileEntry >> 12) & 0xF;
 
-    // Classic NES Series fix: The NES emulator stores code in BG VRAM after
-    // tile data. Tilemaps often contain garbage entries with high tile indices
-    // that would read from code regions instead of tile graphics.
-    // NES only has 256 tiles, so mask to 8 bits to prevent corruption.
-    // This matches what the original NES hardware would do.
-    if (classicNesActive) {
-      tileIndex &= 0xFF;
-    }
-
     int inTileX = scrolledX % 8;
     int inTileY = scrolledY % 8;
 
@@ -1455,13 +1279,11 @@ void PPU::RenderBackground(int bgIndex) {
     // specific tile-base guessing and keeps behavior predictable.
 
     if (!is8bpp) {
-      // 4bpp (16 colors) - Standard GBA format for ALL games including Classic
-      // NES The tile data bytes contain pairs of 4-bit color indices
+      // 4bpp (16 colors) - Standard GBA format
       uint32_t tileStartOffset =
           (tileBase - 0x06000000u) + (uint32_t)tileIndex * 32u;
 
       // mGBA behavior: skip tiles that would read from OBJ VRAM (>= 0x10000)
-      // These tiles are simply not rendered, leaving transparent pixels
       if (tileStartOffset >= 0x10000u) {
         colorIndex = 0; // Transparent
       } else {
@@ -1568,8 +1390,6 @@ void PPU::RestoreFramebuffer(const uint32_t *data, size_t count) {
     std::memcpy(frontBuffer.data(), data, count * sizeof(uint32_t));
   }
 }
-
-void PPU::SetClassicNesMode(bool enabled) { classicNesMode = enabled; }
 
 // Get window enable bits for a given pixel position
 // Returns the enable mask (bits 0-3: BG0-3, bit 4: OBJ, bit 5: Color Effects)

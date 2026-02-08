@@ -130,9 +130,10 @@ TEST(APUTest, PSGWavePlayback) {
   mem.Reset();
   apu.Reset();
 
+  // Use larger wave values to avoid integer truncation at reduced volumes
   std::array<uint8_t, 32> w;
   for (int i = 0; i < 32; ++i)
-    w[i] = uint8_t(i % 16);
+    w[i] = uint8_t((i % 2 == 0) ? 15 : 8);
   apu.SetPSGWaveRAM(w);
   apu.SetPSGWaveParams(4, 0); // periodSamples=4, volume=0 (100%)
   auto s = apu.GeneratePSGSamples(2, 8);
@@ -214,15 +215,17 @@ TEST(APUTest, PSGNoiseProducesBothPolarities) {
   apu.Reset();
   apu.SetPSGNoiseParams(1, false, 15);
   auto s = apu.GeneratePSGSamples(3, 64);
-  int pos = 0, neg = 0;
+  // Noise channel outputs 0 or currentVolume (unsigned, matching mGBA)
+  // Verify both zero and non-zero values exist (LFSR produces both states)
+  int nonZero = 0, zero = 0;
   for (auto v : s) {
     if (v > 0)
-      ++pos;
-    else if (v < 0)
-      ++neg;
+      ++nonZero;
+    else
+      ++zero;
   }
-  EXPECT_GT(pos, 0);
-  EXPECT_GT(neg, 0);
+  EXPECT_GT(nonZero, 0);
+  EXPECT_GT(zero, 0);
 }
 
 // ============================================================================

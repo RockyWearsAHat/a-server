@@ -90,6 +90,15 @@ public:
   // Internal IO Read (Bypasses side effects - used by PPU to avoid recursion)
   uint16_t ReadIORegister16Internal(uint32_t offset) const;
 
+  // Direct IO register read - bypasses write-only checks, open bus, and access
+  // cycle tracking. Used by APU/timer hot paths where the offset is known-good.
+  inline uint16_t ReadIODirect16(uint32_t offset) const {
+    if (offset + 1 < io_regs.size())
+      return static_cast<uint16_t>(io_regs[offset] |
+                                   (io_regs[offset + 1] << 8));
+    return 0;
+  }
+
   // Callback for IO Writes (Used by PPU to track Affine Registers)
   using IOWriteCallback = void (*)(void *context, uint32_t offset,
                                    uint16_t value);
@@ -100,11 +109,6 @@ public:
   void SetGraphicsWriteCallback(GraphicsWriteCallback callback, void *context) {
     onGraphicsWrite = callback;
     graphicsWriteContext = context;
-  }
-
-  // Check if this is a Classic NES Series game (game code starts with "FD")
-  bool IsClassicNES() const {
-    return gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
   }
 
   void PerformDMA(int channel);

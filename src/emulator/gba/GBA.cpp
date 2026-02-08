@@ -159,13 +159,6 @@ bool GBA::LoadROM(const std::string &path) {
 
     Reset();
 
-    // Enable Classic NES mode for FD* games (Donkey Kong, etc.)
-    // These games use NES 2bpp tile format stored in GBA VRAM
-    if (memory->IsClassicNES()) {
-      ppu->SetClassicNesMode(true);
-      std::cout << "[LoadROM] Enabled Classic NES mode" << std::endl;
-    }
-
     std::cout << "[LoadROM] CPU Reset complete. PC=0x" << std::hex
               << cpu->GetRegister(15) << " CPSR=0x" << cpu->GetCPSR()
               << std::dec << std::endl;
@@ -303,7 +296,7 @@ void GBA::Reset() {
   stallCycleAccumulator = 0;
   stallCrashTriggered = false;
   pendingPeripheralCycles = 0;
-  totalCyclesExecuted.store(0, std::memory_order_relaxed);
+  totalCyclesExecuted = 0;
 }
 
 int GBA::Step() {
@@ -385,59 +378,7 @@ int GBA::Step() {
     cpu->PollInterrupts();
   }
 
-  totalCyclesExecuted.fetch_add((uint64_t)totalCycles,
-                                std::memory_order_relaxed);
-
-  // DIAG: track average cycles per instruction
-  {
-    static uint64_t diagSteps = 0;
-    static uint64_t diagTotalCyc = 0;
-    static uint64_t diagBranchPenalties = 0;
-    static uint64_t diagDataCycles = 0;
-    static uint64_t diagCpuCycles = 0;
-    static uint64_t diagFetchRom = 0;
-    static uint64_t diagFetchIwram = 0;
-    static uint64_t diagDmaCyc = 0;
-    static uint64_t diagHaltSteps = 0;
-    static uint64_t diagNonHaltSteps = 0;
-    uint8_t fetchRgn = (uint8_t)(pcBefore >> 24);
-    diagSteps++;
-    diagTotalCyc += totalCycles;
-    diagDmaCyc += dmaCycles;
-    if (cpu->IsHalted()) {
-      diagHaltSteps++;
-    } else {
-      diagDataCycles += dataAccessCycles;
-      diagCpuCycles += cpuCycles;
-      diagNonHaltSteps++;
-      if (fetchRgn >= 0x08 && fetchRgn <= 0x0D)
-        diagFetchRom++;
-      else if (fetchRgn == 0x03)
-        diagFetchIwram++;
-      if ((pcAfter & ~0x1) != expectedNextPC)
-        diagBranchPenalties++;
-    }
-    if (diagSteps % 5000000 == 0) {
-      static FILE *cycF = nullptr;
-      if (!cycF)
-        cycF = fopen("/tmp/cycle_diag.txt", "w");
-      if (cycF) {
-        uint16_t waitcnt = memory->Read16(0x04000204);
-        double avgCpu =
-            diagNonHaltSteps ? (double)diagCpuCycles / diagNonHaltSteps : 0;
-        double avgData =
-            diagNonHaltSteps ? (double)diagDataCycles / diagNonHaltSteps : 0;
-        fprintf(cycF,
-                "steps=%llu haltSteps=%llu nonHalt=%llu avgCPU=%.2f "
-                "branches=%llu dataCyc=%llu avgData=%.2f "
-                "fetchRom=%llu fetchIwram=%llu dmaCyc=%llu WAITCNT=0x%04X\n",
-                diagSteps, diagHaltSteps, diagNonHaltSteps, avgCpu,
-                diagBranchPenalties, diagDataCycles, avgData, diagFetchRom,
-                diagFetchIwram, diagDmaCyc, waitcnt);
-        fflush(cycF);
-      }
-    }
-  }
+  totalCyclesExecuted += (uint64_t)totalCycles;
 
   return totalCycles;
 }

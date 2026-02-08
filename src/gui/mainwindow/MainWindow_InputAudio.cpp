@@ -56,6 +56,7 @@ void MainWindow::initAudio() {
   // prefers 48000Hz). Keep the emulator's audio resampler aligned to the
   // actual device rate.
   if (have.freq > 0) {
+    actualAudioRate_ = have.freq;
     gba.GetAPU().SetOutputSampleRate(have.freq);
     audioRecorder_.SetSampleRate(have.freq);
   }
@@ -102,7 +103,7 @@ bool MainWindow::StartAVRecording(const std::string &path) {
     cfg.videoHeight = 720;
     cfg.videoFps = 60;
   }
-  cfg.audioSampleRate = AUDIO_SAMPLE_RATE;
+  cfg.audioSampleRate = actualAudioRate_;
   cfg.audioChannels = 2;
 
   avRecorder_.Configure(cfg);

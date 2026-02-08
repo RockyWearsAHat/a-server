@@ -44,7 +44,7 @@ public:
 
   // Total cycles executed since last Reset(); useful for deterministic tooling.
   uint64_t GetTotalCycles() const {
-    return totalCyclesExecuted.load(std::memory_order_relaxed);
+    return totalCyclesExecuted;
   }
 
   // Debugger controls (forwarded to ARM7TDMI)
@@ -87,7 +87,7 @@ private:
   int pendingPeripheralCycles = 0;
   static constexpr int PERIPHERAL_BATCH_CYCLES = 8;
 
-  std::atomic<uint64_t> totalCyclesExecuted{0};
+  uint64_t totalCyclesExecuted = 0;
 };
 
 } // namespace AIO::Emulator::GBA

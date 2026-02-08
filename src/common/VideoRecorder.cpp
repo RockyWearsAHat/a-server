@@ -226,9 +226,10 @@ bool AVRecorder::StopRecording() {
   // Encode to final output
   bool ok = EncodeOutput();
 
-  // Cleanup temp files
-  std::filesystem::remove(tempVideoPath_);
-  std::filesystem::remove(tempAudioPath_);
+  // Cleanup temp files (DISABLED FOR DEBUGGING)
+  // std::filesystem::remove(tempVideoPath_);
+  // std::filesystem::remove(tempAudioPath_);
+  std::cout << "[AVRecorder] Temp files kept for debugging: " << tempVideoPath_ << ", " << tempAudioPath_ << std::endl;
 
   return ok;
 }

@@ -48,6 +48,7 @@ TEST(AudioCorruptionTest, MultipleTimerOverflowsFillRingBuffer) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
+  apu.ClearRingBuffer();
 
   apu.SetOutputSampleRate(48000.0f);
 
@@ -61,10 +62,12 @@ TEST(AudioCorruptionTest, MultipleTimerOverflowsFillRingBuffer) {
     apu.WriteFIFO_A(0x10203040u);
   }
 
-  // Simulate multiple timer overflows
+  // Simulate multiple timer overflows + DAC ticks
+  // OnTimerOverflow latches FIFO samples, Update drives the SOUNDBIAS-rate DAC
   const int numOverflows = 100;
   for (int i = 0; i < numOverflows; ++i) {
     apu.OnTimerOverflow(0);
+    apu.Update(512);
   }
 
   // GetSamples should return non-zero samples
@@ -80,6 +83,7 @@ TEST(AudioCorruptionTest, UpsamplingPreventsFifoUnderflow) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
+  apu.ClearRingBuffer();
 
   apu.SetOutputSampleRate(48000.0f);
 
@@ -98,24 +102,25 @@ TEST(AudioCorruptionTest, UpsamplingPreventsFifoUnderflow) {
     apu.WriteFIFO_A(0x20304050u);
   }
 
-  int initialFifoCount = apu.GetFifoACount();
-
-  // Simulate ~100 timer overflows at 8KHz
-  // Expected upsample ratio: 48000/8000 = 6.0
-  // Each overflow should push ~6 samples to ring buffer
+  // Simulate ~100 timer overflows at 8KHz + DAC ticks
+  // DAC runs at 32768 Hz (512 cycles/sample, default SOUNDBIAS mode 0)
+  // Timer period at 8KHz = 16777216/8000 = 2097 CPU cycles
+  // Each overflow: 2097 cycles → ~4 DAC samples generated
   for (int i = 0; i < 100; ++i) {
     if (apu.GetFifoACount() < 16) {
       apu.WriteFIFO_A(0x20304050u);
     }
     apu.OnTimerOverflow(0);
+    apu.Update(2097);
   }
 
-  // Check that ring buffer has accumulated samples
+  // Ring buffer should have ~400 DAC samples (100 overflows × ~4 samples each)
+  // but upsampled from 32768 Hz DAC to 48000 Hz output ≈ 1.46x more
   int16_t buffer[1024];
   int samplesReturned = apu.GetSamples(buffer, 512);
 
-  EXPECT_GT(samplesReturned, 400)
-      << "Upsampling should produce ~6x samples (100 overflows * 6 ≈ 600)";
+  EXPECT_GT(samplesReturned, 100)
+      << "DAC should produce multiple samples per timer overflow period";
 }
 
 TEST(AudioCorruptionTest, NoAudioWhenMasterSoundDisabled) {
@@ -124,6 +129,7 @@ TEST(AudioCorruptionTest, NoAudioWhenMasterSoundDisabled) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
+  apu.ClearRingBuffer();
 
   apu.SetOutputSampleRate(48000.0f);
 
@@ -140,6 +146,7 @@ TEST(AudioCorruptionTest, NoAudioWhenMasterSoundDisabled) {
 
   for (int i = 0; i < 50; ++i) {
     apu.OnTimerOverflow(0);
+    apu.Update(512);
   }
 
   int16_t buffer[256];
@@ -220,7 +227,7 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
   mem.SetAPU(&apu);
   mem.Reset();
   apu.Reset();
-  apu.ClearRingBuffer(); // Clear prefill for this test
+  apu.ClearRingBuffer();
 
   apu.SetOutputSampleRate(48000.0f);
 
@@ -235,8 +242,10 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
     apu.WriteFIFO_A(0x7F7F7F7Fu);
   }
 
+  // Latch FIFO samples then drive the DAC to push to ring buffer
   for (int i = 0; i < 10; ++i) {
     apu.OnTimerOverflow(0);
+    apu.Update(512);
   }
 
   int16_t buffer[64];

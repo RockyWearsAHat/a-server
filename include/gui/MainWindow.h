@@ -259,6 +259,7 @@ private:
   SDL_AudioDeviceID audioDevice = 0;
   static constexpr int AUDIO_SAMPLE_RATE = 32768;
   static constexpr int AUDIO_BUFFER_SIZE = 512;
+  int actualAudioRate_ = AUDIO_SAMPLE_RATE;
 
   // Audio recording for development/testing
   AIO::Common::AudioRecorder audioRecorder_;

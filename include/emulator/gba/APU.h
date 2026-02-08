@@ -36,16 +36,15 @@ public:
   // Check if sound is enabled
   bool IsSoundEnabled() const;
 
-  // PSG helpers
-  // Configure square-wave PSG channel parameters (channel 0 or 1)
+  // Handle writes to PSG sound registers (offsets 0x060..0x084, 0x090..0x09F)
+  void WriteRegister(uint32_t offset, uint16_t value);
+
+  // PSG helpers (for unit tests)
   void SetPSGChannelParams(int channel, int periodSamples, int duty,
                            int volume);
-  // Generate raw PSG samples for testing/verification (mono)
   std::vector<int16_t> GeneratePSGSamples(int channel, int numSamples);
-  // Wave channel helpers
   void SetPSGWaveRAM(const std::array<uint8_t, 32> &data);
   void SetPSGWaveParams(int periodSamples, int volume);
-  // Noise channel helpers
   void SetPSGNoiseParams(int periodSamples, bool shortMode, int volume);
 
   // FIFO fill levels (for sound DMA request logic)
@@ -93,7 +92,7 @@ private:
   int fifoB_WritePos = 0;
   int fifoB_Count = 0;
 
-  // Current FIFO samples being output
+  // Last latched FIFO byte per channel (held between timer overflows)
   int8_t currentSampleA = 0;
   int8_t currentSampleB = 0;
 
@@ -107,46 +106,84 @@ private:
   uint16_t soundcntH = 0;
   uint16_t soundcntX = 0;
 
-  // PSG channel state (channels 1 & 2)
+  // Hardware-accurate PSG channel state (channels 1-4)
+  // These structs store the raw register values and runtime state for
+  // cycle-accurate sample generation driven from the frame sequencer.
+
+  // Square wave channel (channels 1 & 2)
   struct PSGChannel {
-    int periodSamples = 0; // number of output samples per full period
-    int pos = 0;           // current sample position within period
-    int duty = 0;          // 0..3 corresponding to duty ratio
-    int volume = 0;        // 0..15
+    // Register shadow values
+    int duty = 0;           // 0..3
+    int lengthCounter = 0;  // 6-bit, counts down
+    bool lengthEnabled = false;
+    int envelopeInitVol = 0; // 0..15
+    int envelopeDir = 0;     // 0=decrease, 1=increase
+    int envelopePeriod = 0;  // 0..7 (0=disabled)
+    int frequency = 0;      // 11-bit frequency register value
+
+    // Channel 1 sweep (unused for channel 2)
+    int sweepShift = 0;
+    int sweepDir = 0;        // 0=increase, 1=decrease
+    int sweepPeriod = 0;     // 0=disabled
+    int sweepTimer = 0;
+    int sweepFreqShadow = 0;
+    bool sweepEnabled = false;
+    bool sweepNegate = false; // set when negate was used
+
+    // Runtime state
+    int currentVolume = 0;
+    int envelopeTimer = 0;
+    int freqTimer = 0;       // counts down in CPU cycles
+    int wavePos = 0;         // 0..7 position in 8-step duty table
+    bool dacEnabled = false; // bits 3-7 of NRx2 nonzero
+    bool channelEnabled = false;
+
+    // Test-only compat fields
+    int periodSamples = 0;
+    int pos = 0;
+    int volume = 0;
     bool enabled = false;
 
     void Reset() {
+      duty = 0;
+      lengthCounter = 0;
+      lengthEnabled = false;
+      envelopeInitVol = 0;
+      envelopeDir = 0;
+      envelopePeriod = 0;
+      frequency = 0;
+      sweepShift = 0;
+      sweepDir = 0;
+      sweepPeriod = 0;
+      sweepTimer = 0;
+      sweepFreqShadow = 0;
+      sweepEnabled = false;
+      sweepNegate = false;
+      currentVolume = 0;
+      envelopeTimer = 0;
+      freqTimer = 0;
+      wavePos = 0;
+      dacEnabled = false;
+      channelEnabled = false;
       periodSamples = 0;
       pos = 0;
-      duty = 0;
       volume = 0;
       enabled = false;
     }
 
+    // Raw DAC output: duty * currentVolume (0-15 range, matching mGBA)
     int16_t Sample() const {
-      if (!enabled || periodSamples <= 0)
+      if (!channelEnabled || !dacEnabled)
         return 0;
-      // duty mapping: 0=1/8, 1=1/4, 2=1/2, 3=3/4 high
-      float highRatio = 0.125f;
-      switch (duty) {
-      case 0:
-        highRatio = 0.125f;
-        break;
-      case 1:
-        highRatio = 0.25f;
-        break;
-      case 2:
-        highRatio = 0.5f;
-        break;
-      case 3:
-        highRatio = 0.75f;
-        break;
-      }
-      int highLen = std::max(1, int(highRatio * periodSamples));
-      bool high = (pos < highLen);
-      // scale to int16 using volume (0..15)
-      int16_t amp = int16_t((high ? 1.0f : -1.0f) * (volume / 15.0f) * 30000);
-      return amp;
+
+      static constexpr uint8_t dutyTable[4] = {
+          0b00000001, // 12.5%
+          0b10000001, // 25%
+          0b10000111, // 50%
+          0b01111110, // 75%
+      };
+      int bit = (dutyTable[duty & 3] >> (wavePos & 7)) & 1;
+      return static_cast<int16_t>(bit * currentVolume);
     }
   };
 
@@ -154,14 +191,43 @@ private:
 
   // Wave channel (channel 3)
   struct WaveChannel {
-    std::array<uint8_t, 32> wave; // 4-bit samples (0..15)
-    int periodSamples = 0;        // number of output samples per wave nibble
-    int pos = 0;                  // current wave index 0..31
-    int stepCounter = 0;          // counts up to periodSamples
-    int volume = 0;               // 0=100%,1=50%,2=25%,3=mute
+    std::array<uint8_t, 16> waveRAM{}; // 16 bytes = 32 4-bit samples
+    bool dimension = false; // 0=single bank, 1=two banks
+    int bankNumber = 0;
+    bool dacEnabled = false;
+    int lengthCounter = 0;
+    bool lengthEnabled = false;
+    int volumeCode = 0;   // 0=mute, 1=100%, 2=50%, 3=25%
+    bool forceVolume = false; // force 75%
+    int frequency = 0;    // 11-bit
+    bool channelEnabled = false;
+
+    int freqTimer = 0;
+    int wavePos = 0;      // 0..31 (nibble index)
+    int currentSample = 0; // current 4-bit sample value
+
+    // Test-only compat
+    std::array<uint8_t, 32> wave{};
+    int periodSamples = 0;
+    int pos = 0;
+    int stepCounter = 0;
+    int volume = 0;
     bool enabled = false;
 
     void Reset() {
+      waveRAM.fill(0);
+      dimension = false;
+      bankNumber = 0;
+      dacEnabled = false;
+      lengthCounter = 0;
+      lengthEnabled = false;
+      volumeCode = 0;
+      forceVolume = false;
+      frequency = 0;
+      channelEnabled = false;
+      freqTimer = 0;
+      wavePos = 0;
+      currentSample = 0;
       wave.fill(0);
       periodSamples = 0;
       pos = 0;
@@ -170,37 +236,34 @@ private:
       enabled = false;
     }
 
+    // Raw DAC output: 4-bit sample with volume shift (matching mGBA)
     int16_t Sample() const {
-      if (!enabled || periodSamples <= 0)
+      if (!channelEnabled || !dacEnabled)
         return 0;
-      int nib = wave[pos] & 0x0F;
-      float s = (nib / 15.0f) * 2.0f - 1.0f;
-      float volScale = 0.0f;
-      switch (volume) {
-      case 0:
-        volScale = 1.0f;
-        break;
-      case 1:
-        volScale = 0.5f;
-        break;
-      case 2:
-        volScale = 0.25f;
-        break;
-      default:
-        volScale = 0.0f;
-        break;
+
+      int sample = currentSample;
+
+      // Volume shift (mGBA: volume 0=mute(>>4), 1=100%, 2=50%(>>1), 3=25%(>>2))
+      if (forceVolume) {
+        // 75% volume: multiply by 3, shift applied after in GBA mode
+        sample = (sample * 3) / 4;
+      } else {
+        switch (volumeCode) {
+        case 0: return 0; // mute
+        case 1: break;    // 100%
+        case 2: sample >>= 1; break; // 50%
+        case 3: sample >>= 2; break; // 25%
+        }
       }
-      return int16_t(s * volScale * 30000);
+      return static_cast<int16_t>(sample);
     }
 
     void Advance() {
-      if (periodSamples <= 0)
-        return;
-      stepCounter++;
-      if (stepCounter >= periodSamples) {
-        stepCounter = 0;
-        pos = (pos + 1) % int(wave.size());
-      }
+      wavePos = (wavePos + 1) & 31;
+      // Read the nibble from wave RAM
+      int byteIdx = wavePos / 2;
+      currentSample = (wavePos & 1) ? (waveRAM[byteIdx] & 0x0F)
+                                    : ((waveRAM[byteIdx] >> 4) & 0x0F);
     }
   };
 
@@ -208,15 +271,44 @@ private:
 
   // Noise channel (channel 4)
   struct NoiseChannel {
-    uint16_t lfsr = 0x7FFF; // 15-bit LFSR initial state
-    int periodSamples = 0;  // number of output samples per LFSR step
+    int lengthCounter = 0;
+    bool lengthEnabled = false;
+    int envelopeInitVol = 0;
+    int envelopeDir = 0;
+    int envelopePeriod = 0;
+    int divRatio = 0;       // 0..7
+    bool widthMode = false; // 0=15-bit, 1=7-bit
+    int shiftFreq = 0;      // 0..15
+    bool dacEnabled = false;
+    bool channelEnabled = false;
+
+    int currentVolume = 0;
+    int envelopeTimer = 0;
+    uint16_t lfsr = 0;
+    int freqTimer = 0;
+
+    // Test-only compat
+    int periodSamples = 0;
     int stepCounter = 0;
-    bool shortMode = false; // 7-bit mode when true
-    int volume = 0;         // 0..15
+    bool shortMode = false;
+    int volume = 0;
     bool enabled = false;
 
     void Reset() {
-      lfsr = 0x7FFF;
+      lengthCounter = 0;
+      lengthEnabled = false;
+      envelopeInitVol = 0;
+      envelopeDir = 0;
+      envelopePeriod = 0;
+      divRatio = 0;
+      widthMode = false;
+      shiftFreq = 0;
+      dacEnabled = false;
+      channelEnabled = false;
+      currentVolume = 0;
+      envelopeTimer = 0;
+      lfsr = 0;
+      freqTimer = 0;
       periodSamples = 0;
       stepCounter = 0;
       shortMode = false;
@@ -224,48 +316,91 @@ private:
       enabled = false;
     }
 
+    // mGBA: sample = lsb * volume, where lsb is the feedback bit.
+    // After the shift, the output is determined by bit 0 of the LFSR.
+    // With the ^1 inversion in feedback, bit 0 directly gives the sample.
     int16_t Sample() const {
-      if (!enabled || periodSamples <= 0)
+      if (!channelEnabled || !dacEnabled)
         return 0;
-      // Use bit0 as output: 0 -> +, 1 -> -
-      int sign = (lfsr & 1) ? -1 : 1;
-      return int16_t(sign * (volume / 15.0f) * 30000);
+      int bit = lfsr & 1;
+      return static_cast<int16_t>(bit * currentVolume);
     }
 
     void Advance() {
-      if (periodSamples <= 0)
-        return;
-      stepCounter++;
-      if (stepCounter >= periodSamples) {
-        stepCounter = 0;
-        // LFSR feedback: newbit = bit0 XOR bit1
-        uint16_t bit0 = lfsr & 1;
-        uint16_t bit1 = (lfsr >> 1) & 1;
-        uint16_t newbit = bit0 ^ bit1;
-        lfsr = (lfsr >> 1) | (newbit << 14);
-        if (shortMode) {
-          // In short mode also set bit 6 to newbit
-          lfsr = (lfsr & ~(1 << 6)) | (newbit << 6);
-        }
+      uint16_t lsb = (lfsr ^ (lfsr >> 1) ^ 1) & 1;
+      lfsr >>= 1;
+      if (lsb) {
+        lfsr |= (1 << 14);
+        if (widthMode)
+          lfsr |= (1 << 6);
+      } else if (widthMode) {
+        lfsr &= ~(1 << 6);
       }
     }
   };
 
   NoiseChannel noiseChannel;
 
-  // Sample rate conversion
-  float sampleAccumulator = 0.0f;
-  float currentUpsampleRatio =
-      1.0f; // Updated from timer frequency each overflow
+  // Frame sequencer: 512 Hz (every 32768 CPU cycles)
+  // Steps 0-7, clocks length(all), envelope(ch1-4), sweep(ch1)
+  static constexpr int FRAME_SEQ_PERIOD = 32768; // CPU cycles per step
+  int frameSequencerCycles = 0;
+  int frameSequencerStep = 0;
+
+  // PSG cycle accumulators for frequency timers
+  int psgCycleAccum = 0;
+
+  // SOUNDCNT_L register value for PSG L/R routing and volume
+  uint16_t soundcntL = 0;
+
+  // Cached SOUNDBIAS fields to avoid redundant IO reads in GenerateDacSample()
+  int cachedBiasMode = 0;
+  int cachedBiasLevel = 0x200; // bits 0-9, default 0x200
+
+  void TickFrameSequencer();
+  void StepPSGFrequencyTimers(int cycles);
+  int32_t GeneratePSGMixSample();
+
+  // SOUNDBIAS-rate DAC: generates output at hardware sample rate
+  // (32768/65536/131072/262144 Hz depending on SOUNDBIAS bits 14-15)
+  int dacCycleAccumulator = 0;
+  void GenerateDacSample();
+
+  // Sample rate conversion: biquad anti-alias filter + linear interpolation
+  double sampleAccumulator = 0.0;
+  double currentResampleRatio = 1.0; // outputRate / dacRate
   static constexpr float OUTPUT_SAMPLE_RATE = 32768.0f;
   float outputSampleRate = OUTPUT_SAMPLE_RATE;
   static constexpr float GBA_CPU_FREQ = 16777216.0f;
 
-  // Previous sample for linear interpolation (avoids whirly/aliasing artifacts)
+  // Biquad low-pass filter state (second-order IIR, applied at DAC rate
+  // before downsampling to prevent aliasing)
+  struct BiquadState {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+    double a1 = 0.0, a2 = 0.0;
+    double x1 = 0.0, x2 = 0.0; // input history
+    double y1 = 0.0, y2 = 0.0; // output history
+
+    double Process(double input) {
+      double output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1;
+      x1 = input;
+      y2 = y1;
+      y1 = output;
+      return output;
+    }
+
+    void Reset() { x1 = x2 = y1 = y2 = 0.0; }
+  };
+
+  BiquadState lpfLeft, lpfRight;
+  float lastConfiguredLpfRate = 0.0f;
+  void ConfigureLPF(float dacRate, float outRate);
+
+  // Previous filtered sample for linear interpolation
   int16_t prevLeft = 0;
   int16_t prevRight = 0;
 
-  // Add a sample to the ring buffer
   void PushSample(int16_t left, int16_t right);
 };
 
