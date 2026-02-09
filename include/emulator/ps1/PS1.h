@@ -25,6 +25,7 @@ public:
 
   bool LoadBIOS(const std::string &path);
   bool LoadDisc(const std::string &path);
+  bool InitHLE(); // Boot via HLE when no real BIOS is available
   void Reset();
   int Step(); // Run one CPU instruction, returns cycles consumed
 

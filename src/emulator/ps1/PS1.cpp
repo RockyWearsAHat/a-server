@@ -1,4 +1,5 @@
 #include "emulator/ps1/PS1.h"
+#include "emulator/ps1/PS1HleBios.h"
 #include <fstream>
 
 namespace AIO::Emulator::PS1 {
@@ -53,6 +54,15 @@ bool PS1::LoadDisc(const std::string &path) {
   cdrom->LoadDisc(path);
   discLoaded = true;
   return true;
+}
+
+bool PS1::InitHLE() {
+  if (!discLoaded) {
+    return false;
+  }
+  Reset();
+  biosLoaded = PS1HleBios::InitHLE(*this);
+  return biosLoaded;
 }
 
 void PS1::Reset() {

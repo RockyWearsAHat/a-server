@@ -282,7 +282,7 @@ void MainWindow::LoadROM(const std::string &path) {
       }
     }
   } else if (currentEmulator == EmulatorType::PS1) {
-    // PS1 requires BIOS — check env var or settings
+    // Try loading a real BIOS if one is configured
     std::string biosPath;
     const QString settingsBios = settings.value("ps1/biosPath").toString();
     if (!settingsBios.isEmpty()) {
@@ -291,19 +291,19 @@ void MainWindow::LoadROM(const std::string &path) {
       biosPath = envBios;
     }
 
-    if (biosPath.empty()) {
-      statusLabel->setText("PS1 BIOS not configured. Set AIO_PS1_BIOS env var "
-                           "or ps1/biosPath in settings.");
-      return;
-    }
-
-    if (!ps1Emulator.LoadBIOS(biosPath)) {
-      statusLabel->setText("Failed to load PS1 BIOS: " +
-                           QString::fromStdString(biosPath));
-      return;
+    if (!biosPath.empty()) {
+      ps1Emulator.LoadBIOS(biosPath);
     }
 
     success = ps1Emulator.LoadDisc(path);
+
+    // If no real BIOS was loaded, boot via HLE (parse EXE from disc)
+    if (success && !ps1Emulator.IsBIOSLoaded()) {
+      if (!ps1Emulator.InitHLE()) {
+        statusLabel->setText("Failed to initialize PS1 HLE BIOS from disc.");
+        return;
+      }
+    }
     if (success) {
       uint32_t w = ps1Emulator.GetDisplayWidth();
       uint32_t h = ps1Emulator.GetDisplayHeight();

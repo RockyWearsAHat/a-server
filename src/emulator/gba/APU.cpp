@@ -285,33 +285,37 @@ void APU::OnTimerOverflow(int timer) {
   if (timer != fifoATimer && timer != fifoBTimer)
     return;
 
-  // Consume the next FIFO sample on timer overflow.
-  // On underflow, hold the last sample value (GBA DAC latch behavior)
-  // rather than snapping to zero, which would cause a DC jump → pop.
-  if (timer == fifoATimer) {
-    if (fifoA_Count > 0) {
-      currentSampleA = fifoA[fifoA_ReadPos];
-      fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
-      fifoA_Count--;
-    } else {
-      stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
+  // During sound DMA recovery (recursive UpdateTimers inside PerformDMA),
+  // skip FIFO consumption. Output continues using the held sample values,
+  // which avoids both audio gaps and transient spikes from freshly-refilled
+  // FIFO data. On real hardware, DMA and audio are effectively atomic.
+  if (!suppressFifoConsumption) {
+    if (timer == fifoATimer) {
+      if (fifoA_Count > 0) {
+        currentSampleA = fifoA[fifoA_ReadPos];
+        fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
+        fifoA_Count--;
+      } else {
+        stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
+      }
     }
-  }
 
-  if (timer == fifoBTimer) {
-    if (fifoB_Count > 0) {
-      currentSampleB = fifoB[fifoB_ReadPos];
-      fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
-      fifoB_Count--;
-    } else {
-      stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
+    if (timer == fifoBTimer) {
+      if (fifoB_Count > 0) {
+        currentSampleB = fifoB[fifoB_ReadPos];
+        fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
+        fifoB_Count--;
+      } else {
+        stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
+      }
     }
   }
 
   // Recalculate upsample ratio from the timer's reload value.
   // Use ReadIORegister16Internal to avoid re-entrant
   // FlushPendingPeripheralCycles → UpdateTimers → OnTimerOverflow recursion.
-  uint32_t timerOffset = IORegs::TM0CNT_L + (timer * IORegs::TIMER_CHANNEL_SIZE);
+  uint32_t timerOffset =
+      IORegs::TM0CNT_L + (timer * IORegs::TIMER_CHANNEL_SIZE);
   uint16_t reload = memory.ReadIORegister16Internal(timerOffset);
   uint16_t control = memory.ReadIORegister16Internal(timerOffset + 2);
 
@@ -328,8 +332,7 @@ void APU::OnTimerOverflow(int timer) {
     break;
   }
 
-  float timerInterval =
-      static_cast<float>((0x10000 - reload) * prescalerDiv);
+  float timerInterval = static_cast<float>((0x10000 - reload) * prescalerDiv);
   if (timerInterval > 0.0f) {
     float fifoRate = GBA_CPU_FREQ / timerInterval;
     if (fifoRate > 0.0f)

@@ -28,6 +28,8 @@ public:
   // ─── Disc Image ─────────────────────────────────────────────────────
   bool LoadDisc(const std::string &path);
   bool HasDisc() const { return discLoaded; }
+  const uint8_t *GetDiscDataPointer() const { return discData.data(); }
+  size_t GetDiscDataSize() const { return discData.size(); }
 
   // ─── Timing ─────────────────────────────────────────────────────────
   void Tick(uint32_t cpuCycles);

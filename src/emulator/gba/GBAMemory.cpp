@@ -2593,7 +2593,13 @@ void GBAMemory::PerformDMA(int channel) {
       currentSrc -= count * step;
     dmaInternalSrc[channel] = currentSrc;
     lastDMACycles += totalCycles;
+    if (timing == 3 && apu) {
+      apu->SetSuppressFifoConsumption(true);
+    }
     UpdateTimers(totalCycles);
+    if (timing == 3 && apu) {
+      apu->SetSuppressFifoConsumption(false);
+    }
     if (apu)
       apu->Update(totalCycles);
     if (ppu)
@@ -2814,7 +2820,21 @@ void GBAMemory::PerformDMA(int channel) {
   // Update system state to reflect DMA duration
   // This is crucial for games that check timers during DMA or expect delays
   lastDMACycles += totalCycles;
+
+  // For sound DMA (timing=3), suppress FIFO consumption during the
+  // recursive UpdateTimers call. On real hardware, DMA halts the CPU —
+  // timer ticks still occur but FIFO refill and consumption are
+  // effectively atomic. Output generation continues using the held
+  // sample values (sample-and-hold), preventing both audio gaps and
+  // transient spikes from freshly-refilled FIFO data.
+  if (timing == 3 && apu) {
+    apu->SetSuppressFifoConsumption(true);
+  }
   UpdateTimers(totalCycles);
+  if (timing == 3 && apu) {
+    apu->SetSuppressFifoConsumption(false);
+  }
+
   if (apu)
     apu->Update(totalCycles);
   if (ppu)

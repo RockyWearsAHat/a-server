@@ -36,7 +36,7 @@ public:
   uint32_t GetRegister(uint32_t index) const;
   void SetRegister(uint32_t index, uint32_t value);
   uint32_t GetPC() const { return pc; }
-  void SetPC(uint32_t value) { pc = value; }
+  void SetPC(uint32_t value) { pc = value; nextPc = value + 4; }
   uint32_t GetHI() const { return hi; }
   uint32_t GetLO() const { return lo; }
   void SetHI(uint32_t value) { hi = value; }

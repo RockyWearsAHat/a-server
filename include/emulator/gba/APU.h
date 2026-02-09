@@ -23,6 +23,13 @@ public:
   // Configure the host output sample rate (e.g. SDL device freq).
   void SetOutputSampleRate(float hz);
 
+  // Suppress FIFO consumption during DMA timing recovery.
+  // Output generation continues using held sample values (sample-and-hold),
+  // preventing both audio gaps and transient spikes from freshly-refilled FIFO.
+  void SetSuppressFifoConsumption(bool suppress) {
+    suppressFifoConsumption = suppress;
+  }
+
   // FIFO operations
   void WriteFIFO_A(uint32_t value);
   void WriteFIFO_B(uint32_t value);
@@ -390,6 +397,15 @@ private:
   // Ratio = outputSampleRate / fifoTimerRate ≈ 2.048 for M4A games.
   float sampleAccumulator = 0.0f;
   float currentUpsampleRatio = 2.048f; // default, recalculated per timer
+
+  // On real GBA hardware, DMA halts the CPU while refilling the FIFO.
+  // Timer ticks still occur during DMA, but the FIFO consumption and
+  // refill are effectively atomic from the audio output's perspective.
+  // When set, OnTimerOverflow skips FIFO consumption but still generates
+  // output using the current held sample values — this prevents both
+  // audio gaps (from missing output) and transient spikes (from consuming
+  // freshly-refilled FIFO samples in a burst).
+  bool suppressFifoConsumption = false;
 
   // Ring buffer prefill: absorbs frame-boundary jitter between the
   // emulator thread (producing samples in bursts per frame) and the

@@ -13,6 +13,7 @@ add_library(PS1Emulator STATIC
     ${PROJECT_ROOT}/src/emulator/ps1/CDROM.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/GTE.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/PS1Controller.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1HleBios.cpp
     ${PROJECT_ROOT}/src/emulator/common/Logger.cpp
 )
 
