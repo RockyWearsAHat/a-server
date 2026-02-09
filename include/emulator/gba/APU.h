@@ -36,6 +36,23 @@ public:
   // Check if sound is enabled
   bool IsSoundEnabled() const;
 
+  // Returns bits 0-3 reflecting which PSG channels are currently active
+  uint8_t GetChannelStatus() const {
+    uint8_t status = 0;
+    if (hwCh1.enabled)
+      status |= 1;
+    if (hwCh2.enabled)
+      status |= 2;
+    if (hwCh3.enabled)
+      status |= 4;
+    if (hwCh4.enabled)
+      status |= 8;
+    return status;
+  }
+
+  // Called by GBAMemory when a sound IO register is written (0x060-0x084)
+  void OnSoundRegisterWrite(uint32_t offset, uint16_t value);
+
   // PSG helpers
   // Configure square-wave PSG channel parameters (channel 0 or 1)
   void SetPSGChannelParams(int channel, int periodSamples, int duty,
@@ -107,12 +124,12 @@ private:
   uint16_t soundcntH = 0;
   uint16_t soundcntX = 0;
 
-  // PSG channel state (channels 1 & 2)
+  // PSG channel state (channels 1 & 2) — test-only interface
   struct PSGChannel {
-    int periodSamples = 0; // number of output samples per full period
-    int pos = 0;           // current sample position within period
-    int duty = 0;          // 0..3 corresponding to duty ratio
-    int volume = 0;        // 0..15
+    int periodSamples = 0;
+    int pos = 0;
+    int duty = 0;
+    int volume = 0;
     bool enabled = false;
 
     void Reset() {
@@ -126,7 +143,6 @@ private:
     int16_t Sample() const {
       if (!enabled || periodSamples <= 0)
         return 0;
-      // duty mapping: 0=1/8, 1=1/4, 2=1/2, 3=3/4 high
       float highRatio = 0.125f;
       switch (duty) {
       case 0:
@@ -144,13 +160,122 @@ private:
       }
       int highLen = std::max(1, int(highRatio * periodSamples));
       bool high = (pos < highLen);
-      // scale to int16 using volume (0..15)
       int16_t amp = int16_t((high ? 1.0f : -1.0f) * (volume / 15.0f) * 30000);
       return amp;
     }
   };
 
   std::array<PSGChannel, 2> psgChannels;
+
+  // Hardware-driven PSG state (driven from IO register reads)
+  struct HwSquareChannel {
+    int frequencyTimer = 0;  // counts down at 4.194 MHz / prescaler
+    int frequency = 0;       // 11-bit frequency value from register
+    int duty = 0;            // 0-3 duty cycle selection
+    int dutyPos = 0;         // 0-7 position in duty waveform
+    int volume = 0;          // 0-15 current envelope volume
+    int envelopeInitVol = 0; // initial envelope volume
+    int envelopePeriod = 0;  // envelope step period (0 = disabled)
+    int envelopeTimer = 0;   // counts down each frame-seq tick
+    bool envelopeIncrease = false;
+    int lengthCounter = 0; // 0 = expired
+    bool lengthEnable = false;
+    bool enabled = false;
+    bool dacEnabled = false; // DAC on when volume bits or direction set
+
+    // Sweep (channel 1 only)
+    int sweepPeriod = 0;
+    int sweepTimer = 0;
+    int sweepShift = 0;
+    bool sweepNegate = false;
+    bool sweepEnabled = false;
+    int sweepShadow = 0;
+
+    void Reset() { *this = HwSquareChannel{}; }
+
+    int16_t DacOutput() const {
+      if (!enabled || !dacEnabled)
+        return 0;
+      static const uint8_t dutyTable[4][8] = {
+          {0, 0, 0, 0, 0, 0, 0, 1}, // 12.5%
+          {1, 0, 0, 0, 0, 0, 0, 1}, // 25%
+          {1, 0, 0, 0, 0, 1, 1, 1}, // 50%
+          {0, 1, 1, 1, 1, 1, 1, 0}, // 75%
+      };
+      int sample = dutyTable[duty & 3][dutyPos & 7] ? volume : 0;
+      return (int16_t)((sample * 2 - 15) * 256);
+    }
+  };
+
+  struct HwWaveChannel {
+    int frequencyTimer = 0;
+    int frequency = 0;
+    int pos = 0;         // 0-31 sample position
+    int volumeShift = 0; // 0=100%, 1=50%, 2=25%, 3=mute (right-shift)
+    int lengthCounter = 0;
+    bool lengthEnable = false;
+    bool enabled = false;
+    bool dacEnabled = false;
+    bool bankMode = false; // false=single bank, true=two banks
+    int bankSelect = 0;    // which bank to play
+
+    void Reset() { *this = HwWaveChannel{}; }
+
+    int16_t DacOutput(const uint8_t *waveRam) const {
+      if (!enabled || !dacEnabled || volumeShift == 3)
+        return 0;
+      int byteIdx = pos / 2;
+      int nibble = (pos & 1) ? (waveRam[byteIdx] & 0xF)
+                             : ((waveRam[byteIdx] >> 4) & 0xF);
+      int shifted = (volumeShift == 0) ? nibble : (nibble >> volumeShift);
+      return (int16_t)((shifted * 2 - 15) * 256);
+    }
+  };
+
+  struct HwNoiseChannel {
+    int frequencyTimer = 0;
+    int divisor = 0;
+    int shiftAmount = 0;
+    uint16_t lfsr = 0x7FFF;
+    bool shortMode = false;
+    int volume = 0;
+    int envelopeInitVol = 0;
+    int envelopePeriod = 0;
+    int envelopeTimer = 0;
+    bool envelopeIncrease = false;
+    int lengthCounter = 0;
+    bool lengthEnable = false;
+    bool enabled = false;
+    bool dacEnabled = false;
+
+    void Reset() { *this = HwNoiseChannel{}; }
+
+    int16_t DacOutput() const {
+      if (!enabled || !dacEnabled)
+        return 0;
+      int sample = (~lfsr & 1) ? volume : 0;
+      return (int16_t)((sample * 2 - 15) * 256);
+    }
+  };
+
+  HwSquareChannel hwCh1, hwCh2;
+  HwWaveChannel hwCh3;
+  HwNoiseChannel hwCh4;
+
+  // Frame sequencer: clocks at 512 Hz (every 32768 CPU cycles)
+  int frameSequencerCycles = 0;
+  int frameSequencerStep = 0;
+  static constexpr int FRAME_SEQ_PERIOD = 32768; // CPU cycles per step
+
+  void StepFrameSequencer();
+  void ClockLength();
+  void ClockEnvelope();
+  void ClockSweep();
+  int16_t MixPSGChannels();
+  void TickPSGTimers(int cycles);
+
+  // Read Wave RAM from IO registers (0x04000090-0x0400009F)
+  void ReadWaveRam(uint8_t *out16bytes);
 
   // Wave channel (channel 3)
   struct WaveChannel {
@@ -253,19 +378,32 @@ private:
 
   NoiseChannel noiseChannel;
 
-  // Sample rate conversion
-  float sampleAccumulator = 0.0f;
-  float currentUpsampleRatio =
-      1.0f; // Updated from timer frequency each overflow
+  // Upsample from FIFO rate (~16 kHz) to output rate (32768 Hz).
+  // Each FIFO timer overflow produces ~2.05 output samples using
+  // sample-and-hold, keeping FIFO consumption and output synchronized.
+  static constexpr float GBA_CPU_FREQ = 16777216.0f;
   static constexpr float OUTPUT_SAMPLE_RATE = 32768.0f;
   float outputSampleRate = OUTPUT_SAMPLE_RATE;
-  static constexpr float GBA_CPU_FREQ = 16777216.0f;
 
-  // Previous sample for linear interpolation (avoids whirly/aliasing artifacts)
-  int16_t prevLeft = 0;
-  int16_t prevRight = 0;
+  // Fractional accumulator for upsample: advances by 1.0 per timer
+  // overflow, generates output samples until it's < 1.0.
+  // Ratio = outputSampleRate / fifoTimerRate ≈ 2.048 for M4A games.
+  float sampleAccumulator = 0.0f;
+  float currentUpsampleRatio = 2.048f; // default, recalculated per timer
 
-  // Add a sample to the ring buffer
+  // Ring buffer prefill: absorbs frame-boundary jitter between the
+  // emulator thread (producing samples in bursts per frame) and the
+  // SDL callback (consuming samples at a steady real-time rate).
+  static constexpr int RING_PREFILL_SAMPLES = 1024;
+  bool prefilled = false;
+
+  // DC-blocking high-pass filter (simulates GBA coupling capacitor).
+  // Matches mGBA's approach: cap = prev_sample - degraded * FILTER
+  // FILTER = 65368 ≈ 0.9975 in Q16, giving ~13 Hz cutoff at 32 kHz.
+  int32_t hpfCapL = 0;
+  int32_t hpfCapR = 0;
+
+  void GenerateOutputSample();
   void PushSample(int16_t left, int16_t right);
 };
 

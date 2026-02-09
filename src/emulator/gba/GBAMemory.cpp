@@ -1412,10 +1412,11 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     if (offset < io_regs.size())
       val = io_regs[offset];
 
-    // SOUNDCNT_X (0x84) - Return proper status
+    // SOUNDCNT_X (0x84) - Return master enable + active channel status
     if (offset == IORegs::SOUNDCNT_X) {
-      val =
-          io_regs[IORegs::SOUNDCNT_X] & 0x80; // Only preserve master enable bit
+      uint8_t masterEnable = io_regs[IORegs::SOUNDCNT_X] & 0x80;
+      uint8_t chStatus = apu ? apu->GetChannelStatus() : 0;
+      val = masterEnable | (chStatus & 0x0F);
     }
 
     // DMA3 read trace (useful for save validation loops that poll DMA regs)
@@ -2065,6 +2066,18 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       value = (value & 0x80) | (currentVal & 0x0F);
     }
 
+    // PSG channel register writes — notify APU for immediate trigger handling.
+    // Trigger bit (bit 15) is write-only, cleared after processing.
+    if (apu && offset >= IORegs::SOUND1CNT_L && offset <= IORegs::SOUND4CNT_H) {
+      apu->OnSoundRegisterWrite(offset, value);
+      // Clear trigger bit before storing — it's write-only on hardware
+      if ((offset == IORegs::SOUND1CNT_X || offset == IORegs::SOUND2CNT_H ||
+           offset == IORegs::SOUND3CNT_X || offset == IORegs::SOUND4CNT_H) &&
+          (value & 0x8000)) {
+        value &= ~0x8000;
+      }
+    }
+
     // Timer Control (GBATEK timers 0-3)
     if (offset >= IORegs::TM0CNT_L && offset <= IORegs::TM3CNT_H) {
       int timerIdx = (offset - IORegs::TM0CNT_L) / IORegs::TIMER_CHANNEL_SIZE;
@@ -2167,12 +2180,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     } else if (region == 0x07) { // OAM
       uint32_t offset = address & MemoryMap::OAM_MASK;
       if (offset + 1 < oam.size()) {
-        // OAM writes are blocked during visible scanlines (unless HBlank free)
-        // But reusing existing check logic is complex without helper.
-        // However, Write16 is typically allowed.
-        // We will trust the OAM visibility check isn't strictly required for
-        // bulk transfers or we should call WriteOam16 helper? For now, write
-        // direct to assume HBlank/VBlank transfer.
         oam[offset] = b0;
         oam[offset + 1] = b1;
         if (offset + 1 < oam_shadow.size()) {
@@ -2997,8 +3004,6 @@ void GBAMemory::UpdateTimers(int cycles) {
                     bool isFifoA = (dmaDest == 0x040000A0);
                     bool isFifoB = (dmaDest == 0x040000A4);
 
-                    // Real hardware requests sound FIFO DMA when the FIFO
-                    // level is low (roughly <= 16 samples remain).
                     bool shouldRequest = false;
                     if (apu) {
                       if (isFifoA && fifoATimer == i) {

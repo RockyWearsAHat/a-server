@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <emulator/gba/APU.h>
@@ -37,56 +38,168 @@ void APU::Reset() {
   waveChannel.Reset();
   noiseChannel.Reset();
 
+  hwCh1.Reset();
+  hwCh2.Reset();
+  hwCh3.Reset();
+  hwCh4.Reset();
+  frameSequencerCycles = 0;
+  frameSequencerStep = 0;
+
+  hpfCapL = 0;
+  hpfCapR = 0;
+
   sampleAccumulator = 0.0f;
-  prevLeft = 0;
-  prevRight = 0;
+  currentUpsampleRatio = 2.048f;
+
+  // Prefill ring buffer with silence so the SDL callback has a safety
+  // margin (~31 ms at 32 kHz) to absorb frame-boundary timing jitter.
+  prefilled = false;
+  int wp = 0;
+  for (int i = 0; i < RING_PREFILL_SAMPLES; ++i) {
+    ringBuffer[wp] = 0;
+    ringBuffer[wp + 1] = 0;
+    wp = (wp + 2) % (RING_BUFFER_SIZE * 2);
+  }
+  writePos.store(wp, std::memory_order_relaxed);
+  readPos.store(0, std::memory_order_relaxed);
+  prefilled = true;
 }
 
 void APU::PushSample(int16_t left, int16_t right) {
-  // Linear interpolation resampler: converts from GBA sample rate to
-  // host output rate. Avoids the aliasing artifacts of nearest-neighbor.
-  sampleAccumulator += currentUpsampleRatio;
+  int wp = writePos.load(std::memory_order_relaxed);
+  int rp = readPos.load(std::memory_order_acquire);
 
-  while (sampleAccumulator >= 1.0f) {
-    sampleAccumulator -= 1.0f;
+  int nextWp = (wp + 2) % (RING_BUFFER_SIZE * 2);
 
-    int wp = writePos.load(std::memory_order_relaxed);
-    int rp = readPos.load(std::memory_order_acquire);
-    int nextWp = (wp + 2) % (RING_BUFFER_SIZE * 2);
-
-    if (nextWp == rp) {
-      stats.ringOverrunDrops.fetch_add(1, std::memory_order_relaxed);
-      sampleAccumulator = 0.0f;
-      break;
-    }
-
-    float t = 1.0f - sampleAccumulator / std::max(currentUpsampleRatio, 1.0f);
-    t = std::clamp(t, 0.0f, 1.0f);
-    int16_t interpL = static_cast<int16_t>((1.0f - t) * prevLeft + t * left);
-    int16_t interpR = static_cast<int16_t>((1.0f - t) * prevRight + t * right);
-
-    ringBuffer[wp] = interpL;
-    ringBuffer[wp + 1] = interpR;
-    writePos.store(nextWp, std::memory_order_release);
+  if (nextWp == rp) {
+    stats.ringOverrunDrops.fetch_add(1, std::memory_order_relaxed);
+    return;
   }
 
-  prevLeft = left;
-  prevRight = right;
+  ringBuffer[wp] = left;
+  ringBuffer[wp + 1] = right;
+  writePos.store(nextWp, std::memory_order_release);
+}
+
+void APU::GenerateOutputSample() {
+  uint16_t scntX = memory.Read16(IORegs::REG_SOUNDCNT_X);
+
+  int32_t left = 0, right = 0;
+
+  if (scntX & 0x80) {
+    uint16_t scntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
+    uint16_t scntL = memory.Read16(0x04000000 + IORegs::SOUNDCNT_L);
+
+    // --- PSG channels ---
+    int psgVolRight = scntL & 0x7;
+    int psgVolLeft = (scntL >> 4) & 0x7;
+    uint8_t psgEnableRight = (scntL >> 8) & 0xF;
+    uint8_t psgEnableLeft = (scntL >> 12) & 0xF;
+
+    int psgRatio = scntH & 0x3;
+    int psgShift = 2;
+    if (psgRatio == 1)
+      psgShift = 1;
+    else if (psgRatio >= 2)
+      psgShift = 0;
+
+    int16_t ch1 = hwCh1.DacOutput();
+    int16_t ch2 = hwCh2.DacOutput();
+    uint8_t waveRam[16];
+    ReadWaveRam(waveRam);
+    int16_t ch3 = hwCh3.DacOutput(waveRam);
+    int16_t ch4 = hwCh4.DacOutput();
+
+    int32_t psgLeft = 0, psgRight = 0;
+    if (psgEnableLeft & 1)
+      psgLeft += ch1;
+    if (psgEnableLeft & 2)
+      psgLeft += ch2;
+    if (psgEnableLeft & 4)
+      psgLeft += ch3;
+    if (psgEnableLeft & 8)
+      psgLeft += ch4;
+    if (psgEnableRight & 1)
+      psgRight += ch1;
+    if (psgEnableRight & 2)
+      psgRight += ch2;
+    if (psgEnableRight & 4)
+      psgRight += ch3;
+    if (psgEnableRight & 8)
+      psgRight += ch4;
+
+    psgLeft = (psgLeft * (psgVolLeft + 1)) / 8;
+    psgRight = (psgRight * (psgVolRight + 1)) / 8;
+    psgLeft >>= psgShift;
+    psgRight >>= psgShift;
+
+    // --- FIFO channels ---
+    const int volA = (scntH & 0x04) ? 64 : 32;
+    const int volB = (scntH & 0x08) ? 64 : 32;
+
+    if (scntH & 0x200)
+      left += (int32_t)currentSampleA * volA;
+    if (scntH & 0x100)
+      right += (int32_t)currentSampleA * volA;
+    if (scntH & 0x2000)
+      left += (int32_t)currentSampleB * volB;
+    if (scntH & 0x1000)
+      right += (int32_t)currentSampleB * volB;
+
+    left += psgLeft;
+    right += psgRight;
+  }
+
+  // Clamp to 16-bit
+  int16_t outL = static_cast<int16_t>(std::clamp(left, -32768, 32767));
+  int16_t outR = static_cast<int16_t>(std::clamp(right, -32768, 32767));
+
+  // DC-blocking high-pass filter — ALWAYS runs (even during silence)
+  // so the capacitor state decays smoothly and doesn't produce pops
+  // when sound re-enables after being disabled.
+  static constexpr int32_t HPF_FILTER = 65368;
+  int32_t capL = hpfCapL >> 16;
+  int32_t capR = hpfCapR >> 16;
+  int32_t degradedL32 = static_cast<int32_t>(outL) - capL;
+  int32_t degradedR32 = static_cast<int32_t>(outR) - capR;
+  int16_t degradedL =
+      static_cast<int16_t>(std::clamp(degradedL32, -32768, 32767));
+  int16_t degradedR =
+      static_cast<int16_t>(std::clamp(degradedR32, -32768, 32767));
+  hpfCapL = (static_cast<int32_t>(outL) << 16) -
+            static_cast<int32_t>(degradedL) * HPF_FILTER;
+  hpfCapR = (static_cast<int32_t>(outR) << 16) -
+            static_cast<int32_t>(degradedR) * HPF_FILTER;
+
+  PushSample(degradedL, degradedR);
+  stats.pushCalls.fetch_add(1, std::memory_order_relaxed);
+  if (degradedL != 0 || degradedR != 0)
+    stats.pushNonZero.fetch_add(1, std::memory_order_relaxed);
 }
 
 void APU::Update(int cycles) {
-  // Read current sound control registers
   soundcntX = memory.Read16(IORegs::REG_SOUNDCNT_X);
   soundcntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
 
-  // Nothing else to do here - samples are pushed on timer overflow
+  if (!(soundcntX & 0x80))
+    return;
+
+  TickPSGTimers(cycles);
+
+  frameSequencerCycles += cycles;
+  while (frameSequencerCycles >= FRAME_SEQ_PERIOD) {
+    frameSequencerCycles -= FRAME_SEQ_PERIOD;
+    StepFrameSequencer();
+  }
 }
 
 void APU::SetOutputSampleRate(float hz) {
-  if (hz <= 0.0f) {
+  if (hz <= 0.0f)
     return;
-  }
   outputSampleRate = hz;
+  // Recalculate default upsample ratio assuming M4A standard timer
+  // (reload=0xFBE8, prescaler F/1 → ~16009 Hz FIFO rate)
+  currentUpsampleRatio = hz / 16009.0f;
 }
 
 void APU::SetPSGChannelParams(int channel, int periodSamples, int duty,
@@ -164,97 +277,78 @@ void APU::SetPSGNoiseParams(int periodSamples, bool shortMode, int volume) {
 }
 
 void APU::OnTimerOverflow(int timer) {
-  // Master sound gate (SOUNDCNT_X bit 7)
-  if (!(memory.Read16(IORegs::REG_SOUNDCNT_X) & 0x80))
-    return;
-
   uint16_t scntH = memory.Read16(IORegs::REG_SOUNDCNT_H);
 
   int fifoATimer = (scntH >> 10) & 1;
   int fifoBTimer = (scntH >> 14) & 1;
 
-  bool isATimer = (timer == fifoATimer);
-  bool isBTimer = (timer == fifoBTimer);
-
-  if (!isATimer && !isBTimer)
+  if (timer != fifoATimer && timer != fifoBTimer)
     return;
 
-  // Consume FIFO samples for whichever channel(s) use this timer
-  if (isATimer && fifoA_Count > 0) {
-    currentSampleA = fifoA[fifoA_ReadPos];
-    fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
-    fifoA_Count--;
-  } else if (isATimer) {
-    stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
+  // Consume the next FIFO sample on timer overflow.
+  // On underflow, hold the last sample value (GBA DAC latch behavior)
+  // rather than snapping to zero, which would cause a DC jump → pop.
+  if (timer == fifoATimer) {
+    if (fifoA_Count > 0) {
+      currentSampleA = fifoA[fifoA_ReadPos];
+      fifoA_ReadPos = (fifoA_ReadPos + 1) % 32;
+      fifoA_Count--;
+    } else {
+      stats.fifoAUnderflows.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
-  if (isBTimer && fifoB_Count > 0) {
-    currentSampleB = fifoB[fifoB_ReadPos];
-    fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
-    fifoB_Count--;
-  } else if (isBTimer) {
-    stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
+  if (timer == fifoBTimer) {
+    if (fifoB_Count > 0) {
+      currentSampleB = fifoB[fifoB_ReadPos];
+      fifoB_ReadPos = (fifoB_ReadPos + 1) % 32;
+      fifoB_Count--;
+    } else {
+      stats.fifoBUnderflows.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
-  // Push audio output using this timer's frequency as the clock source.
-  // When both FIFOs share a timer, every overflow produces one output.
-  // When they use different timers, each timer overflow pushes separately
-  // using its own frequency — avoids starving a FIFO whose timer fires less
-  // often.
-  const uint16_t tmReload = memory.GetTimerReload(timer);
-  const uint16_t tmControl = memory.GetTimerControl(timer);
-  int prescaler = 1;
-  switch (tmControl & 3) {
-  case 0:
-    prescaler = 1;
-    break;
+  // Recalculate upsample ratio from the timer's reload value.
+  // Use ReadIORegister16Internal to avoid re-entrant
+  // FlushPendingPeripheralCycles → UpdateTimers → OnTimerOverflow recursion.
+  uint32_t timerOffset = IORegs::TM0CNT_L + (timer * IORegs::TIMER_CHANNEL_SIZE);
+  uint16_t reload = memory.ReadIORegister16Internal(timerOffset);
+  uint16_t control = memory.ReadIORegister16Internal(timerOffset + 2);
+
+  int prescalerDiv = 1;
+  switch (control & 0x3) {
   case 1:
-    prescaler = 64;
+    prescalerDiv = 64;
     break;
   case 2:
-    prescaler = 256;
+    prescalerDiv = 256;
     break;
   case 3:
-    prescaler = 1024;
+    prescalerDiv = 1024;
     break;
   }
-  const int cyclesPerSample = (0x10000 - tmReload) * prescaler;
-  if (cyclesPerSample <= 0)
-    return;
 
-  const float inputSampleRate =
-      GBA_CPU_FREQ / static_cast<float>(cyclesPerSample);
-  currentUpsampleRatio = outputSampleRate / inputSampleRate;
+  float timerInterval =
+      static_cast<float>((0x10000 - reload) * prescalerDiv);
+  if (timerInterval > 0.0f) {
+    float fifoRate = GBA_CPU_FREQ / timerInterval;
+    if (fifoRate > 0.0f)
+      currentUpsampleRatio = outputSampleRate / fifoRate;
+  }
 
-  // GBA DAC: int8 FIFO samples, volume-shifted, mixed to L/R, scaled to int16.
-  // Max per-FIFO: int8 (-128..127) << 2 = -512..508
-  // Two FIFOs summed: -1024..1016
-  constexpr int kDacToInt16 = 32;
-  const int volShiftA = (scntH & 0x04) ? 2 : 1;
-  const int volShiftB = (scntH & 0x08) ? 2 : 1;
-
-  int32_t left = 0;
-  int32_t right = 0;
-
-  int32_t dacA = static_cast<int32_t>(currentSampleA) << volShiftA;
-  int32_t dacB = static_cast<int32_t>(currentSampleB) << volShiftB;
-
-  if (scntH & 0x200)
-    left += dacA;
-  if (scntH & 0x100)
-    right += dacA;
-  if (scntH & 0x2000)
-    left += dacB;
-  if (scntH & 0x1000)
-    right += dacB;
-
-  left = std::clamp(left, -1024, 1023) * kDacToInt16;
-  right = std::clamp(right, -1024, 1023) * kDacToInt16;
-
-  PushSample(static_cast<int16_t>(left), static_cast<int16_t>(right));
-  stats.pushCalls.fetch_add(1, std::memory_order_relaxed);
-  if (left != 0 || right != 0)
-    stats.pushNonZero.fetch_add(1, std::memory_order_relaxed);
+  // Generate output samples via sample-and-hold upsampling.
+  // Each timer overflow contributes currentUpsampleRatio output samples
+  // (e.g., ~2.048 for M4A at 32768 Hz output). The accumulator tracks
+  // the fractional sample count; we emit one sample per whole unit.
+  sampleAccumulator += currentUpsampleRatio;
+  int safety = 0;
+  while (sampleAccumulator >= 1.0f && safety < 16) {
+    sampleAccumulator -= 1.0f;
+    GenerateOutputSample();
+    ++safety;
+  }
+  if (sampleAccumulator >= 1.0f)
+    sampleAccumulator = 0.0f;
 }
 
 void APU::WriteFIFO_A(uint32_t value) {
@@ -296,32 +390,330 @@ void APU::ResetFIFO_B() {
 }
 
 int APU::GetSamples(int16_t *buffer, int numSamples) {
-  int rp = readPos.load(std::memory_order_relaxed);
-  int wp = writePos.load(std::memory_order_acquire);
-
   int samplesWritten = 0;
+  uint32_t localUnderruns = 0;
+
   for (int i = 0; i < numSamples; i++) {
+    int rp = readPos.load(std::memory_order_relaxed);
+    int wp = writePos.load(std::memory_order_acquire);
+
     if (rp == wp) {
-      // Underrun: hold last sample to avoid pops from zero insertion
-      if (samplesWritten > 0) {
-        buffer[i * 2] = buffer[(i - 1) * 2];
-        buffer[i * 2 + 1] = buffer[(i - 1) * 2 + 1];
-      } else {
-        buffer[i * 2] = 0;
-        buffer[i * 2 + 1] = 0;
-      }
+      // Buffer empty - fill rest with silence
+      buffer[i * 2] = 0;
+      buffer[i * 2 + 1] = 0;
+      localUnderruns++;
     } else {
       buffer[i * 2] = ringBuffer[rp];
       buffer[i * 2 + 1] = ringBuffer[rp + 1];
-      rp = (rp + 2) % (RING_BUFFER_SIZE * 2);
+
+      int nextRp = (rp + 2) % (RING_BUFFER_SIZE * 2);
+      readPos.store(nextRp, std::memory_order_release);
       samplesWritten++;
     }
   }
 
-  readPos.store(rp, std::memory_order_release);
+  if (localUnderruns != 0) {
+    stats.ringUnderrunSamples.fetch_add(localUnderruns,
+                                        std::memory_order_relaxed);
+  }
+
   return samplesWritten;
 }
 
 bool APU::IsSoundEnabled() const { return (soundcntX & 0x80) != 0; }
+
+void APU::ReadWaveRam(uint8_t *out16bytes) {
+  for (int i = 0; i < 16; ++i) {
+    out16bytes[i] = memory.Read8(0x04000000 + IORegs::WAVE_RAM + i);
+  }
+}
+
+void APU::TickPSGTimers(int cycles) {
+  // Channel 1 (Square with sweep)
+  // GBA CPU = 16.78MHz = 4× GB. Period in GBA cycles = (2048-freq) * 16.
+  if (hwCh1.enabled && hwCh1.dacEnabled) {
+    hwCh1.frequencyTimer -= cycles;
+    while (hwCh1.frequencyTimer <= 0) {
+      hwCh1.frequencyTimer += (2048 - hwCh1.frequency) * 16;
+      hwCh1.dutyPos = (hwCh1.dutyPos + 1) & 7;
+    }
+  }
+
+  // Channel 2 (Square)
+  if (hwCh2.enabled && hwCh2.dacEnabled) {
+    hwCh2.frequencyTimer -= cycles;
+    while (hwCh2.frequencyTimer <= 0) {
+      hwCh2.frequencyTimer += (2048 - hwCh2.frequency) * 16;
+      hwCh2.dutyPos = (hwCh2.dutyPos + 1) & 7;
+    }
+  }
+
+  // Channel 3 (Wave)
+  // Wave period divider runs at 2× square rate. GBA cycles = (2048-freq) * 8.
+  if (hwCh3.enabled && hwCh3.dacEnabled) {
+    hwCh3.frequencyTimer -= cycles;
+    while (hwCh3.frequencyTimer <= 0) {
+      hwCh3.frequencyTimer += (2048 - hwCh3.frequency) * 8;
+      hwCh3.pos = (hwCh3.pos + 1) & 31;
+    }
+  }
+
+  // Channel 4 (Noise)
+  // Divisor table scaled to GBA CPU cycles (4× GB values).
+  if (hwCh4.enabled && hwCh4.dacEnabled) {
+    hwCh4.frequencyTimer -= cycles;
+    while (hwCh4.frequencyTimer <= 0) {
+      static const int divisors[8] = {32, 64, 128, 192, 256, 320, 384, 448};
+      hwCh4.frequencyTimer += divisors[hwCh4.divisor & 7] << hwCh4.shiftAmount;
+      // Clock LFSR
+      uint16_t bit0 = hwCh4.lfsr & 1;
+      uint16_t bit1 = (hwCh4.lfsr >> 1) & 1;
+      uint16_t newbit = bit0 ^ bit1;
+      hwCh4.lfsr = (hwCh4.lfsr >> 1) | (newbit << 14);
+      if (hwCh4.shortMode) {
+        hwCh4.lfsr = (hwCh4.lfsr & ~(1 << 6)) | (newbit << 6);
+      }
+    }
+  }
+}
+
+void APU::StepFrameSequencer() {
+  // GBA frame sequencer: 512 Hz, 8 steps — only clocks length/envelope/sweep
+  switch (frameSequencerStep) {
+  case 0:
+  case 4:
+    ClockLength();
+    break;
+  case 2:
+  case 6:
+    ClockLength();
+    ClockSweep();
+    break;
+  case 7:
+    ClockEnvelope();
+    break;
+  default:
+    break;
+  }
+
+  frameSequencerStep = (frameSequencerStep + 1) & 7;
+}
+
+void APU::OnSoundRegisterWrite(uint32_t offset, uint16_t value) {
+  switch (offset) {
+  case IORegs::SOUND1CNT_L: {
+    hwCh1.sweepPeriod = (value >> 4) & 0x7;
+    hwCh1.sweepNegate = (value >> 3) & 1;
+    hwCh1.sweepShift = value & 0x7;
+    break;
+  }
+  case IORegs::SOUND1CNT_H: {
+    hwCh1.duty = (value >> 6) & 3;
+    hwCh1.envelopeInitVol = (value >> 12) & 0xF;
+    hwCh1.envelopeIncrease = (value >> 11) & 1;
+    hwCh1.envelopePeriod = (value >> 8) & 0x7;
+    hwCh1.dacEnabled = (value & 0xF800) != 0;
+    if (!hwCh1.dacEnabled)
+      hwCh1.enabled = false;
+    break;
+  }
+  case IORegs::SOUND1CNT_X: {
+    hwCh1.frequency = value & 0x7FF;
+    hwCh1.lengthEnable = (value >> 14) & 1;
+
+    if (value & 0x8000) {
+      // Read back envelope params from stored state
+      uint16_t s1h = memory.Read16(0x04000000 + IORegs::SOUND1CNT_H);
+      hwCh1.enabled = hwCh1.dacEnabled;
+      hwCh1.volume = hwCh1.envelopeInitVol;
+      hwCh1.envelopeTimer = hwCh1.envelopePeriod;
+      hwCh1.lengthCounter = hwCh1.lengthCounter > 0 ? hwCh1.lengthCounter : 64;
+      int rawLen = s1h & 0x3F;
+      if (rawLen)
+        hwCh1.lengthCounter = 64 - rawLen;
+      hwCh1.frequencyTimer = (2048 - hwCh1.frequency) * 16;
+      hwCh1.dutyPos = 0;
+
+      hwCh1.sweepShadow = hwCh1.frequency;
+      hwCh1.sweepTimer = hwCh1.sweepPeriod ? hwCh1.sweepPeriod : 8;
+      hwCh1.sweepEnabled = (hwCh1.sweepPeriod > 0 || hwCh1.sweepShift > 0);
+
+      // Overflow check on trigger
+      if (hwCh1.sweepShift > 0) {
+        int delta = hwCh1.sweepShadow >> hwCh1.sweepShift;
+        int newFreq = hwCh1.sweepNegate ? (hwCh1.sweepShadow - delta)
+                                        : (hwCh1.sweepShadow + delta);
+        if (newFreq > 2047)
+          hwCh1.enabled = false;
+      }
+    }
+    break;
+  }
+  case IORegs::SOUND2CNT_L: {
+    hwCh2.duty = (value >> 6) & 3;
+    hwCh2.envelopeInitVol = (value >> 12) & 0xF;
+    hwCh2.envelopeIncrease = (value >> 11) & 1;
+    hwCh2.envelopePeriod = (value >> 8) & 0x7;
+    hwCh2.dacEnabled = (value & 0xF800) != 0;
+    if (!hwCh2.dacEnabled)
+      hwCh2.enabled = false;
+    break;
+  }
+  case IORegs::SOUND2CNT_H: {
+    hwCh2.frequency = value & 0x7FF;
+    hwCh2.lengthEnable = (value >> 14) & 1;
+
+    if (value & 0x8000) {
+      uint16_t s2l = memory.Read16(0x04000000 + IORegs::SOUND2CNT_L);
+      hwCh2.enabled = hwCh2.dacEnabled;
+      hwCh2.volume = hwCh2.envelopeInitVol;
+      hwCh2.envelopeTimer = hwCh2.envelopePeriod;
+      hwCh2.lengthCounter = hwCh2.lengthCounter > 0 ? hwCh2.lengthCounter : 64;
+      int rawLen = s2l & 0x3F;
+      if (rawLen)
+        hwCh2.lengthCounter = 64 - rawLen;
+      hwCh2.frequencyTimer = (2048 - hwCh2.frequency) * 16;
+      hwCh2.dutyPos = 0;
+    }
+    break;
+  }
+  case IORegs::SOUND3CNT_L: {
+    hwCh3.dacEnabled = (value >> 7) & 1;
+    if (!hwCh3.dacEnabled)
+      hwCh3.enabled = false;
+    break;
+  }
+  case IORegs::SOUND3CNT_H: {
+    int volCode = (value >> 13) & 0x3;
+    static const int volShifts[4] = {4, 0, 1, 2}; // mute, 100%, 50%, 25%
+    hwCh3.volumeShift = volShifts[volCode];
+    break;
+  }
+  case IORegs::SOUND3CNT_X: {
+    hwCh3.frequency = value & 0x7FF;
+    hwCh3.lengthEnable = (value >> 14) & 1;
+
+    if (value & 0x8000) {
+      uint16_t s3h = memory.Read16(0x04000000 + IORegs::SOUND3CNT_H);
+      hwCh3.enabled = hwCh3.dacEnabled;
+      hwCh3.lengthCounter = hwCh3.lengthCounter > 0 ? hwCh3.lengthCounter : 256;
+      int rawLen = s3h & 0xFF;
+      if (rawLen)
+        hwCh3.lengthCounter = 256 - rawLen;
+      hwCh3.frequencyTimer = (2048 - hwCh3.frequency) * 8;
+      hwCh3.pos = 0;
+    }
+    break;
+  }
+  case IORegs::SOUND4CNT_L: {
+    hwCh4.envelopeInitVol = (value >> 12) & 0xF;
+    hwCh4.envelopeIncrease = (value >> 11) & 1;
+    hwCh4.envelopePeriod = (value >> 8) & 0x7;
+    hwCh4.dacEnabled = (value & 0xF800) != 0;
+    if (!hwCh4.dacEnabled)
+      hwCh4.enabled = false;
+    break;
+  }
+  case IORegs::SOUND4CNT_H: {
+    hwCh4.divisor = value & 0x7;
+    hwCh4.shiftAmount = (value >> 4) & 0xF;
+    hwCh4.shortMode = (value >> 3) & 1;
+    hwCh4.lengthEnable = (value >> 14) & 1;
+
+    if (value & 0x8000) {
+      uint16_t s4l = memory.Read16(0x04000000 + IORegs::SOUND4CNT_L);
+      hwCh4.enabled = hwCh4.dacEnabled;
+      hwCh4.volume = hwCh4.envelopeInitVol;
+      hwCh4.envelopeTimer = hwCh4.envelopePeriod;
+      hwCh4.lengthCounter = hwCh4.lengthCounter > 0 ? hwCh4.lengthCounter : 64;
+      int rawLen = s4l & 0x3F;
+      if (rawLen)
+        hwCh4.lengthCounter = 64 - rawLen;
+      hwCh4.lfsr = 0x7FFF;
+      static const int divisors[8] = {32, 64, 128, 192, 256, 320, 384, 448};
+      hwCh4.frequencyTimer = divisors[hwCh4.divisor & 7] << hwCh4.shiftAmount;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+void APU::ClockLength() {
+  if (hwCh1.lengthEnable && hwCh1.lengthCounter > 0) {
+    if (--hwCh1.lengthCounter == 0)
+      hwCh1.enabled = false;
+  }
+  if (hwCh2.lengthEnable && hwCh2.lengthCounter > 0) {
+    if (--hwCh2.lengthCounter == 0)
+      hwCh2.enabled = false;
+  }
+  if (hwCh3.lengthEnable && hwCh3.lengthCounter > 0) {
+    if (--hwCh3.lengthCounter == 0)
+      hwCh3.enabled = false;
+  }
+  if (hwCh4.lengthEnable && hwCh4.lengthCounter > 0) {
+    if (--hwCh4.lengthCounter == 0)
+      hwCh4.enabled = false;
+  }
+}
+
+void APU::ClockEnvelope() {
+  // Channel 1 envelope
+  if (hwCh1.envelopePeriod > 0) {
+    if (--hwCh1.envelopeTimer <= 0) {
+      hwCh1.envelopeTimer = hwCh1.envelopePeriod;
+      if (hwCh1.envelopeIncrease && hwCh1.volume < 15)
+        hwCh1.volume++;
+      else if (!hwCh1.envelopeIncrease && hwCh1.volume > 0)
+        hwCh1.volume--;
+    }
+  }
+
+  // Channel 2 envelope
+  if (hwCh2.envelopePeriod > 0) {
+    if (--hwCh2.envelopeTimer <= 0) {
+      hwCh2.envelopeTimer = hwCh2.envelopePeriod;
+      if (hwCh2.envelopeIncrease && hwCh2.volume < 15)
+        hwCh2.volume++;
+      else if (!hwCh2.envelopeIncrease && hwCh2.volume > 0)
+        hwCh2.volume--;
+    }
+  }
+
+  // Channel 4 envelope
+  if (hwCh4.envelopePeriod > 0) {
+    if (--hwCh4.envelopeTimer <= 0) {
+      hwCh4.envelopeTimer = hwCh4.envelopePeriod;
+      if (hwCh4.envelopeIncrease && hwCh4.volume < 15)
+        hwCh4.volume++;
+      else if (!hwCh4.envelopeIncrease && hwCh4.volume > 0)
+        hwCh4.volume--;
+    }
+  }
+}
+
+void APU::ClockSweep() {
+  if (!hwCh1.sweepEnabled || hwCh1.sweepPeriod == 0)
+    return;
+
+  if (--hwCh1.sweepTimer <= 0) {
+    hwCh1.sweepTimer = hwCh1.sweepPeriod ? hwCh1.sweepPeriod : 8;
+
+    if (hwCh1.sweepShift > 0) {
+      int delta = hwCh1.sweepShadow >> hwCh1.sweepShift;
+      int newFreq = hwCh1.sweepNegate ? (hwCh1.sweepShadow - delta)
+                                      : (hwCh1.sweepShadow + delta);
+
+      if (newFreq > 2047) {
+        hwCh1.enabled = false;
+      } else if (newFreq >= 0) {
+        hwCh1.sweepShadow = newFreq;
+        hwCh1.frequency = newFreq;
+      }
+    }
+  }
+}
 
 } // namespace AIO::Emulator::GBA

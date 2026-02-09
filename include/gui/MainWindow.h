@@ -37,6 +37,7 @@ class NASAdapter;
 class QKeyEvent;
 
 #include "emulator/gba/GBA.h"
+#include "emulator/ps1/PS1.h"
 #include "emulator/switch/SwitchEmulator.h"
 
 namespace AIO {
@@ -66,7 +67,7 @@ public:
   ~MainWindow();
 
   void LoadROM(const std::string &path);
-  void SetEmulatorType(int type); // 0=GBA, 1=Switch
+  void SetEmulatorType(int type); // 0=GBA, 1=Switch, 2=PS1
   // Debugger controls via GUI/CLI
   void EnableDebugger(bool enabled);
   void AddBreakpoint(uint32_t addr);
@@ -222,11 +223,12 @@ private:
   QLabel *devPanelLabel;
   QCheckBox *devPanelCheckbox;
 
-  enum class EmulatorType { None, GBA, Switch };
+  enum class EmulatorType { None, GBA, Switch, PS1 };
   EmulatorType currentEmulator = EmulatorType::None;
 
   AIO::Emulator::GBA::GBA gba;
   AIO::Emulator::Switch::SwitchEmulator switchEmulator;
+  AIO::Emulator::PS1::PS1 ps1Emulator;
 
   QTimer *displayTimer; // UI update timer (60 Hz)
   QImage displayImage;

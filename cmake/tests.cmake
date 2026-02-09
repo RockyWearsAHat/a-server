@@ -22,6 +22,78 @@ set_target_properties(gtest gtest_main gmock gmock_main PROPERTIES
 
 enable_testing()
 
+# ─── PS1 Emulator Tests ────────────────────────────────────────────────
+
+add_executable(PS1CPUTests ${PROJECT_ROOT}/tests/PS1CPUTests.cpp)
+set_target_properties(PS1CPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1CPUTests"
+)
+target_link_libraries(PS1CPUTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1MemoryTests ${PROJECT_ROOT}/tests/PS1MemoryTests.cpp)
+set_target_properties(PS1MemoryTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1MemoryTests"
+)
+target_link_libraries(PS1MemoryTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1GPUTests ${PROJECT_ROOT}/tests/PS1GPUTests.cpp)
+set_target_properties(PS1GPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1GPUTests"
+)
+target_link_libraries(PS1GPUTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1DMATests ${PROJECT_ROOT}/tests/PS1DMATests.cpp)
+set_target_properties(PS1DMATests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1DMATests"
+)
+target_link_libraries(PS1DMATests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1TimerTests ${PROJECT_ROOT}/tests/PS1TimerTests.cpp)
+set_target_properties(PS1TimerTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1TimerTests"
+)
+target_link_libraries(PS1TimerTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1SPUTests ${PROJECT_ROOT}/tests/PS1SPUTests.cpp)
+set_target_properties(PS1SPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1SPUTests"
+)
+target_link_libraries(PS1SPUTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1InterruptTests ${PROJECT_ROOT}/tests/PS1InterruptTests.cpp)
+set_target_properties(PS1InterruptTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1InterruptTests"
+)
+target_link_libraries(PS1InterruptTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1GTETests ${PROJECT_ROOT}/tests/PS1GTETests.cpp)
+set_target_properties(PS1GTETests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1GTETests"
+)
+target_link_libraries(PS1GTETests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1ControllerTests ${PROJECT_ROOT}/tests/PS1ControllerTests.cpp)
+set_target_properties(PS1ControllerTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1ControllerTests"
+)
+target_link_libraries(PS1ControllerTests PRIVATE GTest::gtest_main PS1Emulator)
+
+add_executable(PS1IntegrationTests ${PROJECT_ROOT}/tests/PS1IntegrationTests.cpp)
+set_target_properties(PS1IntegrationTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1IntegrationTests"
+)
+target_link_libraries(PS1IntegrationTests PRIVATE GTest::gtest_main PS1Emulator)
+
 
 # Test discovery files stay in CMAKE_BINARY_DIR (build/generated/cmake/)
 set(CMAKE_TEST_GEN_DIR "${CMAKE_BINARY_DIR}")
@@ -274,3 +346,55 @@ if(EXISTS "${PROJECT_ROOT}/tests/DMATimingTests.cpp")
     DISCOVERY_MODE PRE_TEST
   )
 endif()
+
+# ─── PS1 Test Discovery ────────────────────────────────────────────────
+gtest_discover_tests(PS1CPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1MemoryTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1GPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1DMATests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1TimerTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1SPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1InterruptTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1GTETests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1ControllerTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1IntegrationTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

@@ -3,6 +3,7 @@
 #include "emulator/switch/GpuCore.h"
 
 #include "emulator/common/Logger.h"
+#include "emulator/ps1/PS1Constants.h"
 
 #include "input/InputManager.h"
 
@@ -280,6 +281,45 @@ void MainWindow::LoadROM(const std::string &path) {
         displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
       }
     }
+  } else if (currentEmulator == EmulatorType::PS1) {
+    // PS1 requires BIOS — check env var or settings
+    std::string biosPath;
+    const QString settingsBios = settings.value("ps1/biosPath").toString();
+    if (!settingsBios.isEmpty()) {
+      biosPath = settingsBios.toStdString();
+    } else if (const char *envBios = std::getenv("AIO_PS1_BIOS")) {
+      biosPath = envBios;
+    }
+
+    if (biosPath.empty()) {
+      statusLabel->setText("PS1 BIOS not configured. Set AIO_PS1_BIOS env var "
+                           "or ps1/biosPath in settings.");
+      return;
+    }
+
+    if (!ps1Emulator.LoadBIOS(biosPath)) {
+      statusLabel->setText("Failed to load PS1 BIOS: " +
+                           QString::fromStdString(biosPath));
+      return;
+    }
+
+    success = ps1Emulator.LoadDisc(path);
+    if (success) {
+      uint32_t w = ps1Emulator.GetDisplayWidth();
+      uint32_t h = ps1Emulator.GetDisplayHeight();
+      if (w == 0)
+        w = 320;
+      if (h == 0)
+        h = 240;
+      displayImage = QImage(w, h, QImage::Format_ARGB32);
+
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
   } else if (currentEmulator == EmulatorType::Switch) {
     success = switchEmulator.LoadROM(path);
     if (success) {
@@ -364,6 +404,9 @@ void MainWindow::SetEmulatorType(int type) {
   } else if (type == 1) {
     currentEmulator = EmulatorType::Switch;
     std::cout << "[MainWindow] Set emulator type to Switch" << std::endl;
+  } else if (type == 2) {
+    currentEmulator = EmulatorType::PS1;
+    std::cout << "[MainWindow] Set emulator type to PS1" << std::endl;
   }
 }
 
@@ -374,7 +417,8 @@ void MainWindow::StartEmulatorThread() {
 
   // Lazily initialize audio on first emulator run to avoid blocking app
   // startup.
-  if (audioDevice == 0 && currentEmulator == EmulatorType::GBA) {
+  if (audioDevice == 0 && (currentEmulator == EmulatorType::GBA ||
+                           currentEmulator == EmulatorType::PS1)) {
     initAudio();
   }
 
@@ -383,7 +427,8 @@ void MainWindow::StartEmulatorThread() {
   // Start audio immediately when emulation begins.
   // The APU ring buffer already returns silence on underrun, so delaying audio
   // start just creates an artificial "startup silence".
-  if (audioDevice != 0 && currentEmulator == EmulatorType::GBA) {
+  if (audioDevice != 0 && (currentEmulator == EmulatorType::GBA ||
+                           currentEmulator == EmulatorType::PS1)) {
     SDL_PauseAudioDevice(audioDevice, 0);
   }
 }
@@ -491,7 +536,10 @@ void MainWindow::EmulatorThreadMain() {
 
     // Execute one frame
     if (currentEmulator == EmulatorType::GBA) {
-      int totalCycles = 0;
+      static int cycleCarry = 0;
+      if (emulatorFrameNumber.load(std::memory_order_relaxed) == 0)
+        cycleCarry = 0;
+      int totalCycles = cycleCarry;
 
       // Run the frame in smaller chunks to reduce worst-case input latency.
       // At 60fps, 64 chunks is ~0.26ms granularity for when pending KEYINPUT is
@@ -522,6 +570,9 @@ void MainWindow::EmulatorThreadMain() {
         totalCycles += gba.Step();
       }
 
+      // Carry over excess cycles to the next frame for accurate timing
+      cycleCarry = totalCycles - kGbaCyclesPerFrame;
+
       applyPendingKeyinput();
 
       // Periodically flush save
@@ -530,6 +581,45 @@ void MainWindow::EmulatorThreadMain() {
         saveFlushCounter = 0;
         gba.GetMemory().FlushSave();
       }
+    } else if (currentEmulator == EmulatorType::PS1) {
+      // PS1: 33.8688 MHz CPU, 263 scanlines × 2171 cycles/scanline ≈ 570,973
+      // cycles/frame
+      static constexpr int kPs1CyclesPerFrame = 2171 * 263;
+      static int ps1CycleCarry = 0;
+      if (emulatorFrameNumber.load(std::memory_order_relaxed) == 0)
+        ps1CycleCarry = 0;
+      int totalCycles = ps1CycleCarry;
+
+      // Map input: GBA KEYINPUT (active-low) → PS1 pad buttons (active-low)
+      const auto inputSnap = AIO::Input::InputManager::instance().snapshot();
+      uint16_t gbaInput = inputSnap.keyinput;
+      uint16_t ps1Buttons = 0xFFFF;
+      if (!(gbaInput & (1 << 0)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Cross;
+      if (!(gbaInput & (1 << 1)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Circle;
+      if (!(gbaInput & (1 << 2)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Select;
+      if (!(gbaInput & (1 << 3)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Start;
+      if (!(gbaInput & (1 << 4)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Right;
+      if (!(gbaInput & (1 << 5)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Left;
+      if (!(gbaInput & (1 << 6)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Up;
+      if (!(gbaInput & (1 << 7)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Down;
+      if (!(gbaInput & (1 << 8)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::R1;
+      if (!(gbaInput & (1 << 9)))
+        ps1Buttons &= ~Emulator::PS1::PadButton::L1;
+      ps1Emulator.UpdateInput(ps1Buttons);
+
+      while (totalCycles < kPs1CyclesPerFrame && emulatorRunning) {
+        totalCycles += ps1Emulator.Step();
+      }
+      ps1CycleCarry = totalCycles - kPs1CyclesPerFrame;
     } else if (currentEmulator == EmulatorType::Switch) {
       switchEmulator.RunFrame();
     }
@@ -550,9 +640,8 @@ void MainWindow::EmulatorThreadMain() {
                   FrameSnapshot::PALETTE_SIZE);
       std::memcpy(snap.ioRegs.data(), mem.GetIORegs(), FrameSnapshot::IO_SIZE);
 
-      const auto &fb = gba.GetPPU().GetFramebuffer();
-      std::memcpy(snap.framebuffer.data(), fb.data(),
-                  FrameSnapshot::FB_SIZE * sizeof(uint32_t));
+      gba.GetPPU().CopyFramebufferTo(snap.framebuffer.data(),
+                                     FrameSnapshot::FB_SIZE);
 
       for (int i = 0; i < 16; i++) {
         snap.cpuRegisters[i] = gba.GetRegister(i);
@@ -576,6 +665,9 @@ void MainWindow::EmulatorThreadMain() {
     const auto frameDur =
         (currentEmulator == EmulatorType::GBA)
             ? std::chrono::duration_cast<Clock::duration>(gbaFrameDuration)
+        : (currentEmulator == EmulatorType::PS1)
+            ? std::chrono::duration_cast<Clock::duration>(
+                  std::chrono::duration<double>(1.0 / 59.94))
             : std::chrono::milliseconds(16);
 
     // Maintain an absolute "next frame" deadline so we self-correct after
@@ -779,17 +871,16 @@ void MainWindow::UpdateDisplay() {
       pendingEmuKeyinput.store(inputState, std::memory_order_relaxed);
     }
 
-    // Copy framebuffer to display image and record if active
-    const auto &buffer = gba.GetPPU().GetFramebuffer();
-    if ((int)buffer.size() >= 240 * 160) {
-      for (int y = 0; y < 160; ++y) {
-        const uint32_t *src = &buffer[y * 240];
-        uchar *dst = displayImage.scanLine(y);
-        memcpy(dst, src, 240 * sizeof(uint32_t));
-      }
-      // Record frame if A/V recording is active
-      avRecorder_.RecordVideoFrame(buffer);
+    // Copy framebuffer atomically under lock to prevent tearing from
+    // SwapBuffers race
+    constexpr size_t FB_PIXELS = 240 * 160;
+    uint32_t localFb[FB_PIXELS];
+    gba.GetPPU().CopyFramebufferTo(localFb, FB_PIXELS);
+    for (int y = 0; y < 160; ++y) {
+      memcpy(displayImage.scanLine(y), &localFb[y * 240],
+             240 * sizeof(uint32_t));
     }
+    avRecorder_.RecordVideoFrame(localFb);
   } else if (currentEmulator == EmulatorType::Switch) {
     auto *gpu = switchEmulator.GetGPU();
     if (gpu) {
@@ -800,6 +891,28 @@ void MainWindow::UpdateDisplay() {
         // Record frame if A/V recording is active
         avRecorder_.RecordVideoFrame(buffer);
       }
+    }
+  } else if (currentEmulator == EmulatorType::PS1) {
+    // PS1 framebuffer is RGB555 (uint16_t) — convert to ARGB32 for display
+    const uint16_t *ps1Fb = ps1Emulator.GetFramebuffer();
+    const uint32_t w = ps1Emulator.GetDisplayWidth();
+    const uint32_t h = ps1Emulator.GetDisplayHeight();
+    if (ps1Fb && w > 0 && h > 0) {
+      // Resize display image if GPU resolution changed
+      if (static_cast<uint32_t>(displayImage.width()) != w ||
+          static_cast<uint32_t>(displayImage.height()) != h) {
+        displayImage = QImage(w, h, QImage::Format_ARGB32);
+      }
+      const uint32_t pixelCount = w * h;
+      auto *dst = reinterpret_cast<uint32_t *>(displayImage.bits());
+      for (uint32_t i = 0; i < pixelCount; ++i) {
+        uint16_t px = ps1Fb[i];
+        uint8_t r = static_cast<uint8_t>((px & 0x1F) << 3);
+        uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x1F) << 3);
+        uint8_t b = static_cast<uint8_t>(((px >> 10) & 0x1F) << 3);
+        dst[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+      }
+      avRecorder_.RecordVideoFrame(dst);
     }
   }
 

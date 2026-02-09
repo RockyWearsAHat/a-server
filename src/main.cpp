@@ -318,6 +318,11 @@ int main(int argc, char *argv[]) {
       if (romStr.find(".nro") != std::string::npos ||
           romStr.find(".nso") != std::string::npos) {
         window.SetEmulatorType(1); // Switch
+      } else if (romStr.find(".bin") != std::string::npos ||
+                 romStr.find(".cue") != std::string::npos ||
+                 romStr.find(".iso") != std::string::npos ||
+                 romStr.find(".img") != std::string::npos) {
+        window.SetEmulatorType(2); // PS1
       } else {
         window.SetEmulatorType(0); // GBA (default)
       }

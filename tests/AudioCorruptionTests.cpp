@@ -1,10 +1,41 @@
 #include <cmath>
+#include <cstdint>
 #include <emulator/gba/APU.h>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/IORegs.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 using namespace AIO::Emulator::GBA;
+
+// Helper: set up a standard M4A-style audio configuration
+static void SetupM4AAudio(GBAMemory &mem, APU &apu,
+                          float outputRate = 32768.0f) {
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(outputRate);
+
+  // Master sound enable
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+
+  // M4A standard timer: reload=0xFBE8, prescaler F/1
+  mem.Write16(IORegs::REG_TM0CNT_L, 0xFBE8);
+  mem.Write16(IORegs::REG_TM0CNT_H, 0x0080);
+
+  // FIFO A on Timer 0, 100% volume, both channels
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0304);
+}
+
+// Helper: drain ring buffer and return all samples as vector of stereo pairs
+static std::vector<int16_t> DrainRingBuffer(APU &apu, int maxSamples = 4096) {
+  std::vector<int16_t> result;
+  result.resize(maxSamples * 2);
+  int got = apu.GetSamples(result.data(), maxSamples);
+  result.resize(got * 2);
+  return result;
+}
 
 // Tests for audio corruption bugs found in OG-DK, MZM, and MMBN
 
@@ -22,8 +53,8 @@ TEST(AudioCorruptionTest, UpsamplingRatioCalculatedCorrectly) {
   // Configure Timer 0 for ~18KHz
   // Timer reload = 65536 - 933 = 64603 (0xFC4B)
   // At 1x prescaler: 16777216 / 933 ≈ 17982 Hz
-  mem.Write16(IORegs::TM0CNT_L, 0xFC4B);
-  mem.Write16(IORegs::TM0CNT_H, 0x0080);
+  mem.Write16(IORegs::REG_TM0CNT_L, 0xFC4B);
+  mem.Write16(IORegs::REG_TM0CNT_H, 0x0080);
 
   // FIFO A uses Timer 0, enabled to both channels
   mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0B04);
@@ -52,8 +83,8 @@ TEST(AudioCorruptionTest, MultipleTimerOverflowsFillRingBuffer) {
   apu.SetOutputSampleRate(48000.0f);
 
   mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
-  mem.Write16(IORegs::TM0CNT_L, 0xFC4B);
-  mem.Write16(IORegs::TM0CNT_H, 0x0080);
+  mem.Write16(IORegs::REG_TM0CNT_L, 0xFC4B);
+  mem.Write16(IORegs::REG_TM0CNT_H, 0x0080);
   mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0B04);
 
   // Fill FIFO A
@@ -88,8 +119,8 @@ TEST(AudioCorruptionTest, UpsamplingPreventsFifoUnderflow) {
   // Configure Timer 0 for low sample rate (8KHz)
   // Timer reload = 65536 - 2097 = 63439 (0xF7EF)
   // At 1x prescaler: 16777216 / 2097 ≈ 8000 Hz
-  mem.Write16(IORegs::TM0CNT_L, 0xF7EF);
-  mem.Write16(IORegs::TM0CNT_H, 0x0080);
+  mem.Write16(IORegs::REG_TM0CNT_L, 0xF7EF);
+  mem.Write16(IORegs::REG_TM0CNT_H, 0x0080);
 
   mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0B04);
 
@@ -130,8 +161,8 @@ TEST(AudioCorruptionTest, NoAudioWhenMasterSoundDisabled) {
   // Master sound DISABLED (bit 7 = 0)
   mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0000);
 
-  mem.Write16(IORegs::TM0CNT_L, 0xFC4B);
-  mem.Write16(IORegs::TM0CNT_H, 0x0080);
+  mem.Write16(IORegs::REG_TM0CNT_L, 0xFC4B);
+  mem.Write16(IORegs::REG_TM0CNT_H, 0x0080);
   mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0B04);
 
   for (int i = 0; i < 8; ++i) {
@@ -169,10 +200,10 @@ TEST(AudioCorruptionTest, FifoAAndFifoBIndependent) {
   mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
 
   // FIFO A on Timer 0, FIFO B on Timer 1
-  mem.Write16(IORegs::TM0CNT_L, 0xFC4B);
-  mem.Write16(IORegs::TM0CNT_H, 0x0080);
-  mem.Write16(IORegs::TM1CNT_L, 0xF830);
-  mem.Write16(IORegs::TM1CNT_H, 0x0080);
+  mem.Write16(IORegs::BASE + IORegs::TM0CNT_L, 0xFC4B);
+  mem.Write16(IORegs::BASE + IORegs::TM0CNT_H, 0x0080);
+  mem.Write16(IORegs::BASE + IORegs::TM1CNT_L, 0xF830);
+  mem.Write16(IORegs::BASE + IORegs::TM1CNT_H, 0x0080);
 
   // Bits: 2=A vol, 3=B vol, 8-9=A R/L, 10=A timer, 12-13=B R/L, 14=B timer
   uint16_t scntH = 0;
@@ -225,8 +256,8 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
   apu.SetOutputSampleRate(48000.0f);
 
   mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
-  mem.Write16(IORegs::TM0CNT_L, 0xFC4B);
-  mem.Write16(IORegs::TM0CNT_H, 0x0080);
+  mem.Write16(IORegs::REG_TM0CNT_L, 0xFC4B);
+  mem.Write16(IORegs::REG_TM0CNT_H, 0x0080);
 
   // FIFO A to LEFT only (bit 9=1, bit 8=0)
   mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0204);
@@ -259,4 +290,245 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
 
   EXPECT_TRUE(leftHasSignal) << "Left channel should have audio";
   EXPECT_TRUE(rightIsZero) << "Right channel should be silent";
+}
+// ==================================================================
+// BUG FIX TESTS: HPF bypass, FIFO underflow, HPF overflow
+// ==================================================================
+
+// When master sound is disabled, GenerateOutputSample must still run
+// samples through the HPF (feeding it zero) so the capacitor state
+// decays smoothly. Bypassing the HPF and pushing raw silence causes
+// a pop when sound re-enables because the cap holds stale state.
+TEST(AudioCorruptionTest, HpfRunsDuringSoundDisable) {
+  GBAMemory mem;
+  APU apu(mem);
+  SetupM4AAudio(mem, apu);
+
+  // Push some non-zero FIFO samples to build up HPF cap state
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x7F7F7F7Fu);
+  for (int i = 0; i < 20; ++i)
+    apu.OnTimerOverflow(0);
+
+  auto beforeDisable = DrainRingBuffer(apu);
+  ASSERT_GT(beforeDisable.size(), 0u);
+
+  // Disable master sound
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0000);
+
+  // Generate more samples with sound disabled — HPF should still run
+  for (int i = 0; i < 20; ++i)
+    apu.OnTimerOverflow(0);
+  auto duringSilence = DrainRingBuffer(apu);
+
+  // Re-enable master sound with fresh FIFO data
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x01010101u);
+  for (int i = 0; i < 5; ++i)
+    apu.OnTimerOverflow(0);
+  auto afterReenable = DrainRingBuffer(apu);
+
+  // The first sample after re-enable should NOT have a huge discontinuity.
+  // If HPF cap was stale, the first output would be a large pop.
+  bool hasLargePop = false;
+  for (size_t i = 2; i < afterReenable.size(); i += 2) {
+    int32_t delta = std::abs(afterReenable[i] - afterReenable[i - 2]);
+    if (delta > 2000) {
+      hasLargePop = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(hasLargePop)
+      << "Re-enabling sound should not produce a large pop from stale HPF";
+}
+
+// FIFO underflow should hold the last sample value, not snap to zero.
+// Snapping to zero causes a DC jump that the HPF converts into a pop.
+TEST(AudioCorruptionTest, FifoUnderflowHoldsLastSample) {
+  GBAMemory mem;
+  APU apu(mem);
+  SetupM4AAudio(mem, apu);
+
+  // Fill FIFO with known non-zero value
+  apu.WriteFIFO_A(0x40404040u);
+  ASSERT_EQ(apu.GetFifoACount(), 4);
+
+  // Consume all 4 samples
+  for (int i = 0; i < 4; ++i)
+    apu.OnTimerOverflow(0);
+  EXPECT_EQ(apu.GetFifoACount(), 0);
+
+  // Drain output so far
+  DrainRingBuffer(apu);
+
+  // Trigger more overflows with empty FIFO — should hold last sample
+  for (int i = 0; i < 10; ++i)
+    apu.OnTimerOverflow(0);
+
+  auto samples = DrainRingBuffer(apu);
+  ASSERT_GT(samples.size(), 0u);
+
+  // With held sample (0x40 = 64 signed), and FIFO A 100% vol (64),
+  // the mix should continue at 64 * 64 = 4096. The HPF will settle
+  // this to near-zero over time, but there should be NO pop.
+  // Check max sample-to-sample delta is bounded
+  int maxDelta = 0;
+  for (size_t i = 2; i < samples.size(); i += 2) {
+    int d = std::abs((int)samples[i] - (int)samples[i - 2]);
+    maxDelta = std::max(maxDelta, d);
+  }
+  EXPECT_LT(maxDelta, 1000)
+      << "FIFO underflow should not cause a large discontinuity";
+}
+
+// The HPF subtraction (outL - cap>>16) must not overflow int16_t.
+// With large FIFO values (±127 * 64 = ±8128), the mix can swing
+// widely, and the cap tracks the previous DC level. The subtraction
+// must use int32 arithmetic to avoid wrapping.
+TEST(AudioCorruptionTest, HpfNoInt16Overflow) {
+  GBAMemory mem;
+  APU apu(mem);
+  SetupM4AAudio(mem, apu);
+
+  // Push maximum positive FIFO samples
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x7F7F7F7Fu);
+  for (int i = 0; i < 30; ++i)
+    apu.OnTimerOverflow(0);
+  DrainRingBuffer(apu);
+
+  // Abrupt switch to maximum negative
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x80808080u);
+  for (int i = 0; i < 30; ++i)
+    apu.OnTimerOverflow(0);
+
+  auto samples = DrainRingBuffer(apu);
+  ASSERT_GT(samples.size(), 4u);
+
+  // No sample should have an anomalous value from int16 wrap
+  // (wrapping would produce values near ±32767 instead of
+  // the expected range of roughly ±16000)
+  bool hasWrap = false;
+  for (size_t i = 0; i < samples.size(); i += 2) {
+    // The HPF output should never exceed the mixer output range
+    // (±8128 from FIFO). Values near ±32000 indicate overflow.
+    if (std::abs(samples[i]) > 20000) {
+      hasWrap = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(hasWrap)
+      << "HPF arithmetic should not produce int16 overflow/wrap";
+}
+
+// Upsample accumulator precision: over many overflows, the total
+// output sample count should closely match expectedOverflows * ratio.
+TEST(AudioCorruptionTest, UpsampleAccumulatorPrecision) {
+  GBAMemory mem;
+  APU apu(mem);
+  SetupM4AAudio(mem, apu);
+
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x10101010u);
+
+  const int numOverflows = 1000;
+  for (int i = 0; i < numOverflows; ++i) {
+    if (apu.GetFifoACount() < 8)
+      apu.WriteFIFO_A(0x10101010u);
+    apu.OnTimerOverflow(0);
+  }
+
+  auto samples = DrainRingBuffer(apu, 8192);
+  int sampleCount = static_cast<int>(samples.size()) / 2;
+
+  // M4A timer reload 0xFBE8 = 64488, interval = 1048 cycles
+  // fifoRate = 16777216 / 1048 ≈ 16009 Hz
+  // ratio = 32768 / 16009 ≈ 2.048
+  // Expected: 1000 * 2.048 ≈ 2048 samples (±5)
+  EXPECT_NEAR(sampleCount, 2048, 10)
+      << "Upsample accumulator should produce precise sample count";
+}
+
+// After FIFO underflow + refill, audio should resume smoothly
+// without a pop. This tests the MMBN ~200ms periodic pop scenario.
+TEST(AudioCorruptionTest, FifoRefillAfterUnderflowIsSmooth) {
+  GBAMemory mem;
+  APU apu(mem);
+  SetupM4AAudio(mem, apu);
+
+  // Initial fill and playback
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x30303030u);
+  for (int i = 0; i < 40; ++i)
+    apu.OnTimerOverflow(0);
+  DrainRingBuffer(apu);
+
+  // Let FIFO drain to empty
+  while (apu.GetFifoACount() > 0)
+    apu.OnTimerOverflow(0);
+  // A few more overflows with empty FIFO
+  for (int i = 0; i < 5; ++i)
+    apu.OnTimerOverflow(0);
+
+  // Refill with similar value (simulating M4A DMA refill)
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x32323232u);
+
+  // Continue playback
+  for (int i = 0; i < 10; ++i)
+    apu.OnTimerOverflow(0);
+
+  auto samples = DrainRingBuffer(apu);
+  ASSERT_GT(samples.size(), 4u);
+
+  // Max sample-to-sample delta should be bounded
+  int maxDelta = 0;
+  for (size_t i = 2; i < samples.size(); i += 2) {
+    int d = std::abs((int)samples[i] - (int)samples[i - 2]);
+    maxDelta = std::max(maxDelta, d);
+  }
+  EXPECT_LT(maxDelta, 1500)
+      << "Refill after underflow should not produce a pop";
+}
+
+// HPF should converge to zero when fed constant zero input.
+// Verifies no stuck DC offset from integer truncation.
+TEST(AudioCorruptionTest, HpfConvergesToZeroOnSilence) {
+  GBAMemory mem;
+  APU apu(mem);
+  SetupM4AAudio(mem, apu);
+
+  // Push non-zero audio to charge the HPF caps
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x60606060u);
+  for (int i = 0; i < 20; ++i)
+    apu.OnTimerOverflow(0);
+  DrainRingBuffer(apu);
+
+  // Now push silence
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x00000000u);
+  // Run enough overflows for HPF to settle (~400 samples ≈ 200 overflows)
+  for (int i = 0; i < 500; ++i) {
+    if (apu.GetFifoACount() < 8)
+      apu.WriteFIFO_A(0x00000000u);
+    apu.OnTimerOverflow(0);
+  }
+
+  auto samples = DrainRingBuffer(apu, 8192);
+  ASSERT_GT(samples.size(), 100u);
+
+  // The last 100 samples should all be near zero
+  bool allNearZero = true;
+  size_t start = samples.size() - 100;
+  for (size_t i = start; i < samples.size(); i += 2) {
+    if (std::abs(samples[i]) > 2) {
+      allNearZero = false;
+      break;
+    }
+  }
+  EXPECT_TRUE(allNearZero)
+      << "HPF should converge to zero after sustained silence input";
 }

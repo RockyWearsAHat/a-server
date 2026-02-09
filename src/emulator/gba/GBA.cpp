@@ -342,21 +342,22 @@ int GBA::Step() {
   int dmaCycles = memory->GetLastDMACycles();
 
   // DMA cycles were already applied to timers/PPU/APU inside PerformDMA().
-  // HLE cycles must be applied by the outer loop (us).
-  // When CPU is halted, fast-forward time so PPU/timers can reach VBlank/IRQs.
+  // HLE cycles were already applied inside AdvanceHLECycles() — do NOT
+  // add them to peripheralCycles or they will be double-counted.
   int totalCycles = cpuCycles + dmaCycles + hleCycles;
 
-  int peripheralCycles = cpuCycles + hleCycles;
+  int peripheralCycles = cpuCycles;
   if (cpu->IsHalted()) {
-    // During HALT, ARM7TDMI::Step() already advances peripherals by 1 cycle.
-    // The CPU doesn't execute instructions, so cpuCycles shouldn't be added
-    // again — that would double-count and make timers/PPU run too fast.
-    peripheralCycles = 0;
-    totalCycles = 1 + dmaCycles + hleCycles;
+    // During HALT the CPU stops executing instructions, but hardware
+    // peripherals (PPU, timers, APU) keep running. Fast-forward time by one
+    // scanline (~1232 cycles) so timers fire at the correct rate and audio
+    // FIFOs are fed properly.
+    totalCycles = 1232;
+    peripheralCycles = totalCycles;
   }
 
   uint32_t currPc = cpu->GetRegister(15);
-  if (currPc == prevPc) {
+  if (currPc == prevPc && !cpu->IsHalted()) {
     stallCycleAccumulator += static_cast<uint64_t>(totalCycles);
     if (!stallCrashTriggered &&
         stallCycleAccumulator >= STALL_CYCLE_THRESHOLD) {

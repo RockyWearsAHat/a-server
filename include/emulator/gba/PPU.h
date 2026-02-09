@@ -19,6 +19,7 @@ public:
   void Reset();
   void Update(int cycles);
   const std::vector<uint32_t> &GetFramebuffer() const;
+  void CopyFramebufferTo(uint32_t *dst, size_t count) const;
   int GetFrameCount() const { return frameCount; }
   void
   SwapBuffers(); // Call this after frame complete to make it visible to GUI

@@ -1557,6 +1557,12 @@ const std::vector<uint32_t> &PPU::GetFramebuffer() const {
   return frontBuffer;
 }
 
+void PPU::CopyFramebufferTo(uint32_t *dst, size_t count) const {
+  std::lock_guard<std::mutex> lock(bufferMutex);
+  size_t n = std::min(count, frontBuffer.size());
+  std::memcpy(dst, frontBuffer.data(), n * sizeof(uint32_t));
+}
+
 void PPU::SwapBuffers() {
   std::lock_guard<std::mutex> lock(bufferMutex);
   std::swap(frontBuffer, backBuffer);

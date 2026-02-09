@@ -600,11 +600,7 @@ void ARM7TDMI::Step() {
   CheckInterrupts();
 
   if (halted) {
-    // CRITICAL FIX: When halted, CPU doesn't execute instructions, but hardware
-    // (PPU/APU/timers) MUST still advance! On real GBA hardware, HALT stops the
-    // CPU clock but peripheral clocks keep running. Without this, VBlank never
-    // occurs and games hang in HALT forever.
-    memory.AdvanceCycles(1);
+    // CPU stopped — peripheral advancement handled by GBA::Step()
     return;
   }
 

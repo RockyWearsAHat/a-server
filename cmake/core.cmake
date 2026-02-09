@@ -1,4 +1,31 @@
 # Emulator core and main app build
+
+# ─── PS1 Emulator ────────────────────────────────────────────────────────
+add_library(PS1Emulator STATIC
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/R3000A.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1Memory.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1GPU.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1SPU.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1DMA.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/InterruptController.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1Timer.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/CDROM.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/GTE.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1Controller.cpp
+    ${PROJECT_ROOT}/src/emulator/common/Logger.cpp
+)
+
+target_include_directories(PS1Emulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+set_target_properties(PS1Emulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1Emulator"
+)
+
+# ─── GBA Emulator ────────────────────────────────────────────────────────
 add_library(GBAEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/gba/GBA.cpp
     ${PROJECT_ROOT}/src/emulator/gba/GBAMemory.cpp
@@ -113,7 +140,7 @@ target_include_directories(AIOServer PRIVATE
     $<TARGET_PROPERTY:Qt6::Widgets,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network GBAEmulator SwitchEmulator SDL2::SDL2 CURL::libcurl)
+target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network GBAEmulator SwitchEmulator PS1Emulator SDL2::SDL2 CURL::libcurl)
 
 # Set autogen directory for AIOServer
 set_target_properties(AIOServer PROPERTIES

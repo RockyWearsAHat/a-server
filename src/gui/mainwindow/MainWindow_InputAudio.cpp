@@ -97,6 +97,10 @@ bool MainWindow::StartAVRecording(const std::string &path) {
     cfg.videoWidth = 240;
     cfg.videoHeight = 160;
     cfg.videoFps = 60;
+  } else if (currentEmulator == EmulatorType::PS1) {
+    cfg.videoWidth = 320;
+    cfg.videoHeight = 240;
+    cfg.videoFps = 60;
   } else if (currentEmulator == EmulatorType::Switch) {
     cfg.videoWidth = 1280;
     cfg.videoHeight = 720;
@@ -125,6 +129,8 @@ void MainWindow::audioCallback(void *userdata, Uint8 *stream, int len) {
 
   if (self->currentEmulator == EmulatorType::GBA) {
     self->gba.GetAPU().GetSamples(buffer, numSamples);
+  } else if (self->currentEmulator == EmulatorType::PS1) {
+    self->ps1Emulator.GetSPU().GetSamples(buffer, numSamples);
   } else {
     memset(stream, 0, len);
   }

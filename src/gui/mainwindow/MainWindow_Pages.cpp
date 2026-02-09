@@ -441,6 +441,17 @@ void MainWindow::setupEmulatorSelect() {
   });
   layout->addWidget(gbaBtn);
 
+  QPushButton *ps1Btn = new QPushButton("PLAYSTATION", emulatorSelectPage);
+  ps1Btn->setCursor(Qt::PointingHandCursor);
+  ps1Btn->setFocusPolicy(Qt::StrongFocus);
+  ps1Btn->setStyleSheet(
+      "text-align: left; padding-left: 24px; border-left: 6px solid #00bfff;");
+  connect(ps1Btn, &QPushButton::clicked, this, [this]() {
+    currentEmulator = EmulatorType::PS1;
+    goToGameSelect();
+  });
+  layout->addWidget(ps1Btn);
+
   QPushButton *switchBtn =
       new QPushButton("NINTENDO SWITCH", emulatorSelectPage);
   switchBtn->setCursor(Qt::PointingHandCursor);
@@ -465,7 +476,7 @@ void MainWindow::setupEmulatorSelect() {
   // Create adapter for emulator selection with all buttons including back
   emulatorSelectAdapter = std::make_unique<EmulatorSelectAdapter>(
       emulatorSelectPage,
-      std::vector<QPushButton *>{gbaBtn, switchBtn, backBtn}, this);
+      std::vector<QPushButton *>{gbaBtn, ps1Btn, switchBtn, backBtn}, this);
 }
 
 void MainWindow::refreshGameList() {
@@ -480,6 +491,8 @@ void MainWindow::refreshGameList() {
   QStringList filters;
   if (currentEmulator == EmulatorType::GBA) {
     filters << "*.gba";
+  } else if (currentEmulator == EmulatorType::PS1) {
+    filters << "*.bin" << "*.cue" << "*.iso" << "*.img";
   } else if (currentEmulator == EmulatorType::Switch) {
     filters << "*.nso" << "*.nro" << "*.xci" << "*.nsp";
   }
@@ -507,7 +520,9 @@ void MainWindow::refreshGameList() {
     font.setBold(true);
     painter.setFont(font);
 
-    QString sysName = (currentEmulator == EmulatorType::GBA) ? "GBA" : "NSW";
+    QString sysName = (currentEmulator == EmulatorType::GBA)   ? "GBA"
+                      : (currentEmulator == EmulatorType::PS1) ? "PS1"
+                                                               : "NSW";
     painter.drawText(pixmap.rect().adjusted(0, -20, 0, 0), Qt::AlignCenter,
                      sysName);
 
