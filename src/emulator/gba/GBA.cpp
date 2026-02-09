@@ -30,6 +30,8 @@ GBA::GBA() {
   memory->SetAPU(apu.get());
   // Wire up PPU to memory for DMA updates
   memory->SetPPU(ppu.get());
+  // Wire up PPU IO write callback for mid-frame BGxX/BGxY re-latching
+  memory->SetIOWriteCallback(PPU::OnIOWrite, ppu.get());
   // Wire up CPU to memory for debug
   memory->SetCPU(cpu.get());
   // Wire up GBA to memory for flush callbacks

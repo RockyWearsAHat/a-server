@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PS1Constants.h"
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -15,17 +16,17 @@ class PS1GPU;
 
 // PS-X EXE header (2048 bytes, first 0x800 of the executable file on disc)
 struct PSXExeHeader {
-  char magic[8];          // "PS-X EXE"
+  char magic[8]; // "PS-X EXE"
   uint32_t pad1[2];
-  uint32_t initialPC;     // Entry point
-  uint32_t initialGP;     // Initial GP ($28)
-  uint32_t destAddr;      // RAM destination address
-  uint32_t fileSize;      // Size of .text section (data to load)
+  uint32_t initialPC; // Entry point
+  uint32_t initialGP; // Initial GP ($28)
+  uint32_t destAddr;  // RAM destination address
+  uint32_t fileSize;  // Size of .text section (data to load)
   uint32_t pad2[2];
-  uint32_t memfillStart;  // BSS start (memfill)
-  uint32_t memfillSize;   // BSS size
-  uint32_t initialSP;     // Initial SP ($29) base
-  uint32_t spOffset;      // SP offset (added to base)
+  uint32_t memfillStart; // BSS start (memfill)
+  uint32_t memfillSize;  // BSS size
+  uint32_t initialSP;    // Initial SP ($29) base
+  uint32_t spOffset;     // SP offset (added to base)
 };
 
 // High-Level Emulation BIOS for PS1
@@ -33,20 +34,24 @@ struct PSXExeHeader {
 // kernel boot sequence and critical A/B/C table SYSCALL functions.
 class PS1HleBios {
 public:
-  // Attempt to boot the loaded disc via HLE.
-  // Parses the PS-X EXE from the disc image, loads it into RAM,
-  // initializes hardware registers, installs the exception handler,
-  // and sets CPU PC to the game's entry point.
-  // Returns true on success.
   static bool InitHLE(PS1 &ps1);
 
-private:
-  // Parse the PS-X EXE from a raw BIN/ISO disc image
-  static bool FindAndLoadExe(PS1Memory &memory, CDROM &cdrom,
-                             R3000A &cpu, PS1GPU &gpu);
+  // Called from R3000A::Step() when PC hits 0xA0/0xB0/0xC0
+  static void Dispatch(PS1 &ps1, uint8_t table, uint8_t func);
 
-  // Install the HLE exception handler at EXCEPTION_VECTOR (0x80000080)
-  // and kernel function tables in low RAM
+  // Called from R3000A::Step() when PC hits 0x80 (exception vector)
+  static void HandleException(PS1 &ps1);
+
+  // Fire events matching classId/spec (called at VBlank, IRQ delivery, etc.)
+  static void DeliverEvent(uint32_t classId, uint32_t spec);
+
+  // Reset HLE state (events, etc.)
+  static void ResetState();
+
+private:
+  static bool FindAndLoadExe(PS1Memory &memory, CDROM &cdrom, R3000A &cpu,
+                             PS1GPU &gpu);
+
   static void InstallKernelStubs(PS1Memory &memory);
 
   // Populate the BIOS region with a minimal bootstrap that jumps
@@ -61,14 +66,14 @@ private:
                              uint32_t instr);
 
   // Write a MIPS instruction into RAM
-  static void WriteRAMInstr(PS1Memory &memory, uint32_t offset,
-                            uint32_t instr);
+  static void WriteRAMInstr(PS1Memory &memory, uint32_t offset, uint32_t instr);
 
   // MIPS instruction encoding helpers
   static constexpr uint32_t NOP() { return 0x00000000; }
   static constexpr uint32_t JR_RA() { return 0x03E00008; }
   static constexpr uint32_t ADDIU(uint32_t rt, uint32_t rs, int16_t imm) {
-    return (0x09 << 26) | (rs << 21) | (rt << 16) | (static_cast<uint16_t>(imm));
+    return (0x09 << 26) | (rs << 21) | (rt << 16) |
+           (static_cast<uint16_t>(imm));
   }
   static constexpr uint32_t LUI(uint32_t rt, uint16_t imm) {
     return (0x0F << 26) | (rt << 16) | imm;
@@ -85,9 +90,45 @@ private:
   static constexpr uint32_t MTC0(uint32_t rt, uint32_t rd) {
     return (0x10 << 26) | (0x04 << 21) | (rt << 16) | (rd << 11);
   }
-  static constexpr uint32_t RFE() {
-    return (0x10 << 26) | (1 << 25) | 0x10;
-  }
+  static constexpr uint32_t RFE() { return (0x10 << 26) | (1 << 25) | 0x10; }
+
+  // ─── A/B/C Table Dispatch ───────────────────────────────────────────
+  static void DispatchA0(PS1 &ps1, uint8_t func);
+  static void DispatchB0(PS1 &ps1, uint8_t func);
+  static void DispatchC0(PS1 &ps1, uint8_t func);
+
+  // ─── Event System ───────────────────────────────────────────────────
+  struct Event {
+    uint32_t classId;
+    uint32_t spec;
+    uint32_t mode;
+    uint32_t func;
+    bool used;
+    bool enabled;
+    bool fired;
+  };
+
+  static constexpr int MAX_EVENTS = 32;
+  static inline std::array<Event, MAX_EVENTS> events{};
+  static inline bool interruptsEnabled = true;
+  static inline uint32_t hookedEntryIntHandler = 0;
+
+  // Saved CPU state from exception entry — restored by ReturnFromException
+  struct ExceptionFrame {
+    uint32_t gpr[32];
+    uint32_t hi;
+    uint32_t lo;
+    bool valid;
+  };
+  static inline ExceptionFrame savedFrame;
+
+  // Heap state for malloc/free
+  static inline uint32_t heapBase = 0;
+  static inline uint32_t heapSize = 0;
+  static inline uint32_t heapPtr = 0;
+
+  // Random number generator
+  static inline uint32_t hleSeed = 0;
 };
 
 } // namespace AIO::Emulator::PS1

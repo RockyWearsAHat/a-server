@@ -1,4 +1,5 @@
 #include "emulator/ps1/PS1.h"
+#include "emulator/common/Logger.h"
 #include "emulator/ps1/PS1HleBios.h"
 #include <fstream>
 
@@ -33,6 +34,9 @@ PS1::PS1() {
 
   // Wire GTE into CPU for COP2 operations
   cpu->SetGTE(gte.get());
+
+  // Wire PS1 back-reference for HLE BIOS dispatch
+  cpu->SetPS1(this);
 
   controller->SetControllerConnected(true);
 }
@@ -83,11 +87,19 @@ int PS1::Step() {
   int cpuCycles = cpu->Step();
 
   bool wasInVBlank = gpu->InVBlank();
+  uint32_t prevScanline = gpu->GetScanline();
   gpu->Tick(cpuCycles);
 
   // Fire VBlank IRQ on transition into VBlank
   if (!wasInVBlank && gpu->InVBlank()) {
     interrupts->RequestIRQ(IRQ::VBLANK);
+    // Deliver HLE VBlank event so games using WaitEvent/TestEvent can proceed
+    PS1HleBios::DeliverEvent(0xF0000001, 0x0001);
+  }
+
+  // Fire HBlank tick for timers on each new scanline
+  if (gpu->GetScanline() != prevScanline) {
+    timers->TickHBlank();
   }
 
   // Dot clock for timers
@@ -100,8 +112,35 @@ int PS1::Step() {
   cdrom->Tick(cpuCycles);
   controller->Tick(cpuCycles);
 
-  // Check for pending interrupts → signal CPU
+  // Mirror external IRQ state into COP0 CAUSE IP bit 2 (hardware IRQ line)
+  uint32_t cause = cpu->GetCause();
   if (interrupts->HasPendingIRQ()) {
+    cause |= (1u << 10); // IP2 — hardware interrupt pending
+  } else {
+    cause &= ~(1u << 10);
+  }
+  cpu->SetCOP0(CPU::COP0::CAUSE, cause);
+
+  // DEBUG: log IRQ state after 1M steps to see state during game loop
+  static uint64_t irqDbgCount = 0;
+  irqDbgCount++;
+  if (irqDbgCount == 1000000 || irqDbgCount == 5000000 ||
+      irqDbgCount == 20000000) {
+    uint32_t sr = cpu->GetSR();
+    uint32_t istat = interrupts->ReadStat();
+    uint32_t imask = interrupts->ReadMask();
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "IRQ-DBG[%llu]: SR=0x%08X CAUSE=0x%08X I_STAT=0x%04X "
+             "I_MASK=0x%04X pending=%d IEc=%d IM2=%d",
+             (unsigned long long)irqDbgCount, sr, cause, istat, imask,
+             interrupts->HasPendingIRQ() ? 1 : 0, (sr & 1) ? 1 : 0,
+             (sr & (1u << 10)) ? 1 : 0);
+    log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.IRQ", buf);
+  }
+
+  if (cpu->IsInterruptPending()) {
     cpu->TriggerInterrupt();
   }
 

@@ -12,7 +12,6 @@ CDROM::CDROM(PS1Memory &memory, InterruptController &interrupts)
 
 void CDROM::Reset() {
   index = 0;
-  discLoaded = false;
   while (!parameterFIFO.empty())
     parameterFIFO.pop();
   while (!responseFIFO.empty())
@@ -31,6 +30,10 @@ void CDROM::Reset() {
   seeking = false;
   readDelay = 0;
   mode = 0;
+  secondResponsePending = false;
+  secondResponseDelay = 0;
+  secondResponseType = 0;
+  secondResponseData.clear();
 }
 
 bool CDROM::LoadDisc(const std::string &path) {
@@ -180,6 +183,25 @@ void CDROM::Tick(uint32_t cpuCycles) {
     }
   }
 
+  // Handle delayed second response
+  if (secondResponsePending) {
+    if (secondResponseDelay <= cpuCycles) {
+      secondResponseDelay = 0;
+      secondResponsePending = false;
+
+      // Clear response FIFO and push second response data
+      while (!responseFIFO.empty())
+        responseFIFO.pop();
+      for (uint8_t byte : secondResponseData) {
+        responseFIFO.push(byte);
+      }
+      secondResponseData.clear();
+      SetInterrupt(secondResponseType);
+    } else {
+      secondResponseDelay -= cpuCycles;
+    }
+  }
+
   // Handle ongoing reads
   if (reading && readDelay > 0) {
     if (readDelay <= cpuCycles) {
@@ -237,11 +259,23 @@ void CDROM::ExecuteCommand(uint8_t cmd) {
   case 0x06:
     CmdReadN();
     break;
+  case 0x08:
+    CmdStop();
+    break;
   case 0x09:
     CmdPause();
     break;
   case 0x0A:
     CmdInit();
+    break;
+  case 0x0B:
+    CmdMute();
+    break;
+  case 0x0C:
+    CmdDemute();
+    break;
+  case 0x0D:
+    CmdSetFilter();
     break;
   case 0x0E:
     CmdSetMode();
@@ -249,11 +283,29 @@ void CDROM::ExecuteCommand(uint8_t cmd) {
   case 0x15:
     CmdSeekL();
     break;
+  case 0x16:
+    CmdSeekP();
+    break;
   case 0x1A:
     CmdGetID();
     break;
   case 0x1B:
     CmdReadS();
+    break;
+  case 0x03:
+    CmdPlay();
+    break;
+  case 0x10:
+    CmdGetlocL();
+    break;
+  case 0x11:
+    CmdGetlocP();
+    break;
+  case 0x13:
+    CmdGetTN();
+    break;
+  case 0x14:
+    CmdGetTD();
     break;
   case 0x19:
     CmdTest();
@@ -308,6 +360,8 @@ void CDROM::CmdPause() {
   reading = false;
   PushResponse(GetStatusByte());
   SetInterrupt(3);
+  // Second response after motor stops
+  QueueSecondResponse(2, {GetStatusByte()}, 33868); // ~1ms delay
 }
 
 void CDROM::CmdInit() {
@@ -316,6 +370,8 @@ void CDROM::CmdInit() {
   seeking = false;
   PushResponse(GetStatusByte());
   SetInterrupt(3);
+  // Second response after initialization completes
+  QueueSecondResponse(2, {GetStatusByte()}, 33868);
 }
 
 void CDROM::CmdSetMode() {
@@ -331,21 +387,34 @@ void CDROM::CmdSeekL() {
   seeking = false; // Instant seek for now
   PushResponse(GetStatusByte());
   SetInterrupt(3);
+  // Second response when seek completes
+  QueueSecondResponse(2, {GetStatusByte()}, 33868);
+}
+
+void CDROM::CmdSeekP() {
+  seeking = false;
+  PushResponse(GetStatusByte());
+  SetInterrupt(3);
+  QueueSecondResponse(2, {GetStatusByte()}, 33868);
 }
 
 void CDROM::CmdGetID() {
   if (!discLoaded) {
-    // No disc
     PushResponse(0x08); // Shell open
     SetInterrupt(5);
     return;
   }
-  // Licensed disc response
+  // First response: INT3 with status
   PushResponse(GetStatusByte());
   SetInterrupt(3);
 
-  // Second response (INT2) with disc info — simplified
-  // In a full implementation, this would be delayed
+  // Second response: INT2 with 8-byte disc identification
+  // Byte 0-1: stat, flags (0x02=licensed, 0x00=audio disc)
+  // Byte 2: disc type (0x20 = PS1 disc)
+  // Byte 3: 0x00
+  // Byte 4-7: "SCEI" (licensed for US) — ASCII region ID
+  QueueSecondResponse(
+      2, {GetStatusByte(), 0x00, 0x20, 0x00, 0x53, 0x43, 0x45, 0x49}, 33868);
 }
 
 void CDROM::CmdReadS() {
@@ -375,6 +444,99 @@ void CDROM::CmdTest() {
 void CDROM::CmdReadTOC() {
   PushResponse(GetStatusByte());
   SetInterrupt(3);
+  QueueSecondResponse(2, {GetStatusByte()}, 33868);
+}
+
+void CDROM::CmdPlay() {
+  PushResponse(GetStatusByte());
+  SetInterrupt(3);
+}
+
+void CDROM::CmdGetlocL() {
+  // Return current logical sector position in header format
+  PushResponse(DecimalToBCD(seekMinutes));
+  PushResponse(DecimalToBCD(seekSeconds));
+  PushResponse(DecimalToBCD(seekSector));
+  PushResponse(mode); // current mode
+  PushResponse(0);    // file
+  PushResponse(0);    // channel
+  PushResponse(0);    // sub-mode
+  PushResponse(0);    // coding info
+  SetInterrupt(3);
+}
+
+void CDROM::CmdGetlocP() {
+  // Return current physical position (track, index, MM:SS:FF absolute and
+  // relative)
+  PushResponse(0x01); // track
+  PushResponse(0x01); // index
+  PushResponse(DecimalToBCD(seekMinutes));
+  PushResponse(DecimalToBCD(seekSeconds));
+  PushResponse(DecimalToBCD(seekSector));
+  // Absolute position (same for single-track data disc)
+  PushResponse(DecimalToBCD(seekMinutes));
+  PushResponse(DecimalToBCD(seekSeconds));
+  PushResponse(DecimalToBCD(seekSector));
+  SetInterrupt(3);
+}
+
+void CDROM::CmdGetTN() {
+  // Return first and last track number
+  PushResponse(GetStatusByte());
+  PushResponse(0x01); // first track (BCD)
+  PushResponse(0x01); // last track (BCD) — single track for data discs
+  SetInterrupt(3);
+}
+
+void CDROM::CmdGetTD() {
+  // Return start position of track (param = track number in BCD)
+  uint8_t track = 0;
+  if (!parameterFIFO.empty()) {
+    track = parameterFIFO.front();
+    parameterFIFO.pop();
+  }
+  PushResponse(GetStatusByte());
+  if (track == 0) {
+    // Track 0 = total disc length
+    uint32_t totalSectors =
+        static_cast<uint32_t>(discData.size() / RAW_SECTOR_SIZE);
+    uint32_t totalLBA = totalSectors;
+    uint32_t mm = totalLBA / (75 * 60);
+    uint32_t ss = (totalLBA / 75) % 60;
+    PushResponse(DecimalToBCD(static_cast<uint8_t>(mm)));
+    PushResponse(DecimalToBCD(static_cast<uint8_t>(ss)));
+  } else {
+    // Track 1 starts at 00:02:00 (after 2-second pregap)
+    PushResponse(0x00); // MM
+    PushResponse(0x02); // SS
+  }
+  SetInterrupt(3);
+}
+
+void CDROM::CmdStop() {
+  reading = false;
+  seeking = false;
+  PushResponse(GetStatusByte());
+  SetInterrupt(3);
+  QueueSecondResponse(2, {GetStatusByte()}, 33868);
+}
+
+void CDROM::CmdMute() {
+  PushResponse(GetStatusByte());
+  SetInterrupt(3);
+}
+
+void CDROM::CmdDemute() {
+  PushResponse(GetStatusByte());
+  SetInterrupt(3);
+}
+
+void CDROM::CmdSetFilter() {
+  // Consume parameters (file, channel) but don't implement XA filtering
+  while (!parameterFIFO.empty())
+    parameterFIFO.pop();
+  PushResponse(GetStatusByte());
+  SetInterrupt(3);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -386,6 +548,15 @@ void CDROM::SetInterrupt(uint8_t type) {
   if (interruptEnable & interruptFlag) {
     interrupts.RequestIRQ(IRQ::CDROM);
   }
+}
+
+void CDROM::QueueSecondResponse(uint8_t intType,
+                                const std::vector<uint8_t> &data,
+                                uint32_t delayCycles) {
+  secondResponsePending = true;
+  secondResponseDelay = delayCycles;
+  secondResponseType = intType;
+  secondResponseData = data;
 }
 
 uint8_t CDROM::GetStatusByte() const {
@@ -400,15 +571,14 @@ uint8_t CDROM::GetStatusByte() const {
 }
 
 uint32_t CDROM::GetSectorOffset(uint8_t mm, uint8_t ss, uint8_t ff) const {
-  // MSF to LBA, subtract 2-second pregap
   uint32_t lba = (mm * 60 + ss) * 75 + ff;
   if (lba >= 150)
-    lba -= 150; // 2-second pregap
+    lba -= 150;
 
-  // Each sector = 2352 bytes in raw disc image
-  // Data-only offset = skip 24-byte header
-  uint32_t sectorSize = 2352;
-  return lba * sectorSize + 24; // Skip sync + header to get to data
+  // For whole-sector mode (bit 5), skip 12-byte sync to keep sub-header;
+  // for data-only mode, skip 24 bytes (sync + header) to get 2048 bytes
+  uint32_t headerSkip = (mode & 0x20) ? 12 : 24;
+  return lba * RAW_SECTOR_SIZE + headerSkip;
 }
 
 uint8_t CDROM::BCDToDecimal(uint8_t bcd) {
@@ -420,6 +590,16 @@ uint8_t CDROM::DecimalToBCD(uint8_t dec) {
 }
 
 // ─── DMA Interface ──────────────────────────────────────────────────────
+
+bool CDROM::ReadSectorData(uint32_t sectorNum, uint8_t *out,
+                           uint32_t size) const {
+  uint64_t offset =
+      static_cast<uint64_t>(sectorNum) * RAW_SECTOR_SIZE + SECTOR_DATA_OFFSET;
+  if (offset + size > discData.size())
+    return false;
+  std::memcpy(out, discData.data() + offset, size);
+  return true;
+}
 
 uint8_t CDROM::DMARead() {
   if (dataReadPos < dataBuf.size()) {

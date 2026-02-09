@@ -889,6 +889,7 @@ void GBAMemory::SetSaveType(SaveType type) {
   case SaveType::Auto:
     break;
   default:
+    break;
   }
 
   saveTypeLocked = true; // Prevent further dynamic detection
@@ -1494,6 +1495,7 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
+    break;
   }
   return 0;
 }
@@ -2063,7 +2065,25 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
     // SOUNDCNT_X - preserve status bits
     if (offset == IORegs::SOUNDCNT_X) {
       uint16_t currentVal = io_regs[offset] | (io_regs[offset + 1] << 8);
+      bool wasMasterEnabled = (currentVal & 0x80) != 0;
+      bool nowMasterEnabled = (value & 0x80) != 0;
       value = (value & 0x80) | (currentVal & 0x0F);
+
+      // Per GBATEK: disabling master sound zeroes all PSG registers and
+      // disables all channels. Games that toggle sound on/off rely on this.
+      if (wasMasterEnabled && !nowMasterEnabled && apu) {
+        for (uint32_t reg = IORegs::SOUND1CNT_L;
+             reg <= IORegs::SOUND4CNT_H; reg += 2) {
+          io_regs[reg] = 0;
+          io_regs[reg + 1] = 0;
+        }
+        apu->OnSoundRegisterWrite(IORegs::SOUND1CNT_L, 0);
+        apu->OnSoundRegisterWrite(IORegs::SOUND1CNT_H, 0);
+        apu->OnSoundRegisterWrite(IORegs::SOUND2CNT_L, 0);
+        apu->OnSoundRegisterWrite(IORegs::SOUND3CNT_L, 0);
+        apu->OnSoundRegisterWrite(IORegs::SOUND3CNT_H, 0);
+        apu->OnSoundRegisterWrite(IORegs::SOUND4CNT_L, 0);
+      }
     }
 
     // PSG channel register writes — notify APU for immediate trigger handling.
@@ -2107,9 +2127,20 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
         }
       }
     }
-  }
 
-  // For video memory, bypass 8-bit quirks.
+    // BG2X/BG2Y/BG3X/BG3Y writes: store the value to io_regs immediately
+    // and notify the PPU for mid-frame re-latch of internal reference points.
+    // These are write-only 32-bit registers written as two 16-bit halves;
+    // the PPU re-latches on the high halfword write (where the sign bit lives).
+    if (offset >= 0x28 && offset <= 0x3E) {
+      io_regs[offset] = value & 0xFF;
+      io_regs[offset + 1] = (value >> 8) & 0xFF;
+      if (ioWriteCallback) {
+        ioWriteCallback(ioWriteContext, offset, value);
+      }
+      return;
+    }
+  }
   // Also optionally align unaligned halfword stores to match HW behavior
   // (video memory is fundamentally 16-bit addressed).
   if (region == 0x05 || region == 0x06 || region == 0x07) {

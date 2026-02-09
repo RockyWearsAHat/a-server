@@ -28,6 +28,18 @@ static void SetupM4AAudio(GBAMemory &mem, APU &apu,
   mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0304);
 }
 
+// M4A timer interval: reload=0xFBE8, prescaler 1 → 0x10000 - 0xFBE8 = 1048
+static constexpr int M4A_TIMER_CYCLES = 1048;
+
+// Simulate a timer overflow followed by the CPU cycles that would elapse.
+// This mirrors real hardware: timer fires → APU consumes FIFO → CPU runs
+// for one timer period → Update() generates output at the fixed sample rate.
+static void SimulateTimerOverflow(APU &apu, int timer = 0,
+                                  int cpuCycles = M4A_TIMER_CYCLES) {
+  apu.OnTimerOverflow(timer);
+  apu.Update(cpuCycles);
+}
+
 // Helper: drain ring buffer and return all samples as vector of stereo pairs
 static std::vector<int16_t> DrainRingBuffer(APU &apu, int maxSamples = 4096) {
   std::vector<int16_t> result;
@@ -92,10 +104,11 @@ TEST(AudioCorruptionTest, MultipleTimerOverflowsFillRingBuffer) {
     apu.WriteFIFO_A(0x10203040u);
   }
 
-  // Simulate multiple timer overflows
+  // Timer reload 0xFC4B = 64587, interval = 949 cycles
+  const int timerCycles = 949;
   const int numOverflows = 100;
   for (int i = 0; i < numOverflows; ++i) {
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu, 0, timerCycles);
   }
 
   // GetSamples should return non-zero samples
@@ -131,6 +144,9 @@ TEST(AudioCorruptionTest, UpsamplingPreventsFifoUnderflow) {
 
   int initialFifoCount = apu.GetFifoACount();
 
+  // Timer reload 0xF7EF = 63471, interval = 2065 cycles
+  const int timerCycles = 2065;
+
   // Simulate ~100 timer overflows at 8KHz
   // Expected upsample ratio: 48000/8000 = 6.0
   // Each overflow should push ~6 samples to ring buffer
@@ -138,7 +154,7 @@ TEST(AudioCorruptionTest, UpsamplingPreventsFifoUnderflow) {
     if (apu.GetFifoACount() < 16) {
       apu.WriteFIFO_A(0x20304050u);
     }
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu, 0, timerCycles);
   }
 
   // Check that ring buffer has accumulated samples
@@ -169,8 +185,9 @@ TEST(AudioCorruptionTest, NoAudioWhenMasterSoundDisabled) {
     apu.WriteFIFO_A(0x7F7F7F7Fu);
   }
 
+  // Timer reload 0xFC4B, interval = 949 cycles
   for (int i = 0; i < 50; ++i) {
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu, 0, 949);
   }
 
   int16_t buffer[256];
@@ -266,8 +283,9 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
     apu.WriteFIFO_A(0x7F7F7F7Fu);
   }
 
+  // Timer reload 0xFC4B, interval = 949 cycles
   for (int i = 0; i < 10; ++i) {
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu, 0, 949);
   }
 
   int16_t buffer[64];
@@ -308,7 +326,7 @@ TEST(AudioCorruptionTest, HpfRunsDuringSoundDisable) {
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x7F7F7F7Fu);
   for (int i = 0; i < 20; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
 
   auto beforeDisable = DrainRingBuffer(apu);
   ASSERT_GT(beforeDisable.size(), 0u);
@@ -318,7 +336,7 @@ TEST(AudioCorruptionTest, HpfRunsDuringSoundDisable) {
 
   // Generate more samples with sound disabled — HPF should still run
   for (int i = 0; i < 20; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   auto duringSilence = DrainRingBuffer(apu);
 
   // Re-enable master sound with fresh FIFO data
@@ -326,7 +344,7 @@ TEST(AudioCorruptionTest, HpfRunsDuringSoundDisable) {
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x01010101u);
   for (int i = 0; i < 5; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   auto afterReenable = DrainRingBuffer(apu);
 
   // The first sample after re-enable should NOT have a huge discontinuity.
@@ -356,7 +374,7 @@ TEST(AudioCorruptionTest, FifoUnderflowHoldsLastSample) {
 
   // Consume all 4 samples
   for (int i = 0; i < 4; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   EXPECT_EQ(apu.GetFifoACount(), 0);
 
   // Drain output so far
@@ -364,7 +382,7 @@ TEST(AudioCorruptionTest, FifoUnderflowHoldsLastSample) {
 
   // Trigger more overflows with empty FIFO — should hold last sample
   for (int i = 0; i < 10; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
 
   auto samples = DrainRingBuffer(apu);
   ASSERT_GT(samples.size(), 0u);
@@ -395,14 +413,14 @@ TEST(AudioCorruptionTest, HpfNoInt16Overflow) {
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x7F7F7F7Fu);
   for (int i = 0; i < 30; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   DrainRingBuffer(apu);
 
   // Abrupt switch to maximum negative
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x80808080u);
   for (int i = 0; i < 30; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
 
   auto samples = DrainRingBuffer(apu);
   ASSERT_GT(samples.size(), 4u);
@@ -423,8 +441,8 @@ TEST(AudioCorruptionTest, HpfNoInt16Overflow) {
       << "HPF arithmetic should not produce int16 overflow/wrap";
 }
 
-// Upsample accumulator precision: over many overflows, the total
-// output sample count should closely match expectedOverflows * ratio.
+// Fixed-rate output precision: over many timer intervals, the total
+// output sample count should match totalCpuCycles / cyclesPerSample.
 TEST(AudioCorruptionTest, UpsampleAccumulatorPrecision) {
   GBAMemory mem;
   APU apu(mem);
@@ -437,18 +455,17 @@ TEST(AudioCorruptionTest, UpsampleAccumulatorPrecision) {
   for (int i = 0; i < numOverflows; ++i) {
     if (apu.GetFifoACount() < 8)
       apu.WriteFIFO_A(0x10101010u);
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   }
 
   auto samples = DrainRingBuffer(apu, 8192);
   int sampleCount = static_cast<int>(samples.size()) / 2;
 
-  // M4A timer reload 0xFBE8 = 64488, interval = 1048 cycles
-  // fifoRate = 16777216 / 1048 ≈ 16009 Hz
-  // ratio = 32768 / 16009 ≈ 2.048
-  // Expected: 1000 * 2.048 ≈ 2048 samples (±5)
-  EXPECT_NEAR(sampleCount, 2048, 10)
-      << "Upsample accumulator should produce precise sample count";
+  // Total CPU cycles = 1000 * 1048 = 1,048,000
+  // cyclesPerSample = 16777216 / 32768 = 512
+  // Expected: 1,048,000 / 512 ≈ 2047 samples
+  EXPECT_NEAR(sampleCount, 2047, 10)
+      << "Fixed-rate output should produce precise sample count";
 }
 
 // After FIFO underflow + refill, audio should resume smoothly
@@ -462,15 +479,15 @@ TEST(AudioCorruptionTest, FifoRefillAfterUnderflowIsSmooth) {
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x30303030u);
   for (int i = 0; i < 40; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   DrainRingBuffer(apu);
 
   // Let FIFO drain to empty
   while (apu.GetFifoACount() > 0)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   // A few more overflows with empty FIFO
   for (int i = 0; i < 5; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
 
   // Refill with similar value (simulating M4A DMA refill)
   for (int i = 0; i < 8; ++i)
@@ -478,7 +495,7 @@ TEST(AudioCorruptionTest, FifoRefillAfterUnderflowIsSmooth) {
 
   // Continue playback
   for (int i = 0; i < 10; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
 
   auto samples = DrainRingBuffer(apu);
   ASSERT_GT(samples.size(), 4u);
@@ -504,7 +521,7 @@ TEST(AudioCorruptionTest, HpfConvergesToZeroOnSilence) {
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x60606060u);
   for (int i = 0; i < 20; ++i)
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   DrainRingBuffer(apu);
 
   // Now push silence
@@ -514,7 +531,7 @@ TEST(AudioCorruptionTest, HpfConvergesToZeroOnSilence) {
   for (int i = 0; i < 500; ++i) {
     if (apu.GetFifoACount() < 8)
       apu.WriteFIFO_A(0x00000000u);
-    apu.OnTimerOverflow(0);
+    SimulateTimerOverflow(apu);
   }
 
   auto samples = DrainRingBuffer(apu, 8192);

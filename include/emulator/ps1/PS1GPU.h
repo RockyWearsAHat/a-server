@@ -37,9 +37,13 @@ public:
   uint16_t *GetVRAMPointer() { return vram.data(); }
 
   // ─── Framebuffer for display ────────────────────────────────────────
-  const uint16_t *GetFramebuffer() const { return vram.data(); }
+  const uint16_t *GetFramebuffer() const {
+    uint32_t offset = displayVRAMStartY * GPU::VRAM_WIDTH + displayVRAMStartX;
+    return vram.data() + offset;
+  }
   uint32_t GetDisplayWidth() const;
   uint32_t GetDisplayHeight() const;
+  uint32_t GetVRAMStride() const { return GPU::VRAM_WIDTH; }
 
   // ─── DMA Interface ──────────────────────────────────────────────────
   bool DMAReady() const;
@@ -86,6 +90,7 @@ private:
   bool reverseFlag = false;
   bool textureDisable = false;
   uint8_t hRes = 0;
+  uint8_t hRes2 = 0;
   bool vRes480 = false;
   bool palMode = false;
   bool colorDepth24 = false;
@@ -146,10 +151,14 @@ private:
   void GP0_TexturedQuad(const std::vector<uint32_t> &params, bool opaque);
   void GP0_ShadedTriangle(const std::vector<uint32_t> &params, bool opaque);
   void GP0_ShadedQuad(const std::vector<uint32_t> &params, bool opaque);
+  void GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
+                                  bool opaque);
+  void GP0_ShadedTexturedQuad(const std::vector<uint32_t> &params, bool opaque);
   void GP0_MonoRect(const std::vector<uint32_t> &params);
   void GP0_TexturedRect(const std::vector<uint32_t> &params);
   void GP0_MonoDot(const std::vector<uint32_t> &params);
   void GP0_MonoLine(const std::vector<uint32_t> &params);
+  void GP0_ShadedLine(const std::vector<uint32_t> &params);
 
   // VRAM transfer commands
   void GP0_CopyRectVRAMtoVRAM(const std::vector<uint32_t> &params);
@@ -172,6 +181,16 @@ private:
   void PutPixel(int16_t x, int16_t y, uint16_t color);
   bool IsInDrawingArea(int16_t x, int16_t y) const;
   static uint16_t ColorToVRAM(uint8_t r, uint8_t g, uint8_t b);
+
+  // Triangle rasterization via edge function (half-space) method
+  void RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,
+                         uint8_t b0, int16_t x1, int16_t y1, uint8_t r1,
+                         uint8_t g1, uint8_t b1, int16_t x2, int16_t y2,
+                         uint8_t r2, uint8_t g2, uint8_t b2);
+
+  // Texture sampling from VRAM CLUT/direct
+  uint16_t SampleTexture(int32_t texU, int32_t texV, uint16_t clut,
+                         uint16_t texPage) const;
 };
 
 } // namespace AIO::Emulator::PS1

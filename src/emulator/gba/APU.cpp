@@ -48,8 +48,8 @@ void APU::Reset() {
   hpfCapL = 0;
   hpfCapR = 0;
 
-  sampleAccumulator = 0.0f;
   currentUpsampleRatio = 2.048f;
+  psgOutputAccumulator = 0.0f;
 
   // Prefill ring buffer with silence so the SDL callback has a safety
   // margin (~31 ms at 32 kHz) to absorb frame-boundary timing jitter.
@@ -97,11 +97,9 @@ void APU::GenerateOutputSample() {
     uint8_t psgEnableLeft = (scntL >> 12) & 0xF;
 
     int psgRatio = scntH & 0x3;
-    int psgShift = 2;
-    if (psgRatio == 1)
+    int psgShift = 4 - psgRatio;
+    if (psgShift < 1)
       psgShift = 1;
-    else if (psgRatio >= 2)
-      psgShift = 0;
 
     int16_t ch1 = hwCh1.DacOutput();
     int16_t ch2 = hwCh2.DacOutput();
@@ -134,8 +132,8 @@ void APU::GenerateOutputSample() {
     psgRight >>= psgShift;
 
     // --- FIFO channels ---
-    const int volA = (scntH & 0x04) ? 64 : 32;
-    const int volB = (scntH & 0x08) ? 64 : 32;
+    const int volA = (scntH & 0x04) ? 4 : 2;
+    const int volB = (scntH & 0x08) ? 4 : 2;
 
     if (scntH & 0x200)
       left += (int32_t)currentSampleA * volA;
@@ -157,19 +155,19 @@ void APU::GenerateOutputSample() {
   // DC-blocking high-pass filter — ALWAYS runs (even during silence)
   // so the capacitor state decays smoothly and doesn't produce pops
   // when sound re-enables after being disabled.
-  static constexpr int32_t HPF_FILTER = 65368;
-  int32_t capL = hpfCapL >> 16;
-  int32_t capR = hpfCapR >> 16;
+  static constexpr int64_t HPF_FILTER = 65368;
+  int32_t capL = static_cast<int32_t>(hpfCapL >> 16);
+  int32_t capR = static_cast<int32_t>(hpfCapR >> 16);
   int32_t degradedL32 = static_cast<int32_t>(outL) - capL;
   int32_t degradedR32 = static_cast<int32_t>(outR) - capR;
   int16_t degradedL =
       static_cast<int16_t>(std::clamp(degradedL32, -32768, 32767));
   int16_t degradedR =
       static_cast<int16_t>(std::clamp(degradedR32, -32768, 32767));
-  hpfCapL = (static_cast<int32_t>(outL) << 16) -
-            static_cast<int32_t>(degradedL) * HPF_FILTER;
-  hpfCapR = (static_cast<int32_t>(outR) << 16) -
-            static_cast<int32_t>(degradedR) * HPF_FILTER;
+  hpfCapL = (static_cast<int64_t>(outL) << 16) -
+            static_cast<int64_t>(degradedL) * HPF_FILTER;
+  hpfCapR = (static_cast<int64_t>(outR) << 16) -
+            static_cast<int64_t>(degradedR) * HPF_FILTER;
 
   PushSample(degradedL, degradedR);
   stats.pushCalls.fetch_add(1, std::memory_order_relaxed);
@@ -190,6 +188,19 @@ void APU::Update(int cycles) {
   while (frameSequencerCycles >= FRAME_SEQ_PERIOD) {
     frameSequencerCycles -= FRAME_SEQ_PERIOD;
     StepFrameSequencer();
+  }
+
+  // Fixed-rate output: generate output samples at the configured sample rate
+  // regardless of FIFO activity. GenerateOutputSample() mixes both PSG and
+  // FIFO channels — FIFO contributes via the held currentSampleA/B values
+  // which are updated by OnTimerOverflow(). This ensures PSG audio is never
+  // silenced when FIFO timers are active (e.g. MZM text screens use PSG
+  // while the music engine uses FIFO).
+  psgOutputAccumulator += static_cast<float>(cycles);
+  const float cyclesPerSample = GBA_CPU_FREQ / outputSampleRate;
+  while (psgOutputAccumulator >= cyclesPerSample) {
+    psgOutputAccumulator -= cyclesPerSample;
+    GenerateOutputSample();
   }
 }
 
@@ -338,20 +349,6 @@ void APU::OnTimerOverflow(int timer) {
     if (fifoRate > 0.0f)
       currentUpsampleRatio = outputSampleRate / fifoRate;
   }
-
-  // Generate output samples via sample-and-hold upsampling.
-  // Each timer overflow contributes currentUpsampleRatio output samples
-  // (e.g., ~2.048 for M4A at 32768 Hz output). The accumulator tracks
-  // the fractional sample count; we emit one sample per whole unit.
-  sampleAccumulator += currentUpsampleRatio;
-  int safety = 0;
-  while (sampleAccumulator >= 1.0f && safety < 16) {
-    sampleAccumulator -= 1.0f;
-    GenerateOutputSample();
-    ++safety;
-  }
-  if (sampleAccumulator >= 1.0f)
-    sampleAccumulator = 0.0f;
 }
 
 void APU::WriteFIFO_A(uint32_t value) {
@@ -582,6 +579,8 @@ void APU::OnSoundRegisterWrite(uint32_t offset, uint16_t value) {
   }
   case IORegs::SOUND3CNT_L: {
     hwCh3.dacEnabled = (value >> 7) & 1;
+    hwCh3.bankMode = (value >> 5) & 1;
+    hwCh3.bankSelect = (value >> 6) & 1;
     if (!hwCh3.dacEnabled)
       hwCh3.enabled = false;
     break;

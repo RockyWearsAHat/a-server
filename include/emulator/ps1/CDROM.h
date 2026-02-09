@@ -34,6 +34,13 @@ public:
   // ─── Timing ─────────────────────────────────────────────────────────
   void Tick(uint32_t cpuCycles);
 
+  // ─── Sector-Level Access (for HLE BIOS EXE loading) ─────────────────
+  static constexpr uint32_t RAW_SECTOR_SIZE = 2352;
+  static constexpr uint32_t SECTOR_DATA_OFFSET = 24;
+  static constexpr uint32_t SECTOR_DATA_SIZE = 2048;
+  bool ReadSectorData(uint32_t sectorNum, uint8_t *out,
+                      uint32_t size = SECTOR_DATA_SIZE) const;
+
   // ─── DMA Interface ──────────────────────────────────────────────────
   uint8_t DMARead();
   bool HasDataToRead() const;
@@ -74,6 +81,12 @@ private:
   uint32_t readDelay = 0;
   uint8_t mode = 0;
 
+  // ─── Delayed Second Response (for multi-response commands) ──────────
+  bool secondResponsePending = false;
+  uint32_t secondResponseDelay = 0;
+  uint8_t secondResponseType = 0;
+  std::vector<uint8_t> secondResponseData;
+
   // ─── Disc Data ──────────────────────────────────────────────────────
   std::vector<uint8_t> discData;
 
@@ -86,13 +99,25 @@ private:
   void CmdInit();
   void CmdSetMode();
   void CmdSeekL();
+  void CmdSeekP();
   void CmdGetID();
   void CmdReadS();
   void CmdTest();
   void CmdReadTOC();
+  void CmdMute();
+  void CmdDemute();
+  void CmdSetFilter();
+  void CmdStop();
+  void CmdPlay();
+  void CmdGetlocL();
+  void CmdGetlocP();
+  void CmdGetTN();
+  void CmdGetTD();
 
   void PushResponse(uint8_t value);
   void SetInterrupt(uint8_t type);
+  void QueueSecondResponse(uint8_t intType, const std::vector<uint8_t> &data,
+                           uint32_t delayCycles);
   uint32_t GetSectorOffset(uint8_t mm, uint8_t ss, uint8_t ff) const;
   static uint8_t BCDToDecimal(uint8_t bcd);
   static uint8_t DecimalToBCD(uint8_t dec);

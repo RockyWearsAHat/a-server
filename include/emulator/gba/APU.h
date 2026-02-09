@@ -210,7 +210,7 @@ private:
           {0, 1, 1, 1, 1, 1, 1, 0}, // 75%
       };
       int sample = dutyTable[duty & 3][dutyPos & 7] ? volume : 0;
-      return (int16_t)((sample * 2 - 15) * 256);
+      return (int16_t)((sample * 2 - 15) << 3);
     }
   };
 
@@ -229,13 +229,13 @@ private:
     void Reset() { *this = HwWaveChannel{}; }
 
     int16_t DacOutput(const uint8_t *waveRam) const {
-      if (!enabled || !dacEnabled || volumeShift == 3)
+      if (!enabled || !dacEnabled)
         return 0;
       int byteIdx = pos / 2;
       int nibble = (pos & 1) ? (waveRam[byteIdx] & 0xF)
                              : ((waveRam[byteIdx] >> 4) & 0xF);
-      int shifted = (volumeShift == 0) ? nibble : (nibble >> volumeShift);
-      return (int16_t)((shifted * 2 - 15) * 256);
+      int shifted = (volumeShift == 3) ? 0 : ((volumeShift == 0) ? nibble : (nibble >> volumeShift));
+      return (int16_t)((shifted * 2 - 15) << 3);
     }
   };
 
@@ -261,7 +261,7 @@ private:
       if (!enabled || !dacEnabled)
         return 0;
       int sample = (~lfsr & 1) ? volume : 0;
-      return (int16_t)((sample * 2 - 15) * 256);
+      return (int16_t)((sample * 2 - 15) << 3);
     }
   };
 
@@ -392,11 +392,10 @@ private:
   static constexpr float OUTPUT_SAMPLE_RATE = 32768.0f;
   float outputSampleRate = OUTPUT_SAMPLE_RATE;
 
-  // Fractional accumulator for upsample: advances by 1.0 per timer
-  // overflow, generates output samples until it's < 1.0.
-  // Ratio = outputSampleRate / fifoTimerRate ≈ 2.048 for M4A games.
-  float sampleAccumulator = 0.0f;
-  float currentUpsampleRatio = 2.048f; // default, recalculated per timer
+  // Fractional accumulator tracking the FIFO timer rate relative to the
+  // output sample rate. Updated by OnTimerOverflow() but no longer drives
+  // output generation (Update() handles that at a fixed rate).
+  float currentUpsampleRatio = 2.048f;
 
   // On real GBA hardware, DMA halts the CPU while refilling the FIFO.
   // Timer ticks still occur during DMA, but the FIFO consumption and
@@ -407,6 +406,10 @@ private:
   // freshly-refilled FIFO samples in a burst).
   bool suppressFifoConsumption = false;
 
+  // Fractional cycle accumulator for the fixed-rate output path.
+  // Generates output samples at outputSampleRate from Update().
+  float psgOutputAccumulator = 0.0f;
+
   // Ring buffer prefill: absorbs frame-boundary jitter between the
   // emulator thread (producing samples in bursts per frame) and the
   // SDL callback (consuming samples at a steady real-time rate).
@@ -416,8 +419,8 @@ private:
   // DC-blocking high-pass filter (simulates GBA coupling capacitor).
   // Matches mGBA's approach: cap = prev_sample - degraded * FILTER
   // FILTER = 65368 ≈ 0.9975 in Q16, giving ~13 Hz cutoff at 32 kHz.
-  int32_t hpfCapL = 0;
-  int32_t hpfCapR = 0;
+  int64_t hpfCapL = 0;
+  int64_t hpfCapR = 0;
 
   void GenerateOutputSample();
   void PushSample(int16_t left, int16_t right);

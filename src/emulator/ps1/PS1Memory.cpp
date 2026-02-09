@@ -54,10 +54,11 @@ bool PS1Memory::LoadBIOS(const std::string &path) {
 // ─── Address Translation ────────────────────────────────────────────────
 
 uint32_t PS1Memory::TranslateAddress(uint32_t virtualAddr) const {
-  // KUSEG: 0x00000000 - 0x7FFFFFFF (direct mapped)
-  // KSEG0: 0x80000000 - 0x9FFFFFFF (cached, subtract 0x80000000)
-  // KSEG1: 0xA0000000 - 0xBFFFFFFF (uncached, subtract 0xA0000000)
-  // KSEG2: 0xC0000000 - 0xFFFFFFFF (special)
+  // KSEG2 (0xC0000000–0xFFFFFFFF) is NOT masked — it maps to special
+  // hardware registers like the cache control register at 0xFFFE0130
+  if (virtualAddr >= MemMap::KSEG2_START)
+    return virtualAddr;
+  // KUSEG/KSEG0/KSEG1 → mask to physical address
   return virtualAddr & MemMap::KSEG_MASK;
 }
 
@@ -122,9 +123,6 @@ uint16_t PS1Memory::Read16(uint32_t addr) {
 }
 
 uint32_t PS1Memory::Read32(uint32_t addr) {
-  if (cacheIsolated)
-    return 0;
-
   uint32_t phys = TranslateAddress(addr);
 
   if (phys < MemMap::RAM_REGION_SIZE) {
@@ -272,9 +270,15 @@ uint32_t PS1Memory::ReadIO32(uint32_t addr) {
   if (addr == IO::GPU_GPUSTAT && gpu)
     return gpu->ReadGPUSTAT();
 
-  // Controller (SIO0) - 32-bit read of stat
+  // Controller (SIO0) - 32-bit reads
+  if (addr == IO::SIO0_DATA && controller) {
+    return static_cast<uint32_t>(controller->ReadData());
+  }
   if (addr == IO::SIO0_STAT && controller) {
     return controller->ReadStat();
+  }
+  if (addr == IO::SIO0_MODE && controller) {
+    return static_cast<uint32_t>(controller->ReadMode());
   }
 
   if constexpr (Trace::MEMORY) {
@@ -298,11 +302,11 @@ uint16_t PS1Memory::ReadIO16(uint32_t addr) {
 
   // Controller (SIO0)
   if (addr == IO::SIO0_MODE && controller)
-    return controller->ReadStat() & 0xFFFF;
+    return controller->ReadMode();
   if (addr == IO::SIO0_CTRL && controller)
-    return 0;
+    return controller->ReadCtrl();
   if (addr == IO::SIO0_BAUD && controller)
-    return 0;
+    return controller->ReadBaud();
 
   // Interrupt controller
   if (addr == IO::I_STAT && interrupts)
@@ -375,6 +379,12 @@ void PS1Memory::WriteIO32(uint32_t addr, uint32_t value) {
   }
   if (addr == IO::GPU_GP1 && gpu) {
     gpu->WriteGP1(value);
+    return;
+  }
+
+  // Controller (SIO0) - 32-bit writes
+  if (addr == IO::SIO0_DATA && controller) {
+    controller->WriteData(static_cast<uint8_t>(value));
     return;
   }
 

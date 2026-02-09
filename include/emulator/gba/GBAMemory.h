@@ -93,7 +93,10 @@ public:
   // Callback for IO Writes (Used by PPU to track Affine Registers)
   using IOWriteCallback = void (*)(void *context, uint32_t offset,
                                    uint16_t value);
-  void SetIOWriteCallback(IOWriteCallback callback, void *context);
+  void SetIOWriteCallback(IOWriteCallback callback, void *context) {
+    ioWriteCallback = callback;
+    ioWriteContext = context;
+  }
 
   // Callback for Graphics Memory Writes (palette/VRAM/OAM) - forces PPU sync
   using GraphicsWriteCallback = void (*)(void *context);

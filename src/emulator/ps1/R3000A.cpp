@@ -1,5 +1,7 @@
 #include "emulator/ps1/R3000A.h"
 #include "emulator/ps1/GTE.h"
+#include "emulator/ps1/PS1.h"
+#include "emulator/ps1/PS1HleBios.h"
 #include "emulator/ps1/PS1Memory.h"
 #include <iomanip>
 #include <sstream>
@@ -48,11 +50,63 @@ void R3000A::DoBranch(uint32_t target) {
   nextPc = target;
 }
 
+bool R3000A::TryHLETrap() {
+  if (!ps1)
+    return false;
+
+  uint32_t physPc = pc & 0x1FFFFFFF;
+
+  // HLE exception handler at 0x80
+  if (physPc == 0x80) {
+    PS1HleBios::HandleException(*ps1);
+    return true;
+  }
+
+  // BIOS call vectors
+  if (physPc != 0xA0 && physPc != 0xB0 && physPc != 0xC0)
+    return false;
+
+  uint8_t tableId = static_cast<uint8_t>(physPc);
+  uint8_t funcNum = static_cast<uint8_t>(regs[9]); // $t1 holds function number
+
+  PS1HleBios::Dispatch(*ps1, tableId, funcNum);
+
+  // Return to caller
+  pc = regs[31]; // $ra
+  nextPc = pc + 4;
+  return true;
+}
+
 int R3000A::Step() {
+  // HLE BIOS vector intercept — handle before fetching the stub instruction
+  if (TryHLETrap()) {
+    instructionCount++;
+    cycleCount++;
+    return 1;
+  }
+
   currentInstruction = memory.Read32(pc);
 
   if constexpr (Trace::CPU) {
     LogDebug("PC=%08X INSTR=%08X", pc, currentInstruction);
+  }
+
+  // Temporary: periodic PC sampling for debugging (every ~4M instructions)
+  if ((instructionCount & 0x3FFFFF) == 0) {
+    LogInfo("PC=%08X instr=%llu", pc, (unsigned long long)instructionCount);
+  }
+
+  // One-shot diagnostic: log when PC lands in low memory (not BIOS trampoline)
+  {
+    static bool crashLogged = false;
+    if (!crashLogged && pc < 0x80000000 && pc != 0xA0 && pc != 0xB0 &&
+        pc != 0xC0 && pc != 0x80) {
+      LogInfo("CRASH-DETECT: PC=0x%08X instr=%llu r31(RA)=0x%08X r2(v0)=0x%08X "
+              "r4(a0)=0x%08X r29(sp)=0x%08X",
+              pc, (unsigned long long)instructionCount, regs[31], regs[2],
+              regs[4], regs[29]);
+      crashLogged = true;
+    }
   }
 
   uint32_t currentPc = pc;
@@ -64,14 +118,15 @@ int R3000A::Step() {
   inDelaySlot = branchPending;
   branchPending = false;
 
-  // Load delay pipeline: promote previous nextLoad to pending
-  // The pending load is NOT yet visible to the current instruction
+  // Load delay pipeline: MIPS I has a 1-slot load delay.
+  // Instruction N executes LW → sets nextLoad.
+  // At N+1: promote nextLoad → pendingLoad, execute (can't see the value),
+  // then ApplyPendingLoad writes the register. N+2 sees it.
   pendingLoad = nextLoad;
   nextLoad = {};
 
   ExecuteInstruction(currentInstruction);
 
-  // Apply pending load AFTER execute — the delay slot sees the OLD value
   ApplyPendingLoad();
 
   instructionCount++;

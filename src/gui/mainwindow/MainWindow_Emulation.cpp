@@ -897,20 +897,24 @@ void MainWindow::UpdateDisplay() {
     const uint16_t *ps1Fb = ps1Emulator.GetFramebuffer();
     const uint32_t w = ps1Emulator.GetDisplayWidth();
     const uint32_t h = ps1Emulator.GetDisplayHeight();
+    const uint32_t stride = ps1Emulator.GetVRAMStride();
     if (ps1Fb && w > 0 && h > 0) {
       // Resize display image if GPU resolution changed
       if (static_cast<uint32_t>(displayImage.width()) != w ||
           static_cast<uint32_t>(displayImage.height()) != h) {
         displayImage = QImage(w, h, QImage::Format_ARGB32);
       }
-      const uint32_t pixelCount = w * h;
       auto *dst = reinterpret_cast<uint32_t *>(displayImage.bits());
-      for (uint32_t i = 0; i < pixelCount; ++i) {
-        uint16_t px = ps1Fb[i];
-        uint8_t r = static_cast<uint8_t>((px & 0x1F) << 3);
-        uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x1F) << 3);
-        uint8_t b = static_cast<uint8_t>(((px >> 10) & 0x1F) << 3);
-        dst[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+      for (uint32_t y = 0; y < h; ++y) {
+        const uint16_t *srcRow = ps1Fb + y * stride;
+        uint32_t *dstRow = dst + y * w;
+        for (uint32_t x = 0; x < w; ++x) {
+          uint16_t px = srcRow[x];
+          uint8_t r = static_cast<uint8_t>((px & 0x1F) << 3);
+          uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x1F) << 3);
+          uint8_t b = static_cast<uint8_t>(((px >> 10) & 0x1F) << 3);
+          dstRow[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
       }
       avRecorder_.RecordVideoFrame(dst);
     }

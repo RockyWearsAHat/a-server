@@ -772,3 +772,225 @@ TEST(APUTest, FifoCapacityIs32Samples) {
   apu.WriteFIFO_A(0x55667788u);
   EXPECT_EQ(apu.GetFifoACount(), 32);
 }
+
+// ==========================================================================
+// SOUNDCNT_X master disable tests
+// ==========================================================================
+
+// Disabling master sound (SOUNDCNT_X bit 7 → 0) should zero all PSG registers
+TEST(APUTest, MasterDisableZeroesPSGRegisters) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  // Enable master sound
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+
+  // Configure channel 1 with some non-zero values
+  mem.Write16(0x04000060, 0x0070); // SOUND1CNT_L: sweep
+  mem.Write16(0x04000062, 0xF780); // SOUND1CNT_H: length/envelope
+  mem.Write16(0x04000064, 0xC000); // SOUND1CNT_X: frequency + trigger
+
+  // Sync internal state and verify sound is enabled
+  apu.Update(0);
+  EXPECT_TRUE(apu.IsSoundEnabled());
+
+  // Now disable master sound
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0000);
+  apu.Update(0);
+
+  // PSG registers should be zeroed (GBATEK behavior)
+  EXPECT_EQ(mem.Read16(0x04000060), 0x0000) << "SOUND1CNT_L should be zeroed";
+  EXPECT_EQ(mem.Read16(0x04000062), 0x0000) << "SOUND1CNT_H should be zeroed";
+
+  // Master sound should now be disabled
+  EXPECT_FALSE(apu.IsSoundEnabled());
+}
+
+// Re-enabling master sound after disable should allow new PSG setup
+TEST(APUTest, MasterReenableAfterDisable) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  // Enable → disable → re-enable
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0000);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  apu.Update(0);
+
+  EXPECT_TRUE(apu.IsSoundEnabled());
+
+  // Should be able to set up channels again
+  mem.Write16(0x04000068, 0xF780); // SOUND2CNT_L
+  mem.Write16(0x0400006C, 0xC000); // SOUND2CNT_H
+  // Channel 2 should activate
+  uint8_t chStatus = apu.GetChannelStatus();
+  EXPECT_NE(chStatus & 0x02, 0) << "Channel 2 should be active after re-enable";
+}
+
+// ==========================================================================
+// Wave channel bank mode tests
+// ==========================================================================
+
+// SOUND3CNT_L bit 5 controls bank mode, bit 6 controls bank select
+TEST(APUTest, WaveChannelBankModeAndSelect) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  // Enable master sound
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+
+  // Single bank mode (bit 5 = 0), bank 0 selected (bit 6 = 0)
+  mem.Write16(0x04000070, 0x0080); // SOUND3CNT_L: enable, single bank, bank 0
+  uint16_t val = mem.Read16(0x04000070);
+  EXPECT_NE(val & 0x80, 0) << "Wave channel should be enabled";
+
+  // Switch to dual-bank mode (bit 5 = 1), bank 1 selected (bit 6 = 1)
+  mem.Write16(0x04000070, 0x00E0); // bits 5+6+7 set
+  val = mem.Read16(0x04000070);
+  EXPECT_NE(val & 0x20, 0) << "Bank mode bit should be set";
+  EXPECT_NE(val & 0x40, 0) << "Bank select bit should be set";
+}
+
+// ==========================================================================
+// Independent PSG output path tests
+// ==========================================================================
+
+// When no FIFO timer is driving output, PSG channels should still produce
+// audio through the independent output path in APU::Update()
+TEST(APUTest, PSGOutputWithoutFIFOTimer) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(32768.0f);
+
+  // Enable master sound
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+
+  // Set PSG volume to max in SOUNDCNT_L
+  mem.Write16(0x04000080, 0x0077); // SOUNDCNT_L: max volume L+R
+  // SOUNDCNT_H: PSG at 100% ratio (bits 0-1 = 3)
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+
+  // Enable channel 1 with max volume square wave
+  mem.Write16(0x04000062, 0xF780); // SOUND1CNT_H: duty=3, envelope=max
+  mem.Write16(0x04000064, 0xC700); // SOUND1CNT_X: freq + trigger
+
+  // Run enough CPU cycles to generate some samples
+  // At ~16.78 MHz CPU and 32768 Hz output, ~512 cycles per sample
+  int cpuCycles = 512 * 100; // ~100 samples worth
+  apu.Update(cpuCycles);
+
+  // Check that ring buffer has data (write pos advanced)
+  float fillRatio = apu.GetRingBufferFillRatio();
+  EXPECT_GT(fillRatio, 0.0f)
+      << "PSG should produce output even without FIFO timer overflow";
+}
+
+// When FIFO timer IS driving output, OnTimerOverflow consumes FIFO samples
+// and Update() generates output that includes both PSG and FIFO mixing.
+TEST(APUTest, FifoTimerConsumesAndMixesOutput) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.ClearRingBuffer();
+
+  // Enable master sound
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+
+  // Configure SOUNDCNT_H: FIFO A enabled, uses timer 0
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0B00);
+
+  // Fill FIFO A with some data
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x40404040u);
+
+  int initialCount = apu.GetFifoACount();
+
+  // Simulate timer 0 overflow — should consume a FIFO sample
+  apu.OnTimerOverflow(0);
+
+  EXPECT_LT(apu.GetFifoACount(), initialCount)
+      << "Timer overflow should consume FIFO samples";
+
+  // Now Update() generates the actual output samples
+  apu.Update(512 * 10);
+  float fillRatio = apu.GetRingBufferFillRatio();
+  EXPECT_GT(fillRatio, 0.0f)
+      << "Update() should generate output samples with FIFO data mixed in";
+}
+
+// ==========================================================================
+// FIFO A/B reset isolation test
+// ==========================================================================
+
+// Resetting FIFO A should not affect FIFO B and vice versa
+TEST(APUTest, FifoResetIsolation) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  apu.WriteFIFO_A(0x11223344u);
+  apu.WriteFIFO_B(0x55667788u);
+  EXPECT_EQ(apu.GetFifoACount(), 4);
+  EXPECT_EQ(apu.GetFifoBCount(), 4);
+
+  // Reset only FIFO A
+  apu.ResetFIFO_A();
+  EXPECT_EQ(apu.GetFifoACount(), 0);
+  EXPECT_EQ(apu.GetFifoBCount(), 4) << "FIFO B should be unaffected by FIFO A reset";
+
+  // Reset only FIFO B
+  apu.ResetFIFO_B();
+  EXPECT_EQ(apu.GetFifoBCount(), 0);
+}
+
+// ==========================================================================
+// Reset clears new accuracy fields
+// ==========================================================================
+
+TEST(APUTest, ResetClearsAccuracyFields) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  // Run some audio to build up internal state
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0B00);
+  apu.WriteFIFO_A(0x40404040u);
+  apu.OnTimerOverflow(0);
+  apu.Update(512 * 10);
+
+  // Reset and verify PSG output still works cleanly
+  apu.Reset();
+
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(32768.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x0077);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+  mem.Write16(0x04000062, 0xF780);
+  mem.Write16(0x04000064, 0xC700);
+
+  apu.Update(512 * 50);
+  float fillRatio = apu.GetRingBufferFillRatio();
+  EXPECT_GT(fillRatio, 0.0f)
+      << "After Reset(), PSG output should work immediately";
+}

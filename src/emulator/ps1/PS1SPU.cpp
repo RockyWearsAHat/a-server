@@ -375,15 +375,58 @@ int16_t PS1SPU::DecodeSample(SPUVoice &voice) {
   // When counter overflows the base rate, move to next sample
   while (voice.sampleCounter >= SPU::SAMPLE_RATE_BASE) {
     voice.sampleCounter -= SPU::SAMPLE_RATE_BASE;
-    // Advance to next ADPCM sample position (simplified)
+    voice.sampleIndex++;
+
+    // Need to decode a new ADPCM block (28 samples per 16-byte block)
+    if (voice.sampleIndex >= 28) {
+      voice.sampleIndex = 0;
+
+      // Read the 16-byte ADPCM block from SPU RAM
+      uint32_t blockAddr = voice.currentAddr;
+      uint8_t block[16];
+      for (int i = 0; i < 16; i++) {
+        uint32_t wordAddr = (blockAddr + i) / 2;
+        if (wordAddr >= spuRAM.size()) {
+          block[i] = 0;
+          continue;
+        }
+        uint16_t word = spuRAM[wordAddr];
+        block[i] = (blockAddr + i) & 1 ? (word >> 8) : (word & 0xFF);
+      }
+
+      // Check flags (byte 1): bit 0=loop end, bit 1=loop repeat, bit 2=loop
+      // start
+      uint8_t flags = block[1];
+      if (flags & 0x04) {
+        // Loop start — save this address as repeat point
+        voice.repeatAddr = static_cast<uint16_t>(voice.currentAddr / 8);
+      }
+
+      DecodeADPCMBlock(block, voice.decodedSamples, voice.prevSamples[0],
+                       voice.prevSamples[1]);
+
+      // Advance to next block
+      voice.currentAddr += 16;
+
+      if (flags & 0x01) {
+        // Loop end
+        if (flags & 0x02) {
+          // Loop repeat — jump back to loop start
+          voice.currentAddr = static_cast<uint32_t>(voice.repeatAddr) * 8;
+        } else {
+          // No loop — silence and stop
+          voice.adsrPhase = ADSRPhase::Off;
+          voice.adsrLevel = 0;
+          return 0;
+        }
+      }
+    }
   }
 
-  // Read and decode ADPCM block from SPU RAM (simplified)
-  uint32_t blockAddr = voice.currentAddr / 2;
-  if (blockAddr >= spuRAM.size())
-    return 0;
-
-  // Return decoded sample (simplified — actual ADPCM decoding below)
+  // Return the current decoded sample
+  if (voice.sampleIndex < 28) {
+    return voice.decodedSamples[voice.sampleIndex];
+  }
   return 0;
 }
 
@@ -432,11 +475,36 @@ void PS1SPU::DecodeADPCMBlock(const uint8_t *block, int16_t *samples,
 }
 
 void PS1SPU::UpdateADSR(SPUVoice &voice) {
-  // Simplified ADSR envelope processing
+  // PS1 ADSR register layout:
+  // adsrLo (16 bits): sustain_level[3:0] | decay_shift[7:4] | attack_step[9:8]
+  // | attack_shift[14:10] | attack_mode[15] adsrHi (16 bits):
+  // release_shift[4:0] | release_mode[5] | (unused[12:6]) | sustain_step[15:14]
+  // | sustain_shift[13] | sustain_dir[14] | sustain_mode[15] Simplified but
+  // correct field extraction:
+
   switch (voice.adsrPhase) {
   case ADSRPhase::Attack: {
-    int32_t rate = (voice.adsrLo >> 8) & 0x7F;
-    voice.adsrLevel += std::max(1, 0x7FFF / std::max(1, (rate + 1)));
+    bool attackMode = (voice.adsrLo >> 15) & 1; // 0=linear, 1=exponential
+    int32_t attackShift = (voice.adsrLo >> 10) & 0x1F;
+    int32_t attackStep = (voice.adsrLo >> 8) & 3;
+
+    int32_t step = 7 - attackStep;
+    if (attackShift < 11) {
+      step <<= (11 - attackShift);
+    } else {
+      step >>= (attackShift - 11);
+    }
+    if (step < 1)
+      step = 1;
+
+    // Exponential attack slows down above 0x6000
+    if (attackMode && voice.adsrLevel > 0x6000) {
+      step >>= 2;
+      if (step < 1)
+        step = 1;
+    }
+
+    voice.adsrLevel += step;
     if (voice.adsrLevel >= 0x7FFF) {
       voice.adsrLevel = 0x7FFF;
       voice.adsrPhase = ADSRPhase::Decay;
@@ -444,8 +512,22 @@ void PS1SPU::UpdateADSR(SPUVoice &voice) {
     break;
   }
   case ADSRPhase::Decay: {
+    // Decay is always exponential decrease
+    int32_t decayShift = (voice.adsrLo >> 4) & 0x0F;
     int32_t sustainLevel = ((voice.adsrLo & 0x0F) + 1) * 0x800;
-    voice.adsrLevel -= voice.adsrLevel >> 4;
+
+    int32_t step = -1;
+    if (decayShift < 11) {
+      step <<= (11 - decayShift);
+    } else {
+      step >>= (decayShift - 11);
+    }
+    // Exponential: step proportional to current level
+    step = (step * voice.adsrLevel) >> 15;
+    if (step > -1)
+      step = -1;
+
+    voice.adsrLevel += step;
     if (voice.adsrLevel <= sustainLevel) {
       voice.adsrLevel = sustainLevel;
       voice.adsrPhase = ADSRPhase::Sustain;
@@ -453,16 +535,61 @@ void PS1SPU::UpdateADSR(SPUVoice &voice) {
     break;
   }
   case ADSRPhase::Sustain: {
-    bool decrease = (voice.adsrHi >> 14) & 1;
-    if (decrease) {
-      voice.adsrLevel -= voice.adsrLevel >> 5;
-      if (voice.adsrLevel < 0)
-        voice.adsrLevel = 0;
+    bool sustainMode = (voice.adsrHi >> 15) & 1; // 0=linear, 1=exponential
+    bool sustainDir = (voice.adsrHi >> 14) & 1;  // 0=increase, 1=decrease
+    int32_t sustainShift = (voice.adsrHi >> 8) & 0x1F;
+    int32_t sustainStep = (voice.adsrHi >> 6) & 3;
+
+    int32_t step;
+    if (sustainDir) {
+      // Decrease
+      step = -(8 - sustainStep);
+    } else {
+      // Increase
+      step = 7 - sustainStep;
     }
+
+    if (sustainShift < 11) {
+      step <<= (11 - sustainShift);
+    } else {
+      step >>= (sustainShift - 11);
+    }
+
+    // Exponential scaling
+    if (sustainMode) {
+      if (sustainDir) {
+        step = (step * voice.adsrLevel) >> 15;
+        if (step > -1)
+          step = -1;
+      } else if (voice.adsrLevel > 0x6000) {
+        step >>= 2;
+        if (step < 1)
+          step = 1;
+      }
+    }
+
+    voice.adsrLevel += step;
+    voice.adsrLevel = std::clamp(voice.adsrLevel, 0, 0x7FFF);
     break;
   }
   case ADSRPhase::Release: {
-    voice.adsrLevel -= voice.adsrLevel >> 4;
+    bool releaseMode = (voice.adsrHi >> 5) & 1; // 0=linear, 1=exponential
+    int32_t releaseShift = voice.adsrHi & 0x1F;
+
+    int32_t step = -1;
+    if (releaseShift < 11) {
+      step <<= (11 - releaseShift);
+    } else {
+      step >>= (releaseShift - 11);
+    }
+
+    if (releaseMode) {
+      step = (step * voice.adsrLevel) >> 15;
+      if (step > -1)
+        step = -1;
+    }
+
+    voice.adsrLevel += step;
     if (voice.adsrLevel <= 0) {
       voice.adsrLevel = 0;
       voice.adsrPhase = ADSRPhase::Off;

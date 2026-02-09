@@ -460,21 +460,7 @@ void PPU::Update(int cycles) {
             memory.Write16(0x03007FF8, biosIF);
           }
 
-          // DIAG: count VBlank occurrences
-          {
-            static FILE *vbLog = nullptr;
-            static uint64_t vbCount = 0;
-            if (!vbLog)
-              vbLog = fopen("/tmp/vblank_diag.txt", "w");
-            vbCount++;
-            if (vbCount % 60 == 0 && vbLog) {
-              fprintf(vbLog, "VBlank #%llu dispstat_irq=%d ime=%d ie_vbl=%d\n",
-                      vbCount, (dispstat & 0x8) ? 1 : 0,
-                      (memory.ReadIORegister16Internal(0x208) & 1),
-                      (memory.ReadIORegister16Internal(0x200) & 1));
-              fflush(vbLog);
-            }
-          }
+
 
           // Defer VBlank DMA until after all end-of-line bookkeeping
           // (VCOUNT/VCOUNT-match/DISPSTAT) is committed.
@@ -568,12 +554,76 @@ void PPU::DrawScanline() {
 }
 
 void PPU::RenderOBJ() {
-  // Iterate backwards for priority (127 first, then 0 on top)
+  // GBA hardware OBJ rendering budget: 1210 dots available per scanline.
+  // When HBlank Interval Free (DISPCNT bit 5) is set, the budget drops
+  // to 954 dots because OAM access during HBlank steals rendering time.
+  // Each non-affine pixel costs 1 dot, each affine pixel costs 2 dots.
+  // Sprites are evaluated in OAM order (0 first); once the budget is
+  // exhausted, remaining sprites on this scanline are not rendered.
+  const uint16_t dispcntForBudget = ReadRegister(0x00);
+  const bool hblankIntervalFree = ((dispcntForBudget >> 5) & 1) != 0;
+  const int maxObjDots = hblankIntervalFree ? 954 : 1210;
+
+  // First pass: evaluate sprites in OAM order (0→127) to determine which
+  // sprites fit within the rendering budget. Each sprite that intersects
+  // this scanline costs dots based on its visible width.
+  struct ObjEntry {
+    int oamIndex;
+    int dotsUsed;
+  };
+  int objDotsUsed = 0;
+  uint8_t objRenderable[128] = {};
+
+  const uint8_t *oamData = memory.GetOAMData();
+  const size_t oamSize = memory.GetOAMSize();
+
+  static const int sizes[3][4][2] = {
+      {{8, 8}, {16, 16}, {32, 32}, {64, 64}},
+      {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
+      {{8, 16}, {8, 32}, {16, 32}, {32, 64}}
+  };
+
+  for (int i = 0; i < 128; ++i) {
+    const uint32_t oamOff = static_cast<uint32_t>(i * 8);
+    uint16_t a0 = ReadLE16(oamData, oamSize, oamOff);
+    uint16_t a1 = ReadLE16(oamData, oamSize, oamOff + 2);
+
+    const bool affine = ((a0 >> 8) & 1) != 0;
+    const bool dblOrDis = ((a0 >> 9) & 1) != 0;
+    const uint8_t mode = (a0 >> 10) & 0x3;
+    if (!affine && dblOrDis) continue;
+    if (mode == 3) continue;
+
+    int y = a0 & 0xFF;
+    int shape = (a0 >> 14) & 0x3;
+    if (shape == 3) continue;
+    int sz = (a1 >> 14) & 0x3;
+    int w = sizes[shape][sz][0];
+    int h = sizes[shape][sz][1];
+    int bw = (affine && dblOrDis) ? w * 2 : w;
+    int bh = (affine && dblOrDis) ? h * 2 : h;
+
+    // GBA Y-coords are 8-bit unsigned; large sprites near Y=255 wrap into
+    // negative territory to appear at the top of the screen.
+    if (y + bh > 256) y -= 256;
+
+    if (scanline < y || scanline >= y + bh) continue;
+
+    int dotsPerPixel = affine ? 2 : 1;
+    int dotCost = bw * dotsPerPixel;
+    objDotsUsed += dotCost;
+    if (objDotsUsed <= maxObjDots) {
+      objRenderable[i] = 1;
+    }
+  }
+
+  // Second pass: render in reverse OAM order (127→0) so lower-index
+  // sprites overwrite higher-index ones (correct priority).
   for (int i = 127; i >= 0; --i) {
+    if (!objRenderable[i]) continue;
+
     uint32_t oamAddr = 0x07000000 + (i * 8);
 
-    const uint8_t *oamData = memory.GetOAMData();
-    const size_t oamSize = memory.GetOAMSize();
     const uint32_t oamOff = (oamAddr - 0x07000000u);
     uint16_t attr0 = ReadLE16(oamData, oamSize, oamOff);
     uint16_t attr1 = ReadLE16(oamData, oamSize, oamOff + 2);
@@ -602,10 +652,6 @@ void PPU::RenderOBJ() {
     bool isAffine = affine;
     bool isDoubleSize = affine && doubleSizeOrDisable;
 
-    // Handle Y Wrapping (0-255)
-    if (y > 160)
-      y -= 256;
-
     // Shape (0=Square, 1=Horizontal, 2=Vertical)
     int shape = (attr0 >> 14) & 0x3;
     int size = (attr1 >> 14) & 0x3;
@@ -624,6 +670,11 @@ void PPU::RenderOBJ() {
     // For double-size affine, the bounding box is doubled
     int boundWidth = isDoubleSize ? width * 2 : width;
     int boundHeight = isDoubleSize ? height * 2 : height;
+
+    // GBA Y-coords are 8-bit unsigned; large sprites near Y=255 wrap into
+    // negative territory to appear at the top of the screen.
+    if (y + boundHeight > 256)
+      y -= 256;
 
     // Check if scanline is within sprite bounds
     if (scanline >= y && scanline < y + boundHeight) {
@@ -1577,6 +1628,52 @@ void PPU::RestoreFramebuffer(const uint32_t *data, size_t count) {
 
 void PPU::SetClassicNesMode(bool enabled) { classicNesMode = enabled; }
 
+void PPU::OnIOWrite(void *context, uint32_t offset, uint16_t value) {
+  if (context)
+    static_cast<PPU *>(context)->HandleIOWrite(offset, value);
+}
+
+void PPU::HandleIOWrite(uint32_t offset, uint16_t value) {
+  // Per GBATEK: writing BGxX/BGxY mid-frame immediately re-latches the
+  // internal reference point registers. This is used by games for wavy
+  // backgrounds, screen-shake, and parallax effects (e.g. Metroid Zero
+  // Mission). Only the full 32-bit write (high halfword) triggers relatch.
+  auto signExtend28 = [](int32_t v) -> int32_t {
+    if (v & 0x08000000)
+      v |= 0xF0000000;
+    return v;
+  };
+
+  switch (offset) {
+  case 0x2A: { // BG2X high halfword
+    uint32_t lo = ReadRegister(0x28);
+    uint32_t hi = static_cast<uint32_t>(value) & 0x0FFF;
+    bg2x_internal = signExtend28(static_cast<int32_t>((hi << 16) | lo));
+    break;
+  }
+  case 0x2E: { // BG2Y high halfword
+    uint32_t lo = ReadRegister(0x2C);
+    uint32_t hi = static_cast<uint32_t>(value) & 0x0FFF;
+    bg2y_internal = signExtend28(static_cast<int32_t>((hi << 16) | lo));
+    break;
+  }
+  case 0x3A: { // BG3X high halfword
+    uint32_t lo = ReadRegister(0x38);
+    uint32_t hi = static_cast<uint32_t>(value) & 0x0FFF;
+    bg3x_internal = signExtend28(static_cast<int32_t>((hi << 16) | lo));
+    break;
+  }
+  case 0x3E: { // BG3Y high halfword
+    uint32_t lo = ReadRegister(0x3C);
+    uint32_t hi = static_cast<uint32_t>(value) & 0x0FFF;
+    bg3y_internal = signExtend28(static_cast<int32_t>((hi << 16) | lo));
+    break;
+  }
+  default:
+    break;
+  }
+}
+
 // Get window enable bits for a given pixel position
 // Returns the enable mask (bits 0-3: BG0-3, bit 4: OBJ, bit 5: Color Effects)
 uint8_t PPU::GetWindowMaskForPixel(int x, int y) {
@@ -1713,8 +1810,6 @@ void PPU::BuildObjWindowMaskForScanline() {
     }
 
     int y = attr0 & 0xFF;
-    if (y > 160)
-      y -= 256;
 
     const bool affine = ((attr0 >> 8) & 1) != 0;
     const bool doubleSizeOrDisable = ((attr0 >> 9) & 1) != 0;
@@ -1736,6 +1831,11 @@ void PPU::BuildObjWindowMaskForScanline() {
 
     const int boundWidth = isDoubleSize ? width * 2 : width;
     const int boundHeight = isDoubleSize ? height * 2 : height;
+
+    // GBA Y-coords are 8-bit unsigned; large sprites near Y=255 wrap into
+    // negative territory to appear at the top of the screen.
+    if (y + boundHeight > 256)
+      y -= 256;
 
     if (scanline < y || scanline >= y + boundHeight) {
       continue;

@@ -13,6 +13,7 @@ namespace AIO::Emulator::PS1 {
 
 class PS1Memory;
 class GTE;
+class PS1;
 
 // Pending load slot for load delay emulation
 struct PendingLoad {
@@ -32,11 +33,17 @@ public:
   // ─── GTE (COP2) ─────────────────────────────────────────────────────
   void SetGTE(GTE *gte) { this->gte = gte; }
 
+  // ─── PS1 back-reference (for HLE BIOS dispatch) ────────────────────
+  void SetPS1(PS1 *ps1) { this->ps1 = ps1; }
+
   // ─── Register Access ────────────────────────────────────────────────
   uint32_t GetRegister(uint32_t index) const;
   void SetRegister(uint32_t index, uint32_t value);
   uint32_t GetPC() const { return pc; }
-  void SetPC(uint32_t value) { pc = value; nextPc = value + 4; }
+  void SetPC(uint32_t value) {
+    pc = value;
+    nextPc = value + 4;
+  }
   uint32_t GetHI() const { return hi; }
   uint32_t GetLO() const { return lo; }
   void SetHI(uint32_t value) { hi = value; }
@@ -69,6 +76,7 @@ public:
 private:
   PS1Memory &memory;
   GTE *gte = nullptr;
+  PS1 *ps1 = nullptr;
 
   // ─── Registers ──────────────────────────────────────────────────────
   std::array<uint32_t, 32> regs{};
@@ -185,6 +193,9 @@ private:
 
   // Apply pending load delay
   void ApplyPendingLoad();
+
+  // HLE BIOS trap: returns true if PC was 0xA0/0xB0/0xC0 and was handled
+  bool TryHLETrap();
 
   // Branch helper
   void DoBranch(uint32_t target);

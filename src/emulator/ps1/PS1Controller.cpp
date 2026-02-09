@@ -104,7 +104,8 @@ void PS1Controller::ProcessByte(uint8_t txByte) {
       commState = CommState::SelectedPad;
       rxData = 0xFF;
       rxReady = true;
-      stat |= (1 << 7); // ACK
+      stat |= (1 << 7);    // ACK
+      transferDelay = 100; // Fire IRQ after short delay
     } else {
       rxData = 0xFF;
     }
@@ -116,6 +117,7 @@ void PS1Controller::ProcessByte(uint8_t txByte) {
       rxData = pad.padId;
       rxReady = true;
       stat |= (1 << 7);
+      transferDelay = 100;
     } else {
       commState = CommState::Idle;
       rxData = 0xFF;
@@ -127,6 +129,7 @@ void PS1Controller::ProcessByte(uint8_t txByte) {
     rxData = 0x5A;
     rxReady = true;
     stat |= (1 << 7);
+    transferDelay = 100;
     break;
 
   case CommState::SendingReady:
@@ -134,6 +137,7 @@ void PS1Controller::ProcessByte(uint8_t txByte) {
     rxData = static_cast<uint8_t>(pad.buttons & 0xFF);
     rxReady = true;
     stat |= (1 << 7);
+    transferDelay = 100;
     break;
 
   case CommState::SendingButtons_Lo:
@@ -141,11 +145,13 @@ void PS1Controller::ProcessByte(uint8_t txByte) {
     rxData = static_cast<uint8_t>((pad.buttons >> 8) & 0xFF);
     rxReady = true;
     stat |= (1 << 7);
+    transferDelay = 100;
     break;
 
   case CommState::SendingButtons_Hi:
     commState = CommState::Done;
     rxData = 0xFF;
+    // No ACK on last byte
     break;
 
   case CommState::Done:

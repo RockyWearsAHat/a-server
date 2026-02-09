@@ -60,6 +60,7 @@ public:
 
   // ─── Framebuffer for display ────────────────────────────────────────
   const uint16_t *GetFramebuffer() const { return gpu->GetFramebuffer(); }
+  uint32_t GetVRAMStride() const { return gpu->GetVRAMStride(); }
   uint32_t GetDisplayWidth() const { return gpu->GetDisplayWidth(); }
   uint32_t GetDisplayHeight() const { return gpu->GetDisplayHeight(); }
 

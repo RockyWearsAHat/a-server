@@ -825,48 +825,255 @@ void GTE::CmdINTPL(uint32_t cmd) {
           (rgbc >> 24) & 0xFF);
 }
 
-void GTE::CmdNCS([[maybe_unused]] uint32_t cmd) {
-  // Normal Color Single on V0
-  // Simplified: just output the RGBC color
-  PushRGB(rgbc & 0xFF, (rgbc >> 8) & 0xFF, (rgbc >> 16) & 0xFF,
+void GTE::NCSCore(int vIdx, uint32_t cmd) {
+  bool lmBit = (cmd >> 10) & 1;
+
+  // Step 1: Light matrix × normal vector → light intensity
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(l[i][0]) * v[vIdx][0] +
+                     static_cast<int64_t>(l[i][1]) * v[vIdx][1] +
+                     static_cast<int64_t>(l[i][2]) * v[vIdx][2];
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+
+  // Step 2: Light color matrix × light vector + background color → lit color
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(bk[i]) * 0x1000 +
+                     static_cast<int64_t>(lr[i][0]) * ir[1] +
+                     static_cast<int64_t>(lr[i][1]) * ir[2] +
+                     static_cast<int64_t>(lr[i][2]) * ir[3];
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+}
+
+void GTE::CmdNCS(uint32_t cmd) {
+  NCSCore(0, cmd);
+  PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
           (rgbc >> 24) & 0xFF);
 }
 
-void GTE::CmdNCT([[maybe_unused]] uint32_t cmd) {
-  // Normal Color Triple
-  for (int i = 0; i < 3; i++)
-    CmdNCS(cmd);
+void GTE::CmdNCT(uint32_t cmd) {
+  for (int i = 0; i < 3; i++) {
+    NCSCore(i, cmd);
+    PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+            (rgbc >> 24) & 0xFF);
+  }
 }
 
-void GTE::CmdNCDS([[maybe_unused]] uint32_t cmd) {
-  CmdNCS(cmd); // Simplified
+void GTE::CmdNCDS(uint32_t cmd) {
+  bool lmBit = (cmd >> 10) & 1;
+  NCSCore(0, cmd);
+
+  // Depth-cue: interpolate toward far color using IR0
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  // Apply RGBC color modulation
+  mac[1] = static_cast<int32_t>(
+      CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+  mac[2] = static_cast<int32_t>(
+      CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+  mac[3] = static_cast<int32_t>(
+      CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+
+  // Interpolate toward far color
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
+    result = mac[i + 1] + ir[0] * (result >> 12);
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+
+  PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+          (rgbc >> 24) & 0xFF);
 }
 
-void GTE::CmdNCDT([[maybe_unused]] uint32_t cmd) {
-  for (int i = 0; i < 3; i++)
-    CmdNCDS(cmd);
+void GTE::CmdNCDT(uint32_t cmd) {
+  bool lmBit = (cmd >> 10) & 1;
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  for (int vi = 0; vi < 3; vi++) {
+    NCSCore(vi, cmd);
+
+    mac[1] = static_cast<int32_t>(
+        CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+    mac[2] = static_cast<int32_t>(
+        CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+    mac[3] = static_cast<int32_t>(
+        CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+
+    for (int i = 0; i < 3; i++) {
+      int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
+      result = mac[i + 1] + ir[0] * (result >> 12);
+      mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+      ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+    }
+
+    PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+            (rgbc >> 24) & 0xFF);
+  }
 }
 
-void GTE::CmdNCCS([[maybe_unused]] uint32_t cmd) {
-  CmdNCS(cmd); // Simplified
+void GTE::CmdNCCS(uint32_t cmd) {
+  NCSCore(0, cmd);
+
+  // Multiply lit color by RGBC vertex color
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  mac[1] = static_cast<int32_t>(
+      CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+  mac[2] = static_cast<int32_t>(
+      CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+  mac[3] = static_cast<int32_t>(
+      CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, (cmd >> 10) & 1));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, (cmd >> 10) & 1));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, (cmd >> 10) & 1));
+
+  PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+          (rgbc >> 24) & 0xFF);
 }
 
-void GTE::CmdNCCT([[maybe_unused]] uint32_t cmd) {
-  for (int i = 0; i < 3; i++)
-    CmdNCCS(cmd);
+void GTE::CmdNCCT(uint32_t cmd) {
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  for (int vi = 0; vi < 3; vi++) {
+    NCSCore(vi, cmd);
+
+    mac[1] = static_cast<int32_t>(
+        CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+    mac[2] = static_cast<int32_t>(
+        CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+    mac[3] = static_cast<int32_t>(
+        CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+    ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, (cmd >> 10) & 1));
+    ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, (cmd >> 10) & 1));
+    ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, (cmd >> 10) & 1));
+
+    PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+            (rgbc >> 24) & 0xFF);
+  }
 }
 
-void GTE::CmdCDP([[maybe_unused]] uint32_t cmd) {
-  CmdDPCS(cmd); // Simplified
+void GTE::CmdCDP(uint32_t cmd) {
+  bool lmBit = (cmd >> 10) & 1;
+
+  // IR already contains light vector — apply LR matrix + BK
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(bk[i]) * 0x1000 +
+                     static_cast<int64_t>(lr[i][0]) * ir[1] +
+                     static_cast<int64_t>(lr[i][1]) * ir[2] +
+                     static_cast<int64_t>(lr[i][2]) * ir[3];
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+
+  // Multiply by RGBC, then depth-cue toward FC
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  mac[1] = static_cast<int32_t>(
+      CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+  mac[2] = static_cast<int32_t>(
+      CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+  mac[3] = static_cast<int32_t>(
+      CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
+    result = mac[i + 1] + ir[0] * (result >> 12);
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+
+  PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+          (rgbc >> 24) & 0xFF);
 }
 
-void GTE::CmdCC([[maybe_unused]] uint32_t cmd) {
-  PushRGB(rgbc & 0xFF, (rgbc >> 8) & 0xFF, (rgbc >> 16) & 0xFF,
+void GTE::CmdCC(uint32_t cmd) {
+  bool lmBit = (cmd >> 10) & 1;
+
+  // IR already contains light vector — apply LR matrix + BK
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(bk[i]) * 0x1000 +
+                     static_cast<int64_t>(lr[i][0]) * ir[1] +
+                     static_cast<int64_t>(lr[i][1]) * ir[2] +
+                     static_cast<int64_t>(lr[i][2]) * ir[3];
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+
+  // Multiply by RGBC vertex color
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  mac[1] = static_cast<int32_t>(
+      CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+  mac[2] = static_cast<int32_t>(
+      CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+  mac[3] = static_cast<int32_t>(
+      CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+
+  PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
           (rgbc >> 24) & 0xFF);
 }
 
 void GTE::CmdDCPL(uint32_t cmd) {
-  CmdDPCS(cmd); // Simplified
+  bool lmBit = (cmd >> 10) & 1;
+
+  // IR already contains lit color — multiply by RGBC then depth-cue toward FC
+  uint8_t colorR = rgbc & 0xFF;
+  uint8_t colorG = (rgbc >> 8) & 0xFF;
+  uint8_t colorB = (rgbc >> 16) & 0xFF;
+
+  mac[1] = static_cast<int32_t>(
+      CheckMAC(1, static_cast<int64_t>(colorR) * ir[1]) << 4);
+  mac[2] = static_cast<int32_t>(
+      CheckMAC(2, static_cast<int64_t>(colorG) * ir[2]) << 4);
+  mac[3] = static_cast<int32_t>(
+      CheckMAC(3, static_cast<int64_t>(colorB) * ir[3]) << 4);
+
+  for (int i = 0; i < 3; i++) {
+    int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
+    result = mac[i + 1] + ir[0] * (result >> 12);
+    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+  }
+
+  PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+          static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+          (rgbc >> 24) & 0xFF);
 }
 
 void GTE::CmdGPF(uint32_t cmd) {

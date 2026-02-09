@@ -30,8 +30,10 @@ uint32_t PS1Timer::Read32(uint32_t addr) const {
   case 0x00:
     return ch.counter;
   case 0x04: {
-    // Reading mode clears reached flags
+    // Reading mode clears reached flags (bits 11-12) after returning current
+    // value
     uint32_t value = ch.mode;
+    const_cast<TimerChannel &>(ch).clearReachedFlags();
     return value;
   }
   case 0x08:
@@ -113,6 +115,7 @@ void PS1Timer::TickChannel(uint32_t index, uint32_t ticks) {
   auto &ch = channels[index];
 
   for (uint32_t i = 0; i < ticks; i++) {
+    uint16_t prevCounter = ch.counter;
     ch.counter++;
 
     // Check target reached
@@ -127,7 +130,7 @@ void PS1Timer::TickChannel(uint32_t index, uint32_t ticks) {
     }
 
     // Check overflow (0xFFFF → 0x0000)
-    if (ch.counter == 0 && i > 0) {
+    if (prevCounter == 0xFFFF && ch.counter == 0) {
       ch.setReachedOverflow();
       if (ch.irqOnOverflow()) {
         CheckIRQ(index);

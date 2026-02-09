@@ -29,11 +29,15 @@ struct SPUVoice {
   ADSRPhase adsrPhase = ADSRPhase::Off;
   int32_t adsrLevel = 0;
   uint32_t currentAddr = 0;
-  uint32_t sampleCounter = 0;      // Fixed-point sample position
+  uint32_t sampleCounter = 0;      // Fixed-point sample position (4.12)
   int16_t prevSamples[2] = {0, 0}; // ADPCM decode history
   bool keyOn = false;
   bool keyOff = false;
   bool loopFlag = false;
+
+  // Decoded ADPCM block buffer
+  int16_t decodedSamples[28] = {};
+  uint32_t sampleIndex = 28; // Start past end to force first decode
 };
 
 class PS1SPU : public Common::Loggable {

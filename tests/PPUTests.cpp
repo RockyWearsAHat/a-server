@@ -4118,3 +4118,176 @@ TEST_F(VRAMAddressTest, VRAM_UpperMirror) {
   memory.Write16(0x06010002u, 0x5678u);
   EXPECT_EQ(memory.Read16(0x06018002u), 0x5678u);
 }
+
+// ==========================================================================
+// OBJ per-scanline cycle limit tests (GBATEK: sprite rendering budget)
+// ==========================================================================
+
+class PPUObjBudgetTest : public ::testing::Test {
+protected:
+  GBAMemory memory;
+  PPU ppu{memory};
+
+  void SetUp() override {
+    // Mode 0, BG0 + OBJ enabled, 1-D OBJ mapping
+    memory.Write16(0x04000000, 0x1140);
+
+    // Set backdrop to blue so we can distinguish dropped sprites
+    memory.Write16(0x05000000, 0x7C00); // BGR555 blue
+
+    // Set OBJ palette 0 index 1 = red
+    memory.Write16(0x05000202, 0x001F);
+
+    // Write tile 1 in OBJ VRAM (4bpp, 32 bytes) — all pixel index 1
+    for (int i = 0; i < 16; i++) {
+      memory.Write16(0x06010000u + 1u * 32u + i * 2, 0x1111);
+    }
+
+    // Disable all sprites initially
+    for (uint32_t spr = 0; spr < 128; ++spr) {
+      const uint32_t base = spr * 8u;
+      TestUtil::WriteOam16(memory, base + 0, (1u << 9)); // Disable bit
+      TestUtil::WriteOam16(memory, base + 2, 0);
+      TestUtil::WriteOam16(memory, base + 4, 0);
+    }
+  }
+
+  // Place a non-affine 64x64 sprite at OAM index `idx`, position (x, y)
+  void Place64x64Sprite(int idx, int x, int y) {
+    // Shape=0 (square), size=3 (64x64), tile=1, priority=0
+    uint16_t attr0 = (y & 0xFF) | (0 << 14); // shape=square
+    uint16_t attr1 = (x & 0x1FF) | (3 << 14); // size=3 → 64x64
+    uint16_t attr2 = 1; // tile index 1
+
+    uint32_t base = idx * 8;
+    TestUtil::WriteOam16(memory, base + 0, attr0);
+    TestUtil::WriteOam16(memory, base + 2, attr1);
+    TestUtil::WriteOam16(memory, base + 4, attr2);
+  }
+};
+
+// Real GBA: 1210-dot budget. 19 64px non-affine sprites = 1216 dots.
+// Sprite 18 (0-indexed) pushes over budget and should be dropped.
+TEST_F(PPUObjBudgetTest, SpritesExceedingBudgetAreDropped) {
+  uint32_t backdrop = TestUtil::ARGBFromBGR555(0x7C00);
+  uint32_t spriteColor = TestUtil::ARGBFromBGR555(0x001F); // red
+
+  // Place sprites 0-17 all at x=0, y=0, 64x64 to consume 1152 dots
+  for (int i = 0; i < 18; ++i) {
+    Place64x64Sprite(i, 0, 0);
+  }
+  // Fill ALL tiles that a 64x64 1D-mapped 4bpp sprite needs (64 tiles)
+  // tileIndex=1, so tiles 1..64 each 32 bytes in OBJ VRAM (0x06010000)
+  for (int t = 1; t <= 64; ++t) {
+    for (int w = 0; w < 16; ++w) {
+      memory.Write16(0x06010000u + t * 32u + w * 2, 0x1111);
+    }
+  }
+  // Sprite 18 at unique x=120 — 1152+64=1216 > 1210, should be dropped
+  Place64x64Sprite(18, 120, 0);
+
+  ppu.Update(960);
+  ppu.SwapBuffers();
+
+  // x=0 should show sprite color (red)
+  uint32_t pxInBudget = TestUtil::GetPixel(ppu, 0, 0);
+  EXPECT_EQ(pxInBudget, spriteColor)
+      << "Sprites within budget should render";
+
+  // x=120 should show backdrop because sprite 18 was dropped
+  uint32_t pxOverBudget = TestUtil::GetPixel(ppu, 120, 0);
+  EXPECT_EQ(pxOverBudget, backdrop)
+      << "Sprite 18 (over 1210-dot budget) should be dropped, showing backdrop";
+}
+
+// HBlank Interval Free (DISPCNT bit 5) reduces budget from 1210 to 954
+TEST_F(PPUObjBudgetTest, HBlankIntervalFreeReducesBudget) {
+  // Enable HBlank Interval Free
+  memory.Write16(0x04000000, 0x1140 | (1 << 5));
+
+  uint32_t backdrop = TestUtil::ARGBFromBGR555(0x7C00);
+
+  // Fill tiles 1..64 for 64x64 sprites
+  for (int t = 1; t <= 64; ++t) {
+    for (int w = 0; w < 16; ++w) {
+      memory.Write16(0x06010000u + t * 32u + w * 2, 0x1111);
+    }
+  }
+
+  // 14 sprites × 64 dots = 896 (fits), sprite 14 → 960 (over 954)
+  for (int i = 0; i < 14; ++i) {
+    Place64x64Sprite(i, 0, 0);
+  }
+  // Sprite 14 at a unique x position — should be dropped with 954-dot budget
+  Place64x64Sprite(14, 120, 0);
+
+  ppu.Update(960);
+  ppu.SwapBuffers();
+
+  // x=120 should show backdrop (sprite 14 over budget)
+  uint32_t pxOverBudget = TestUtil::GetPixel(ppu, 120, 0);
+  EXPECT_EQ(pxOverBudget, backdrop)
+      << "Sprite 14 should be dropped with HBlank Interval Free (954-dot limit)";
+}
+
+// ==========================================================================
+// BGxX/BGxY mid-frame re-latch tests
+// Per GBATEK: BG2X/BG2Y/BG3X/BG3Y are write-only registers. Reading them
+// returns 0. We verify the IO write callback fires without crashing and
+// that writes to the BG reference point range go through the fast path.
+// ==========================================================================
+
+class PPUBgRefLatchTest : public ::testing::Test {
+protected:
+  GBAMemory memory;
+  PPU ppu{memory};
+
+  void SetUp() override {
+    memory.SetIOWriteCallback(PPU::OnIOWrite, &ppu);
+  }
+};
+
+// Writing BG2X (offset 0x28-0x2A) should not crash and should store via fast path
+TEST_F(PPUBgRefLatchTest, BG2XWriteDoesNotCrash) {
+  memory.Write16(0x04000000, 0x0C00); // Mode 2, BG2 enabled
+  memory.Write16(0x04000028, 0x0000); // BG2X low
+  memory.Write16(0x0400002A, 0x0001); // BG2X high → triggers relatch callback
+  // No crash = pass. BG2X is write-only so Read returns 0.
+}
+
+// Writing BG2Y should trigger the callback path
+TEST_F(PPUBgRefLatchTest, BG2YWriteDoesNotCrash) {
+  memory.Write16(0x04000000, 0x0C00);
+  memory.Write16(0x0400002C, 0x8000); // BG2Y low
+  memory.Write16(0x0400002E, 0x0002); // BG2Y high
+}
+
+// Writing BG3X should trigger the callback path
+TEST_F(PPUBgRefLatchTest, BG3XWriteDoesNotCrash) {
+  memory.Write16(0x04000000, 0x0C00);
+  memory.Write16(0x04000038, 0x1234); // BG3X low
+  memory.Write16(0x0400003A, 0x0005); // BG3X high
+}
+
+// Writing BG3Y should trigger the callback path
+TEST_F(PPUBgRefLatchTest, BG3YWriteDoesNotCrash) {
+  memory.Write16(0x04000000, 0x0C00);
+  memory.Write16(0x0400003C, 0xABCD); // BG3Y low
+  memory.Write16(0x0400003E, 0x0003); // BG3Y high
+}
+
+// BG ref point writes with negative (sign-extended) values should not crash
+TEST_F(PPUBgRefLatchTest, NegativeBG2XSignExtensionDoesNotCrash) {
+  memory.Write16(0x04000000, 0x0C00);
+  // BG2X = 0x0FFFFFFF (28 bits all set = -1 in signed)
+  memory.Write16(0x04000028, 0xFFFF); // BG2X low
+  memory.Write16(0x0400002A, 0x0FFF); // BG2X high (bits 27-16)
+}
+
+// Callback still fires without PPU context (null safety)
+TEST_F(PPUBgRefLatchTest, NullCallbackContextIsSafe) {
+  // Set callback with null context
+  memory.SetIOWriteCallback(PPU::OnIOWrite, nullptr);
+  // Should not crash — OnIOWrite checks for null
+  memory.Write16(0x0400002A, 0x0001);
+}

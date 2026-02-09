@@ -29,6 +29,7 @@ void PS1GPU::Reset() {
   reverseFlag = false;
   textureDisable = false;
   hRes = 0;
+  hRes2 = 0;
   vRes480 = false;
   palMode = false;
   colorDepth24 = false;
@@ -79,13 +80,25 @@ uint32_t PS1GPU::ReadGPUSTAT() const {
   stat |= static_cast<uint32_t>(reverseFlag) << 14;
   stat |= static_cast<uint32_t>(textureDisable) << 15;
   stat |= static_cast<uint32_t>(hRes) << 16;
-  // Bit 17 and 18 handle horizontal resolution
+  stat |= static_cast<uint32_t>(hRes2) << 18;
   stat |= static_cast<uint32_t>(vRes480) << 19;
   stat |= static_cast<uint32_t>(palMode) << 20;
   stat |= static_cast<uint32_t>(colorDepth24) << 21;
   stat |= static_cast<uint32_t>(interlace) << 22;
   stat |= static_cast<uint32_t>(displayDisabled) << 23;
   stat |= static_cast<uint32_t>(irq1) << 24;
+
+  // Bit 25: DMA / Data Request — depends on direction
+  if (dmaDirection == 1) {
+    // FIFO state (always ready for simplicity)
+    stat |= 1 << 25;
+  } else if (dmaDirection == 2) {
+    // CPU → GP0: same as bit 28 (ready to receive)
+    stat |= 1 << 25;
+  } else if (dmaDirection == 3) {
+    // VRAM → CPU: same as bit 27 (ready to send)
+    stat |= 1 << 25;
+  }
 
   // DMA / Data request bits
   stat |= 1 << 26; // Ready to receive DMA block
@@ -297,6 +310,18 @@ void PS1GPU::ProcessGP0Command() {
   case 0x42:
     GP0_MonoLine(gp0CommandBuffer);
     break;
+  case 0x50:
+  case 0x52:
+    GP0_ShadedLine(gp0CommandBuffer);
+    break;
+  case 0x34:
+  case 0x36:
+    GP0_ShadedTexturedTriangle(gp0CommandBuffer, (cmd & 1) == 0);
+    break;
+  case 0x3C:
+  case 0x3E:
+    GP0_ShadedTexturedQuad(gp0CommandBuffer, (cmd & 1) == 0);
+    break;
   case 0x60:
   case 0x62:
     GP0_MonoRect(gp0CommandBuffer);
@@ -315,9 +340,21 @@ void PS1GPU::ProcessGP0Command() {
   case 0x72:
     GP0_MonoRect(gp0CommandBuffer);
     break;
+  case 0x74:
+  case 0x75:
+  case 0x76:
+  case 0x77:
+    GP0_TexturedRect(gp0CommandBuffer);
+    break;
   case 0x78:
   case 0x7A:
     GP0_MonoRect(gp0CommandBuffer);
+    break;
+  case 0x7C:
+  case 0x7D:
+  case 0x7E:
+  case 0x7F:
+    GP0_TexturedRect(gp0CommandBuffer);
     break;
   case 0x80:
     GP0_CopyRectVRAMtoVRAM(gp0CommandBuffer);
@@ -370,9 +407,8 @@ void PS1GPU::GP0_FillRect(const std::vector<uint32_t> &params) {
   uint16_t w = static_cast<uint16_t>(params[2] & 0x3FF);
   uint16_t h = static_cast<uint16_t>((params[2] >> 16) & 0x1FF);
 
-  // Round up to 16-pixel alignment
+  // Only width is rounded to 16-pixel alignment per hardware spec
   w = ((w + 0xF) & ~0xF);
-  h = ((h + 0xF) & ~0xF);
 
   for (uint16_t dy = 0; dy < h; dy++) {
     for (uint16_t dx = 0; dx < w; dx++) {
@@ -422,21 +458,37 @@ void PS1GPU::GP0_MaskBitSetting(uint32_t cmd) {
   maskBitCheck = (cmd >> 1) & 1;
 }
 
-// ─── GP0 Rendering (stubs for now — rasterize later) ────────────────────
+// ─── GP0 Rendering ──────────────────────────────────────────────────────
 
 void PS1GPU::GP0_MonoTriangle(const std::vector<uint32_t> &params,
                               [[maybe_unused]] bool opaque) {
   uint8_t r = static_cast<uint8_t>(params[0]);
   uint8_t g = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
-  uint16_t color = ColorToVRAM(r, g, b);
 
-  // Extract 3 vertices and draw (simplified — proper rasterization TODO)
-  for (int i = 1; i <= 3; i++) {
-    int16_t x = static_cast<int16_t>(params[i] & 0xFFFF) + drawOffsetX;
-    int16_t y = static_cast<int16_t>(params[i] >> 16) + drawOffsetY;
-    PutPixel(x, y, color);
-  }
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[2] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[2] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  int16_t x2 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[3] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y2 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[3] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+
+  RasterizeTriangle(x0, y0, r, g, b, x1, y1, r, g, b, x2, y2, r, g, b);
 }
 
 void PS1GPU::GP0_MonoQuad(const std::vector<uint32_t> &params,
@@ -444,37 +496,341 @@ void PS1GPU::GP0_MonoQuad(const std::vector<uint32_t> &params,
   uint8_t r = static_cast<uint8_t>(params[0]);
   uint8_t g = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
-  uint16_t color = ColorToVRAM(r, g, b);
 
-  for (int i = 1; i <= 4; i++) {
-    int16_t x = static_cast<int16_t>(params[i] & 0xFFFF) + drawOffsetX;
-    int16_t y = static_cast<int16_t>(params[i] >> 16) + drawOffsetY;
-    PutPixel(x, y, color);
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[2] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[2] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  int16_t x2 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[3] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y2 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[3] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  int16_t x3 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[4] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y3 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[4] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+
+  // Split quad into two triangles (0-1-2, 1-2-3)
+  RasterizeTriangle(x0, y0, r, g, b, x1, y1, r, g, b, x2, y2, r, g, b);
+  RasterizeTriangle(x1, y1, r, g, b, x2, y2, r, g, b, x3, y3, r, g, b);
+}
+
+void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
+                                  [[maybe_unused]] bool opaque) {
+  // Format: color+cmd, vert0, tex0+clut, vert1, tex1+texpage, vert2, tex2
+  uint8_t r0 = static_cast<uint8_t>(params[0]);
+  uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
+  uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
+
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  uint8_t u0 = static_cast<uint8_t>(params[2]);
+  uint8_t v0 = static_cast<uint8_t>(params[2] >> 8);
+  uint16_t clut = static_cast<uint16_t>(params[2] >> 16);
+
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[3] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[3] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  uint8_t u1 = static_cast<uint8_t>(params[4]);
+  uint8_t v1 = static_cast<uint8_t>(params[4] >> 8);
+  uint16_t texPage = static_cast<uint16_t>(params[4] >> 16);
+
+  int16_t x2 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[5] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y2 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[5] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  uint8_t u2 = static_cast<uint8_t>(params[6]);
+  uint8_t v2 = static_cast<uint8_t>(params[6] >> 8);
+
+  // Bounding box
+  int16_t minX = std::min({x0, x1, x2});
+  int16_t maxX = std::max({x0, x1, x2});
+  int16_t minY = std::min({y0, y1, y2});
+  int16_t maxY = std::max({y0, y1, y2});
+  minX = std::max(minX, static_cast<int16_t>(drawAreaLeft));
+  maxX = std::min(maxX, static_cast<int16_t>(drawAreaRight));
+  minY = std::max(minY, static_cast<int16_t>(drawAreaTop));
+  maxY = std::min(maxY, static_cast<int16_t>(drawAreaBottom));
+
+  int32_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+  if (area == 0)
+    return;
+
+  for (int16_t py = minY; py <= maxY; py++) {
+    for (int16_t px = minX; px <= maxX; px++) {
+      int32_t w0 = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+      int32_t w1 = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1);
+      int32_t w2 = (x0 - x2) * (py - y2) - (px - x2) * (y0 - y2);
+
+      bool inside = (area > 0) ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+      if (!inside)
+        continue;
+
+      // Barycentric interpolation for texture coordinates
+      int32_t absArea = std::abs(area);
+      int32_t bw0 = std::abs(w1); // weight for v0
+      int32_t bw1 = std::abs(w2); // weight for v1
+      int32_t bw2 = std::abs(w0); // weight for v2
+
+      int32_t u = (bw0 * u0 + bw1 * u1 + bw2 * u2) / absArea;
+      int32_t v = (bw0 * v0 + bw1 * v1 + bw2 * v2) / absArea;
+
+      uint16_t texel = SampleTexture(u & 0xFF, v & 0xFF, clut, texPage);
+      if (texel == 0)
+        continue; // Transparent black
+
+      // For raw textures (bit 0 of cmd), use texel directly; otherwise modulate
+      if (!opaque) {
+        PutPixel(px, py, texel);
+      } else {
+        uint8_t tr = ((texel & 0x1F) << 3);
+        uint8_t tg = (((texel >> 5) & 0x1F) << 3);
+        uint8_t tb = (((texel >> 10) & 0x1F) << 3);
+        tr = static_cast<uint8_t>(std::min(255, (tr * r0) >> 7));
+        tg = static_cast<uint8_t>(std::min(255, (tg * g0) >> 7));
+        tb = static_cast<uint8_t>(std::min(255, (tb * b0) >> 7));
+        PutPixel(px, py, ColorToVRAM(tr, tg, tb));
+      }
+    }
   }
 }
 
-void PS1GPU::GP0_TexturedTriangle(
-    [[maybe_unused]] const std::vector<uint32_t> &params,
-    [[maybe_unused]] bool opaque) {
-  // Textured rendering placeholder
+void PS1GPU::GP0_TexturedQuad(const std::vector<uint32_t> &params,
+                              [[maybe_unused]] bool opaque) {
+  // Split into two textured triangles
+  // Tri 1: verts 0,1,2 with tex coords
+  std::vector<uint32_t> tri1 = {params[0], params[1], params[2], params[3],
+                                params[4], params[5], params[6]};
+  GP0_TexturedTriangle(tri1, opaque);
+
+  // Tri 2: verts 1,2,3 — repack
+  std::vector<uint32_t> tri2 = {params[0], params[3], params[4], params[5],
+                                params[6], params[7], params[8]};
+  GP0_TexturedTriangle(tri2, opaque);
 }
 
-void PS1GPU::GP0_TexturedQuad(
-    [[maybe_unused]] const std::vector<uint32_t> &params,
-    [[maybe_unused]] bool opaque) {
-  // Textured rendering placeholder
+void PS1GPU::GP0_ShadedTriangle(const std::vector<uint32_t> &params,
+                                [[maybe_unused]] bool opaque) {
+  // Format: color0+cmd, vert0, color1, vert1, color2, vert2
+  uint8_t r0 = static_cast<uint8_t>(params[0]);
+  uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
+  uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
+  int16_t x0 = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
+  int16_t y0 = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+
+  uint8_t r1 = static_cast<uint8_t>(params[2]);
+  uint8_t g1 = static_cast<uint8_t>(params[2] >> 8);
+  uint8_t b1 = static_cast<uint8_t>(params[2] >> 16);
+  int16_t x1 = static_cast<int16_t>(params[3] & 0xFFFF) + drawOffsetX;
+  int16_t y1 = static_cast<int16_t>(params[3] >> 16) + drawOffsetY;
+
+  uint8_t r2 = static_cast<uint8_t>(params[4]);
+  uint8_t g2 = static_cast<uint8_t>(params[4] >> 8);
+  uint8_t b2 = static_cast<uint8_t>(params[4] >> 16);
+  int16_t x2 = static_cast<int16_t>(params[5] & 0xFFFF) + drawOffsetX;
+  int16_t y2 = static_cast<int16_t>(params[5] >> 16) + drawOffsetY;
+
+  RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r1, g1, b1, x2, y2, r2, g2, b2);
 }
 
-void PS1GPU::GP0_ShadedTriangle(
-    [[maybe_unused]] const std::vector<uint32_t> &params,
-    [[maybe_unused]] bool opaque) {
-  // Gouraud shaded triangle placeholder
+void PS1GPU::GP0_ShadedQuad(const std::vector<uint32_t> &params,
+                            [[maybe_unused]] bool opaque) {
+  // Format: color0+cmd, vert0, color1, vert1, color2, vert2, color3, vert3
+  uint8_t r0 = static_cast<uint8_t>(params[0]);
+  uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
+  uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+
+  uint8_t r1 = static_cast<uint8_t>(params[2]);
+  uint8_t g1 = static_cast<uint8_t>(params[2] >> 8);
+  uint8_t b1 = static_cast<uint8_t>(params[2] >> 16);
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[3] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[3] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+
+  uint8_t r2 = static_cast<uint8_t>(params[4]);
+  uint8_t g2 = static_cast<uint8_t>(params[4] >> 8);
+  uint8_t b2 = static_cast<uint8_t>(params[4] >> 16);
+  int16_t x2 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[5] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y2 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[5] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+
+  uint8_t r3 = static_cast<uint8_t>(params[6]);
+  uint8_t g3 = static_cast<uint8_t>(params[6] >> 8);
+  uint8_t b3 = static_cast<uint8_t>(params[6] >> 16);
+  int16_t x3 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[7] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y3 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[7] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+
+  RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r1, g1, b1, x2, y2, r2, g2, b2);
+  RasterizeTriangle(x1, y1, r1, g1, b1, x2, y2, r2, g2, b2, x3, y3, r3, g3, b3);
 }
 
-void PS1GPU::GP0_ShadedQuad(
-    [[maybe_unused]] const std::vector<uint32_t> &params,
-    [[maybe_unused]] bool opaque) {
-  // Gouraud shaded quad placeholder
+void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
+                                        [[maybe_unused]] bool opaque) {
+  // 9 words: color0+cmd, vert0, tex0+clut, color1, vert1, tex1+texpage, color2,
+  // vert2, tex2
+  uint8_t r0 = static_cast<uint8_t>(params[0]);
+  uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
+  uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  uint8_t u0 = static_cast<uint8_t>(params[2]);
+  uint8_t v0 = static_cast<uint8_t>(params[2] >> 8);
+  uint16_t clut = static_cast<uint16_t>(params[2] >> 16);
+
+  uint8_t r1 = static_cast<uint8_t>(params[3]);
+  uint8_t g1 = static_cast<uint8_t>(params[3] >> 8);
+  uint8_t b1 = static_cast<uint8_t>(params[3] >> 16);
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[4] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[4] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  uint8_t u1 = static_cast<uint8_t>(params[5]);
+  uint8_t v1 = static_cast<uint8_t>(params[5] >> 8);
+  uint16_t texPage = static_cast<uint16_t>(params[5] >> 16);
+
+  uint8_t r2 = static_cast<uint8_t>(params[6]);
+  uint8_t g2 = static_cast<uint8_t>(params[6] >> 8);
+  uint8_t b2 = static_cast<uint8_t>(params[6] >> 16);
+  int16_t x2 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[7] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y2 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[7] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  uint8_t u2 = static_cast<uint8_t>(params[8]);
+  uint8_t v2 = static_cast<uint8_t>(params[8] >> 8);
+
+  int16_t minX =
+      std::max(std::min({x0, x1, x2}), static_cast<int16_t>(drawAreaLeft));
+  int16_t maxX =
+      std::min(std::max({x0, x1, x2}), static_cast<int16_t>(drawAreaRight));
+  int16_t minY =
+      std::max(std::min({y0, y1, y2}), static_cast<int16_t>(drawAreaTop));
+  int16_t maxY =
+      std::min(std::max({y0, y1, y2}), static_cast<int16_t>(drawAreaBottom));
+
+  int32_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+  if (area == 0)
+    return;
+
+  for (int16_t py = minY; py <= maxY; py++) {
+    for (int16_t px = minX; px <= maxX; px++) {
+      int32_t w0 = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+      int32_t w1 = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1);
+      int32_t w2 = (x0 - x2) * (py - y2) - (px - x2) * (y0 - y2);
+
+      bool inside = (area > 0) ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+      if (!inside)
+        continue;
+
+      int32_t absArea = std::abs(area);
+      int32_t bw0 = std::abs(w1);
+      int32_t bw1 = std::abs(w2);
+      int32_t bw2 = std::abs(w0);
+
+      int32_t u = (bw0 * u0 + bw1 * u1 + bw2 * u2) / absArea;
+      int32_t v = (bw0 * v0 + bw1 * v1 + bw2 * v2) / absArea;
+
+      uint16_t texel = SampleTexture(u & 0xFF, v & 0xFF, clut, texPage);
+      if (texel == 0)
+        continue;
+
+      if (!opaque) {
+        PutPixel(px, py, texel);
+      } else {
+        // Interpolate vertex color for modulation
+        uint8_t cr =
+            static_cast<uint8_t>((bw0 * r0 + bw1 * r1 + bw2 * r2) / absArea);
+        uint8_t cg =
+            static_cast<uint8_t>((bw0 * g0 + bw1 * g1 + bw2 * g2) / absArea);
+        uint8_t cb =
+            static_cast<uint8_t>((bw0 * b0 + bw1 * b1 + bw2 * b2) / absArea);
+
+        uint8_t tr = ((texel & 0x1F) << 3);
+        uint8_t tg = (((texel >> 5) & 0x1F) << 3);
+        uint8_t tb = (((texel >> 10) & 0x1F) << 3);
+        tr = static_cast<uint8_t>(std::min(255, (tr * cr) >> 7));
+        tg = static_cast<uint8_t>(std::min(255, (tg * cg) >> 7));
+        tb = static_cast<uint8_t>(std::min(255, (tb * cb) >> 7));
+        PutPixel(px, py, ColorToVRAM(tr, tg, tb));
+      }
+    }
+  }
+}
+
+void PS1GPU::GP0_ShadedTexturedQuad(const std::vector<uint32_t> &params,
+                                    [[maybe_unused]] bool opaque) {
+  // 12 words: split into two shaded-textured triangles
+  // Tri 1: verts 0,1,2 → params[0..8]
+  std::vector<uint32_t> tri1 = {params[0], params[1], params[2],
+                                params[3], params[4], params[5],
+                                params[6], params[7], params[8]};
+  GP0_ShadedTexturedTriangle(tri1, opaque);
+
+  // Tri 2: verts 1,2,3 → repack
+  std::vector<uint32_t> tri2 = {params[3], params[4],  params[5],
+                                params[6], params[7],  params[8],
+                                params[9], params[10], params[11]};
+  GP0_ShadedTexturedTriangle(tri2, opaque);
 }
 
 void PS1GPU::GP0_MonoRect(const std::vector<uint32_t> &params) {
@@ -506,9 +862,59 @@ void PS1GPU::GP0_MonoRect(const std::vector<uint32_t> &params) {
   }
 }
 
-void PS1GPU::GP0_TexturedRect(
-    [[maybe_unused]] const std::vector<uint32_t> &params) {
-  // Textured rectangle placeholder
+void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
+  // Format: color+cmd, vertex, texcoord+clut, size (for variable)
+  uint8_t r = static_cast<uint8_t>(params[0]);
+  uint8_t g = static_cast<uint8_t>(params[0] >> 8);
+  uint8_t b = static_cast<uint8_t>(params[0] >> 16);
+  uint8_t cmd = static_cast<uint8_t>(params[0] >> 24);
+
+  int16_t x = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
+  int16_t y = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+
+  uint8_t u = static_cast<uint8_t>(params[2]);
+  uint8_t v = static_cast<uint8_t>(params[2] >> 8);
+  uint16_t clut = static_cast<uint16_t>(params[2] >> 16);
+
+  // Use current texture page from draw mode settings
+  uint16_t texPage =
+      texPageBaseX | (texPageBaseY << 4) | (texPageColorDepth << 7);
+
+  uint16_t w = 0, h = 0;
+  if ((cmd & 0xF8) == 0x74) {
+    w = 8;
+    h = 8;
+  } else if ((cmd & 0xF8) == 0x7C) {
+    w = 16;
+    h = 16;
+  } else if (params.size() >= 4) {
+    w = params[3] & 0xFFFF;
+    h = params[3] >> 16;
+  }
+
+  bool rawTexture =
+      (cmd & 1); // Odd commands = raw texture (no color modulation)
+
+  for (int16_t dy = 0; dy < static_cast<int16_t>(h); dy++) {
+    for (int16_t dx = 0; dx < static_cast<int16_t>(w); dx++) {
+      uint16_t texel =
+          SampleTexture((u + dx) & 0xFF, (v + dy) & 0xFF, clut, texPage);
+      if (texel == 0)
+        continue; // Transparent
+
+      if (rawTexture) {
+        PutPixel(x + dx, y + dy, texel);
+      } else {
+        uint8_t tr = ((texel & 0x1F) << 3);
+        uint8_t tg = (((texel >> 5) & 0x1F) << 3);
+        uint8_t tb = (((texel >> 10) & 0x1F) << 3);
+        tr = static_cast<uint8_t>(std::min(255, (tr * r) >> 7));
+        tg = static_cast<uint8_t>(std::min(255, (tg * g) >> 7));
+        tb = static_cast<uint8_t>(std::min(255, (tb * b) >> 7));
+        PutPixel(x + dx, y + dy, ColorToVRAM(tr, tg, tb));
+      }
+    }
+  }
 }
 
 void PS1GPU::GP0_MonoDot(const std::vector<uint32_t> &params) {
@@ -551,6 +957,50 @@ void PS1GPU::GP0_MonoLine(const std::vector<uint32_t> &params) {
       err += dx;
       y0 += sy;
     }
+  }
+}
+
+void PS1GPU::GP0_ShadedLine(const std::vector<uint32_t> &params) {
+  // Format: color0+cmd, vert0, color1, vert1
+  uint8_t r0 = static_cast<uint8_t>(params[0]);
+  uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
+  uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
+  int16_t x0 = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
+  int16_t y0 = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+
+  uint8_t r1 = static_cast<uint8_t>(params[2]);
+  uint8_t g1 = static_cast<uint8_t>(params[2] >> 8);
+  uint8_t b1 = static_cast<uint8_t>(params[2] >> 16);
+  int16_t x1 = static_cast<int16_t>(params[3] & 0xFFFF) + drawOffsetX;
+  int16_t y1 = static_cast<int16_t>(params[3] >> 16) + drawOffsetY;
+
+  int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  int err = dx + dy;
+  int totalSteps = std::max(std::abs(x1 - x0), std::abs(y1 - y0));
+  if (totalSteps == 0)
+    totalSteps = 1;
+  int step = 0;
+
+  while (true) {
+    // Interpolate color
+    uint8_t r = static_cast<uint8_t>(r0 + (r1 - r0) * step / totalSteps);
+    uint8_t g = static_cast<uint8_t>(g0 + (g1 - g0) * step / totalSteps);
+    uint8_t b = static_cast<uint8_t>(b0 + (b1 - b0) * step / totalSteps);
+    PutPixel(x0, y0, ColorToVRAM(r, g, b));
+
+    if (x0 == x1 && y0 == y1)
+      break;
+    int e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
+    step++;
   }
 }
 
@@ -705,11 +1155,11 @@ void PS1GPU::GP1_VerticalDisplayRange(uint32_t cmd) {
 
 void PS1GPU::GP1_DisplayMode(uint32_t cmd) {
   hRes = cmd & 3;
+  hRes2 = (cmd >> 6) & 1;
   vRes480 = (cmd >> 2) & 1;
   palMode = (cmd >> 3) & 1;
   colorDepth24 = (cmd >> 4) & 1;
   interlace = (cmd >> 5) & 1;
-  // Bit 6 = horizontal resolution 2 (368 mode)
   reverseFlag = (cmd >> 7) & 1;
 }
 
@@ -829,8 +1279,10 @@ void PS1GPU::WriteVRAM(uint32_t x, uint32_t y, uint16_t value) {
 // ─── Display Dimensions ────────────────────────────────────────────────
 
 uint32_t PS1GPU::GetDisplayWidth() const {
-  static constexpr uint32_t widths[] = {256, 368, 320, 368, 512, 368, 640, 368};
-  return widths[hRes & 7];
+  if (hRes2)
+    return 368;
+  static constexpr uint32_t widths[] = {256, 320, 512, 640};
+  return widths[hRes & 3];
 }
 
 uint32_t PS1GPU::GetDisplayHeight() const { return vRes480 ? 480 : 240; }
@@ -852,6 +1304,98 @@ bool PS1GPU::IsInDrawingArea(int16_t x, int16_t y) const {
 
 uint16_t PS1GPU::ColorToVRAM(uint8_t r, uint8_t g, uint8_t b) {
   return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
+}
+
+// ─── Triangle Rasterizer (Gouraud shading via half-space method) ────────
+
+void PS1GPU::RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,
+                               uint8_t b0, int16_t x1, int16_t y1, uint8_t r1,
+                               uint8_t g1, uint8_t b1, int16_t x2, int16_t y2,
+                               uint8_t r2, uint8_t g2, uint8_t b2) {
+  // Bounding box clipped to drawing area
+  int16_t minX =
+      std::max(std::min({x0, x1, x2}), static_cast<int16_t>(drawAreaLeft));
+  int16_t maxX =
+      std::min(std::max({x0, x1, x2}), static_cast<int16_t>(drawAreaRight));
+  int16_t minY =
+      std::max(std::min({y0, y1, y2}), static_cast<int16_t>(drawAreaTop));
+  int16_t maxY =
+      std::min(std::max({y0, y1, y2}), static_cast<int16_t>(drawAreaBottom));
+
+  // 2x signed area — also used as denominator for barycentric weights
+  int32_t area = static_cast<int32_t>(x1 - x0) * (y2 - y0) -
+                 static_cast<int32_t>(x2 - x0) * (y1 - y0);
+  if (area == 0)
+    return;
+
+  for (int16_t py = minY; py <= maxY; py++) {
+    for (int16_t px = minX; px <= maxX; px++) {
+      // Edge functions
+      int32_t w0 = static_cast<int32_t>(x1 - x0) * (py - y0) -
+                   static_cast<int32_t>(px - x0) * (y1 - y0);
+      int32_t w1 = static_cast<int32_t>(x2 - x1) * (py - y1) -
+                   static_cast<int32_t>(px - x1) * (y2 - y1);
+      int32_t w2 = static_cast<int32_t>(x0 - x2) * (py - y2) -
+                   static_cast<int32_t>(px - x2) * (y0 - y2);
+
+      bool inside = (area > 0) ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+      if (!inside)
+        continue;
+
+      // Barycentric interpolation
+      int32_t absArea = std::abs(area);
+      int32_t bw0 = std::abs(w1); // weight for vertex 0
+      int32_t bw1 = std::abs(w2); // weight for vertex 1
+      int32_t bw2 = std::abs(w0); // weight for vertex 2
+
+      uint8_t r =
+          static_cast<uint8_t>((bw0 * r0 + bw1 * r1 + bw2 * r2) / absArea);
+      uint8_t g =
+          static_cast<uint8_t>((bw0 * g0 + bw1 * g1 + bw2 * g2) / absArea);
+      uint8_t b =
+          static_cast<uint8_t>((bw0 * b0 + bw1 * b1 + bw2 * b2) / absArea);
+
+      PutPixel(px, py, ColorToVRAM(r, g, b));
+    }
+  }
+}
+
+// ─── Texture Sampling ──────────────────────────────────────────────────
+
+uint16_t PS1GPU::SampleTexture(int32_t texU, int32_t texV, uint16_t clut,
+                               uint16_t texPage) const {
+  // Apply texture window masking
+  texU = (texU & ~(texWindowMaskX * 8)) |
+         ((texWindowOffsetX & texWindowMaskX) * 8);
+  texV = (texV & ~(texWindowMaskY * 8)) |
+         ((texWindowOffsetY & texWindowMaskY) * 8);
+
+  uint32_t tpX = (texPage & 0xF) * 64; // Texture page X base (in VRAM pixels)
+  uint32_t tpY = ((texPage >> 4) & 1) * 256; // Texture page Y base
+  uint32_t colorDepth = (texPage >> 7) & 3;  // 0=4bit, 1=8bit, 2=15bit
+
+  uint32_t clutX = (clut & 0x3F) * 16;  // CLUT X in VRAM
+  uint32_t clutY = (clut >> 6) & 0x1FF; // CLUT Y in VRAM
+
+  if (colorDepth == 0) {
+    // 4-bit color (16 colors from CLUT)
+    uint32_t texelX = tpX + texU / 4;
+    uint32_t texelY = tpY + texV;
+    uint16_t texelWord = ReadVRAM(texelX, texelY);
+    uint8_t nibble = (texelWord >> ((texU & 3) * 4)) & 0xF;
+    return ReadVRAM(clutX + nibble, clutY);
+  } else if (colorDepth == 1) {
+    // 8-bit color (256 colors from CLUT)
+    uint32_t texelX = tpX + texU / 2;
+    uint32_t texelY = tpY + texV;
+    uint16_t texelWord = ReadVRAM(texelX, texelY);
+    uint8_t index = (texelWord >> ((texU & 1) * 8)) & 0xFF;
+    return ReadVRAM(clutX + index, clutY);
+  } else {
+    // 15-bit direct color
+    return ReadVRAM(tpX + texU, tpY + texV);
+  }
 }
 
 // ─── Debug ──────────────────────────────────────────────────────────────

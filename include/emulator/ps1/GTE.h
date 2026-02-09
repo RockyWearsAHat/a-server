@@ -91,6 +91,9 @@ private:
   void CmdGPF(uint32_t cmd);   // General purpose interpolation
   void CmdGPL(uint32_t cmd);   // General purpose interpolation + accumulate
 
+  // Shared lighting core: L×V → LR×light+BK
+  void NCSCore(int vIdx, uint32_t cmd);
+
   // ─── Math Helpers ───────────────────────────────────────────────────
   int64_t CheckMAC(int macIndex, int64_t value);
   int32_t CheckIR(int irIndex, int64_t value, bool lmBit);

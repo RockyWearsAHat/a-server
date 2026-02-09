@@ -35,6 +35,9 @@ public:
   // These games store colors at palette indices 9-14 but use paletteBank=8
   void SetClassicNesMode(bool enabled);
 
+  // IO register write callback for mid-frame BGxX/BGxY re-latching
+  static void OnIOWrite(void *context, uint32_t offset, uint16_t value);
+
   uint64_t GetInstanceId() const { return instanceId; }
 
 private:
@@ -61,7 +64,6 @@ private:
 
   uint16_t ReadRegister(uint32_t offset);
 
-  static void OnIOWrite(void *context, uint32_t offset, uint16_t value);
   void HandleIOWrite(uint32_t offset, uint16_t value);
 
   GBAMemory &memory;
