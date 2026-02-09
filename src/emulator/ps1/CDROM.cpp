@@ -1,6 +1,8 @@
 #include "emulator/ps1/CDROM.h"
 #include "emulator/ps1/InterruptController.h"
 #include "emulator/ps1/PS1Memory.h"
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -20,6 +22,10 @@ void CDROM::Reset() {
   dataReadPos = 0;
   interruptEnable = 0;
   interruptFlag = 0;
+  while (!pendingIRQs.empty())
+    pendingIRQs.pop();
+  queuedDeliveryPending = false;
+  queuedDeliveryDelay = 0;
   commandPending = false;
   pendingCommand = 0;
   commandDelay = 0;
@@ -37,9 +43,49 @@ void CDROM::Reset() {
 }
 
 bool CDROM::LoadDisc(const std::string &path) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  std::string binPath = path;
+
+  // Parse CUE sheets to extract the referenced BIN file
+  if (path.size() >= 4) {
+    std::string ext = path.substr(path.size() - 4);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    if (ext == ".cue") {
+      std::ifstream cueFile(path);
+      if (!cueFile.is_open()) {
+        LogError("Failed to open CUE file: %s", path.c_str());
+        return false;
+      }
+      std::string line;
+      bool foundFile = false;
+      while (std::getline(cueFile, line)) {
+        // Look for: FILE "filename.bin" BINARY
+        auto pos = line.find("FILE");
+        if (pos == std::string::npos)
+          continue;
+        auto q1 = line.find('"', pos);
+        if (q1 == std::string::npos)
+          continue;
+        auto q2 = line.find('"', q1 + 1);
+        if (q2 == std::string::npos)
+          continue;
+        std::string filename = line.substr(q1 + 1, q2 - q1 - 1);
+        // Resolve relative to the CUE file's directory
+        std::filesystem::path cuePath(path);
+        binPath = (cuePath.parent_path() / filename).string();
+        foundFile = true;
+        LogInfo("CUE parsed: BIN file = %s", binPath.c_str());
+        break;
+      }
+      if (!foundFile) {
+        LogError("No FILE directive found in CUE: %s", path.c_str());
+        return false;
+      }
+    }
+  }
+
+  std::ifstream file(binPath, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
-    LogError("Failed to open disc image: %s", path.c_str());
+    LogError("Failed to open disc image: %s", binPath.c_str());
     return false;
   }
 
@@ -49,7 +95,7 @@ bool CDROM::LoadDisc(const std::string &path) {
   file.read(reinterpret_cast<char *>(discData.data()), size);
 
   discLoaded = true;
-  LogInfo("Disc loaded: %s (%zu bytes)", path.c_str(), discData.size());
+  LogInfo("Disc loaded: %s (%zu bytes)", binPath.c_str(), discData.size());
   return true;
 }
 
@@ -69,20 +115,20 @@ uint8_t CDROM::Read8(uint32_t addr) {
       stat |= 0x40; // Data FIFO not empty
     if (commandPending)
       stat |= 0x80; // Busy
-    LogDebug("CDROM-R reg0 status=0x%02X idx=%d respEmpty=%d busy=%d", stat,
-             index, responseFIFO.empty() ? 1 : 0, commandPending ? 1 : 0);
+    LogInfo("CDROM-R reg0 status=0x%02X idx=%d respEmpty=%d busy=%d", stat,
+            index, responseFIFO.empty() ? 1 : 0, commandPending ? 1 : 0);
     return stat;
   }
   case 1: {
     // Response FIFO
     if (responseFIFO.empty()) {
-      LogDebug("CDROM-R reg1 response=0x00 (empty)");
+      LogInfo("CDROM-R reg1 response=0x00 (empty)");
       return 0;
     }
     uint8_t val = responseFIFO.front();
     responseFIFO.pop();
-    LogDebug("CDROM-R reg1 response=0x%02X remaining=%zu", val,
-             responseFIFO.size());
+    LogInfo("CDROM-R reg1 response=0x%02X remaining=%zu", val,
+            responseFIFO.size());
     return val;
   }
   case 2: {
@@ -96,10 +142,10 @@ uint8_t CDROM::Read8(uint32_t addr) {
     if (index & 1) {
       // Interrupt flag (with index bit)
       uint8_t val = interruptFlag | 0xE0;
-      LogDebug("CDROM-R reg3 intFlag=0x%02X (raw=0x%02X)", val, interruptFlag);
+      LogInfo("CDROM-R reg3 intFlag=0x%02X (raw=0x%02X)", val, interruptFlag);
       return val;
     }
-    LogDebug("CDROM-R reg3 intEnable=0x%02X", interruptEnable | 0xE0);
+    LogInfo("CDROM-R reg3 intEnable=0x%02X", interruptEnable | 0xE0);
     return interruptEnable | 0xE0;
   }
   default:
@@ -110,7 +156,7 @@ uint8_t CDROM::Read8(uint32_t addr) {
 void CDROM::Write8(uint32_t addr, uint8_t value) {
   uint32_t reg = addr - IO::CDROM_BASE;
 
-  LogDebug("CDROM-W reg%d.idx%d val=0x%02X", reg, index, value);
+  LogInfo("CDROM-W reg%d.idx%d val=0x%02X", reg, index, value);
 
   switch (reg) {
   case 0:
@@ -123,7 +169,8 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
       // Command register
       commandPending = true;
       pendingCommand = value;
-      commandDelay = 50000; // Approximate delay in CPU cycles
+      commandDelay =
+          5000; // ~150μs — close to real hardware first-response timing
       if constexpr (Trace::CDROM_TRACE) {
         LogDebug("CD command %02X queued", value);
       }
@@ -157,8 +204,12 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
     case 0:
       // Request register
       if (value & 0x80) {
-        // Want data — load sector data into buffer
+        // Want data — reset read position to make sector data available
+        dataReadPos = 0;
+        LogInfo("CDROM request data: dataBuf.size=%zu dataReadPos=0",
+                dataBuf.size());
       } else {
+        LogInfo("CDROM clear data: dataBuf had %zu bytes", dataBuf.size());
         dataBuf.clear();
         dataReadPos = 0;
       }
@@ -166,6 +217,18 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
     case 1:
       // Interrupt flag (write to acknowledge)
       interruptFlag &= ~(value & 0x1F);
+      // De-assert IRQ line when all interrupt flags are cleared
+      if ((interruptFlag & 0x07) == 0) {
+        interrupts.ClearIRQ(IRQ::CDROM);
+
+        // Schedule queued interrupt delivery via a tiny delay so the game
+        // returns from the current exception before the next IRQ fires.
+        if (!pendingIRQs.empty() && !queuedDeliveryPending) {
+          queuedDeliveryPending = true;
+          queuedDeliveryDelay = 4000; // ~120μs — enough for game to return and
+                                      // set up its wait loop
+        }
+      }
       if (value & 0x40) {
         // Clear parameter FIFO
         while (!parameterFIFO.empty())
@@ -184,6 +247,37 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
 // ─── Timing ─────────────────────────────────────────────────────────────
 
 void CDROM::Tick(uint32_t cpuCycles) {
+  // Deliver queued interrupts after a short delay so the game has time
+  // to return from the previous exception handler before the next fires.
+  if (queuedDeliveryPending) {
+    if (queuedDeliveryDelay <= cpuCycles) {
+      queuedDeliveryPending = false;
+      queuedDeliveryDelay = 0;
+
+      if (!pendingIRQs.empty() && (interruptFlag & 0x07) == 0) {
+        auto next = std::move(pendingIRQs.front());
+        pendingIRQs.pop();
+
+        while (!responseFIFO.empty())
+          responseFIFO.pop();
+        for (uint8_t b : next.response) {
+          responseFIFO.push(b);
+        }
+
+        interruptFlag = next.type;
+        LogInfo(
+            "CDROM DeliverQueued INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
+            next.type, interruptEnable, interruptFlag,
+            (interruptEnable & interruptFlag) ? 1 : 0);
+        if (interruptEnable & interruptFlag) {
+          interrupts.RequestIRQ(IRQ::CDROM);
+        }
+      }
+    } else {
+      queuedDeliveryDelay -= cpuCycles;
+    }
+  }
+
   if (commandPending) {
     if (commandDelay <= cpuCycles) {
       commandDelay = 0;
@@ -256,9 +350,7 @@ void CDROM::Tick(uint32_t cpuCycles) {
 // ─── Command Execution ─────────────────────────────────────────────────
 
 void CDROM::ExecuteCommand(uint8_t cmd) {
-  if constexpr (Trace::CDROM_TRACE) {
-    LogDebug("Executing CD command %02X", cmd);
-  }
+  LogInfo("Executing CD command %02X", cmd);
 
   switch (cmd) {
   case 0x01:
@@ -361,7 +453,10 @@ void CDROM::CmdSetLoc() {
 void CDROM::CmdReadN() {
   reading = true;
   bool doubleSpeed = mode & 0x80;
-  readDelay = doubleSpeed ? (Clock::CPU_HZ / 150) : (Clock::CPU_HZ / 75);
+  // Deliver first sector after a short delay. Must be long enough for
+  // the game to return from the INT3 exception and enter its CdSync wait
+  // loop, but short enough to beat the sync timeout.
+  readDelay = 5000; // ~150μs
 
   PushResponse(GetStatusByte());
   SetInterrupt(3);
@@ -555,10 +650,27 @@ void CDROM::CmdSetFilter() {
 void CDROM::PushResponse(uint8_t value) { responseFIFO.push(value); }
 
 void CDROM::SetInterrupt(uint8_t type) {
+  // Real hardware holds back new interrupts until the current one is
+  // acknowledged. Queue if there's already an unacknowledged interrupt.
+  if (interruptFlag & 0x07) {
+    QueuedIRQ queued;
+    queued.type = type & 0x07;
+    // Snapshot the current response FIFO for the queued interrupt
+    std::queue<uint8_t> copy = responseFIFO;
+    while (!copy.empty()) {
+      queued.response.push_back(copy.front());
+      copy.pop();
+    }
+    pendingIRQs.push(std::move(queued));
+    LogInfo("CDROM QueueInterrupt INT%d (current flag=0x%02X, queue depth=%zu)",
+            type, interruptFlag, pendingIRQs.size());
+    return;
+  }
+
   interruptFlag = type & 0x07;
-  LogDebug("CDROM SetInterrupt INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
-           type, interruptEnable, interruptFlag,
-           (interruptEnable & interruptFlag) ? 1 : 0);
+  LogInfo("CDROM SetInterrupt INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
+          type, interruptEnable, interruptFlag,
+          (interruptEnable & interruptFlag) ? 1 : 0);
   if (interruptEnable & interruptFlag) {
     interrupts.RequestIRQ(IRQ::CDROM);
   }

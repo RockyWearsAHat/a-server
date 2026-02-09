@@ -310,13 +310,11 @@ TEST(AudioCorruptionTest, StereoPanningWorks) {
   EXPECT_TRUE(rightIsZero) << "Right channel should be silent";
 }
 // ==================================================================
-// BUG FIX TESTS: HPF bypass, FIFO underflow, HPF overflow
+// BUG FIX TESTS: Sound disable/re-enable, FIFO underflow, overflow
 // ==================================================================
 
-// When master sound is disabled, GenerateOutputSample must still run
-// samples through the HPF (feeding it zero) so the capacitor state
-// decays smoothly. Bypassing the HPF and pushing raw silence causes
-// a pop when sound re-enables because the cap holds stale state.
+// When master sound is disabled and then re-enabled, the output
+// should resume without a large pop/discontinuity.
 TEST(AudioCorruptionTest, HpfRunsDuringSoundDisable) {
   GBAMemory mem;
   APU apu(mem);
@@ -358,11 +356,11 @@ TEST(AudioCorruptionTest, HpfRunsDuringSoundDisable) {
     }
   }
   EXPECT_FALSE(hasLargePop)
-      << "Re-enabling sound should not produce a large pop from stale HPF";
+      << "Re-enabling sound should not produce a large pop";
 }
 
 // FIFO underflow should hold the last sample value, not snap to zero.
-// Snapping to zero causes a DC jump that the HPF converts into a pop.
+// Snapping to zero causes a DC jump that produces an audible pop.
 TEST(AudioCorruptionTest, FifoUnderflowHoldsLastSample) {
   GBAMemory mem;
   APU apu(mem);
@@ -387,9 +385,8 @@ TEST(AudioCorruptionTest, FifoUnderflowHoldsLastSample) {
   auto samples = DrainRingBuffer(apu);
   ASSERT_GT(samples.size(), 0u);
 
-  // With held sample (0x40 = 64 signed), and FIFO A 100% vol (64),
-  // the mix should continue at 64 * 64 = 4096. The HPF will settle
-  // this to near-zero over time, but there should be NO pop.
+  // With held sample (0x40 = 64 signed) and FIFO A 100% vol,
+  // the mix should continue at a steady level — no pop.
   // Check max sample-to-sample delta is bounded
   int maxDelta = 0;
   for (size_t i = 2; i < samples.size(); i += 2) {
@@ -400,10 +397,8 @@ TEST(AudioCorruptionTest, FifoUnderflowHoldsLastSample) {
       << "FIFO underflow should not cause a large discontinuity";
 }
 
-// The HPF subtraction (outL - cap>>16) must not overflow int16_t.
-// With large FIFO values (±127 * 64 = ±8128), the mix can swing
-// widely, and the cap tracks the previous DC level. The subtraction
-// must use int32 arithmetic to avoid wrapping.
+// With large FIFO values, the mix can swing widely. Verify that
+// abrupt polarity changes don't produce int16 wrap-around.
 TEST(AudioCorruptionTest, HpfNoInt16Overflow) {
   GBAMemory mem;
   APU apu(mem);
@@ -441,7 +436,7 @@ TEST(AudioCorruptionTest, HpfNoInt16Overflow) {
     }
   }
   EXPECT_FALSE(hasWrap)
-      << "HPF arithmetic should not produce int16 overflow/wrap";
+      << "Audio pipeline should not produce int16 overflow/wrap";
 }
 
 // Fixed-rate output precision: over many timer intervals, the total
@@ -513,22 +508,20 @@ TEST(AudioCorruptionTest, FifoRefillAfterUnderflowIsSmooth) {
       << "Refill after underflow should not produce a pop";
 }
 
-// HPF should converge to zero when fed constant zero input.
-// Verifies no stuck DC offset from integer truncation.
+// Output should converge to zero when fed constant zero FIFO input.
 TEST(AudioCorruptionTest, HpfConvergesToZeroOnSilence) {
   GBAMemory mem;
   APU apu(mem);
   SetupM4AAudio(mem, apu);
 
-  // Push non-zero audio to charge the HPF caps
+  // Push non-zero audio then drain
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x60606060u);
   for (int i = 0; i < 20; ++i)
     SimulateTimerOverflow(apu);
   DrainRingBuffer(apu);
 
-  // Now push silence — with SOUNDBIAS gain (~48×) the HPF cap is
-  // charged to a much larger value, so allow more overflows to settle.
+  // Now push silence
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x00000000u);
   for (int i = 0; i < 2000; ++i) {
@@ -541,8 +534,7 @@ TEST(AudioCorruptionTest, HpfConvergesToZeroOnSilence) {
   ASSERT_GT(samples.size(), 100u);
 
   // The last 100 samples should all be near zero.
-  // Tolerance raised to 100 because the SOUNDBIAS gain amplifies
-  // any HPF residual by ~48×.
+  // Tolerance of 100 accounts for SOUNDBIAS gain (~48×).
   bool allNearZero = true;
   size_t start = samples.size() - 100;
   for (size_t i = start; i < samples.size(); i += 2) {

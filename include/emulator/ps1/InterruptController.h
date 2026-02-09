@@ -23,6 +23,7 @@ public:
 
   // ─── IRQ Trigger ────────────────────────────────────────────────────
   void RequestIRQ(uint32_t irqBit);
+  void ClearIRQ(uint32_t irqBit) { iStat &= ~irqBit; }
 
   // ─── Polling ────────────────────────────────────────────────────────
   bool HasPendingIRQ() const { return (iStat & iMask) != 0; }

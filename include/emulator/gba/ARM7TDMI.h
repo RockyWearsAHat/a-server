@@ -97,8 +97,7 @@ private:
   // Pipeline Prefetch Buffer
   // ARM7TDMI has a 3-stage pipeline: Fetch, Decode, Execute
   // We simulate prefetch to handle self-modifying code correctly:
-  // - Classic NES games write to upcoming instructions then check if the
-  //   old prefetched opcode executes (it should on real hardware)
+  // - Writes to upcoming instructions don't affect already-prefetched opcodes
   // - prefetch[0] = instruction about to execute (was fetched 2 cycles ago)
   // - prefetch[1] = next instruction (was fetched 1 cycle ago)
   // - When PC changes (branches, interrupts), pipeline must be flushed

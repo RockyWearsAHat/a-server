@@ -4772,7 +4772,7 @@ TEST_F(CPUTest, SWI_LZ77UnCompVram_OddSize) {
 }
 
 TEST_F(CPUTest, SWI_LZ77UnCompWram_ToIwram) {
-  // Test LZ77 decompression to IWRAM (0x03000000) - used by Classic NES games
+  // Test LZ77 decompression to IWRAM (0x03000000)
   const uint32_t src = 0x02000100u;
   const uint32_t dst = 0x03000400u; // IWRAM destination
 
@@ -5634,13 +5634,12 @@ TEST_F(CPUTest, SWI_UnimplementedHandler) {
   EXPECT_EQ(cpu.GetRegister(0), 0xDEADBEEFu);
 }
 
-// === Classic NES Pipeline Self-Modifying Code Test ===
-// This tests the ARM7TDMI 3-stage pipeline behavior that Classic NES games
-// rely on for anti-emulation protection.
-// Reference: docs/research/classic-nes-series-emulation.md
+// === ARM7TDMI Pipeline Self-Modifying Code Test ===
+// Tests the 3-stage pipeline behavior where already-prefetched opcodes
+// are not affected by writes to upcoming instruction addresses.
 
-TEST_F(CPUTest, Pipeline_SelfModifyingCode_ClassicNES) {
-  // Classic NES Metroid anti-emulation test sequence:
+TEST_F(CPUTest, Pipeline_SelfModifyingCode) {
+  // Anti-emulation test sequence found in various games:
   // 06000260:  E3A01000     mov r1, #0
   // 06000264:  E28FE008     add lr, pc, #8       ; lr = 0x264+8+8 = 0x274
   // 06000268:  E51F0010     ldr r0, [$06000260]  ; r0 = 0xE3A01000
@@ -5651,7 +5650,7 @@ TEST_F(CPUTest, Pipeline_SelfModifyingCode_ClassicNES) {
   // With correct 3-stage pipeline: r1 = 255 (old instruction was prefetched)
   // With wrong pipeline: r1 = 0 (modified instruction is fetched)
 
-  // Use VRAM region (0x06000000) since Classic NES games execute code there
+  // Use VRAM region (0x06000000) — some games execute code there
   const uint32_t base = 0x06000260;
 
   // Write the test sequence to VRAM
@@ -5680,6 +5679,7 @@ TEST_F(CPUTest, Pipeline_SelfModifyingCode_ClassicNES) {
   // The modified instruction "mov r1, #0" (from 0x260) is fetched, giving r1 =
   // 0.
   EXPECT_EQ(cpu.GetRegister(1), 255u)
-      << "Pipeline depth test failed: Classic NES games expect the old "
-         "instruction to be prefetched before self-modifying code completes.";
+      << "Pipeline depth test failed: correct ARM7TDMI emulation requires "
+         "the old instruction to be prefetched before self-modifying code "
+         "completes.";
 }

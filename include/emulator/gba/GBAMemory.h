@@ -1,5 +1,5 @@
 #pragma once
-#include "GameDB.h"
+#include "SaveType.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -32,11 +32,10 @@ public:
   // execute BIOS code directly instead of using HLE stubs.
   bool HasLLEBIOS() const { return lleBiosLoaded; }
 
-  // Set BIOS prefetch value (used by CPU after SWI calls for Classic NES
-  // protection)
+  // BIOS prefetch value returned after SWI calls
   void SetBiosPrefetch(uint32_t value) { biosPrefetch = value; }
 
-  // Get open-bus value for unmapped memory reads (Classic NES protection)
+  // Open-bus value for unmapped memory reads
   uint32_t GetOpenBusValue() const;
 
   // APU connection for sound callbacks
@@ -103,11 +102,6 @@ public:
   void SetGraphicsWriteCallback(GraphicsWriteCallback callback, void *context) {
     onGraphicsWrite = callback;
     graphicsWriteContext = context;
-  }
-
-  // Check if this is a Classic NES Series game (game code starts with "FD")
-  bool IsClassicNES() const {
-    return gameCode.length() >= 2 && gameCode.substr(0, 2) == "FD";
   }
 
   void PerformDMA(int channel);

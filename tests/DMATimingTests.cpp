@@ -240,7 +240,7 @@ TEST_F(DMAWaitStateTest, RomToRom_32bit) {
 // =============================================================================
 
 TEST_F(DMAWaitStateTest, TotalCycles_IwramToVram_1024Words_32bit) {
-  // Classic NES series scenario: IWRAM 0x03000000 -> VRAM 0x06006000
+  // IWRAM 0x03000000 -> VRAM 0x06006000
   // 1024 words, 32-bit
   // Base: 2 cycles
   // First word: 0 + 1 = 1 cycle
@@ -378,10 +378,10 @@ TEST_F(DMAWaitStateTest, OldTimingComparison_RomToVram) {
 }
 
 // =============================================================================
-// Classic NES Series Specific Tests (OG-DK Scenario)
+// IWRAM->VRAM Tilemap DMA Scenario Tests
 // =============================================================================
 
-TEST_F(DMAWaitStateTest, ClassicNES_TilemapDMA_Timing) {
+TEST_F(DMAWaitStateTest, IwramToVram_TilemapDMA_Timing) {
   // The problematic DMA in OG-DK:
   // IWRAM 0x03000000 -> VRAM tilemap 0x06006000
   // 1024 words (0x1000 bytes), 32-bit
@@ -399,7 +399,7 @@ TEST_F(DMAWaitStateTest, ClassicNES_TilemapDMA_Timing) {
   // But the issue is that this DMA happens BEFORE valid data is in IWRAM
 }
 
-TEST_F(DMAWaitStateTest, ClassicNES_Frame2_ScanlinePosition) {
+TEST_F(DMAWaitStateTest, IwramToVram_Frame2_ScanlinePosition) {
   // With proper timing, the tilemap DMA happens at Frame 2 scanline ~18
   // Frame timing: 1232 cycles per scanline, 228 scanlines per frame
 

@@ -18,11 +18,19 @@ bool PS1HleBios::InitHLE(PS1 &ps1) {
   auto &cdrom = ps1.GetCDROM();
 
   ResetState();
+
+  // Zero all RAM before setting up kernel state or loading the EXE.
+  // The real BIOS clears RAM during boot. Many games (including Crash
+  // Bandicoot) have BSS globals beyond the loaded .text section that must
+  // start at zero but have no memfill header entry to zero them.
+  std::memset(memory.GetRAMPointer(), 0, MemSize::RAM);
+
   PopulateBiosRegion(memory);
   InstallKernelStubs(memory);
   InstallTrampolines(memory);
   InitKernelState(memory);
   InitGPU(gpu);
+  InitCDROM(cdrom);
 
   if (!FindAndLoadExe(memory, cdrom, cpu, gpu)) {
     return false;
@@ -43,6 +51,7 @@ void PS1HleBios::ResetState() {
   changeClearRCntFlags = {};
   b0TableRamAddr = 0;
   c0TableRamAddr = 0;
+  pendingCallbackAddr = 0;
 }
 
 // ─── HLE Exception Handler ──────────────────────────────────────────────
@@ -70,26 +79,65 @@ void PS1HleBios::HandleException(PS1 &ps1) {
   mem.WriteRAM32(tcbPtr + 0x94, cpu.GetCOP0(CPU::COP0::SR));
   mem.WriteRAM32(tcbPtr + 0x98, cause);
 
+  {
+    static int handleExcCount = 0;
+    if (handleExcCount < 10) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      uint32_t epc = cpu.GetEPC();
+      uint32_t instr = mem.Read32(epc);
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "HandleExc #%d: excCode=%u hookedHandler=0x%08X cause=0x%08X "
+                 "EPC=0x%08X instr=0x%08X",
+                 handleExcCount, excCode, hookedEntryIntHandler, cause, epc,
+                 instr);
+      handleExcCount++;
+    }
+  }
+
   if (excCode == 0 && hookedEntryIntHandler != 0) {
     uint32_t istat = irqs.ReadStat();
     uint32_t imask = irqs.ReadMask();
     uint32_t pending = istat & imask;
 
+    // IRQ-DBG: Log interrupt state for first 10 exceptions to diagnose timer
+    // issues
+    static int irqDbgCount = 0;
+    if (irqDbgCount < 10) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      log.LogFmt(
+          AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+          "IRQ-DBG #%d: I_STAT=0x%04X I_MASK=0x%04X pending=0x%04X EPC=0x%08X",
+          irqDbgCount, istat, imask, pending, cpu.GetEPC());
+      irqDbgCount++;
+    }
+
+    // Deliver BIOS events for any games using the event system.
+    // Do NOT clear I_STAT bits here — the game's own IRQ handler
+    // (registered via HookEntryInt) reads I_STAT to identify interrupt
+    // sources. If we clear the bits, the game never sees the interrupt.
+    pendingCallbackAddr = 0;
+
     if (pending & IRQ::VBLANK) {
-      DeliverEvent(0xF0000001, 0x0001);
-      irqs.WriteStat(istat & ~IRQ::VBLANK);
+      DeliverEvent(0xF0000001, 0x0001); // Hardware IRQ0 class
+      DeliverEvent(0xF2000003,
+                   0x0002); // Root counter 3 (software VBlank timer)
     }
     if (pending & IRQ::TIMER0) {
-      DeliverEvent(0xF0000002, 0x0001);
-      irqs.WriteStat(istat & ~IRQ::TIMER0);
+      DeliverEvent(0xF0000005, 0x0002); // Hardware IRQ4 class, spec=interrupted
+      DeliverEvent(0xF2000000, 0x0002); // Root counter 0 (dotclock)
     }
     if (pending & IRQ::TIMER1) {
-      DeliverEvent(0xF0000002, 0x0002);
-      irqs.WriteStat(istat & ~IRQ::TIMER1);
+      DeliverEvent(0xF0000006, 0x0002); // Hardware IRQ5 class, spec=interrupted
+      DeliverEvent(0xF2000001, 0x0002); // Root counter 1 (hblank)
     }
     if (pending & IRQ::TIMER2) {
-      DeliverEvent(0xF0000002, 0x0004);
-      irqs.WriteStat(istat & ~IRQ::TIMER2);
+      DeliverEvent(0xF0000006,
+                   0x0002); // IRQ6 shares class with IRQ5 (BIOS bug)
+      DeliverEvent(0xF2000002, 0x0002); // Root counter 2 (system clock/8)
+    }
+    if (pending & IRQ::DMA) {
+      DeliverEvent(0xF0000004, 0x1000); // Hardware IRQ3 (DMA)
+      DeliverEvent(0xF0000011, 0x0004); // Memory card DMA done (lower level)
     }
     if (pending & IRQ::CDROM) {
       auto &cdrom = ps1.GetCDROM();
@@ -125,17 +173,27 @@ void PS1HleBios::HandleException(PS1 &ps1) {
         DeliverEvent(0xF0000003, spec);
       }
       DeliverEvent(0xF0000003, 0x1000);
+    }
 
-      // Do NOT acknowledge CDROM IRQ here — the game's own handler
-      // (reached via the longjmp) needs to see it pending so it can
-      // read the CDROM response FIFO and acknowledge the interrupt flag
-      // itself via CDROM register writes.
-    }
-    if (pending & IRQ::DMA) {
-      irqs.WriteStat(istat & ~IRQ::DMA);
-    }
-    if (pending & IRQ::SIO0) {
-      irqs.WriteStat(istat & ~IRQ::SIO0);
+    // If a mode=0x1000 callback was triggered by DeliverEvent, invoke it.
+    // The callback runs in exception context and will call ReturnFromException
+    // when done, which restores CPU state from the TCB.
+    if (pendingCallbackAddr != 0) {
+      uint32_t cbAddr = pendingCallbackAddr;
+      pendingCallbackAddr = 0;
+
+      {
+        auto &log = AIO::Emulator::Common::Logger::Instance();
+        char dbg[256];
+        snprintf(dbg, sizeof(dbg),
+                 "ExcDispatch: invoking mode=0x1000 callback at 0x%08X "
+                 "(EPC=0x%08X)",
+                 cbAddr, cpu.GetEPC());
+        log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
+      }
+
+      cpu.SetPC(cbAddr);
+      return;
     }
 
     // longjmp into the setjmp buffer registered via HookEntryInt (B0:19h)
@@ -149,11 +207,12 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       snprintf(dbg, sizeof(dbg),
                "ExcDispatch: longjmp buf=0x%08X ra=0x%08X sp=0x%08X EPC=0x%08X "
                "SR=0x%08X tcb=0x%08X v0_saved=0x%08X v0_cpu=0x%08X "
-               "ra_saved=0x%08X",
+               "ra_saved=0x%08X sp_saved=0x%08X",
                sjBuf, ra, sp, cpu.GetEPC(), cpu.GetCOP0(CPU::COP0::SR), tcbPtr,
                mem.ReadRAM32(tcbPtr + 0x08 + 2 * 4),   // v0 in TCB
                cpu.GetRegister(2),                     // v0 in CPU
-               mem.ReadRAM32(tcbPtr + 0x08 + 31 * 4)); // ra in TCB
+               mem.ReadRAM32(tcbPtr + 0x08 + 31 * 4),  // ra in TCB
+               mem.ReadRAM32(tcbPtr + 0x08 + 29 * 4)); // sp in TCB
       log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
     }
 
@@ -206,9 +265,60 @@ void PS1HleBios::HandleException(PS1 &ps1) {
 
 // ─── HLE BIOS Dispatch ─────────────────────────────────────────────────
 
-void PS1HleBios::Dispatch(PS1 &ps1, uint8_t table, uint8_t func) {
+bool PS1HleBios::Dispatch(PS1 &ps1, uint8_t table, uint8_t func) {
   auto &log = AIO::Emulator::Common::Logger::Instance();
   auto &cpu = ps1.GetCPU();
+  auto &mem = ps1.GetMemory();
+
+  // PSY-Q and other runtimes patch the A0/B0/C0 function tables in RAM
+  // to redirect BIOS calls to their own implementations. Check if the
+  // table entry still points to our trampoline; if not, redirect the CPU
+  // to the patched target instead of running the HLE handler.
+  uint32_t tableAddr = 0;
+  uint32_t trampolineBase = 0;
+  switch (table) {
+  case 0xA0:
+    tableAddr = A0_TABLE_ADDR;
+    trampolineBase = A0_TRAMPOLINE_ADDR;
+    break;
+  case 0xB0:
+    tableAddr = B0_TABLE_ADDR;
+    trampolineBase = B0_TRAMPOLINE_ADDR;
+    break;
+  case 0xC0:
+    tableAddr = C0_TABLE_ADDR;
+    trampolineBase = C0_TRAMPOLINE_ADDR;
+    break;
+  }
+
+  uint32_t expectedTrampoline = 0x80000000 | (trampolineBase + func * 12);
+  uint32_t actualEntry = mem.Read32(0x80000000 | (tableAddr + func * 4));
+
+  if (actualEntry != expectedTrampoline) {
+    // The real BIOS stores kernel code in the first 64KB of RAM (relocated
+    // from ROM). In HLE mode we never populate that region, so redirecting
+    // to addresses in kernel RAM (0x0000_0500 – 0x0000_FFFF) would execute
+    // garbage. Only redirect when the patched target is in user RAM, which
+    // indicates the game (or its SDK) installed its own handler.
+    uint32_t physTarget = actualEntry & 0x1FFFFFFF;
+    constexpr uint32_t KERNEL_CODE_START = 0x00000500;
+    constexpr uint32_t KERNEL_CODE_END = 0x00010000;
+
+    if (physTarget >= KERNEL_CODE_START && physTarget < KERNEL_CODE_END) {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "Table 0x%02X[0x%02X] patched to kernel RAM 0x%08X — "
+                 "using HLE handler instead (no real BIOS code in HLE mode)",
+                 table, func, actualEntry);
+    } else {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "Table 0x%02X[0x%02X] patched: expected=0x%08X "
+                 "actual=0x%08X → redirecting",
+                 table, func, expectedTrampoline, actualEntry);
+      cpu.SetPC(actualEntry);
+      return false;
+    }
+  }
+
   log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
              "BIOS call: table=0x%02X func=0x%02X ($ra=0x%08X) "
              "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t1=0x%08X",
@@ -219,13 +329,14 @@ void PS1HleBios::Dispatch(PS1 &ps1, uint8_t table, uint8_t func) {
   switch (table) {
   case 0xA0:
     DispatchA0(ps1, func);
-    break;
+    return true;
   case 0xB0:
-    DispatchB0(ps1, func);
-    break;
+    return DispatchB0(ps1, func);
   case 0xC0:
     DispatchC0(ps1, func);
-    break;
+    return true;
+  default:
+    return true;
   }
 }
 
@@ -235,6 +346,14 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
   auto &cpu = ps1.GetCPU();
   auto &gpu = ps1.GetGPU();
   auto &mem = ps1.GetMemory();
+
+  {
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.BIOS",
+               "A0:0x%02X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X RA=0x%08X",
+               func, cpu.GetRegister(4), cpu.GetRegister(5), cpu.GetRegister(6),
+               cpu.GetRegister(7), cpu.GetRegister(31));
+  }
 
   switch (func) {
 
@@ -247,8 +366,8 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
 
     if (nameAddr < 0x1000 && (nameAddr & 0x1FFFFFFF) < 0x1000) {
       log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                 "A0:open() spurious: nameAddr=0x%08X → fd=0", nameAddr);
-      cpu.SetRegister(2, 0);
+                 "A0:open() spurious: nameAddr=0x%08X → fd=-1", nameAddr);
+      cpu.SetRegister(2, 0xFFFFFFFF);
       break;
     }
 
@@ -265,8 +384,6 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
 
     if (std::strstr(filename, "tty") || std::strstr(filename, "TTY")) {
       cpu.SetRegister(2, (accessMode & 0x01) ? 0u : 1u);
-    } else if (filename[0] == '\0') {
-      cpu.SetRegister(2, 0);
     } else {
       cpu.SetRegister(2, 0xFFFFFFFF);
     }
@@ -662,17 +779,86 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
     break;
   }
 
-  // A0:3Eh puts(src) — silently consume
-  case 0x3E:
+  // A0:3Eh puts(src) — log the string
+  case 0x3E: {
+    uint32_t srcAddr = cpu.GetRegister(4);
+    char buf[256];
+    int i = 0;
+    for (; i < 255; i++) {
+      uint8_t ch = mem.Read8(srcAddr + i);
+      if (ch == 0)
+        break;
+      buf[i] = static_cast<char>(ch);
+    }
+    buf[i] = '\0';
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.TTY", "puts: \"%s\"",
+               buf);
     break;
+  }
 
-  // A0:3Fh printf — silently consume
-  case 0x3F:
+  // A0:3Fh printf — log the format string (no vararg expansion)
+  case 0x3F: {
+    uint32_t fmtAddr = cpu.GetRegister(4);
+    char buf[256];
+    int i = 0;
+    for (; i < 255; i++) {
+      uint8_t ch = mem.Read8(fmtAddr + i);
+      if (ch == 0)
+        break;
+      buf[i] = static_cast<char>(ch);
+    }
+    buf[i] = '\0';
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.TTY",
+               "printf: \"%s\"", buf);
     break;
+  }
 
   // A0:44h FlushCache — no-op for HLE
   case 0x44:
     break;
+
+  // A0:46h GPU_dw(Xdst,Ydst,Xsiz,Ysiz,src) — CPU-to-VRAM software transfer
+  case 0x46: {
+    uint32_t xdst = cpu.GetRegister(4) & 0xFFFF;
+    uint32_t ydst = cpu.GetRegister(5) & 0xFFFF;
+    uint32_t xsiz = cpu.GetRegister(6) & 0xFFFF;
+    uint32_t ysiz = cpu.GetRegister(7) & 0xFFFF;
+    uint32_t src = mem.Read32(cpu.GetRegister(29) + 0x10);
+
+    gpu.WriteGP0(0xA0000000);
+    gpu.WriteGP0((ydst << 16) | xdst);
+    gpu.WriteGP0((ysiz << 16) | xsiz);
+
+    uint32_t nWords = (xsiz * ysiz + 1) / 2;
+    for (uint32_t i = 0; i < nWords; i++) {
+      gpu.WriteGP0(mem.Read32(src + i * 4));
+    }
+    cpu.SetRegister(2, src + nWords * 4);
+    break;
+  }
+
+  // A0:47h gpu_send_dma(Xdst,Ydst,Xsiz,Ysiz,src) — CPU-to-VRAM via DMA (HLE:
+  // software path)
+  case 0x47: {
+    uint32_t xdst = cpu.GetRegister(4) & 0xFFFF;
+    uint32_t ydst = cpu.GetRegister(5) & 0xFFFF;
+    uint32_t xsiz = cpu.GetRegister(6) & 0xFFFF;
+    uint32_t ysiz = cpu.GetRegister(7) & 0xFFFF;
+    uint32_t src = mem.Read32(cpu.GetRegister(29) + 0x10);
+
+    gpu.WriteGP0(0xA0000000);
+    gpu.WriteGP0((ydst << 16) | xdst);
+    gpu.WriteGP0((ysiz << 16) | xsiz);
+
+    uint32_t nWords = (xsiz * ysiz + 1) / 2;
+    for (uint32_t i = 0; i < nWords; i++) {
+      gpu.WriteGP0(mem.Read32(src + i * 4));
+    }
+    cpu.SetRegister(2, 0x1F801810);
+    break;
+  }
 
   // A0:48h SendGP1Command(gp1cmd)
   case 0x48: {
@@ -714,12 +900,79 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
     break;
   }
 
+  // A0:4Ch gpu_abort_dma() — stop GPU DMA and reset display state
+  case 0x4C: {
+    gpu.WriteGP1(0x04000000);
+    gpu.WriteGP1(0x02000000);
+    gpu.WriteGP1(0x01000000);
+    cpu.SetRegister(2, 0x1F801814);
+    break;
+  }
+
+  // A0:4Dh GetGPUStatus() — read GPUSTAT register
+  case 0x4D: {
+    cpu.SetRegister(2, gpu.ReadGPUSTAT());
+    break;
+  }
+
+  // A0:4Eh gpu_sync() — HLE: GPU is always ready
+  case 0x4E: {
+    cpu.SetRegister(2, 0);
+    break;
+  }
+
   // A0:70h _bu_init — no-op
   case 0x70:
     break;
 
-  // A0:72h _96_remove — broken in real BIOS, safe no-op
+  // A0:54h / A0:71h _96_init — CDROM subsystem initialization
+  // The real BIOS enqueues CDROM IRQ handlers, opens CDROM events,
+  // and resets the CDROM hardware. In HLE mode, our CDROM is initialized
+  // at boot and IRQs are handled directly in hardware emulation.
+  // Re-initialize the CDROM hardware registers to ensure a clean state.
+  case 0x54:
+  case 0x71: {
+    auto &cdrom = ps1.GetCDROM();
+    InitCDROM(cdrom);
+    break;
+  }
+
+  // A0:72h _96_remove — broken in real BIOS due to SysDeqIntRP bug, safe no-op
   case 0x72:
+    break;
+
+  // A0:90h-93h CdromIoIrqFunc / CdromDmaIrqFunc — internal IRQ handlers
+  // In HLE mode, CDROM IRQs are handled directly by hardware emulation
+  case 0x90:
+  case 0x91:
+  case 0x92:
+  case 0x93:
+    break;
+
+  // A0:95h CdInitSubFunc — subfunction for _96_init
+  // Hardware CDROM init is done by InitCDROM; this is a no-op in HLE
+  case 0x95:
+    cpu.SetRegister(2, 1);
+    break;
+
+  // A0:96h AddCDROMDevice — already set up in InitKernelState DCBs
+  case 0x96:
+    break;
+
+  // A0:97h AddMemCardDevice — already set up in InitKernelState DCBs
+  case 0x97:
+    break;
+
+  // A0:9Eh SetCdromIrqAutoAbort(type, flag) — no-op in HLE
+  case 0x9E:
+    break;
+
+  // A0:A2h EnqueueCdIntr — IRQ chain managed by hardware emulation
+  case 0xA2:
+    break;
+
+  // A0:A3h DequeueCdIntr — broken in real BIOS, no-op
+  case 0xA3:
     break;
 
   default:
@@ -732,9 +985,17 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
 // Per PSX-SPX: https://psx-spx.consoledev.net/kernelbios/#bios-function-summary
 // GPU functions do NOT exist in the B-table; they are A-table only (A0:47-4B).
 
-void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
+bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   auto &cpu = ps1.GetCPU();
   auto &mem = ps1.GetMemory();
+
+  {
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.BIOS",
+               "B0:0x%02X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X RA=0x%08X",
+               func, cpu.GetRegister(4), cpu.GetRegister(5), cpu.GetRegister(6),
+               cpu.GetRegister(7), cpu.GetRegister(31));
+  }
 
   switch (func) {
 
@@ -747,30 +1008,81 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   case 0x01:
     break;
 
-  // B0:02h init_timer(t,reload,flags)
-  case 0x02:
+  // B0:02h init_timer(t, target, flags)
+  // Real BIOS writes timer HW registers: base mode 0x0048 (resetOnTarget +
+  // irqRepeat) flags & 0x0010 → sync enable, flags & 0x0001 → external clock,
+  // flags & 0x1000 → irqOnTarget
+  case 0x02: {
+    uint32_t t = cpu.GetRegister(4) & 0xFFFF;
+    uint16_t target = static_cast<uint16_t>(cpu.GetRegister(5));
+    uint16_t flags = static_cast<uint16_t>(cpu.GetRegister(6));
+    if (t < 3) {
+      auto &timers = ps1.GetTimers();
+      uint32_t timerBase = IO::TIMER_BASE + t * IO::TIMER_CHANNEL_SIZE;
+      timers.Write32(timerBase + 0x04, 0); // reset mode first (clears counter)
+      timers.Write32(timerBase + 0x08, target); // set target
+      uint16_t mode = 0x0048; // resetOnTarget(3) + irqRepeat(6)
+      if (flags & 0x0010)
+        mode |= 0x0001; // sync enable
+      if (flags & 0x0001)
+        mode |= 0x0100; // external clock source
+      if (flags & 0x1000)
+        mode |= 0x0010; // irqOnTarget
+      timers.Write32(timerBase + 0x04,
+                     mode); // write final mode (resets counter)
+    }
+    cpu.SetRegister(2, (t < 3) ? 1u : 0u);
+    break;
+  }
+
+  // B0:03h get_timer(t) — read current counter value
+  case 0x03: {
+    uint32_t t = cpu.GetRegister(4) & 0xFFFF;
+    uint32_t val = 0;
+    if (t < 3) {
+      auto &timers = ps1.GetTimers();
+      val = timers.Read32(IO::TIMER_BASE + t * IO::TIMER_CHANNEL_SIZE);
+    }
+    cpu.SetRegister(2, val);
+    break;
+  }
+
+  // B0:04h enable_timer_irq(t) — set I_MASK bit for timer
+  case 0x04: {
+    uint32_t t = cpu.GetRegister(4) & 0xFFFF;
+    static constexpr uint32_t timerMasks[] = {IRQ::TIMER0, IRQ::TIMER1,
+                                              IRQ::TIMER2, IRQ::VBLANK};
+    if (t <= 3) {
+      auto &irqs = ps1.GetInterrupts();
+      irqs.WriteMask(irqs.ReadMask() | timerMasks[t]);
+    }
+    cpu.SetRegister(2, (t <= 2) ? 1u : 0u);
+    break;
+  }
+
+  // B0:05h disable_timer_irq(t) — clear I_MASK bit for timer
+  case 0x05: {
+    uint32_t t = cpu.GetRegister(4) & 0xFFFF;
+    static constexpr uint32_t timerMasks[] = {IRQ::TIMER0, IRQ::TIMER1,
+                                              IRQ::TIMER2, IRQ::VBLANK};
+    if (t <= 3) {
+      auto &irqs = ps1.GetInterrupts();
+      irqs.WriteMask(irqs.ReadMask() & ~timerMasks[t]);
+    }
     cpu.SetRegister(2, 1);
     break;
+  }
 
-  // B0:03h get_timer(t)
-  case 0x03:
-    cpu.SetRegister(2, 0);
+  // B0:06h restart_timer(t) — reset counter to 0
+  case 0x06: {
+    uint32_t t = cpu.GetRegister(4) & 0xFFFF;
+    if (t < 3) {
+      auto &timers = ps1.GetTimers();
+      timers.Write32(IO::TIMER_BASE + t * IO::TIMER_CHANNEL_SIZE, 0);
+    }
+    cpu.SetRegister(2, (t < 3) ? 1u : 0u);
     break;
-
-  // B0:04h enable_timer_irq(t)
-  case 0x04:
-    cpu.SetRegister(2, 1);
-    break;
-
-  // B0:05h disable_timer_irq(t)
-  case 0x05:
-    cpu.SetRegister(2, 1);
-    break;
-
-  // B0:06h restart_timer(t)
-  case 0x06:
-    cpu.SetRegister(2, 1);
-    break;
+  }
 
   // B0:07h DeliverEvent(class, spec)
   case 0x07: {
@@ -894,7 +1206,8 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     cpu.SetLO(mem.ReadRAM32(tcbPtr + 0x90));
 
     uint32_t sr = mem.ReadRAM32(tcbPtr + 0x94);
-    // RFE: shift the interrupt/kernel-mode stack right by 2
+    // RFE: shift the interrupt/kernel-mode stack right by 2,
+    // restoring IEp→IEc and IEo→IEp (re-enables interrupts)
     sr = (sr & ~0xF) | ((sr >> 2) & 0xF);
     cpu.SetCOP0(CPU::COP0::SR, sr);
 
@@ -903,19 +1216,20 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
       char dbg[512];
       uint32_t v0_tcb = mem.ReadRAM32(tcbPtr + 0x08 + 2 * 4);
       uint32_t ra_tcb = mem.ReadRAM32(tcbPtr + 0x08 + 31 * 4);
+      uint32_t sp_tcb = mem.ReadRAM32(tcbPtr + 0x08 + 29 * 4);
       snprintf(dbg, sizeof(dbg),
                "ReturnFromException: EPC=0x%08X SR=0x%08X tcb=0x%08X "
-               "v0_tcb=0x%08X ra_tcb=0x%08X v0_cpu=0x%08X ra_cpu=0x%08X",
-               epc, sr, tcbPtr, v0_tcb, ra_tcb, cpu.GetRegister(2),
+               "v0_tcb=0x%08X ra_tcb=0x%08X sp_tcb=0x%08X v0_cpu=0x%08X "
+               "ra_cpu=0x%08X",
+               epc, sr, tcbPtr, v0_tcb, ra_tcb, sp_tcb, cpu.GetRegister(2),
                cpu.GetRegister(31));
       log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
     }
 
     cpu.SetPC(epc);
-    break;
+    // PC is set to EPC, not $ra — tell TryHLETrap not to overwrite
+    return false;
   }
-
-  // B0:18h ResetEntryInt
   case 0x18:
     hookedEntryIntHandler = 0;
     cpu.SetRegister(2, 0);
@@ -958,9 +1272,9 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     if (nameAddr < 0x1000 && (nameAddr & 0x1FFFFFFF) < 0x1000) {
       log.LogFmt(
           AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-          "open() spurious call: nameAddr=0x%08X mode=0x%X ra=0x%08X → fd=0",
+          "open() spurious call: nameAddr=0x%08X mode=0x%X ra=0x%08X → fd=-1",
           nameAddr, accessMode, cpu.GetRegister(31));
-      cpu.SetRegister(2, 0);
+      cpu.SetRegister(2, 0xFFFFFFFF);
       break;
     }
 
@@ -983,9 +1297,6 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
       cpu.SetRegister(2, (accessMode & 0x01) ? 0u : 1u);
     } else if (std::strstr(filename, "bu") || std::strstr(filename, "BU")) {
       cpu.SetRegister(2, 0xFFFFFFFF);
-    } else if (filename[0] == '\0') {
-      // Empty filename — probably spurious call, return stdin
-      cpu.SetRegister(2, 0);
     } else {
       cpu.SetRegister(2, 0xFFFFFFFF);
     }
@@ -1056,9 +1367,24 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     cpu.SetRegister(2, cpu.GetRegister(4));
     break;
 
-  // B0:3Fh puts(src) — consume silently
-  case 0x3F:
+  // B0:3Fh puts(src) — log the string
+  case 0x3F: {
+    uint32_t srcAddr = cpu.GetRegister(4);
+    auto &mem2 = ps1.GetMemory();
+    char buf[256];
+    int i = 0;
+    for (; i < 255; i++) {
+      uint8_t ch = mem2.Read8(srcAddr + i);
+      if (ch == 0)
+        break;
+      buf[i] = static_cast<char>(ch);
+    }
+    buf[i] = '\0';
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.TTY", "puts: \"%s\"",
+               buf);
     break;
+  }
 
   // B0:40h cd(name) — change directory
   case 0x40:
@@ -1129,6 +1455,8 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     cpu.SetRegister(2, 0);
     break;
   }
+
+  return true;
 }
 
 // ─── C-Table (0xC0) ─────────────────────────────────────────────────────
@@ -1136,11 +1464,31 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
 void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
   auto &cpu = ps1.GetCPU();
 
+  {
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.BIOS",
+               "C0:0x%02X a0=0x%08X a1=0x%08X RA=0x%08X", func,
+               cpu.GetRegister(4), cpu.GetRegister(5), cpu.GetRegister(31));
+  }
+
   switch (func) {
 
-  // C0:00h EnqueueTimerAndVblankIrqs — no-op (handled by emulator hardware)
-  case 0x00:
+  // C0:00h EnqueueTimerAndVblankIrqs
+  // Real BIOS: clears IMASK timer/VBlank bits, resets all 3 timers to
+  // mode=0/target=0/counter=0
+  case 0x00: {
+    auto &irqs = ps1.GetInterrupts();
+    irqs.WriteMask(irqs.ReadMask() &
+                   ~(IRQ::VBLANK | IRQ::TIMER0 | IRQ::TIMER1 | IRQ::TIMER2));
+    auto &timers = ps1.GetTimers();
+    for (uint32_t i = 0; i < 3; i++) {
+      uint32_t base = IO::TIMER_BASE + i * IO::TIMER_CHANNEL_SIZE;
+      timers.Write32(base + 0x04, 0); // mode = 0 (also resets counter)
+      timers.Write32(base + 0x08, 0); // target = 0
+      timers.Write32(base + 0x00, 0); // counter = 0
+    }
     break;
+  }
 
   // C0:01h EnqueueSyscallHandler — no-op
   case 0x01:
@@ -1252,7 +1600,14 @@ void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
 void PS1HleBios::DeliverEvent(uint32_t classId, uint32_t spec) {
   for (auto &ev : events) {
     if (ev.used && ev.enabled && ev.classId == classId && ev.spec == spec) {
-      ev.fired = true;
+      if (ev.mode == 0x1000 && ev.func != 0) {
+        // Callback mode: record the callback address for the exception handler
+        // to invoke. The callback will eventually call ReturnFromException.
+        pendingCallbackAddr = ev.func;
+      } else {
+        // Polling mode (0x2000): mark event as ready for TestEvent/WaitEvent
+        ev.fired = true;
+      }
     }
   }
 }
@@ -1281,13 +1636,11 @@ void PS1HleBios::PopulateBiosRegion(PS1Memory &memory) {
 // ─── Kernel Stubs in RAM ────────────────────────────────────────────────
 
 void PS1HleBios::InstallKernelStubs(PS1Memory &memory) {
-  // ─── Garbage area at 0x00000000 ───────────────────────────────────
-  // Real BIOS copies the 4-opcode exception vector here, but first word
-  // gets overwritten to 0x00000003 by CDROM init code.
-  // Games like R-Types read from address 0 via uninitialized pointers
-  // and need non-zero values.
-  // Real BIOS pattern: LUI k0,0 / ADDIU k0,k0,0xC80 / JR k0 / NOP
-  WriteRAMInstr(memory, 0x00, 0x00000003); // overwritten
+  // ─── Exception vector at 0x00000000 ──────────────────────────────
+  // Real BIOS: LUI k0,0 / ADDIU k0,k0,0xC80 / JR k0 / NOP
+  // Some games jump here via bad return addresses (RA=0), and need the
+  // vector to route cleanly to the exception handler block at 0xC80.
+  WriteRAMInstr(memory, 0x00, LUI(26, 0x0000)); // lui k0, 0
   WriteRAMInstr(
       memory, 0x04,
       ADDIU(26, 26,
@@ -1378,6 +1731,13 @@ void PS1HleBios::InstallKernelStubs(PS1Memory &memory) {
   // (used to fill jump table entries)
   WriteRAMInstr(memory, STUB_RET_ADDR, JR_RA());
   WriteRAMInstr(memory, STUB_RET_ADDR + 4, NOP());
+
+  // Halt stub — infinite loop for when the game's main() returns.
+  // Real BIOS has a shell loop; we just spin so the game doesn't
+  // execute through address 0 and trigger false exceptions.
+  uint32_t haltTarget = (0x80000000 | HALT_ADDR) >> 2;
+  WriteRAMInstr(memory, HALT_ADDR, J(haltTarget));
+  WriteRAMInstr(memory, HALT_ADDR + 4, NOP());
 }
 
 // ─── Trampoline Stubs ───────────────────────────────────────────────────
@@ -1606,6 +1966,16 @@ void PS1HleBios::InitKernelState(PS1Memory &memory) {
 
 void PS1HleBios::InitGPU(PS1GPU &gpu) { gpu.Reset(); }
 
+void PS1HleBios::InitCDROM(CDROM &cdrom) {
+  // The real BIOS boot sequence initializes the CDROM controller by writing
+  // to its hardware registers. Games expect interruptEnable=0x1F (all five
+  // interrupt types enabled) before they send their first command.
+  // Replicate those register writes so the first CdlGetStat fires an IRQ.
+  cdrom.Write8(IO::CDROM_BASE + 0, 0x01); // Select index 1
+  cdrom.Write8(IO::CDROM_BASE + 2, 0x1F); // reg2.idx1 = interruptEnable = all
+  cdrom.Write8(IO::CDROM_BASE + 0, 0x00); // Restore index 0
+}
+
 // ─── EXE Loading from Disc Image ───────────────────────────────────────
 
 // Find a file in an ISO9660 directory by name prefix (case-insensitive),
@@ -1811,7 +2181,7 @@ bool PS1HleBios::FindAndLoadExe(PS1Memory &memory, CDROM &cdrom, R3000A &cpu,
     codeSector++;
   }
 
-  // Step 6: Zero-fill BSS if specified
+  // Step 6: Zero-fill BSS if specified (usually redundant after full RAM clear)
   if (header.memfillSize > 0 && header.memfillStart != 0) {
     uint32_t bssPhys = header.memfillStart & 0x1FFFFF;
     uint32_t bssEnd = bssPhys + header.memfillSize;
@@ -1824,6 +2194,11 @@ bool PS1HleBios::FindAndLoadExe(PS1Memory &memory, CDROM &cdrom, R3000A &cpu,
 
   // Step 7: Set CPU initial state from EXE header
   cpu.SetPC(header.initialPC);
+
+  // Real BIOS calls the EXE entry via JAL, setting $ra to the BIOS shell loop.
+  // Set $ra to our halt stub so that if the game's main() returns,
+  // it spins harmlessly instead of executing through address 0.
+  cpu.SetRegister(31, 0x80000000 | HALT_ADDR);
 
   if (header.initialGP != 0) {
     cpu.SetRegister(28, header.initialGP);

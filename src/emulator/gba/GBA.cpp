@@ -98,9 +98,6 @@ bool GBA::LoadROM(const std::string &path) {
     // Analyze ROM metadata intelligently (must happen early)
     ROMMetadata metadata = ROMMetadataAnalyzer::Analyze(buffer);
 
-    // Apply game-specific ROM patches for known compatibility issues
-    ApplyROMPatches(metadata);
-
     // Store metadata in memory for boot state configuration
     romMetadata = metadata;
 
@@ -160,13 +157,6 @@ bool GBA::LoadROM(const std::string &path) {
     }
 
     Reset();
-
-    // Enable Classic NES mode for FD* games (Donkey Kong, etc.)
-    // These games use NES 2bpp tile format stored in GBA VRAM
-    if (memory->IsClassicNES()) {
-      ppu->SetClassicNesMode(true);
-      std::cout << "[LoadROM] Enabled Classic NES mode" << std::endl;
-    }
 
     std::cout << "[LoadROM] CPU Reset complete. PC=0x" << std::hex
               << cpu->GetRegister(15) << " CPSR=0x" << cpu->GetCPSR()
@@ -271,14 +261,6 @@ void GBA::ConfigureBootStateFromMetadata(const ROMMetadata &metadata) {
   }
   std::cout << std::endl;
 
-  // Classic NES Series games (game codes starting with "FD") use standard GBA
-  // rendering - they internally emulate an NES but output through the normal
-  // GBA PPU pipeline with standard 4bpp tiles and 2-byte tilemap entries.
-  // No special handling is needed.
-
-  // Apply game-specific boot configurations based on metadata
-  // No hardcoded patches - everything is derived from the ROM's actual
-  // structure
   std::cout << "[ConfigureBoot] Boot configuration complete" << std::endl;
 }
 
@@ -505,12 +487,6 @@ void GBA::PatchROM(uint32_t addr, uint32_t val) {
   std::cout << "[PatchROM] Addr=" << std::hex << addr << " Val=" << val
             << std::dec << std::endl;
   memory->WriteROM32(addr, val);
-}
-
-void GBA::ApplyROMPatches(const ROMMetadata &metadata) {
-  // Apply game-specific ROM patches for known compatibility issues
-  // Currently no patches needed - EEPROM implementation is now correct
-  (void)metadata; // Suppress unused parameter warning
 }
 
 // Debugger controls

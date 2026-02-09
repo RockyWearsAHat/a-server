@@ -36,8 +36,12 @@ class PS1HleBios {
 public:
   static bool InitHLE(PS1 &ps1);
 
-  // Called from R3000A::Step() when PC hits 0xA0/0xB0/0xC0
-  static void Dispatch(PS1 &ps1, uint8_t table, uint8_t func);
+  // Called from R3000A::Step() when PC hits 0xA0/0xB0/0xC0.
+  // Returns true if HLE handled the call and caller should set PC=$ra.
+  // Returns false if:
+  //   - The function table was patched (PC redirected to patched target), or
+  //   - The handler set PC itself (e.g. ReturnFromException sets PC=EPC)
+  static bool Dispatch(PS1 &ps1, uint8_t table, uint8_t func);
 
   // Called from R3000A::Step() when PC hits 0x80 (exception vector)
   static void HandleException(PS1 &ps1);
@@ -104,11 +108,18 @@ private:
   // Stub return trampoline — JR $ra; NOP — for filling jump tables
   static constexpr uint32_t STUB_RET_ADDR = 0xF200;
 
+  // Halt stub — infinite loop for game return (J self; NOP)
+  // Real BIOS has a shell loop here; we just spin.
+  static constexpr uint32_t HALT_ADDR = 0xF210;
+
   // Install trampoline stubs for all A0/B0/C0 table entries
   static void InstallTrampolines(PS1Memory &memory);
 
   // Initialize GPU to a sane default display mode
   static void InitGPU(PS1GPU &gpu);
+
+  // Initialize CDROM hardware registers to post-BIOS-boot state
+  static void InitCDROM(CDROM &cdrom);
 
   // Write a MIPS instruction into the BIOS region
   static void WriteBIOSInstr(PS1Memory &memory, uint32_t physOffset,
@@ -143,7 +154,8 @@ private:
 
   // ─── A/B/C Table Dispatch ───────────────────────────────────────────
   static void DispatchA0(PS1 &ps1, uint8_t func);
-  static void DispatchB0(PS1 &ps1, uint8_t func);
+  // Returns true = normal (return to $ra), false = PC already set by handler
+  static bool DispatchB0(PS1 &ps1, uint8_t func);
   static void DispatchC0(PS1 &ps1, uint8_t func);
 
   // ─── Event System ───────────────────────────────────────────────────
@@ -185,6 +197,9 @@ private:
   // RAM addresses of B0/C0 jump tables (returned by GetB0Table/GetC0Table)
   static inline uint32_t b0TableRamAddr = 0;
   static inline uint32_t c0TableRamAddr = 0;
+
+  // Pending mode=0x1000 callback from DeliverEvent (called during exception)
+  static inline uint32_t pendingCallbackAddr = 0;
 };
 
 } // namespace AIO::Emulator::PS1

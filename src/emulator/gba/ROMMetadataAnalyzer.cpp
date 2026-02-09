@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cctype>
-#include <emulator/gba/GameDB.h>
 #include <emulator/gba/ROMMetadataAnalyzer.h>
 #include <iostream>
 
@@ -74,19 +73,11 @@ ROMMetadata ROMMetadataAnalyzer::Analyze(const std::vector<uint8_t> &romData) {
   }
   std::cout << std::endl;
 
-  // First check GameDB for known game overrides (highest priority)
-  auto gameOverride = GameDB::GetOverride(metadata.gameCode);
-  if (gameOverride.saveType != SaveType::Auto) {
-    metadata.saveType = gameOverride.saveType;
-    std::cout << "[ROMAnalyzer] Using GameDB override for save type"
-              << std::endl;
-  } else {
-    // Detect save type - first try analyzing actual save behavior patterns
-    metadata.saveType = AnalyzeSaveBehavior(romData);
-    if (metadata.saveType == SaveType::Auto) {
-      // Fall back to string detection if behavior analysis didn't find anything
-      metadata.saveType = DetectSaveType(romData);
-    }
+  // Detect save type - first try analyzing actual save behavior patterns
+  metadata.saveType = AnalyzeSaveBehavior(romData);
+  if (metadata.saveType == SaveType::Auto) {
+    // Fall back to string detection if behavior analysis didn't find anything
+    metadata.saveType = DetectSaveType(romData);
   }
 
   std::cout << "[ROMAnalyzer] Detected Save Type: ";

@@ -161,8 +161,10 @@ void PS1Memory::Write8(uint32_t addr, uint8_t value) {
   uint32_t phys = TranslateAddress(addr);
 
   if (phys < MemMap::RAM_REGION_SIZE) {
-    if (!cacheIsolated)
-      ram[phys & (MemSize::RAM - 1)] = value;
+    if (!cacheIsolated) {
+      uint32_t offset = phys & (MemSize::RAM - 1);
+      ram[offset] = value;
+    }
     return;
   }
   if (phys >= MemMap::SCRATCHPAD_START && phys <= MemMap::SCRATCHPAD_END) {
@@ -214,6 +216,20 @@ void PS1Memory::Write32(uint32_t addr, uint32_t value) {
     if (!cacheIsolated) {
       uint32_t offset = phys & (MemSize::RAM - 1);
       std::memcpy(&ram[offset], &value, sizeof(uint32_t));
+      // TEMP: Track hash table base writes
+      if (offset == 0x0005C530) {
+        uint32_t pc = cpu ? cpu->GetPC() : 0;
+        LogInfo("WATCH: Write32 0x8005C530 = 0x%08X (PC=0x%08X)", value, pc);
+        // Dump instructions around the write site
+        if (cpu && value == 0xFFFFFFF0) {
+          for (int d = -8; d <= 8; d++) {
+            uint32_t addr = pc + d * 4;
+            uint32_t instr;
+            std::memcpy(&instr, &ram[(addr & 0x1FFFFF)], sizeof(uint32_t));
+            LogInfo("  CODE 0x%08X: 0x%08X", addr, instr);
+          }
+        }
+      }
     }
     return;
   }
@@ -468,7 +484,8 @@ uint32_t PS1Memory::ReadRAM32(uint32_t offset) const {
 }
 
 void PS1Memory::WriteRAM32(uint32_t offset, uint32_t value) {
-  std::memcpy(&ram[offset & (MemSize::RAM - 1)], &value, sizeof(uint32_t));
+  uint32_t actualOffset = offset & (MemSize::RAM - 1);
+  std::memcpy(&ram[actualOffset], &value, sizeof(uint32_t));
 }
 
 void PS1Memory::WriteBIOS32(uint32_t offset, uint32_t value) {

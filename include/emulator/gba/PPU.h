@@ -31,10 +31,6 @@ public:
   // For frame step-back: restore a saved framebuffer
   void RestoreFramebuffer(const uint32_t *data, size_t count);
 
-  // Classic NES Series palette mapping workaround
-  // These games store colors at palette indices 9-14 but use paletteBank=8
-  void SetClassicNesMode(bool enabled);
-
   // IO register write callback for mid-frame BGxX/BGxY re-latching
   static void OnIOWrite(void *context, uint32_t offset, uint16_t value);
 
@@ -108,14 +104,6 @@ private:
 
   // Per-scanline OBJ rendering budget. 1=this OAM entry is renderable.
   std::array<uint8_t, 128> objRenderable{};
-
-  // Classic NES Series palette mapping mode
-  bool classicNesMode = false;
-
-  // Per-frame cache for TilemapLooksLikeCode (avoid 160 redundant scans/frame)
-  int cachedCodeCheckFrame = -1;
-  uint32_t cachedCodeCheckMapBase = 0;
-  bool cachedCodeCheckResult = false;
 };
 
 } // namespace AIO::Emulator::GBA

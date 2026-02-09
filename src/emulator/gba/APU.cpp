@@ -45,11 +45,14 @@ void APU::Reset() {
   frameSequencerCycles = 0;
   frameSequencerStep = 0;
 
-  hpfCapL = 0;
-  hpfCapR = 0;
-
   currentUpsampleRatio = 2.048f;
-  psgOutputAccumulator = 0.0f;
+  nativeAccumulator = 0.0f;
+
+  resampleBuf.fill(0);
+  resampleBufCount = 0;
+  prevResampleL = 0;
+  prevResampleR = 0;
+  resamplePos = 0.0f;
 
   // Prefill ring buffer with silence so the SDL callback has a safety
   // margin (~31 ms at 32 kHz) to absorb frame-boundary timing jitter.
@@ -81,7 +84,60 @@ void APU::PushSample(int16_t left, int16_t right) {
   writePos.store(nextWp, std::memory_order_release);
 }
 
-void APU::GenerateOutputSample() {
+void APU::ResampleAndPush() {
+  if (resampleBufCount == 0)
+    return;
+
+  // Linear interpolation from NATIVE_SAMPLE_RATE (32768 Hz) to
+  // deviceSampleRate. resamplePos tracks fractional position within
+  // resampleBuf.
+  const float ratio = NATIVE_SAMPLE_RATE / deviceSampleRate;
+  const float bufEnd = static_cast<float>(resampleBufCount);
+
+  while (resamplePos < bufEnd) {
+    int idx = static_cast<int>(resamplePos);
+    float frac = resamplePos - static_cast<float>(idx);
+
+    int16_t s0L, s0R, s1L, s1R;
+
+    if (idx < 0) {
+      // Interpolating from the previous Update()'s last sample
+      s0L = prevResampleL;
+      s0R = prevResampleR;
+    } else {
+      s0L = resampleBuf[idx * 2];
+      s0R = resampleBuf[idx * 2 + 1];
+    }
+
+    if (idx + 1 < resampleBufCount) {
+      s1L = resampleBuf[(idx + 1) * 2];
+      s1R = resampleBuf[(idx + 1) * 2 + 1];
+    } else {
+      // At the boundary — hold the last sample
+      s1L = s0L;
+      s1R = s0R;
+    }
+
+    int16_t outL = static_cast<int16_t>(static_cast<float>(s0L) +
+                                        frac * static_cast<float>(s1L - s0L));
+    int16_t outR = static_cast<int16_t>(static_cast<float>(s0R) +
+                                        frac * static_cast<float>(s1R - s0R));
+
+    PushSample(outL, outR);
+    resamplePos += ratio;
+  }
+
+  // Save last sample for cross-boundary interpolation
+  if (resampleBufCount > 0) {
+    prevResampleL = resampleBuf[(resampleBufCount - 1) * 2];
+    prevResampleR = resampleBuf[(resampleBufCount - 1) * 2 + 1];
+  }
+
+  // Carry fractional position into next Update() call
+  resamplePos -= bufEnd;
+}
+
+void APU::GenerateNativeSample() {
   uint16_t scntX = memory.Read16(IORegs::REG_SOUNDCNT_X);
 
   int32_t left = 0, right = 0;
@@ -126,9 +182,11 @@ void APU::GenerateOutputSample() {
     if (psgEnableRight & 8)
       psgRight += ch4;
 
-    // mGBA PSG gain chain: accumulate unsigned → <<3 → *(1+masterVol)
-    psgLeft = (psgLeft << 3) * (psgVolLeft + 1);
-    psgRight = (psgRight << 3) * (psgVolRight + 1);
+    // mGBA PSG gain chain: (sum << 3) * (1 + masterVol) >> psgShift
+    psgLeft <<= 3;
+    psgRight <<= 3;
+    psgLeft = psgLeft * (psgVolLeft + 1);
+    psgRight = psgRight * (psgVolRight + 1);
     psgLeft >>= psgShift;
     psgRight >>= psgShift;
 
@@ -148,9 +206,7 @@ void APU::GenerateOutputSample() {
     left += psgLeft;
     right += psgRight;
 
-    // SOUNDBIAS gain — mirrors mGBA's _applyBias().
-    // Bias is bits 1-9 of SOUNDBIAS register (default 0x200 → bias=0x200).
-    // Add bias, clamp to 10-bit, subtract bias, scale by masterVolume*3/16.
+    // SOUNDBIAS: bits 0-9 = bias level (default register=0x200, so bias=0x200)
     uint16_t soundBiasReg = memory.Read16(0x04000000 + IORegs::SOUNDBIAS);
     int bias = soundBiasReg & 0x3FF;
     constexpr int MASTER_VOL = 0x100;
@@ -166,30 +222,18 @@ void APU::GenerateOutputSample() {
     right = applyBias(right);
   }
 
-  // Clamp to 16-bit
+  // Clamp to 16-bit — these go into the internal 32768 Hz buffer,
+  // not directly to the ring. ResampleAndPush() interpolates to device rate.
   int16_t outL = static_cast<int16_t>(std::clamp(left, -32768, 32767));
   int16_t outR = static_cast<int16_t>(std::clamp(right, -32768, 32767));
 
-  // DC-blocking high-pass filter — ALWAYS runs (even during silence)
-  // so the capacitor state decays smoothly and doesn't produce pops
-  // when sound re-enables after being disabled.
-  static constexpr int64_t HPF_FILTER = 65368;
-  int32_t capL = static_cast<int32_t>(hpfCapL >> 16);
-  int32_t capR = static_cast<int32_t>(hpfCapR >> 16);
-  int32_t degradedL32 = static_cast<int32_t>(outL) - capL;
-  int32_t degradedR32 = static_cast<int32_t>(outR) - capR;
-  int16_t degradedL =
-      static_cast<int16_t>(std::clamp(degradedL32, -32768, 32767));
-  int16_t degradedR =
-      static_cast<int16_t>(std::clamp(degradedR32, -32768, 32767));
-  hpfCapL = (static_cast<int64_t>(outL) << 16) -
-            static_cast<int64_t>(degradedL) * HPF_FILTER;
-  hpfCapR = (static_cast<int64_t>(outR) << 16) -
-            static_cast<int64_t>(degradedR) * HPF_FILTER;
-
-  PushSample(degradedL, degradedR);
+  if (resampleBufCount < RESAMPLE_BUF_SIZE) {
+    resampleBuf[resampleBufCount * 2] = outL;
+    resampleBuf[resampleBufCount * 2 + 1] = outR;
+    resampleBufCount++;
+  }
   stats.pushCalls.fetch_add(1, std::memory_order_relaxed);
-  if (degradedL != 0 || degradedR != 0)
+  if (outL != 0 || outR != 0)
     stats.pushNonZero.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -208,26 +252,26 @@ void APU::Update(int cycles) {
     StepFrameSequencer();
   }
 
-  // Fixed-rate output: generate output samples at the configured sample rate
-  // regardless of FIFO activity. GenerateOutputSample() mixes both PSG and
-  // FIFO channels — FIFO contributes via the held currentSampleA/B values
-  // which are updated by OnTimerOverflow(). This ensures PSG audio is never
-  // silenced when FIFO timers are active (e.g. MZM text screens use PSG
-  // while the music engine uses FIFO).
-  psgOutputAccumulator += static_cast<float>(cycles);
-  const float cyclesPerSample = GBA_CPU_FREQ / outputSampleRate;
-  while (psgOutputAccumulator >= cyclesPerSample) {
-    psgOutputAccumulator -= cyclesPerSample;
-    GenerateOutputSample();
+  // Generate internal samples at the GBA's native 32768 Hz rate.
+  // This keeps PSG and FIFO pacing accurate to real hardware.
+  resampleBufCount = 0;
+  nativeAccumulator += static_cast<float>(cycles);
+  const float cyclesPerNativeSample = GBA_CPU_FREQ / NATIVE_SAMPLE_RATE;
+  while (nativeAccumulator >= cyclesPerNativeSample) {
+    nativeAccumulator -= cyclesPerNativeSample;
+    GenerateNativeSample();
+  }
+
+  // Resample the 32768 Hz buffer to the SDL device rate and push to ring.
+  if (resampleBufCount > 0) {
+    ResampleAndPush();
   }
 }
 
 void APU::SetOutputSampleRate(float hz) {
   if (hz <= 0.0f)
     return;
-  outputSampleRate = hz;
-  // Recalculate default upsample ratio assuming M4A standard timer
-  // (reload=0xFBE8, prescaler F/1 → ~16009 Hz FIFO rate)
+  deviceSampleRate = hz;
   currentUpsampleRatio = hz / 16009.0f;
 }
 
@@ -365,7 +409,7 @@ void APU::OnTimerOverflow(int timer) {
   if (timerInterval > 0.0f) {
     float fifoRate = GBA_CPU_FREQ / timerInterval;
     if (fifoRate > 0.0f)
-      currentUpsampleRatio = outputSampleRate / fifoRate;
+      currentUpsampleRatio = deviceSampleRate / fifoRate;
   }
 }
 

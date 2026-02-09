@@ -70,6 +70,16 @@ private:
   uint8_t interruptEnable = 0;
   uint8_t interruptFlag = 0;
 
+  // Queued interrupts: on real hardware new interrupts are held back until
+  // the current one is acknowledged by the game.
+  struct QueuedIRQ {
+    uint8_t type;
+    std::vector<uint8_t> response;
+  };
+  std::queue<QueuedIRQ> pendingIRQs;
+  bool queuedDeliveryPending = false;
+  uint32_t queuedDeliveryDelay = 0;
+
   // ─── Command Processing ─────────────────────────────────────────────
   bool commandPending = false;
   uint8_t pendingCommand = 0;

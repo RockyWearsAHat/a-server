@@ -718,8 +718,8 @@ void ARM7TDMI::Step() {
     const uint32_t instrAddr = pcAligned;
 
     // Pipeline emulation: Use prefetched instruction if available.
-    // Classic NES games test self-modifying code behavior - on real ARM7TDMI,
-    // writes to upcoming instructions don't affect already-prefetched opcodes.
+    // On real ARM7TDMI, writes to upcoming instructions don't affect
+    // already-prefetched opcodes (3-stage pipeline behavior).
     uint16_t instruction;
     if (prefetchValid[0] && prefetchThumb[0] && prefetchAddr[0] == instrAddr) {
       // Use prefetched instruction (may differ from current memory if SMC)
@@ -793,8 +793,8 @@ void ARM7TDMI::Step() {
     const uint32_t instrAddr = pc & ~3u;
 
     // Pipeline emulation: Use prefetched instruction if available.
-    // Classic NES games test self-modifying code behavior - on real ARM7TDMI,
-    // writes to upcoming instructions don't affect already-prefetched opcodes.
+    // On real ARM7TDMI, writes to upcoming instructions don't affect
+    // already-prefetched opcodes (3-stage pipeline behavior).
     uint32_t instruction;
 
     if (prefetchValid[0] && !prefetchThumb[0] && prefetchAddr[0] == instrAddr) {
@@ -3014,10 +3014,9 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
     break;
   }
 
-  // Update biosPrefetch after every SWI call - mimics real BIOS returning with
-  // "MOV R2, #4" (0xE3A02004) at the SWI return point. Classic NES games check
-  // this value when reading BIOS from outside BIOS as anti-emulation
-  // protection.
+  // Real BIOS returns with "MOV R2, #4" (0xE3A02004) at the SWI return
+  // point. Reads from BIOS region outside BIOS code return this prefetched
+  // value (open-bus behavior).
   memory.SetBiosPrefetch(0xE3A02004);
 }
 
@@ -3675,23 +3674,6 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
 
     uint32_t addr = registers[rb];
     uint32_t startAddr = addr;
-
-    // DEBUG: Trace STMIA to DMA3 control registers (0x40000D4-0x40000DF)
-    // Classic NES games use STM ordering quirks to set up DMA
-    const bool isClassicNes = memory.IsClassicNES();
-    bool traceDMA3 =
-        isClassicNes && (!L && addr >= 0x40000D4 && addr <= 0x40000E0);
-    if (traceDMA3) {
-      fprintf(stderr, "[STMIA DMA3] PC=0x%08X R%d=0x%08X rList=0x%02X",
-              registers[15] - 2, rb, addr, rList);
-      for (int i = 0; i < 8; ++i) {
-        if ((rList >> i) & 1) {
-          fprintf(stderr, " R%d=0x%08X", i, registers[i]);
-        }
-      }
-      fprintf(stderr, "\n");
-      fflush(stderr);
-    }
 
     for (int i = 0; i < 8; ++i) {
       if ((rList >> i) & 1) {

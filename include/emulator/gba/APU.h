@@ -387,30 +387,39 @@ private:
 
   NoiseChannel noiseChannel;
 
-  // Upsample from FIFO rate (~16 kHz) to output rate (32768 Hz).
-  // Each FIFO timer overflow produces ~2.05 output samples using
-  // sample-and-hold, keeping FIFO consumption and output synchronized.
   static constexpr float GBA_CPU_FREQ = 16777216.0f;
-  static constexpr float OUTPUT_SAMPLE_RATE = 32768.0f;
-  float outputSampleRate = OUTPUT_SAMPLE_RATE;
 
-  // Fractional accumulator tracking the FIFO timer rate relative to the
-  // output sample rate. Updated by OnTimerOverflow() but no longer drives
-  // output generation (Update() handles that at a fixed rate).
+  // Internal generation always runs at the GBA's native 32768 Hz.
+  // A linear-interpolation resampler converts to the SDL device rate.
+  static constexpr float NATIVE_SAMPLE_RATE = 32768.0f;
+  float deviceSampleRate = NATIVE_SAMPLE_RATE;
+
+  // Fractional accumulator tracking the FIFO timer rate (no longer drives
+  // output generation, but kept for diagnostics / future use).
   float currentUpsampleRatio = 2.048f;
 
-  // On real GBA hardware, DMA halts the CPU while refilling the FIFO.
-  // Timer ticks still occur during DMA, but the FIFO consumption and
-  // refill are effectively atomic from the audio output's perspective.
-  // When set, OnTimerOverflow skips FIFO consumption but still generates
-  // output using the current held sample values — this prevents both
-  // audio gaps (from missing output) and transient spikes (from consuming
-  // freshly-refilled FIFO samples in a burst).
   bool suppressFifoConsumption = false;
 
-  // Fractional cycle accumulator for the fixed-rate output path.
-  // Generates output samples at outputSampleRate from Update().
-  float psgOutputAccumulator = 0.0f;
+  // Fractional cycle accumulator — generates internal samples at 32768 Hz.
+  float nativeAccumulator = 0.0f;
+
+  // --- Linear-interpolation resampler (32768 Hz → device rate) ---
+  // Intermediate buffer holding 32768 Hz stereo samples produced each
+  // Update() call, consumed by the resampler before returning.
+  static constexpr int RESAMPLE_BUF_SIZE = 2048;
+  std::array<int16_t, RESAMPLE_BUF_SIZE * 2> resampleBuf;
+  int resampleBufCount = 0;
+
+  // Previous stereo sample for interpolation across Update() boundaries.
+  int16_t prevResampleL = 0;
+  int16_t prevResampleR = 0;
+
+  // Fractional position within the resample buffer (0.0 to resampleBufCount).
+  // Advances by (NATIVE_SAMPLE_RATE / deviceSampleRate) per output sample.
+  float resamplePos = 0.0f;
+
+  // Resamples the internal 32768 Hz buffer to device rate and pushes to ring.
+  void ResampleAndPush();
 
   // Ring buffer prefill: absorbs frame-boundary jitter between the
   // emulator thread (producing samples in bursts per frame) and the
@@ -418,13 +427,7 @@ private:
   static constexpr int RING_PREFILL_SAMPLES = 1024;
   bool prefilled = false;
 
-  // DC-blocking high-pass filter (simulates GBA coupling capacitor).
-  // Matches mGBA's approach: cap = prev_sample - degraded * FILTER
-  // FILTER = 65368 ≈ 0.9975 in Q16, giving ~13 Hz cutoff at 32 kHz.
-  int64_t hpfCapL = 0;
-  int64_t hpfCapR = 0;
-
-  void GenerateOutputSample();
+  void GenerateNativeSample();
   void PushSample(int16_t left, int16_t right);
 };
 

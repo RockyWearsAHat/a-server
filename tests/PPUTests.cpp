@@ -1225,152 +1225,6 @@ TEST(PPUTest, TextBg_ScreenSize3_UsesCorrectHorizontalScreenBlock) {
 }
 
 // ============================================================================
-// Classic NES Series Palette Handling Tests
-// ============================================================================
-// Per PPU analysis: Classic NES games store all 4 NES BG palettes in GBA
-// palette bank 0. Each NES palette has 4 colors at indices 8 + nesPal*4.
-// The tilemap's palette bits 12-13 select the NES sub-palette.
-// Formula: effectiveIndex = 8 + (palBank & 3) * 4 + colorIndex
-
-TEST(PPUTest, ClassicNesMode_ColorIndexRemapping) {
-  // Classic NES mode uses:
-  // - Standard GBA tilemap format (16-bit entries)
-  // - NES 2bpp planar tile data format
-  // - Color remapping: index = 8 + paletteBank*4 + colorIndex
-  GBAMemory mem;
-  mem.Reset();
-  PPU ppu(mem);
-
-  ppu.SetClassicNesMode(true);
-  mem.Write16(0x04000000u, 0x0080u);
-
-  mem.Write16(0x05000000u, 0x0000u); // backdrop black
-  // Put red at palette index 9 (8 + 0*4 + 1)
-  mem.Write16(0x05000000u + 9 * 2, 0x001Fu); // Index 9 = red
-
-  // BG0CNT: charBase=1 (0x04), screenBase=13 (0x0D)
-  mem.Write16(0x04000008u, 0x0D04u);
-
-  // Standard GBA tilemap: 16-bit entry with tile=1, palette=0
-  const uint32_t mapBase = 0x06006800u;
-  mem.Write16(mapBase, 0x0001u); // tile 1, palette 0
-
-  // NES 2bpp tile 1 at charBase 1 (0x06004000)
-  const uint32_t tile1 = 0x06004000u + 1u * 32u;
-  // colorIndex 1 at pixel 0: plane0 bit 7 = 1, plane1 bit 7 = 0
-  mem.Write8(tile1 + 0u, 0x80u); // plane0: bit 7 = 1
-  mem.Write8(tile1 + 8u, 0x00u); // plane1: bit 7 = 0
-
-  mem.Write16(0x04000000u, 0x0100u);
-  ppu.Update(960);
-  ppu.SwapBuffers();
-
-  // colorIndex 1 remaps to index 9 (8 + 0*4 + 1) -> red
-  EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x001Fu));
-}
-
-TEST(PPUTest, ClassicNesMode_UsesTilemapSubPaletteBits) {
-  // Classic NES mode uses standard GBA tilemap with palette bits (12-15).
-  // Tile data is NES 2bpp planar format.
-  // Final palette index = 8 + (paletteBank & 0x3)*4 + colorIndex
-  GBAMemory mem;
-  mem.Reset();
-  PPU ppu(mem);
-
-  ppu.SetClassicNesMode(true);
-  mem.Write16(0x04000000u, 0x0080u);
-
-  mem.Write16(0x05000000u, 0x0000u); // backdrop black
-  // palette 0, colorIndex 3: index 11 (8+0*4+3) = green
-  // palette 1, colorIndex 3: index 15 (8+1*4+3) = blue
-  mem.Write16(0x05000000u + 11 * 2, 0x03E0u); // green at index 11
-  mem.Write16(0x05000000u + 15 * 2, 0x7C00u); // blue at index 15
-
-  // BG0CNT: charBase=1 (0x04), screenBase=13 (0x0D)
-  mem.Write16(0x04000008u, 0x0D04u);
-
-  const uint32_t mapBase = 0x06006800u;
-  // Standard GBA tilemap: tile 1 with palette 1 (bits 12-15 = 1)
-  mem.Write16(mapBase, 0x1001u); // tile 1, palette 1
-
-  // NES 2bpp tile 1 at charBase 1 (0x06004000)
-  const uint32_t tile1 = 0x06004000u + 1u * 32u;
-  // colorIndex 3 at pixel 0: plane0 bit7=1, plane1 bit7=1
-  mem.Write8(tile1 + 0u, 0x80u); // plane0: bit 7 = 1
-  mem.Write8(tile1 + 8u, 0x80u); // plane1: bit 7 = 1 → colorIndex = 3
-
-  mem.Write16(0x04000000u, 0x0100u);
-  ppu.Update(960);
-  ppu.SwapBuffers();
-
-  // colorIndex 3, palette 1 -> index 15 (8 + 1*4 + 3) → blue
-  EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x7C00u));
-}
-
-TEST(PPUTest, ClassicNesMode_ColorIndex0_UsesBackgroundColor) {
-  // Classic NES mode: color index 0 maps to palette index 8 + pal*4 + 0.
-  // Unlike normal GBA where colorIndex 0 is transparent, Classic NES
-  // remaps it to the sub-palette's first entry.
-  GBAMemory mem;
-  mem.Reset();
-  PPU ppu(mem);
-
-  ppu.SetClassicNesMode(true);
-  mem.Write16(0x04000000u, 0x0080u);
-
-  mem.Write16(0x05000000u, 0x0000u);
-  // Put blue at palette index 8 (8 + 0*4 + 0)
-  mem.Write16(0x05000000u + 8 * 2, 0x7C00u); // Index 8 = blue
-
-  // BG0CNT: charBase=1 (0x04), screenBase=13 (0x0D)
-  mem.Write16(0x04000008u, 0x0D04u);
-
-  const uint32_t mapBase = 0x06006800u;
-  // Standard GBA tilemap: tile 1, palette 0
-  mem.Write16(mapBase, 0x0001u);
-
-  // NES 2bpp tile 1: colorIndex 0 (both planes = 0)
-  const uint32_t tile1 = 0x06004000u + 1u * 32u;
-  mem.Write8(tile1 + 0u, 0x00u); // plane0: bit 7 = 0
-  mem.Write8(tile1 + 8u, 0x00u); // plane1: bit 7 = 0 → colorIndex = 0
-
-  mem.Write16(0x04000000u, 0x0100u);
-  ppu.Update(960);
-  ppu.SwapBuffers();
-
-  // colorIndex 0 maps to index 8 (8 + 0*4 + 0) → blue
-  EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x7C00u));
-}
-
-TEST(PPUTest, ClassicNesMode_Disabled_NormalPaletteBankBehavior) {
-  GBAMemory mem;
-  mem.Reset();
-  PPU ppu(mem);
-
-  // Classic NES mode NOT enabled
-  ppu.SetClassicNesMode(false);
-  mem.Write16(0x04000000u, 0x0080u);
-
-  mem.Write16(0x05000000u, 0x0000u);
-  // Palette bank 8, index 1 = cyan
-  mem.Write16(0x05000000u + (8 * 32) + (1 * 2), 0x7FE0u);
-
-  mem.Write16(0x04000008u, 0x0000u);
-  mem.Write16(0x06000000u, 0x0001u | (8u << 12)); // paletteBank=8
-
-  const uint32_t tile1 = 0x06000000u + 1u * 32u;
-  mem.Write16(tile1 + 0u, 0x0001u); // colorIndex 1
-  mem.Write16(tile1 + 2u, 0x0000u);
-
-  mem.Write16(0x04000000u, 0x0100u);
-  ppu.Update(960);
-  ppu.SwapBuffers();
-
-  // Without Classic NES mode, uses paletteBank 8 directly
-  EXPECT_EQ(ppu.GetFramebuffer()[0], TestUtil::ARGBFromBGR555(0x7FE0u));
-}
-
-// ============================================================================
 // Mode 0 Background Scroll Register Tests (per GBATEK)
 // ============================================================================
 // GBATEK: BG scroll registers are 9 bits (0-511). For 256-pixel screens,
@@ -1439,59 +1293,6 @@ TEST(PPUTest, TextBg_ScrollY_WrapsAt512ForSize3) {
   ppu.SwapBuffers();
 
   EXPECT_GE(ppu.GetFramebuffer().size(), (size_t)240);
-}
-
-// Classic NES Tile Index Masking Test
-// Per PPU analysis: Classic NES games use tilemap entries where the high byte
-// contains NES attributes. The tile index is stored in the low 8 bits only.
-// Tiles 256-511 would overlap with tilemap VRAM, so we mask to 8 bits.
-// Classic NES games use 8-bit tile indices (0-255) with their configured
-// charBase. The 8-bit mask prevents accessing invalid tile data that would
-// overlap with the tilemap. For OG-DK: charBase=1 (0x4000), screenBase=13
-// (0x6800), 8-bit tile indices.
-TEST(PPUTest, ClassicNesMode_TileIndexMaskedTo8Bits) {
-  // Classic NES mode masks tile indices to 8 bits to prevent VRAM overlap.
-  // Tile data is in NES 2bpp planar format.
-  GBAMemory mem;
-  mem.Reset();
-  PPU ppu(mem);
-
-  ppu.SetClassicNesMode(true);
-  mem.Write16(0x04000000u, 0x0080u); // Forced blank
-
-  // Set up palette color at bank 0, index 10 (remapped location for colorIndex
-  // 2) Final index = 8 + paletteBank*4 + colorIndex = 8 + 0*4 + 2 = 10
-  const uint32_t palBank0 = 0x05000000u;
-  mem.Write16(palBank0 + 10 * 2, 0x001Fu); // Bank 0, index 10 = red
-
-  // BG0CNT: charBase=1 (0x4000), screenBase=13 (0x6800)
-  mem.Write16(0x04000008u, 0x0D04u);
-
-  // Create tile 0xF7 (247) at charBase 1 (0x06004000) in NES 2bpp format
-  const uint32_t tileBase = 0x06004000u; // charBase 1
-  const uint32_t tile247 = tileBase + 247u * 32u;
-  // NES 2bpp: colorIndex 2 = plane0 bit 0, plane1 bit 1
-  // For pixel 0 (bit 7): plane0=0, plane1=1 → colorIndex 2
-  mem.Write8(tile247 + 0, 0x00u); // plane0: bit 7 = 0
-  mem.Write8(tile247 + 8, 0x80u); // plane1: bit 7 = 1 → colorIndex = 2
-
-  // Create tilemap entry at screenBase 13 = 0x06006800
-  // Use entry 0x01F7 which has tile=0x1F7 in 10-bit interpretation,
-  // but Classic NES masks to 0xF7 (247) using 8-bit mask.
-  const uint32_t mapBase = 0x06006800u;
-  mem.Write16(mapBase,
-              0x01F7u); // tile=0x1F7 if 10-bit, or 0xF7 if 8-bit masked
-
-  mem.Write16(0x04000000u, 0x0100u); // Enable BG0
-  ppu.Update(960);
-  ppu.SwapBuffers();
-
-  // With Classic NES 8-bit tile masking: tile 0xF7 is used from charBase 1
-  // colorIndex 2 remaps to palette index 10 (8 + 0*4 + 2) => red
-  uint32_t expected = TestUtil::ARGBFromBGR555(0x001Fu);
-  uint32_t actual = ppu.GetFramebuffer()[0];
-  EXPECT_EQ(actual, expected) << "Classic NES should use tile index 0xF7 (247) "
-                                 "from charBase 1 (8-bit masked)";
 }
 
 TEST(PPUTest, ObjAffine_UsesAffineIndexFromAttr1Bits9To13) {
@@ -3329,38 +3130,6 @@ TEST_F(PPUBlendTest, BrightnessFadeToBlack) {
 // All tests are DISABLED by default. Remove DISABLED_ prefix to enable one at a
 // time.
 
-// CATEGORY 1: Classic NES Detection/Configuration
-class GBABehavior_Category1_ClassicNESDetection : public testing::Test {
-protected:
-  GBAMemory memory;
-  PPU ppu{memory};
-};
-
-TEST_F(GBABehavior_Category1_ClassicNESDetection,
-       ROMCodeFDKEDetectsClassicNESMode) {
-  // GBATEK: ROM codes FDKE, FDBZ should auto-enable Classic NES mode
-  // Expected: isClassicNESMode() returns true after loading FDKE ROM
-  // Implementation: Read game code 0xAC-0xAF, enable mode if matches
-}
-
-TEST_F(GBABehavior_Category1_ClassicNESDetection,
-       CharBase1_ScreenBase13_CombinationActivatesMode) {
-  // GBATEK: charBase=1 + screenBase=13 unique to Classic NES
-  // Expected: This combo enables tile masking & palette remapping
-  // Implementation: Detect combination in BGCNT write
-}
-
-TEST_F(GBABehavior_Category1_ClassicNESDetection,
-       VRAMLayoutPreventsCharsetMisread) {
-  // Expected: Tile fetch row 32+ doesn't read charset area
-  // Implementation: Proper tilemap address calc in PPU::FetchTile()
-}
-
-TEST_F(GBABehavior_Category1_ClassicNESDetection,
-       ClassicNESModePersistsAcrossFrames) {
-  // Expected: Once enabled, mode stays active for all scanlines
-}
-
 // CATEGORY 2: Mode 0 BG Rendering Specifics
 class GBABehavior_Category2_Mode0Rendering : public testing::Test {
 protected:
@@ -3395,24 +3164,6 @@ protected:
 TEST_F(GBABehavior_Category3_PaletteColors, ColorIndex0IsTransparent) {
   // GBATEK: Color index 0 always transparent in modes 0-3
   // Expected: Pixels with index 0 show priority below
-}
-
-TEST_F(GBABehavior_Category3_PaletteColors,
-       PaletteRemappingOnlyInClassicNESMode) {
-  // CRITICAL: colorIndex 1-6 -> +8 ONLY in Classic NES
-  // Expected: Remapping conditional on isClassicNESMode flag
-
-  // This test documents the behavior found in PPUTests.cpp lines 2287-2292
-  // In Classic NES mode: palette color indices 1-6 get remapped to 9-14
-  // In normal mode: no remapping
-
-  // TODO: Test needs a way to set Classic NES mode and verify palette fetch
-  // behavior The fix is already in PPU.cpp but needs proper test coverage to
-  // ensure:
-  // 1. Regular GBA games do NOT get remapped
-  // 2. Only Classic NES games use the +8 offset
-
-  EXPECT_TRUE(true); // Placeholder - needs GBA ROM loading support
 }
 
 TEST_F(GBABehavior_Category3_PaletteColors,
@@ -3529,43 +3280,10 @@ TEST_F(GBABehavior_Category9_DMACycleSteal, DMA_CausesVRAMAccessDelay) {
   // GBATEK: DMA conflicts with VRAM cause CPU stall
 }
 
-// CATEGORY 10: Classic NES Specific Behaviors
-class GBABehavior_Category10_ClassicNESSpecific : public testing::Test {
-protected:
-  GBAMemory memory;
-  PPU ppu{memory};
-};
-
-TEST_F(GBABehavior_Category10_ClassicNESSpecific,
-       BIOSPrefetchAfterSWI_Value0xE3A02004) {
-  // GBATEK: Prefetch buffer after SWI = 0xE3A02004
-}
-
-TEST_F(GBABehavior_Category10_ClassicNESSpecific, ROMSizeMirroringFormula) {
-  // Classic NES ROMs (256KB, 512KB) mirror at boundaries
-  // Note: ROM is read-only, so this test verifies the mirroring concept
-  // without attempting to write to ROM (which would be ignored)
-
-  // TODO: This test requires loading actual ROM data to verify mirroring
-  // For now, just verify the memory region is accessible
-  uint32_t read_value = memory.Read32(0x08000000);
-  // Expect 0 or open bus - ROM not loaded, just testing region access
-  (void)read_value; // Suppress unused warning
-}
-
-TEST_F(GBABehavior_Category10_ClassicNESSpecific,
-       SaveTypeEEPROMvsSRAM_AutoDetect) {
-  // GBATEK: Detect save type from game code
-}
-
-TEST_F(GBABehavior_Category10_ClassicNESSpecific,
-       PaletteBankGameCodeSpecific_OGDKBanks1_13_14) {
-  // OG-DK uses banks 1, 13, 14 (critical for visual correctness)
-}
 // ============================================================================
 // DOCUMENTED GBA BEHAVIOR TESTS - CORE PPU RENDERING
 // These tests verify specific GBATEK-documented behaviors that may cause
-// graphics corruption in games like OG-DK (Classic NES Series).
+// graphics corruption in games like OG-DK.
 // ============================================================================
 
 // Test Class for Mode 0 Text Background Rendering

@@ -33,7 +33,6 @@ add_library(GBAEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/gba/ARM7TDMI.cpp
     ${PROJECT_ROOT}/src/emulator/gba/PPU.cpp
     ${PROJECT_ROOT}/src/emulator/gba/APU.cpp
-    ${PROJECT_ROOT}/src/emulator/gba/GameDB.cpp
     ${PROJECT_ROOT}/src/emulator/gba/ROMMetadataAnalyzer.cpp
     ${PROJECT_ROOT}/src/emulator/common/Logger.cpp
     ${PROJECT_ROOT}/src/emulator/common/Fuzzer.cpp

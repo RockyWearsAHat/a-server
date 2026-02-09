@@ -53,9 +53,7 @@ uint32_t PS1DMA::Read32(uint32_t addr) const {
 void PS1DMA::Write32(uint32_t addr, uint32_t value) {
   if (addr == IO::DMA_DPCR) {
     dpcr = value;
-    if constexpr (Trace::DMA_TRACE) {
-      LogDebug("DPCR=%08X", dpcr);
-    }
+    LogInfo("DMA DPCR=%08X ch3_enable=%d", value, (value >> 15) & 1);
     return;
   }
   if (addr == IO::DMA_DICR) {
@@ -94,10 +92,12 @@ void PS1DMA::Write32(uint32_t addr, uint32_t value) {
     break;
   case 0x08:
     ch.channelControl = value;
-    if constexpr (Trace::DMA_TRACE) {
-      LogDebug("DMA ch%u CHCR=%08X (dir=%s sync=%u active=%d trigger=%d)",
-               channelIndex, value, ch.directionFromRAM() ? "fromRAM" : "toRAM",
-               ch.syncMode(), ch.isActive(), ch.isTrigger());
+    if (channelIndex == DMA::Channel::CDROM || Trace::DMA_TRACE) {
+      LogInfo("DMA ch%u CHCR=%08X (dir=%s sync=%u active=%d trigger=%d "
+              "addr=%08X block=%08X)",
+              channelIndex, value, ch.directionFromRAM() ? "fromRAM" : "toRAM",
+              ch.syncMode(), ch.isActive(), ch.isTrigger(), ch.baseAddr,
+              ch.blockControl);
     }
     CheckAndStartTransfer(channelIndex);
     break;
@@ -119,7 +119,6 @@ void PS1DMA::CheckAndStartTransfer(uint32_t channelIndex) {
   // Manual sync mode requires trigger bit
   if (ch.syncMode() == DMA::SyncMode::MANUAL && !ch.isTrigger())
     return;
-
   DoTransfer(channelIndex);
 }
 
@@ -215,6 +214,10 @@ void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
           word |= static_cast<uint32_t>(cdrom->DMARead()) << 16;
           word |= static_cast<uint32_t>(cdrom->DMARead()) << 24;
         }
+        if (i == 0) {
+          LogInfo("DMA CDROM->RAM: %u words, addr=%08X, first word=%08X",
+                  wordCount, channels[channelIndex].baseAddr, word);
+        }
         break;
       case DMA::Channel::SPU:
         word = spu.DMARead();
@@ -254,16 +257,14 @@ void PS1DMA::DoLinkedListTransfer(uint32_t channelIndex) {
     uint32_t header = memory.ReadRAM32(addr);
     uint32_t wordCount = header >> 24;
 
-    // Send words to GPU
     for (uint32_t i = 0; i < wordCount; i++) {
       addr += 4;
       uint32_t word = memory.ReadRAM32(addr & 0x001FFFFC);
       gpu.DMAWrite(word);
     }
 
-    // Check for end marker
     if (header & 0x00800000)
-      break; // Bit 23 = end of list
+      break;
 
     addr = header & 0x001FFFFC;
     safetyCounter++;

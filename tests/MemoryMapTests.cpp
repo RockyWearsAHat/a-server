@@ -51,9 +51,9 @@ TEST(MemoryMapTest, IrqHandlerWordWriteIsAtomicAndNotTorn) {
   EXPECT_EQ(mem.Read32(kIrqHandler), 0x0800012Cu);
 }
 
-// Classic NES Series (1 MiB ROMs) should be mirrored 4 times to 4 MiB
+// Small ROMs (1 MiB) should be mirrored to fill the 32 MiB ROM window
 // Reference: mGBA src/gba/gba.c lines 455-472
-TEST(MemoryMapTest, ClassicNes1MibRomMirrored4Times) {
+TEST(MemoryMapTest, SmallRomMirroredToFillWindow) {
   AIO::Emulator::GBA::GBAMemory mem;
 
   // Create a 1 MiB ROM with recognizable pattern

@@ -953,7 +953,8 @@ TEST(APUTest, FifoResetIsolation) {
   // Reset only FIFO A
   apu.ResetFIFO_A();
   EXPECT_EQ(apu.GetFifoACount(), 0);
-  EXPECT_EQ(apu.GetFifoBCount(), 4) << "FIFO B should be unaffected by FIFO A reset";
+  EXPECT_EQ(apu.GetFifoBCount(), 4)
+      << "FIFO B should be unaffected by FIFO A reset";
 
   // Reset only FIFO B
   apu.ResetFIFO_B();
@@ -993,4 +994,192 @@ TEST(APUTest, ResetClearsAccuracyFields) {
   float fillRatio = apu.GetRingBufferFillRatio();
   EXPECT_GT(fillRatio, 0.0f)
       << "After Reset(), PSG output should work immediately";
+}
+
+// ==========================================================================
+// Linear-interpolation resampler tests (32768 Hz → device rate)
+// ==========================================================================
+
+TEST(APUResamplerTest, UpsamplingProducesMoreSamplesThanNative) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+
+  // At native rate (32768 Hz), 1 frame = 280896 cycles ≈ 548 samples
+  apu.Reset();
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(32768.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x0077);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+  mem.Write16(0x04000062, 0xF780);
+  mem.Write16(0x04000064, 0xC700);
+  apu.Update(280896);
+  std::vector<int16_t> bufNative(8192 * 2);
+  int nativeSamples = apu.GetSamples(bufNative.data(), 8192);
+
+  // At 48000 Hz, same cycles should produce ~803 samples
+  apu.Reset();
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(48000.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x0077);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+  mem.Write16(0x04000062, 0xF780);
+  mem.Write16(0x04000064, 0xC700);
+  apu.Update(280896);
+  std::vector<int16_t> buf48k(8192 * 2);
+  int samples48k = apu.GetSamples(buf48k.data(), 8192);
+
+  EXPECT_GT(samples48k, nativeSamples)
+      << "48kHz output should produce more samples than 32768Hz for the same "
+         "CPU cycles";
+
+  float ratio =
+      static_cast<float>(samples48k) / static_cast<float>(nativeSamples);
+  EXPECT_NEAR(ratio, 48000.0f / 32768.0f, 0.05f)
+      << "Sample count ratio should match device rate ratio (~1.465)";
+}
+
+TEST(APUResamplerTest, IdentityRate_OutputMatchesNative) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.ClearRingBuffer();
+
+  apu.SetOutputSampleRate(32768.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x0077);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+  mem.Write16(0x04000062, 0xF780);
+  mem.Write16(0x04000064, 0xC700);
+
+  apu.Update(280896);
+
+  std::vector<int16_t> buf(8192 * 2);
+  int got = apu.GetSamples(buf.data(), 8192);
+
+  // 280896 cycles / (16777216 / 32768) ≈ 548 samples
+  EXPECT_NEAR(got, 548, 10)
+      << "At native rate, ~548 samples expected per frame";
+}
+
+TEST(APUResamplerTest, ResamplerProducesNonSilentOutput) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.ClearRingBuffer();
+
+  apu.SetOutputSampleRate(48000.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x1177); // SOUNDCNT_L: vol=7, ch1 routed L+R
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003); // PSG ratio 100%
+  // PSG channel 1: envelope vol=15, duty=50%, trigger
+  mem.Write16(0x04000062, 0xF080); // SOUND1CNT_H: vol=15, duty=2 (50%)
+  mem.Write16(0x04000064, 0xC400); // SOUND1CNT_X: freq=0x400, trigger
+
+  // Call Update in small batches so TickPSGTimers interleaves with
+  // sample generation — mirrors GBA's PERIPHERAL_BATCH_CYCLES cadence.
+  constexpr int BATCH = 8;
+  constexpr int TOTAL = 280896;
+  for (int c = 0; c < TOTAL; c += BATCH) {
+    apu.Update(BATCH);
+  }
+
+  std::vector<int16_t> buf(2048 * 2);
+  int got = apu.GetSamples(buf.data(), 2048);
+
+  ASSERT_GT(got, 0) << "Resampler should produce samples at 48kHz";
+
+  bool hasNonZero = false;
+  for (int i = 0; i < got * 2; ++i) {
+    if (buf[i] != 0) {
+      hasNonZero = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(hasNonZero)
+      << "Resampled output should contain non-silent PSG data";
+}
+
+TEST(APUResamplerTest, DownsamplingProducesFewerSamples) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+
+  apu.Reset();
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(22050.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x0077);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+  mem.Write16(0x04000062, 0xF780);
+  mem.Write16(0x04000064, 0xC700);
+  apu.Update(280896);
+  std::vector<int16_t> bufLow(8192 * 2);
+  int samplesLow = apu.GetSamples(bufLow.data(), 8192);
+
+  apu.Reset();
+  apu.ClearRingBuffer();
+  apu.SetOutputSampleRate(32768.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x0077);
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003);
+  mem.Write16(0x04000062, 0xF780);
+  mem.Write16(0x04000064, 0xC700);
+  apu.Update(280896);
+  std::vector<int16_t> bufNative(8192 * 2);
+  int samplesNative = apu.GetSamples(bufNative.data(), 8192);
+
+  EXPECT_LT(samplesLow, samplesNative)
+      << "22050 Hz output should produce fewer samples than 32768 Hz";
+
+  float ratio =
+      static_cast<float>(samplesLow) / static_cast<float>(samplesNative);
+  EXPECT_NEAR(ratio, 22050.0f / 32768.0f, 0.05f)
+      << "Sample count ratio should match device rate ratio (~0.673)";
+}
+
+TEST(APUResamplerTest, LinearInterpolationSmooths) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+  apu.ClearRingBuffer();
+
+  apu.SetOutputSampleRate(48000.0f);
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+  mem.Write16(0x04000080, 0x1177); // SOUNDCNT_L: vol=7, ch1 routed L+R
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0003); // PSG ratio 100%
+  mem.Write16(0x04000062, 0xF080); // SOUND1CNT_H: vol=15, duty=2 (50%)
+  mem.Write16(0x04000064, 0xC400); // SOUND1CNT_X: freq=0x400, trigger
+
+  // Small batches so PSG timers interleave with sample generation
+  constexpr int BATCH = 8;
+  constexpr int TOTAL = 280896;
+  for (int c = 0; c < TOTAL; c += BATCH) {
+    apu.Update(BATCH);
+  }
+
+  std::vector<int16_t> buf(2048 * 2);
+  int got = apu.GetSamples(buf.data(), 2048);
+  ASSERT_GT(got, 10);
+
+  // Linear interpolation limits sample-to-sample jumps.
+  // Without resampling (zero-order hold), full-amplitude jumps (~60000) occur.
+  int maxDelta = 0;
+  for (int i = 1; i < got; ++i) {
+    int delta = std::abs(static_cast<int>(buf[i * 2]) -
+                         static_cast<int>(buf[(i - 1) * 2]));
+    maxDelta = std::max(maxDelta, delta);
+  }
+
+  EXPECT_LT(maxDelta, 32000)
+      << "Linear interpolation should prevent full-amplitude jumps between "
+         "consecutive output samples";
 }

@@ -72,9 +72,6 @@ private:
   // Configure boot state based on intelligently detected ROM metadata
   void ConfigureBootStateFromMetadata(const ROMMetadata &metadata);
 
-  // Apply game-specific ROM patches for known compatibility issues
-  void ApplyROMPatches(const ROMMetadata &metadata);
-
   // PC stall detection (treat long stalls as crash-equivalent)
   uint32_t lastPcForStall = 0;
   uint64_t stallCycleAccumulator = 0;

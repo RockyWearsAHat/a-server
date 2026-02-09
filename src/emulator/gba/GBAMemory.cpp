@@ -5,7 +5,6 @@
 #include <emulator/gba/ARM7TDMI.h>
 #include <emulator/gba/GBA.h>
 #include <emulator/gba/GBAMemory.h>
-#include <emulator/gba/GameDB.h>
 #include <emulator/gba/IORegs.h>
 #include <emulator/gba/PPU.h>
 #include <fstream>
@@ -2072,8 +2071,8 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       // Per GBATEK: disabling master sound zeroes all PSG registers and
       // disables all channels. Games that toggle sound on/off rely on this.
       if (wasMasterEnabled && !nowMasterEnabled && apu) {
-        for (uint32_t reg = IORegs::SOUND1CNT_L;
-             reg <= IORegs::SOUND4CNT_H; reg += 2) {
+        for (uint32_t reg = IORegs::SOUND1CNT_L; reg <= IORegs::SOUND4CNT_H;
+             reg += 2) {
           io_regs[reg] = 0;
           io_regs[reg + 1] = 0;
         }

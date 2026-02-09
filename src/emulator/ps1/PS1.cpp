@@ -93,8 +93,8 @@ int PS1::Step() {
   // Fire VBlank IRQ on transition into VBlank
   if (!wasInVBlank && gpu->InVBlank()) {
     interrupts->RequestIRQ(IRQ::VBLANK);
-    // Deliver HLE VBlank event so games using WaitEvent/TestEvent can proceed
     PS1HleBios::DeliverEvent(0xF0000001, 0x0001);
+    PS1HleBios::DeliverEvent(0xF2000003, 0x0002);
   }
 
   // Fire HBlank tick for timers on each new scanline
@@ -120,25 +120,6 @@ int PS1::Step() {
     cause &= ~(1u << 10);
   }
   cpu->SetCOP0(CPU::COP0::CAUSE, cause);
-
-  // DEBUG: log IRQ state after 1M steps to see state during game loop
-  static uint64_t irqDbgCount = 0;
-  irqDbgCount++;
-  if (irqDbgCount == 1000000 || irqDbgCount == 5000000 ||
-      irqDbgCount == 20000000) {
-    uint32_t sr = cpu->GetSR();
-    uint32_t istat = interrupts->ReadStat();
-    uint32_t imask = interrupts->ReadMask();
-    auto &log = AIO::Emulator::Common::Logger::Instance();
-    char buf[256];
-    snprintf(buf, sizeof(buf),
-             "IRQ-DBG[%llu]: SR=0x%08X CAUSE=0x%08X I_STAT=0x%04X "
-             "I_MASK=0x%04X pending=%d IEc=%d IM2=%d",
-             (unsigned long long)irqDbgCount, sr, cause, istat, imask,
-             interrupts->HasPendingIRQ() ? 1 : 0, (sr & 1) ? 1 : 0,
-             (sr & (1u << 10)) ? 1 : 0);
-    log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.IRQ", buf);
-  }
 
   if (cpu->IsInterruptPending()) {
     cpu->TriggerInterrupt();

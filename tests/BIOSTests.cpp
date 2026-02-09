@@ -130,8 +130,8 @@ TEST(BIOSTest, BIOSReadOutsideBIOSReturnsOpenBus) {
   // Reads from BIOS addresses < 0x4000 while executing from ROM should return
   // biosPrefetch (not open bus from current fetch). biosPrefetch is 0xE3A02004
   // by default (after SWI calls), or 0 if no SWI has been called yet.
-  // Our emulator defaults to 0xE3A02004 for Classic NES protection
-  // compatibility.
+  // Our emulator defaults biosPrefetch to 0xE3A02004 (MOV R2, #4) since
+  // the BIOS leaves this value after its startup SWI sequence.
   //
   // Addresses >= 0x4000 in region 0 return open bus (CPU prefetch), NOT
   // biosPrefetch.
@@ -154,7 +154,6 @@ TEST(BIOSTest, Region0AboveBIOSReturnsOpenBusFromPrefetch) {
 
   // Reads from region 0 addresses >= 0x4000 (above BIOS) should return
   // open bus value based on CPU prefetch from the current PC, NOT biosPrefetch.
-  // This is the behavior Classic NES games rely on for protection checks.
   // The open bus value for ARM mode from ROM at 0x08000000 is the instruction
   // there.
   EXPECT_EQ(mem.Read8(0x00004000u), 0x44u); // open bus from ROM fetch
@@ -162,7 +161,7 @@ TEST(BIOSTest, Region0AboveBIOSReturnsOpenBusFromPrefetch) {
   EXPECT_EQ(mem.Read8(0x00004002u), 0x22u);
   EXPECT_EQ(mem.Read8(0x00004003u), 0x11u);
 
-  // Same for Classic NES protection addresses like 0x00AE0000
+  // Same for other region 0 addresses above BIOS
   EXPECT_EQ(mem.Read8(0x00AE0000u), 0x44u);
   EXPECT_EQ(mem.Read8(0x00AE0001u), 0x33u);
 }
