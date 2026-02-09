@@ -425,14 +425,17 @@ TEST(AudioCorruptionTest, HpfNoInt16Overflow) {
   auto samples = DrainRingBuffer(apu);
   ASSERT_GT(samples.size(), 4u);
 
-  // No sample should have an anomalous value from int16 wrap
-  // (wrapping would produce values near ±32767 instead of
-  // the expected range of roughly ±16000)
+  // With SOUNDBIAS-based gain (~48×), legitimate FIFO output can
+  // reach ±24k. Check that successive samples don't show sign-flip
+  // discontinuities characteristic of int16 wrap-around.
   bool hasWrap = false;
-  for (size_t i = 0; i < samples.size(); i += 2) {
-    // The HPF output should never exceed the mixer output range
-    // (±8128 from FIFO). Values near ±32000 indicate overflow.
-    if (std::abs(samples[i]) > 20000) {
+  for (size_t i = 2; i < samples.size(); i += 2) {
+    int16_t prev = samples[i - 2];
+    int16_t curr = samples[i];
+    // A sudden polarity flip with both values near the rails
+    // indicates arithmetic overflow (e.g. +32000 → -32000).
+    if (std::abs(prev) > 30000 && std::abs(curr) > 30000 &&
+        ((prev > 0) != (curr > 0))) {
       hasWrap = true;
       break;
     }
@@ -524,24 +527,26 @@ TEST(AudioCorruptionTest, HpfConvergesToZeroOnSilence) {
     SimulateTimerOverflow(apu);
   DrainRingBuffer(apu);
 
-  // Now push silence
+  // Now push silence — with SOUNDBIAS gain (~48×) the HPF cap is
+  // charged to a much larger value, so allow more overflows to settle.
   for (int i = 0; i < 8; ++i)
     apu.WriteFIFO_A(0x00000000u);
-  // Run enough overflows for HPF to settle (~400 samples ≈ 200 overflows)
-  for (int i = 0; i < 500; ++i) {
+  for (int i = 0; i < 2000; ++i) {
     if (apu.GetFifoACount() < 8)
       apu.WriteFIFO_A(0x00000000u);
     SimulateTimerOverflow(apu);
   }
 
-  auto samples = DrainRingBuffer(apu, 8192);
+  auto samples = DrainRingBuffer(apu, 16384);
   ASSERT_GT(samples.size(), 100u);
 
-  // The last 100 samples should all be near zero
+  // The last 100 samples should all be near zero.
+  // Tolerance raised to 100 because the SOUNDBIAS gain amplifies
+  // any HPF residual by ~48×.
   bool allNearZero = true;
   size_t start = samples.size() - 100;
   for (size_t i = start; i < samples.size(); i += 2) {
-    if (std::abs(samples[i]) > 2) {
+    if (std::abs(samples[i]) > 100) {
       allNearZero = false;
       break;
     }

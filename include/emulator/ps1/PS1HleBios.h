@@ -54,9 +54,52 @@ private:
 
   static void InstallKernelStubs(PS1Memory &memory);
 
+  // Initialize kernel RAM state: Table of Tables, FCBs, DCBs, TCBs,
+  // PCB, A0/B0/C0 jump tables, device strings, and pre-open stdin/stdout
+  static void InitKernelState(PS1Memory &memory);
+
   // Populate the BIOS region with a minimal bootstrap that jumps
   // to the HLE entry or provides a NOP sled for exception vectors
   static void PopulateBiosRegion(PS1Memory &memory);
+
+  // ─── Kernel RAM Layout Constants ────────────────────────────────────
+  // All addresses are physical offsets within the first 64KB of RAM.
+  // Real BIOS uses 0xE000-0xFFFF for kernel memory allocations.
+
+  // A0 jump table: 256 entries × 4 bytes at fixed address 0x200
+  static constexpr uint32_t A0_TABLE_ADDR = 0x200;
+  static constexpr uint32_t A0_TABLE_ENTRIES = 256;
+
+  // B0/C0 jump tables in kernel memory region
+  static constexpr uint32_t B0_TABLE_ADDR = 0xE000;
+  static constexpr uint32_t B0_TABLE_ENTRIES = 256;
+  static constexpr uint32_t C0_TABLE_ADDR = 0xE400;
+  static constexpr uint32_t C0_TABLE_ENTRIES = 128;
+
+  // Trampoline stubs — 3 MIPS instructions (12 bytes) per entry.
+  // Games read function pointers from the B0/C0/A0 tables and call them
+  // directly. Each trampoline loads $t1 with the function number and jumps
+  // to the 0xA0/0xB0/0xC0 vector so TryHLETrap can intercept the call.
+  static constexpr uint32_t A0_TRAMPOLINE_ADDR = 0x1000;  // 256 × 12 = 0xC00
+  static constexpr uint32_t B0_TRAMPOLINE_ADDR = 0x2000;  // 256 × 12 = 0xC00
+  static constexpr uint32_t C0_TRAMPOLINE_ADDR = 0x3000;  // 128 × 12 = 0x600
+
+  // Control block regions
+  static constexpr uint32_t EXCB_ADDR = 0xE600; // 4 × 0x08 = 0x20
+  static constexpr uint32_t PCB_ADDR  = 0xE620; // 1 × 0x04
+  static constexpr uint32_t TCB_ADDR  = 0xE624; // 4 × 0xC0 = 0x300
+  static constexpr uint32_t EVCB_ADDR = 0xE924; // 16 × 0x1C = 0x1C0
+  static constexpr uint32_t FCB_ADDR  = 0xEB00; // 16 × 0x2C = 0x2C0
+  static constexpr uint32_t DCB_ADDR  = 0xEDC0; // 10 × 0x50 = 0x320
+
+  // Device name strings placed after the control blocks
+  static constexpr uint32_t DEV_STRINGS_ADDR = 0xF0E0;
+
+  // Stub return trampoline — JR $ra; NOP — for filling jump tables
+  static constexpr uint32_t STUB_RET_ADDR = 0xF200;
+
+  // Install trampoline stubs for all A0/B0/C0 table entries
+  static void InstallTrampolines(PS1Memory &memory);
 
   // Initialize GPU to a sane default display mode
   static void InitGPU(PS1GPU &gpu);
@@ -129,6 +172,13 @@ private:
 
   // Random number generator
   static inline uint32_t hleSeed = 0;
+
+  // ChangeClearRCnt flags per timer (0..2) and vblank (3)
+  static inline std::array<uint32_t, 4> changeClearRCntFlags{};
+
+  // RAM addresses of B0/C0 jump tables (returned by GetB0Table/GetC0Table)
+  static inline uint32_t b0TableRamAddr = 0;
+  static inline uint32_t c0TableRamAddr = 0;
 };
 
 } // namespace AIO::Emulator::PS1

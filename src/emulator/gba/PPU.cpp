@@ -460,8 +460,6 @@ void PPU::Update(int cycles) {
             memory.Write16(0x03007FF8, biosIF);
           }
 
-
-
           // Defer VBlank DMA until after all end-of-line bookkeeping
           // (VCOUNT/VCOUNT-match/DISPSTAT) is committed.
           triggerVBlankDMA = true;
@@ -577,11 +575,9 @@ void PPU::RenderOBJ() {
   const uint8_t *oamData = memory.GetOAMData();
   const size_t oamSize = memory.GetOAMSize();
 
-  static const int sizes[3][4][2] = {
-      {{8, 8}, {16, 16}, {32, 32}, {64, 64}},
-      {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
-      {{8, 16}, {8, 32}, {16, 32}, {32, 64}}
-  };
+  static const int sizes[3][4][2] = {{{8, 8}, {16, 16}, {32, 32}, {64, 64}},
+                                     {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
+                                     {{8, 16}, {8, 32}, {16, 32}, {32, 64}}};
 
   for (int i = 0; i < 128; ++i) {
     const uint32_t oamOff = static_cast<uint32_t>(i * 8);
@@ -591,12 +587,15 @@ void PPU::RenderOBJ() {
     const bool affine = ((a0 >> 8) & 1) != 0;
     const bool dblOrDis = ((a0 >> 9) & 1) != 0;
     const uint8_t mode = (a0 >> 10) & 0x3;
-    if (!affine && dblOrDis) continue;
-    if (mode == 3) continue;
+    if (!affine && dblOrDis)
+      continue;
+    if (mode == 3)
+      continue;
 
     int y = a0 & 0xFF;
     int shape = (a0 >> 14) & 0x3;
-    if (shape == 3) continue;
+    if (shape == 3)
+      continue;
     int sz = (a1 >> 14) & 0x3;
     int w = sizes[shape][sz][0];
     int h = sizes[shape][sz][1];
@@ -605,9 +604,11 @@ void PPU::RenderOBJ() {
 
     // GBA Y-coords are 8-bit unsigned; large sprites near Y=255 wrap into
     // negative territory to appear at the top of the screen.
-    if (y + bh > 256) y -= 256;
+    if (y + bh > 256)
+      y -= 256;
 
-    if (scanline < y || scanline >= y + bh) continue;
+    if (scanline < y || scanline >= y + bh)
+      continue;
 
     int dotsPerPixel = affine ? 2 : 1;
     int dotCost = bw * dotsPerPixel;
@@ -620,7 +621,8 @@ void PPU::RenderOBJ() {
   // Second pass: render in reverse OAM order (127→0) so lower-index
   // sprites overwrite higher-index ones (correct priority).
   for (int i = 127; i >= 0; --i) {
-    if (!objRenderable[i]) continue;
+    if (!objRenderable[i])
+      continue;
 
     uint32_t oamAddr = 0x07000000 + (i * 8);
 
@@ -1967,7 +1969,8 @@ bool PPU::IsLayerEnabledAtPixel(int x, int y, int layer) {
 
 void PPU::ApplyColorEffects() {
   // Read blend control registers
-  uint16_t bldcnt = ReadRegister(0x50);   // BLDCNT
+  uint16_t bldcnt = ReadRegister(0x50); // BLDCNT
+
   uint16_t bldalpha = ReadRegister(0x52); // BLDALPHA
   uint16_t bldy = ReadRegister(0x54);     // BLDY
 

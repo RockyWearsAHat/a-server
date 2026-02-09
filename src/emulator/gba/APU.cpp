@@ -146,6 +146,24 @@ void APU::GenerateOutputSample() {
 
     left += psgLeft;
     right += psgRight;
+
+    // SOUNDBIAS-based gain — mirrors mGBA's _applyBias().
+    // Real hardware adds bias (0x200), clamps to 10-bit (0-0x3FF), subtracts
+    // bias, then multiplies by masterVolume*3/16.  With masterVolume = 0x100
+    // the effective gain is 48×, mapping the ~±2000 combined signal into
+    // the full 16-bit output range.
+    constexpr int BIAS = 0x200;
+    constexpr int MASTER_VOL = 0x100;
+    auto applyBias = [](int sample) -> int {
+      sample += BIAS;
+      if (sample >= 0x400)
+        sample = 0x3FF;
+      else if (sample < 0)
+        sample = 0;
+      return ((sample - BIAS) * MASTER_VOL * 3) >> 4;
+    };
+    left = applyBias(left);
+    right = applyBias(right);
   }
 
   // Clamp to 16-bit

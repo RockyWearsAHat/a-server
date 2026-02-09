@@ -4155,9 +4155,9 @@ protected:
   // Place a non-affine 64x64 sprite at OAM index `idx`, position (x, y)
   void Place64x64Sprite(int idx, int x, int y) {
     // Shape=0 (square), size=3 (64x64), tile=1, priority=0
-    uint16_t attr0 = (y & 0xFF) | (0 << 14); // shape=square
+    uint16_t attr0 = (y & 0xFF) | (0 << 14);  // shape=square
     uint16_t attr1 = (x & 0x1FF) | (3 << 14); // size=3 → 64x64
-    uint16_t attr2 = 1; // tile index 1
+    uint16_t attr2 = 1;                       // tile index 1
 
     uint32_t base = idx * 8;
     TestUtil::WriteOam16(memory, base + 0, attr0);
@@ -4191,8 +4191,7 @@ TEST_F(PPUObjBudgetTest, SpritesExceedingBudgetAreDropped) {
 
   // x=0 should show sprite color (red)
   uint32_t pxInBudget = TestUtil::GetPixel(ppu, 0, 0);
-  EXPECT_EQ(pxInBudget, spriteColor)
-      << "Sprites within budget should render";
+  EXPECT_EQ(pxInBudget, spriteColor) << "Sprites within budget should render";
 
   // x=120 should show backdrop because sprite 18 was dropped
   uint32_t pxOverBudget = TestUtil::GetPixel(ppu, 120, 0);
@@ -4226,8 +4225,8 @@ TEST_F(PPUObjBudgetTest, HBlankIntervalFreeReducesBudget) {
 
   // x=120 should show backdrop (sprite 14 over budget)
   uint32_t pxOverBudget = TestUtil::GetPixel(ppu, 120, 0);
-  EXPECT_EQ(pxOverBudget, backdrop)
-      << "Sprite 14 should be dropped with HBlank Interval Free (954-dot limit)";
+  EXPECT_EQ(pxOverBudget, backdrop) << "Sprite 14 should be dropped with "
+                                       "HBlank Interval Free (954-dot limit)";
 }
 
 // ==========================================================================
@@ -4242,12 +4241,11 @@ protected:
   GBAMemory memory;
   PPU ppu{memory};
 
-  void SetUp() override {
-    memory.SetIOWriteCallback(PPU::OnIOWrite, &ppu);
-  }
+  void SetUp() override { memory.SetIOWriteCallback(PPU::OnIOWrite, &ppu); }
 };
 
-// Writing BG2X (offset 0x28-0x2A) should not crash and should store via fast path
+// Writing BG2X (offset 0x28-0x2A) should not crash and should store via fast
+// path
 TEST_F(PPUBgRefLatchTest, BG2XWriteDoesNotCrash) {
   memory.Write16(0x04000000, 0x0C00); // Mode 2, BG2 enabled
   memory.Write16(0x04000028, 0x0000); // BG2X low
