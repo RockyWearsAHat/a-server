@@ -91,24 +91,6 @@ int R3000A::Step() {
     LogDebug("PC=%08X INSTR=%08X", pc, currentInstruction);
   }
 
-  // Temporary: periodic PC sampling for debugging (every ~4M instructions)
-  if ((instructionCount & 0x3FFFFF) == 0) {
-    LogInfo("PC=%08X instr=%llu", pc, (unsigned long long)instructionCount);
-  }
-
-  // One-shot diagnostic: log when PC lands in low memory (not BIOS trampoline)
-  {
-    static bool crashLogged = false;
-    if (!crashLogged && pc < 0x80000000 && pc != 0xA0 && pc != 0xB0 &&
-        pc != 0xC0 && pc != 0x80) {
-      LogInfo("CRASH-DETECT: PC=0x%08X instr=%llu r31(RA)=0x%08X r2(v0)=0x%08X "
-              "r4(a0)=0x%08X r29(sp)=0x%08X",
-              pc, (unsigned long long)instructionCount, regs[31], regs[2],
-              regs[4], regs[29]);
-      crashLogged = true;
-    }
-  }
-
   uint32_t currentPc = pc;
   pc = nextPc;
   nextPc += 4;

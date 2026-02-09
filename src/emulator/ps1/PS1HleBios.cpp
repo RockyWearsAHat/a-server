@@ -49,23 +49,31 @@ void PS1HleBios::ResetState() {
 
 void PS1HleBios::HandleException(PS1 &ps1) {
   auto &cpu = ps1.GetCPU();
+  auto &mem = ps1.GetMemory();
   auto &irqs = ps1.GetInterrupts();
 
   uint32_t cause = cpu.GetCause();
   uint32_t excCode = (cause >> 2) & 0x1F;
 
+  // Save full CPU state to the current TCB, matching real BIOS behavior.
+  // PCB holds a pointer to the current TCB. TCB layout (0xC0 bytes):
+  //   0x00: status, 0x04: unused
+  //   0x08: r0..r31 (0x80 bytes), 0x88: EPC, 0x8C: HI, 0x90: LO
+  //   0x94: SR, 0x98: Cause
+  uint32_t tcbPtr = mem.ReadRAM32(PCB_ADDR) & 0x1FFFFF;
+  for (int i = 0; i < 32; i++) {
+    mem.WriteRAM32(tcbPtr + 0x08 + i * 4, cpu.GetRegister(i));
+  }
+  mem.WriteRAM32(tcbPtr + 0x88, cpu.GetEPC());
+  mem.WriteRAM32(tcbPtr + 0x8C, cpu.GetHI());
+  mem.WriteRAM32(tcbPtr + 0x90, cpu.GetLO());
+  mem.WriteRAM32(tcbPtr + 0x94, cpu.GetCOP0(CPU::COP0::SR));
+  mem.WriteRAM32(tcbPtr + 0x98, cause);
+
   if (excCode == 0 && hookedEntryIntHandler != 0) {
     uint32_t istat = irqs.ReadStat();
     uint32_t imask = irqs.ReadMask();
     uint32_t pending = istat & imask;
-
-    // Save full CPU state so ReturnFromException can restore it
-    for (int i = 0; i < 32; i++) {
-      savedFrame.gpr[i] = cpu.GetRegister(i);
-    }
-    savedFrame.hi = cpu.GetHI();
-    savedFrame.lo = cpu.GetLO();
-    savedFrame.valid = true;
 
     if (pending & IRQ::VBLANK) {
       DeliverEvent(0xF0000001, 0x0001);
@@ -84,7 +92,44 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       irqs.WriteStat(istat & ~IRQ::TIMER2);
     }
     if (pending & IRQ::CDROM) {
-      irqs.WriteStat(istat & ~IRQ::CDROM);
+      auto &cdrom = ps1.GetCDROM();
+      uint8_t intType = cdrom.GetInterruptFlag();
+
+      // Map CDROM INT type to event spec per PSX-SPX:
+      //   INT1 → data ready (spec=0x0040)
+      //   INT2 → command completed (spec=0x0020)
+      //   INT3 → command acknowledged (spec=0x0010)
+      //   INT4 → data end (spec=0x0080)
+      //   INT5 → error (spec=0x8000)
+      uint32_t spec = 0;
+      switch (intType) {
+      case 1:
+        spec = 0x0040;
+        break;
+      case 2:
+        spec = 0x0020;
+        break;
+      case 3:
+        spec = 0x0010;
+        break;
+      case 4:
+        spec = 0x0080;
+        break;
+      case 5:
+        spec = 0x8000;
+        break;
+      default:
+        break;
+      }
+      if (spec != 0) {
+        DeliverEvent(0xF0000003, spec);
+      }
+      DeliverEvent(0xF0000003, 0x1000);
+
+      // Do NOT acknowledge CDROM IRQ here — the game's own handler
+      // (reached via the longjmp) needs to see it pending so it can
+      // read the CDROM response FIFO and acknowledge the interrupt flag
+      // itself via CDROM register writes.
     }
     if (pending & IRQ::DMA) {
       irqs.WriteStat(istat & ~IRQ::DMA);
@@ -93,19 +138,22 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       irqs.WriteStat(istat & ~IRQ::SIO0);
     }
 
-    // longjmp into the setjmp buffer registered via HookEntryInt (B0:19h).
-    auto &mem = ps1.GetMemory();
+    // longjmp into the setjmp buffer registered via HookEntryInt (B0:19h)
     uint32_t sjBuf = hookedEntryIntHandler;
     uint32_t ra = mem.Read32(sjBuf + 0x00);
     uint32_t sp = mem.Read32(sjBuf + 0x04);
 
     {
       auto &log = AIO::Emulator::Common::Logger::Instance();
-      char dbg[256];
+      char dbg[512];
       snprintf(dbg, sizeof(dbg),
                "ExcDispatch: longjmp buf=0x%08X ra=0x%08X sp=0x%08X EPC=0x%08X "
-               "SR=0x%08X",
-               sjBuf, ra, sp, cpu.GetEPC(), cpu.GetCOP0(CPU::COP0::SR));
+               "SR=0x%08X tcb=0x%08X v0_saved=0x%08X v0_cpu=0x%08X "
+               "ra_saved=0x%08X",
+               sjBuf, ra, sp, cpu.GetEPC(), cpu.GetCOP0(CPU::COP0::SR), tcbPtr,
+               mem.ReadRAM32(tcbPtr + 0x08 + 2 * 4),   // v0 in TCB
+               cpu.GetRegister(2),                     // v0 in CPU
+               mem.ReadRAM32(tcbPtr + 0x08 + 31 * 4)); // ra in TCB
       log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
     }
 
@@ -121,8 +169,7 @@ void PS1HleBios::HandleException(PS1 &ps1) {
   }
 
   if (excCode == 0) {
-    // Hardware interrupt but no registered handler — just acknowledge and
-    // return
+    // Hardware interrupt but no registered handler — acknowledge and return
     uint32_t istat = irqs.ReadStat();
     uint32_t imask = irqs.ReadMask();
     uint32_t pending = istat & imask;
@@ -161,9 +208,13 @@ void PS1HleBios::HandleException(PS1 &ps1) {
 
 void PS1HleBios::Dispatch(PS1 &ps1, uint8_t table, uint8_t func) {
   auto &log = AIO::Emulator::Common::Logger::Instance();
+  auto &cpu = ps1.GetCPU();
   log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-             "BIOS call: table=0x%02X func=0x%02X ($ra=0x%08X)", table, func,
-             ps1.GetCPU().GetRegister(31));
+             "BIOS call: table=0x%02X func=0x%02X ($ra=0x%08X) "
+             "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t1=0x%08X",
+             table, func, cpu.GetRegister(31), cpu.GetRegister(4),
+             cpu.GetRegister(5), cpu.GetRegister(6), cpu.GetRegister(7),
+             cpu.GetRegister(9));
 
   switch (table) {
   case 0xA0:
@@ -827,32 +878,39 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     cpu.SetRegister(2, 0xFFFFFFFF);
     break;
 
-  // B0:17h ReturnFromException
+  // B0:17h ReturnFromException — restore from TCB, matching real BIOS
   case 0x17: {
-    uint32_t epc = cpu.GetEPC();
+    uint32_t tcbPtr = mem.ReadRAM32(PCB_ADDR) & 0x1FFFFF;
+
+    // Restore R1..R31 from TCB (skip R0 and R26/K0 per PSX-SPX)
+    for (int i = 1; i < 32; i++) {
+      if (i == 26)
+        continue; // K0 reserved for exception handler
+      cpu.SetRegister(i, mem.ReadRAM32(tcbPtr + 0x08 + i * 4));
+    }
+
+    uint32_t epc = mem.ReadRAM32(tcbPtr + 0x88);
+    cpu.SetHI(mem.ReadRAM32(tcbPtr + 0x8C));
+    cpu.SetLO(mem.ReadRAM32(tcbPtr + 0x90));
+
+    uint32_t sr = mem.ReadRAM32(tcbPtr + 0x94);
+    // RFE: shift the interrupt/kernel-mode stack right by 2
+    sr = (sr & ~0xF) | ((sr >> 2) & 0xF);
+    cpu.SetCOP0(CPU::COP0::SR, sr);
 
     {
       auto &log = AIO::Emulator::Common::Logger::Instance();
-      char dbg[256];
-      uint32_t sr = cpu.GetCOP0(CPU::COP0::SR);
+      char dbg[512];
+      uint32_t v0_tcb = mem.ReadRAM32(tcbPtr + 0x08 + 2 * 4);
+      uint32_t ra_tcb = mem.ReadRAM32(tcbPtr + 0x08 + 31 * 4);
       snprintf(dbg, sizeof(dbg),
-               "ReturnFromException: EPC=0x%08X SR=0x%08X valid=%d", epc, sr,
-               savedFrame.valid ? 1 : 0);
+               "ReturnFromException: EPC=0x%08X SR=0x%08X tcb=0x%08X "
+               "v0_tcb=0x%08X ra_tcb=0x%08X v0_cpu=0x%08X ra_cpu=0x%08X",
+               epc, sr, tcbPtr, v0_tcb, ra_tcb, cpu.GetRegister(2),
+               cpu.GetRegister(31));
       log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
     }
 
-    if (savedFrame.valid) {
-      for (int i = 1; i < 32; i++) {
-        cpu.SetRegister(i, savedFrame.gpr[i]);
-      }
-      cpu.SetHI(savedFrame.hi);
-      cpu.SetLO(savedFrame.lo);
-      savedFrame.valid = false;
-    }
-
-    uint32_t sr = cpu.GetCOP0(CPU::COP0::SR);
-    sr = (sr & ~0xF) | ((sr >> 2) & 0xF);
-    cpu.SetCOP0(CPU::COP0::SR, sr);
     cpu.SetPC(epc);
     break;
   }
@@ -906,7 +964,7 @@ void PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
       break;
     }
 
-    // Mask to physical for reading the filename string
+    // Read the filename string
     uint32_t physName = nameAddr & 0x1FFFFFFF;
     char filename[128];
     for (int i = 0; i < 127; i++) {
@@ -1223,44 +1281,95 @@ void PS1HleBios::PopulateBiosRegion(PS1Memory &memory) {
 // ─── Kernel Stubs in RAM ────────────────────────────────────────────────
 
 void PS1HleBios::InstallKernelStubs(PS1Memory &memory) {
-  // Garbage area at 0x00000000 — must be non-zero for games like R-Types
-  // that read from address 0 via uninitialized pointers.
-  // Real BIOS copies the exception handler here; we write a recognizable
-  // pattern that satisfies the non-zero requirement.
-  WriteRAMInstr(memory, 0x00, 0x00000003); // real BIOS overwrites [0] with 3
-  WriteRAMInstr(memory, 0x04, 0x275A0C80); // part of exc handler copy
-  WriteRAMInstr(memory, 0x08, 0x03400008); // jr k0
-  WriteRAMInstr(memory, 0x0C, 0x00000000); // nop
+  // ─── Garbage area at 0x00000000 ───────────────────────────────────
+  // Real BIOS copies the 4-opcode exception vector here, but first word
+  // gets overwritten to 0x00000003 by CDROM init code.
+  // Games like R-Types read from address 0 via uninitialized pointers
+  // and need non-zero values.
+  // Real BIOS pattern: LUI k0,0 / ADDIU k0,k0,0xC80 / JR k0 / NOP
+  WriteRAMInstr(memory, 0x00, 0x00000003); // overwritten
+  WriteRAMInstr(
+      memory, 0x04,
+      ADDIU(26, 26,
+            static_cast<int16_t>(EXC_HANDLER_ADDR))); // addiu k0,k0,0xC80
+  WriteRAMInstr(memory, 0x08, 0x03400008);            // jr k0
+  WriteRAMInstr(memory, 0x0C, NOP());
 
   // RAM size in megabytes at [0x60]
   memory.WriteRAM32(0x60, 2);
-  // Unknown kernel vars at fixed offsets
   memory.WriteRAM32(0x64, 0x00000000);
   memory.WriteRAM32(0x68, 0x000000FF);
 
-  // Exception vector at 0x80000080:
-  // The real BIOS installs 4 opcodes that jump to the kernel exception handler.
-  // For HLE, the CPU intercepts PC=0x80 before fetching, so these are only
-  // read by games that patch the exception handler (e.g., Metal Gear Solid).
-  // We install the standard pattern that games expect to find:
-  //   lui  k0, upper(handler)
-  //   addiu k0, lower(handler)
-  //   jr   k0
-  //   nop
-  // Point to our BIOS region handler stub at 0xBFC00180 (physical 0x1FC00180)
+  // ─── Exception vector at 0x80000080 ───────────────────────────────
+  // Real BIOS: 4 opcodes that jump to the kernel exception handler.
+  // For HLE, the CPU intercepts PC=0x80 before fetching these.
+  // Games that patch the exception handler expect the standard pattern
+  // pointing to EXC_HANDLER_ADDR (real BIOS uses 0xC80).
   uint32_t excBase = 0x80;
-  WriteRAMInstr(memory, excBase, LUI(26, 0xA000));         // lui k0, 0xA000
-  WriteRAMInstr(memory, excBase + 4, ORI(26, 26, 0x0080)); // ori k0, k0, 0x0080
-  WriteRAMInstr(memory, excBase + 8, 0x03400008);          // jr k0
-  WriteRAMInstr(memory, excBase + 12, NOP());              // nop (delay slot)
+  WriteRAMInstr(memory, excBase, LUI(26, 0x0000)); // lui k0, 0
+  WriteRAMInstr(
+      memory, excBase + 4,
+      ADDIU(26, 26,
+            static_cast<int16_t>(EXC_HANDLER_ADDR))); // addiu k0,k0,0xC80
+  WriteRAMInstr(memory, excBase + 8, 0x03400008);     // jr k0
+  WriteRAMInstr(memory, excBase + 12, NOP());
 
-  // A/B/C call vectors at 0xA0, 0xB0, 0xC0 in RAM
-  // Games call these via JR; the CPU intercepts at these addresses for HLE.
-  // Install JR $ra + NOP as fallback in case the intercept is bypassed.
+  // ─── Exception handler code block at EXC_HANDLER_ADDR ─────────────
+  // Games read C(06h) and patch instructions at specific offsets from
+  // the returned address. This block must contain the standard instruction
+  // pattern the real BIOS has so games can verify and patch it.
+  //
+  // Real BIOS exception handler layout (from PSX-SPX patch docs):
+  //   +00h: load ToT pointer and get TCB chain
+  //   +08h..+24h: navigate to current TCB
+  //   +28h: SW r1, [k0+04h]   ← start of register save block
+  //   +2Ch: SW r2, [k0+08h]
+  //   +30h: SW r3, [k0+0Ch]
+  //   ...more register saves...
+  //   +7Ch: SW ra, [k0+7Ch]
+  //   +80h: MFC0 r3, cop0r14 (EPC)  ← lightgun patch target
+  //   +84h: NOP
+  //   ...rest of exception handler...
+  //
+  // We fill this with NOP except for the specific instructions that
+  // games verify/patch.  HLE still intercepts at PC=0x80 so these
+  // opcodes are never actually executed — they just need to be
+  // readable at the expected addresses.
+
+  // Zero-fill the whole handler block first
+  for (uint32_t off = 0; off < EXC_HANDLER_SIZE; off += 4) {
+    WriteRAMInstr(memory, EXC_HANDLER_ADDR + off, NOP());
+  }
+
+  // +00h: LUI k0, 0x0100 (part of ToT lookup — games verify this)
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x00, LUI(26, 0x0001));
+  // +04h: NOP
+  // +08h: LW k0, [k0+08h] — load ExCB pointer
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x08, 0x8F5A0008);
+  // +0Ch: NOP
+  // +10h: LW k0, [k0+00h] — first chain element
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x10, 0x8F5A0000);
+  // +14h: NOP
+  // +18h: ADDIU k0, k0, 8 — skip to TCB register save area
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x18, 0x235A0008);
+
+  // +28h..+30h: Register saves that the cop0r13 patch targets
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x28, 0xAF410004); // SW r1,[k0+04h]
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x2C, 0xAF420008); // SW r2,[k0+08h]
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x30, 0xAF43000C); // SW r3,[k0+0Ch]
+
+  // +7Ch: SW ra, [k0+7Ch]
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x7C, 0xAF5F007C);
+
+  // +80h: MFC0 r3, cop0r14 (EPC) — lightgun patch writes here
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x80, 0x40037000);
+  // +84h: NOP
+  WriteRAMInstr(memory, EXC_HANDLER_ADDR + 0x84, NOP());
+
+  // ─── A/B/C call vectors at 0xA0, 0xB0, 0xC0 ──────────────────────
   for (uint32_t tableAddr : {0xA0u, 0xB0u, 0xC0u}) {
     WriteRAMInstr(memory, tableAddr, JR_RA());
     WriteRAMInstr(memory, tableAddr + 4, NOP());
-    // The real BIOS has 4 opcodes per vector (16 bytes)
     WriteRAMInstr(memory, tableAddr + 8, NOP());
     WriteRAMInstr(memory, tableAddr + 12, NOP());
   }
@@ -1353,9 +1462,9 @@ void PS1HleBios::InitKernelState(PS1Memory &memory) {
     memory.WriteRAM32(C0_TABLE_ADDR + i * 4, tramAddr);
   }
 
-  // C(06h) = ExceptionHandler — games read this to patch exception handling
-  // Point to the code we installed at 0x80000080
-  memory.WriteRAM32(C0_TABLE_ADDR + 0x06 * 4, 0x80000080);
+  // C(06h) = ExceptionHandler — games read this to patch exception handling.
+  // Must point to the exception handler code block (real BIOS uses 0xC80).
+  memory.WriteRAM32(C0_TABLE_ADDR + 0x06 * 4, 0x80000000 | EXC_HANDLER_ADDR);
 
   // ─── Zero-fill all control block regions ──────────────────────────
   uint8_t *ram = memory.GetRAMPointer();

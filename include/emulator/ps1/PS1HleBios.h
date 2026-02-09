@@ -80,17 +80,23 @@ private:
   // Games read function pointers from the B0/C0/A0 tables and call them
   // directly. Each trampoline loads $t1 with the function number and jumps
   // to the 0xA0/0xB0/0xC0 vector so TryHLETrap can intercept the call.
-  static constexpr uint32_t A0_TRAMPOLINE_ADDR = 0x1000;  // 256 × 12 = 0xC00
-  static constexpr uint32_t B0_TRAMPOLINE_ADDR = 0x2000;  // 256 × 12 = 0xC00
-  static constexpr uint32_t C0_TRAMPOLINE_ADDR = 0x3000;  // 128 × 12 = 0x600
+  static constexpr uint32_t A0_TRAMPOLINE_ADDR = 0x1000; // 256 × 12 = 0xC00
+  static constexpr uint32_t B0_TRAMPOLINE_ADDR = 0x2000; // 256 × 12 = 0xC00
+  static constexpr uint32_t C0_TRAMPOLINE_ADDR = 0x3000; // 128 × 12 = 0x600
 
   // Control block regions
   static constexpr uint32_t EXCB_ADDR = 0xE600; // 4 × 0x08 = 0x20
-  static constexpr uint32_t PCB_ADDR  = 0xE620; // 1 × 0x04
-  static constexpr uint32_t TCB_ADDR  = 0xE624; // 4 × 0xC0 = 0x300
+  static constexpr uint32_t PCB_ADDR = 0xE620;  // 1 × 0x04
+  static constexpr uint32_t TCB_ADDR = 0xE624;  // 4 × 0xC0 = 0x300
   static constexpr uint32_t EVCB_ADDR = 0xE924; // 16 × 0x1C = 0x1C0
-  static constexpr uint32_t FCB_ADDR  = 0xEB00; // 16 × 0x2C = 0x2C0
-  static constexpr uint32_t DCB_ADDR  = 0xEDC0; // 10 × 0x50 = 0x320
+  static constexpr uint32_t FCB_ADDR = 0xEB00;  // 16 × 0x2C = 0x2C0
+  static constexpr uint32_t DCB_ADDR = 0xEDC0;  // 10 × 0x50 = 0x320
+
+  // Exception handler code block — games read C(06h) and patch code at
+  // offsets like +28h, +70h, +80h from it.  Real BIOS places this at 0xC80.
+  // Must be far enough from the A0/B0/C0 vectors at 0xA0-0xCF.
+  static constexpr uint32_t EXC_HANDLER_ADDR = 0xC80;
+  static constexpr uint32_t EXC_HANDLER_SIZE = 0x100; // 256 bytes
 
   // Device name strings placed after the control blocks
   static constexpr uint32_t DEV_STRINGS_ADDR = 0xF0E0;

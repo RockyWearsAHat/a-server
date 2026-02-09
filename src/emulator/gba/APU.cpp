@@ -101,12 +101,12 @@ void APU::GenerateOutputSample() {
     if (psgShift < 1)
       psgShift = 1;
 
-    int16_t ch1 = hwCh1.DacOutput();
-    int16_t ch2 = hwCh2.DacOutput();
+    int ch1 = hwCh1.DacOutput();
+    int ch2 = hwCh2.DacOutput();
     uint8_t waveRam[16];
     ReadWaveRam(waveRam);
-    int16_t ch3 = hwCh3.DacOutput(waveRam);
-    int16_t ch4 = hwCh4.DacOutput();
+    int ch3 = hwCh3.DacOutput(waveRam);
+    int ch4 = hwCh4.DacOutput();
 
     int32_t psgLeft = 0, psgRight = 0;
     if (psgEnableLeft & 1)
@@ -126,8 +126,9 @@ void APU::GenerateOutputSample() {
     if (psgEnableRight & 8)
       psgRight += ch4;
 
-    psgLeft = (psgLeft * (psgVolLeft + 1)) / 8;
-    psgRight = (psgRight * (psgVolRight + 1)) / 8;
+    // mGBA PSG gain chain: accumulate unsigned → <<3 → *(1+masterVol)
+    psgLeft = (psgLeft << 3) * (psgVolLeft + 1);
+    psgRight = (psgRight << 3) * (psgVolRight + 1);
     psgLeft >>= psgShift;
     psgRight >>= psgShift;
 
@@ -147,20 +148,19 @@ void APU::GenerateOutputSample() {
     left += psgLeft;
     right += psgRight;
 
-    // SOUNDBIAS-based gain — mirrors mGBA's _applyBias().
-    // Real hardware adds bias (0x200), clamps to 10-bit (0-0x3FF), subtracts
-    // bias, then multiplies by masterVolume*3/16.  With masterVolume = 0x100
-    // the effective gain is 48×, mapping the ~±2000 combined signal into
-    // the full 16-bit output range.
-    constexpr int BIAS = 0x200;
+    // SOUNDBIAS gain — mirrors mGBA's _applyBias().
+    // Bias is bits 1-9 of SOUNDBIAS register (default 0x200 → bias=0x200).
+    // Add bias, clamp to 10-bit, subtract bias, scale by masterVolume*3/16.
+    uint16_t soundBiasReg = memory.Read16(0x04000000 + IORegs::SOUNDBIAS);
+    int bias = soundBiasReg & 0x3FF;
     constexpr int MASTER_VOL = 0x100;
-    auto applyBias = [](int sample) -> int {
-      sample += BIAS;
+    auto applyBias = [bias](int sample) -> int {
+      sample += bias;
       if (sample >= 0x400)
         sample = 0x3FF;
       else if (sample < 0)
         sample = 0;
-      return ((sample - BIAS) * MASTER_VOL * 3) >> 4;
+      return ((sample - bias) * MASTER_VOL * 3) >> 4;
     };
     left = applyBias(left);
     right = applyBias(right);
@@ -604,9 +604,16 @@ void APU::OnSoundRegisterWrite(uint32_t offset, uint16_t value) {
     break;
   }
   case IORegs::SOUND3CNT_H: {
-    int volCode = (value >> 13) & 0x3;
-    static const int volShifts[4] = {4, 0, 1, 2}; // mute, 100%, 50%, 25%
-    hwCh3.volumeShift = volShifts[volCode];
+    int volCode = (value >> 13) & 0x7;
+    // GBA-specific: volCode >= 4 means "Force 75%" (sample * 3/16)
+    if (volCode >= 4) {
+      hwCh3.volumeShift = 0;
+      hwCh3.forceThreeQuarters = true;
+    } else {
+      static const int volShifts[4] = {4, 0, 1, 2}; // mute, 100%, 50%, 25%
+      hwCh3.volumeShift = volShifts[volCode];
+      hwCh3.forceThreeQuarters = false;
+    }
     break;
   }
   case IORegs::SOUND3CNT_X: {

@@ -7,6 +7,8 @@ description: "Instructions for visual development testing - capturing A/V output
 
 ## 🚨 CRITICAL: AGENT CANNOT VIEW IMAGES OR VIDEO
 
+**OVER ALL OTHER FORMS OF TESTING, PREFER THE INBUILT VS CODE DEBUGGER FOR CAREFUL STEP-BY-STEP INSPECTION OF INTERNAL STATE, BREAKPOINTS ON SPECIFIC SECTIONS, AND CLEAR AND CLEAN TRACKING OF DATA. ALWAYS PREFER THE VS CODE DEBUGGER, LOGGING, OR UNIT TESTING** Visual testing is a last resort when you need to verify actual rendered output or audio quality that can't be captured by unit tests, logs, or step through debugging.
+
 **AI agents CANNOT see, view, or analyze:**
 
 - MP4 video files

@@ -69,14 +69,20 @@ uint8_t CDROM::Read8(uint32_t addr) {
       stat |= 0x40; // Data FIFO not empty
     if (commandPending)
       stat |= 0x80; // Busy
+    LogDebug("CDROM-R reg0 status=0x%02X idx=%d respEmpty=%d busy=%d", stat,
+             index, responseFIFO.empty() ? 1 : 0, commandPending ? 1 : 0);
     return stat;
   }
   case 1: {
     // Response FIFO
-    if (responseFIFO.empty())
+    if (responseFIFO.empty()) {
+      LogDebug("CDROM-R reg1 response=0x00 (empty)");
       return 0;
+    }
     uint8_t val = responseFIFO.front();
     responseFIFO.pop();
+    LogDebug("CDROM-R reg1 response=0x%02X remaining=%zu", val,
+             responseFIFO.size());
     return val;
   }
   case 2: {
@@ -89,8 +95,11 @@ uint8_t CDROM::Read8(uint32_t addr) {
   case 3: {
     if (index & 1) {
       // Interrupt flag (with index bit)
-      return interruptFlag | 0xE0; // Top 3 bits always set
+      uint8_t val = interruptFlag | 0xE0;
+      LogDebug("CDROM-R reg3 intFlag=0x%02X (raw=0x%02X)", val, interruptFlag);
+      return val;
     }
+    LogDebug("CDROM-R reg3 intEnable=0x%02X", interruptEnable | 0xE0);
     return interruptEnable | 0xE0;
   }
   default:
@@ -100,6 +109,8 @@ uint8_t CDROM::Read8(uint32_t addr) {
 
 void CDROM::Write8(uint32_t addr, uint8_t value) {
   uint32_t reg = addr - IO::CDROM_BASE;
+
+  LogDebug("CDROM-W reg%d.idx%d val=0x%02X", reg, index, value);
 
   switch (reg) {
   case 0:
@@ -545,6 +556,9 @@ void CDROM::PushResponse(uint8_t value) { responseFIFO.push(value); }
 
 void CDROM::SetInterrupt(uint8_t type) {
   interruptFlag = type & 0x07;
+  LogDebug("CDROM SetInterrupt INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
+           type, interruptEnable, interruptFlag,
+           (interruptEnable & interruptFlag) ? 1 : 0);
   if (interruptEnable & interruptFlag) {
     interrupts.RequestIRQ(IRQ::CDROM);
   }

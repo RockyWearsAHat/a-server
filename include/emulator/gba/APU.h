@@ -200,7 +200,7 @@ private:
 
     void Reset() { *this = HwSquareChannel{}; }
 
-    int16_t DacOutput() const {
+    int DacOutput() const {
       if (!enabled || !dacEnabled)
         return 0;
       static const uint8_t dutyTable[4][8] = {
@@ -209,8 +209,7 @@ private:
           {1, 0, 0, 0, 0, 1, 1, 1}, // 50%
           {0, 1, 1, 1, 1, 1, 1, 0}, // 75%
       };
-      int sample = dutyTable[duty & 3][dutyPos & 7] ? volume : 0;
-      return (int16_t)((sample * 2 - 15) << 3);
+      return dutyTable[duty & 3][dutyPos & 7] ? volume : 0;
     }
   };
 
@@ -223,19 +222,23 @@ private:
     bool lengthEnable = false;
     bool enabled = false;
     bool dacEnabled = false;
-    bool bankMode = false; // false=single bank, true=two banks
-    int bankSelect = 0;    // which bank to play
+    bool bankMode = false;           // false=single bank, true=two banks
+    int bankSelect = 0;              // which bank to play
+    bool forceThreeQuarters = false; // GBA-specific Force 75% mode
 
     void Reset() { *this = HwWaveChannel{}; }
 
-    int16_t DacOutput(const uint8_t *waveRam) const {
+    int DacOutput(const uint8_t *waveRam) const {
       if (!enabled || !dacEnabled)
         return 0;
       int byteIdx = pos / 2;
       int nibble = (pos & 1) ? (waveRam[byteIdx] & 0xF)
                              : ((waveRam[byteIdx] >> 4) & 0xF);
-      int shifted = (volumeShift == 3) ? 0 : ((volumeShift == 0) ? nibble : (nibble >> volumeShift));
-      return (int16_t)((shifted * 2 - 15) << 3);
+      if (forceThreeQuarters)
+        return (nibble * 3) >> 2;
+      if (volumeShift >= 4)
+        return 0;
+      return (volumeShift == 0) ? nibble : (nibble >> volumeShift);
     }
   };
 
@@ -257,11 +260,10 @@ private:
 
     void Reset() { *this = HwNoiseChannel{}; }
 
-    int16_t DacOutput() const {
+    int DacOutput() const {
       if (!enabled || !dacEnabled)
         return 0;
-      int sample = (~lfsr & 1) ? volume : 0;
-      return (int16_t)((sample * 2 - 15) << 3);
+      return (~lfsr & 1) ? volume : 0;
     }
   };
 

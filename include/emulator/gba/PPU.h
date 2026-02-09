@@ -42,13 +42,15 @@ public:
 
 private:
   void DrawScanline();
-  void RenderMode0();
-  void RenderMode1();
-  void RenderMode2();
+  void RenderMode0(bool objEnabled);
+  void RenderMode1(bool objEnabled);
+  void RenderMode2(bool objEnabled);
   void RenderMode3();
   void RenderMode4();
   void RenderMode5();
   void RenderOBJ();
+  void ComputeOBJBudget();
+  void RenderOBJAtPriority(int priority);
   void RenderBackground(int bgIndex);
   void RenderAffineBackground(int bgIndex);
 
@@ -103,6 +105,9 @@ private:
 
   // Per-scanline OBJ window coverage. 1=inside OBJ window.
   std::array<uint8_t, SCREEN_WIDTH> objWindowMaskLine{};
+
+  // Per-scanline OBJ rendering budget. 1=this OAM entry is renderable.
+  std::array<uint8_t, 128> objRenderable{};
 
   // Classic NES Series palette mapping mode
   bool classicNesMode = false;

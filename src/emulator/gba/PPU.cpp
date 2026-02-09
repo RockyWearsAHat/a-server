@@ -528,23 +528,32 @@ void PPU::DrawScanline() {
   std::fill(priorityBuffer.begin() + scanline * SCREEN_WIDTH,
             priorityBuffer.begin() + (scanline + 1) * SCREEN_WIDTH, (uint8_t)4);
 
-  if (mode == 0) {
-    RenderMode0();
-  } else if (mode == 1) {
-    RenderMode1();
-  } else if (mode == 2) {
-    RenderMode2();
-  } else if (mode == 3) {
-    RenderMode3();
-  } else if (mode == 4) {
-    RenderMode4();
-  } else if (mode == 5) {
-    RenderMode5();
+  bool objEnabled = (dispcnt & 0x1000) != 0;
+
+  // Pre-compute OBJ rendering budget so mode renderers can interleave
+  // OBJ rendering with BG rendering per priority level
+  if (objEnabled) {
+    ComputeOBJBudget();
   }
 
-  // Render OBJ (Sprites)
-  if (dispcnt & 0x1000) { // OBJ Enable
-    RenderOBJ();
+  if (mode == 0) {
+    RenderMode0(objEnabled);
+  } else if (mode == 1) {
+    RenderMode1(objEnabled);
+  } else if (mode == 2) {
+    RenderMode2(objEnabled);
+  } else if (mode == 3) {
+    RenderMode3();
+    if (objEnabled)
+      RenderOBJ();
+  } else if (mode == 4) {
+    RenderMode4();
+    if (objEnabled)
+      RenderOBJ();
+  } else if (mode == 5) {
+    RenderMode5();
+    if (objEnabled)
+      RenderOBJ();
   }
 
   // Apply Color Special Effects (Blending/Brightness)
@@ -552,6 +561,13 @@ void PPU::DrawScanline() {
 }
 
 void PPU::RenderOBJ() {
+  ComputeOBJBudget();
+  for (int p = 3; p >= 0; --p) {
+    RenderOBJAtPriority(p);
+  }
+}
+
+void PPU::ComputeOBJBudget() {
   // GBA hardware OBJ rendering budget: 1210 dots available per scanline.
   // When HBlank Interval Free (DISPCNT bit 5) is set, the budget drops
   // to 954 dots because OAM access during HBlank steals rendering time.
@@ -562,15 +578,8 @@ void PPU::RenderOBJ() {
   const bool hblankIntervalFree = ((dispcntForBudget >> 5) & 1) != 0;
   const int maxObjDots = hblankIntervalFree ? 954 : 1210;
 
-  // First pass: evaluate sprites in OAM order (0→127) to determine which
-  // sprites fit within the rendering budget. Each sprite that intersects
-  // this scanline costs dots based on its visible width.
-  struct ObjEntry {
-    int oamIndex;
-    int dotsUsed;
-  };
   int objDotsUsed = 0;
-  uint8_t objRenderable[128] = {};
+  objRenderable.fill(0);
 
   const uint8_t *oamData = memory.GetOAMData();
   const size_t oamSize = memory.GetOAMSize();
@@ -602,8 +611,6 @@ void PPU::RenderOBJ() {
     int bw = (affine && dblOrDis) ? w * 2 : w;
     int bh = (affine && dblOrDis) ? h * 2 : h;
 
-    // GBA Y-coords are 8-bit unsigned; large sprites near Y=255 wrap into
-    // negative territory to appear at the top of the screen.
     if (y + bh > 256)
       y -= 256;
 
@@ -617,19 +624,28 @@ void PPU::RenderOBJ() {
       objRenderable[i] = 1;
     }
   }
+}
 
-  // Second pass: render in reverse OAM order (127→0) so lower-index
+void PPU::RenderOBJAtPriority(int targetPriority) {
+  const uint8_t *oamData = memory.GetOAMData();
+  const size_t oamSize = memory.GetOAMSize();
+
+  // Render in reverse OAM order (127→0) so lower-index
   // sprites overwrite higher-index ones (correct priority).
   for (int i = 127; i >= 0; --i) {
     if (!objRenderable[i])
       continue;
 
-    uint32_t oamAddr = 0x07000000 + (i * 8);
+    const uint32_t oamOff = static_cast<uint32_t>(i * 8);
+    uint16_t attr2 = ReadLE16(oamData, oamSize, oamOff + 4);
 
-    const uint32_t oamOff = (oamAddr - 0x07000000u);
+    // Skip sprites not at the target priority level
+    int priority = (attr2 >> 10) & 0x3;
+    if (priority != targetPriority)
+      continue;
+
     uint16_t attr0 = ReadLE16(oamData, oamSize, oamOff);
     uint16_t attr1 = ReadLE16(oamData, oamSize, oamOff + 2);
-    uint16_t attr2 = ReadLE16(oamData, oamSize, oamOff + 4);
 
     // Check Y Coordinate
     int y = attr0 & 0xFF;
@@ -687,7 +703,6 @@ void PPU::RenderOBJ() {
         x -= 512; // Sign extend 9-bit X
 
       int tileIndex = attr2 & 0x3FF;
-      int priority = (attr2 >> 10) & 0x3;
       int paletteBank = (attr2 >> 12) & 0xF;
       bool is8bpp = (attr0 >> 13) & 1;
       const bool mosaicEnable = ((attr0 >> 12) & 1) != 0;
@@ -904,28 +919,25 @@ void PPU::RenderOBJ() {
   }
 }
 
-void PPU::RenderMode2() {
+void PPU::RenderMode2(bool objEnabled) {
   // Mode 2: Affine, BG2 and BG3
   uint16_t dispcnt = ReadRegister(0x00);
 
-  // Get priorities for enabled BGs
-  bool bg2Enabled = dispcnt & 0x0400;
-  bool bg3Enabled = dispcnt & 0x0800;
+  bool bg2Enabled = (dispcnt & 0x0400) != 0;
+  bool bg3Enabled = (dispcnt & 0x0800) != 0;
 
   int bg2Priority = bg2Enabled ? (ReadRegister(0x0C) & 0x3) : 99;
   int bg3Priority = bg3Enabled ? (ReadRegister(0x0E) & 0x3) : 99;
 
-  // Render in priority order: lower priority first, then higher (BG2 wins ties)
-  if (bg2Priority > bg3Priority || (bg2Priority == bg3Priority && bg2Enabled)) {
-    if (bg3Enabled)
+  // Render per priority level (3→0), interleaving BGs and OBJs
+  for (int p = 3; p >= 0; --p) {
+    // BG3 first (higher index), then BG2
+    if (bg3Enabled && bg3Priority == p)
       RenderAffineBackground(3);
-    if (bg2Enabled)
+    if (bg2Enabled && bg2Priority == p)
       RenderAffineBackground(2);
-  } else {
-    if (bg2Enabled)
-      RenderAffineBackground(2);
-    if (bg3Enabled)
-      RenderAffineBackground(3);
+    if (objEnabled)
+      RenderOBJAtPriority(p);
   }
 }
 
@@ -1237,7 +1249,7 @@ void PPU::RenderMode5() {
   // Scanlines >= 128 will just show backdrop
 }
 
-void PPU::RenderMode1() {
+void PPU::RenderMode1(bool objEnabled) {
   // Mode 1: Mixed Tiled mode
   // BG0, BG1 = Regular tiled (text mode)
   // BG2 = Affine/Rotation-Scaling
@@ -1245,7 +1257,6 @@ void PPU::RenderMode1() {
 
   uint16_t dispcnt = ReadRegister(0x00);
 
-  // Get priorities for enabled BGs
   struct BGInfo {
     int index;
     int priority;
@@ -1267,41 +1278,30 @@ void PPU::RenderMode1() {
     }
   }
 
-  // Sort by priority (descending) then by index (descending for same priority)
-  for (int i = 0; i < 3; ++i) {
-    for (int j = i + 1; j < 3; ++j) {
-      if (bgs[i].priority < bgs[j].priority ||
-          (bgs[i].priority == bgs[j].priority && bgs[i].index < bgs[j].index)) {
-        BGInfo temp = bgs[i];
-        bgs[i] = bgs[j];
-        bgs[j] = temp;
+  // Render per priority level (3→0), interleaving BGs and OBJs
+  for (int p = 3; p >= 0; --p) {
+    // BG2 first (higher index), then BG1, then BG0
+    for (int bgSlot = 2; bgSlot >= 0; --bgSlot) {
+      if (bgs[bgSlot].enabled && bgs[bgSlot].priority == p) {
+        if (bgs[bgSlot].affine) {
+          RenderAffineBackground(bgs[bgSlot].index);
+        } else {
+          RenderBackground(bgs[bgSlot].index);
+        }
       }
     }
-  }
-
-  // Render in sorted order (lowest priority first)
-  for (int i = 0; i < 3; ++i) {
-    if (bgs[i].enabled) {
-      if (bgs[i].affine) {
-        RenderAffineBackground(bgs[i].index);
-      } else {
-        RenderBackground(bgs[i].index);
-      }
+    if (objEnabled) {
+      RenderOBJAtPriority(p);
     }
   }
 }
 
-void PPU::RenderMode0() {
+void PPU::RenderMode0(bool objEnabled) {
   // Mode 0: Tiled, BG0-BG3
+  // GBA composites per priority level: for each priority 3→0,
+  // render BGs at that level (highest BG index first), then OBJs at that level.
   uint16_t dispcnt = ReadRegister(0x00);
 
-  // Render backgrounds from lowest priority to highest
-  // BG priority is in bits 0-1 of BGxCNT (0 = highest, 3 = lowest)
-  // When priorities are equal, lower BG number wins (BG0 > BG1 > BG2 > BG3)
-  // So we render: priority 3 first, then 2, 1, 0
-  // Within same priority: BG3 first, then BG2, BG1, BG0 (so BG0 wins on ties)
-
-  // Get priorities for enabled BGs
   struct BGInfo {
     int index;
     int priority;
@@ -1311,33 +1311,25 @@ void PPU::RenderMode0() {
 
   for (int i = 0; i < 4; ++i) {
     bgs[i].index = i;
-    bgs[i].enabled = dispcnt & (0x100 << i);
+    bgs[i].enabled = (dispcnt & (0x100 << i)) != 0;
     if (bgs[i].enabled) {
       uint16_t bgcnt = ReadRegister(0x08 + (i * 2));
       bgs[i].priority = bgcnt & 0x3;
     } else {
-      bgs[i].priority = 99; // Won't be rendered
+      bgs[i].priority = 99;
     }
   }
 
-  // Sort by priority (descending) then by index (descending for same priority)
-  // This means we render lowest priority first, BG with higher index first for
-  // ties
-  for (int i = 0; i < 4; ++i) {
-    for (int j = i + 1; j < 4; ++j) {
-      if (bgs[i].priority < bgs[j].priority ||
-          (bgs[i].priority == bgs[j].priority && bgs[i].index < bgs[j].index)) {
-        BGInfo temp = bgs[i];
-        bgs[i] = bgs[j];
-        bgs[j] = temp;
+  // Render per priority level (3→0). Within each level, render BGs with
+  // higher index first so lower BG index wins ties, then OBJs at that level.
+  for (int p = 3; p >= 0; --p) {
+    for (int bgIdx = 3; bgIdx >= 0; --bgIdx) {
+      if (bgs[bgIdx].enabled && bgs[bgIdx].priority == p) {
+        RenderBackground(bgs[bgIdx].index);
       }
     }
-  }
-
-  // Render in sorted order (lowest priority first)
-  for (int i = 0; i < 4; ++i) {
-    if (bgs[i].enabled) {
-      RenderBackground(bgs[i].index);
+    if (objEnabled) {
+      RenderOBJAtPriority(p);
     }
   }
 }

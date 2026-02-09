@@ -41,6 +41,9 @@ public:
   bool ReadSectorData(uint32_t sectorNum, uint8_t *out,
                       uint32_t size = SECTOR_DATA_SIZE) const;
 
+  // ─── Interrupt State (for HLE BIOS event delivery) ──────────────────
+  uint8_t GetInterruptFlag() const { return interruptFlag & 0x07; }
+
   // ─── DMA Interface ──────────────────────────────────────────────────
   uint8_t DMARead();
   bool HasDataToRead() const;
