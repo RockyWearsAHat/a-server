@@ -151,6 +151,36 @@ inline uint16_t ReadBgVram16(const uint8_t *vram, size_t /*vramSize*/,
   return static_cast<uint16_t>(vram[o0] | (vram[o1] << 8));
 }
 
+// Snapshot helpers for reading VRAM/palette by absolute GBA address.
+// These avoid going through the memory bus so rendering reads frame-stable
+// snapshot data instead of live memory the CPU may be updating.
+inline uint8_t ReadSnapshotVram8(const uint8_t *snap, uint32_t absAddr) {
+  uint32_t offset = absAddr & 0x1FFFFu;
+  if (offset >= 0x18000u)
+    offset -= 0x8000u;
+  return snap[offset];
+}
+
+inline uint16_t ReadSnapshotVram16(const uint8_t *snap, uint32_t absAddr) {
+  uint32_t offset = absAddr & 0x1FFFFu;
+  if (offset >= 0x18000u)
+    offset -= 0x8000u;
+  uint32_t o1 = (offset + 1u);
+  if (o1 >= 0x18000u)
+    o1 -= 0x8000u;
+  return static_cast<uint16_t>(snap[offset] | (snap[o1] << 8));
+}
+
+inline uint16_t ReadSnapshotPalette16(const uint8_t *snap, uint32_t absAddr) {
+  uint32_t offset = absAddr & 0x3FFu;
+  return static_cast<uint16_t>(snap[offset] | (snap[offset + 1u] << 8));
+}
+
+inline uint16_t ReadSnapshotOam16(const uint8_t *snap, uint32_t absAddr) {
+  uint32_t offset = absAddr & 0x3FFu;
+  return static_cast<uint16_t>(snap[offset] | (snap[offset + 1u] << 8));
+}
+
 } // namespace
 
 PPU::PPU(GBAMemory &mem)
@@ -159,6 +189,10 @@ PPU::PPU(GBAMemory &mem)
   // Initialize double buffers with black
   backBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
   frontBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 0xFF000000);
+
+  vramSnapshot.resize(VRAM_SNAPSHOT_SIZE, 0);
+  paletteSnapshot.resize(PALETTE_SNAPSHOT_SIZE, 0);
+  oamSnapshot.resize(OAM_SNAPSHOT_SIZE, 0);
   // Initialize priority buffer (4 = backdrop, lowest priority)
   priorityBuffer.resize(SCREEN_WIDTH * SCREEN_HEIGHT, 4);
 
@@ -190,6 +224,11 @@ void PPU::Reset() {
 
   // Clear OBJ window mask
   objWindowMaskLine.fill(0);
+
+  // Reset latched scroll registers
+  std::fill(std::begin(latchedBGHOFS), std::end(latchedBGHOFS), 0);
+  std::fill(std::begin(latchedBGVOFS), std::end(latchedBGVOFS), 0);
+  scrollLatchedForScanline = false;
 
   // Clear framebuffers to black
   std::fill(backBuffer.begin(), backBuffer.end(), 0xFF000000);
@@ -235,24 +274,16 @@ void PPU::Update(int cycles) {
 
     // Check if we hit an event
     if (cycleCounter == 960) {
-      // HBlank Start
+      // HBlank Start: render using values set up during previous HBlank
       if (scanline < 160) {
-        // Render the scanline using the VRAM/OAM state from the visible period.
-        // HBlank is when games/DMA typically update VRAM for the *next*
-        // scanline.
         DrawScanline();
       }
 
       // Hardware enters HBlank on every scanline (including VBlank).
       // Set DISPSTAT first so any HBlank-triggered work sees the flag.
-      // Use ReadIORegister16Internal to avoid infinite recursion with flush.
       uint16_t dispstat = memory.ReadIORegister16Internal(0x04);
       dispstat |= 2; // HBlank flag (Bit 1)
       memory.WriteIORegisterInternal(0x04, dispstat);
-
-      // Apply any palette/VRAM writes that were queued during the visible
-      // period so they become visible at the next safe window.
-      memory.ApplyDeferredWrites();
 
       // Trigger HBlank IRQ if enabled in DISPSTAT.
       if (dispstat & 0x10) { // HBlank IRQ Enable (Bit 4)
@@ -284,8 +315,20 @@ void PPU::Update(int cycles) {
         scanline = 0;
         frameCount++;
 
-        // Swap buffers after frame completion for thread-safe display
         SwapBuffers();
+      }
+
+      // Latch BG scroll registers at the start of each visible scanline.
+      // The game may update scroll during the previous scanline's visible
+      // period. By latching at cycle 0 of the NEW scanline, we capture
+      // the value after the game's writes have taken effect, preventing
+      // CPU batch-timing jitter from affecting which value DrawScanline sees.
+      if (scanline < 160) {
+        for (int bg = 0; bg < 4; ++bg) {
+          latchedBGHOFS[bg] = ReadRegister(0x10 + bg * 4) & 0x01FF;
+          latchedBGVOFS[bg] = ReadRegister(0x12 + bg * 4) & 0x01FF;
+        }
+        scrollLatchedForScanline = true;
       }
 
       // Update VCOUNT
@@ -311,10 +354,6 @@ void PPU::Update(int cycles) {
 
         // Trigger VBlank IRQ on rising edge
         if (!wasVBlank) {
-
-          // Apply any deferred palette writes now that we're in VBlank
-          // This ensures palette is stable for entire previous frame
-          memory.ApplyDeferredWrites();
 
           // Latch BGxX/BGxY to internal registers at VBlank start
           // BG2 reference point (0x04000028-0x0400002F)
@@ -387,13 +426,39 @@ void PPU::Update(int cycles) {
 }
 
 void PPU::DrawScanline() {
+  if (scanline == 0) {
+    SnapshotGraphicsMemory();
+  }
+
+  // Fallback: latch BG scroll registers if VBlank latching in Update()
+  // hasn't run yet (first frame, or direct DrawScanline calls in tests).
+  // In normal operation, scrollLatchedForScanline is true from the previous
+  // frame's VBlank and the latched values remain stable for the entire frame.
+  if (!scrollLatchedForScanline) {
+    for (int bg = 0; bg < 4; ++bg) {
+      latchedBGHOFS[bg] = ReadRegister(0x10 + bg * 4) & 0x01FF;
+      latchedBGVOFS[bg] = ReadRegister(0x12 + bg * 4) & 0x01FF;
+    }
+  }
+
   uint16_t dispcnt = ReadRegister(0x00);
+
+  // GBATEK: When forced blank is set (bit 7), the display shows white.
+  // No BGs or OBJs are rendered.
+  if (dispcnt & 0x0080u) {
+    for (int x = 0; x < SCREEN_WIDTH; ++x) {
+      backBuffer[scanline * SCREEN_WIDTH + x] = 0xFFFFFFFFu; // White
+    }
+    return;
+  }
+
   int mode = dispcnt & 0x7;
 
   BuildObjWindowMaskForScanline();
 
   // Fetch Backdrop Color (Palette Index 0)
-  uint16_t backdropColor = memory.Read16(0x05000000);
+  uint16_t backdropColor =
+      ReadSnapshotPalette16(paletteSnapshot.data(), 0x05000000);
   uint8_t r = (backdropColor & 0x1F) << 3;
   uint8_t g = ((backdropColor >> 5) & 0x1F) << 3;
   uint8_t b = ((backdropColor >> 10) & 0x1F) << 3;
@@ -473,8 +538,8 @@ void PPU::ComputeOBJBudget() {
   int objDotsUsed = 0;
   objRenderable.fill(0);
 
-  const uint8_t *oamData = memory.GetOAMData();
-  const size_t oamSize = memory.GetOAMSize();
+  const uint8_t *oamData = oamSnapshot.data();
+  const size_t oamSize = OAM_SNAPSHOT_SIZE;
 
   static const int sizes[3][4][2] = {{{8, 8}, {16, 16}, {32, 32}, {64, 64}},
                                      {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
@@ -519,8 +584,8 @@ void PPU::ComputeOBJBudget() {
 }
 
 void PPU::RenderOBJAtPriority(int targetPriority) {
-  const uint8_t *oamData = memory.GetOAMData();
-  const size_t oamSize = memory.GetOAMSize();
+  const uint8_t *oamData = oamSnapshot.data();
+  const size_t oamSize = OAM_SNAPSHOT_SIZE;
 
   // Render in reverse OAM order (127→0) so lower-index
   // sprites overwrite higher-index ones (correct priority).
@@ -626,10 +691,10 @@ void PPU::RenderOBJAtPriority(int targetPriority) {
         // Each affine parameter group is 32 bytes apart in OAM
         // Parameters are at offsets 6, 14, 22, 30 within each 32-byte block
         uint32_t affineBase = 0x07000006 + (affineIndex * 32);
-        pa = (int16_t)memory.Read16(affineBase);
-        pb = (int16_t)memory.Read16(affineBase + 8);
-        pc = (int16_t)memory.Read16(affineBase + 16);
-        pd = (int16_t)memory.Read16(affineBase + 24);
+        pa = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase);
+        pb = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase + 8);
+        pc = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase + 16);
+        pd = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase + 24);
       }
 
       // Center of the sprite in sprite coordinates
@@ -704,16 +769,16 @@ void PPU::RenderOBJAtPriority(int targetPriority) {
           int inTileY = spriteY % 8;
 
           if (is8bpp) {
-            const uint8_t *vramData = memory.GetVRAMData();
-            const size_t vramSize = memory.GetVRAMSize();
+            const uint8_t *vramData = vramSnapshot.data();
+            const size_t vramSize = VRAM_SNAPSHOT_SIZE;
             pixelTileAddr = tileBase + (uint32_t)tileNum * 32u +
                             (uint32_t)inTileY * 8u + (uint32_t)inTileX;
             pixelTileByte =
                 ReadVram8(vramData, vramSize, pixelTileAddr - 0x06000000u);
             colorIndex = pixelTileByte;
           } else {
-            const uint8_t *vramData = memory.GetVRAMData();
-            const size_t vramSize = memory.GetVRAMSize();
+            const uint8_t *vramData = vramSnapshot.data();
+            const size_t vramSize = VRAM_SNAPSHOT_SIZE;
             pixelTileAddr = tileBase + (uint32_t)tileNum * 32u +
                             (uint32_t)inTileY * 4u + (uint32_t)(inTileX / 2);
             pixelTileByte =
@@ -740,16 +805,16 @@ void PPU::RenderOBJAtPriority(int targetPriority) {
           int inTileY = spriteY % 8;
 
           if (is8bpp) {
-            const uint8_t *vramData = memory.GetVRAMData();
-            const size_t vramSize = memory.GetVRAMSize();
+            const uint8_t *vramData = vramSnapshot.data();
+            const size_t vramSize = VRAM_SNAPSHOT_SIZE;
             pixelTileAddr = tileBase + (uint32_t)tileNum * 32u +
                             (uint32_t)inTileY * 8u + (uint32_t)inTileX;
             pixelTileByte =
                 ReadVram8(vramData, vramSize, pixelTileAddr - 0x06000000u);
             colorIndex = pixelTileByte;
           } else {
-            const uint8_t *vramData = memory.GetVRAMData();
-            const size_t vramSize = memory.GetVRAMSize();
+            const uint8_t *vramData = vramSnapshot.data();
+            const size_t vramSize = VRAM_SNAPSHOT_SIZE;
             pixelTileAddr = tileBase + (uint32_t)tileNum * 32u +
                             (uint32_t)inTileY * 4u + (uint32_t)(inTileX / 2);
             pixelTileByte =
@@ -786,8 +851,8 @@ void PPU::RenderOBJAtPriority(int targetPriority) {
                   (effectivePaletteBank * 32) + (effectiveColorIndex * 2);
             }
 
-            const uint8_t *palData = memory.GetPaletteData();
-            const size_t palSize = memory.GetPaletteSize();
+            const uint8_t *palData = paletteSnapshot.data();
+            const size_t palSize = PALETTE_SNAPSHOT_SIZE;
             uint16_t color =
                 ReadLE16(palData, palSize, paletteAddr - 0x05000000u);
 
@@ -907,7 +972,7 @@ void PPU::RenderAffineBackground(int bgIndex) {
         int tileY = mapY / 8;
 
         uint32_t mapAddr = mapBase + (tileY * tileMapWidth) + tileX;
-        uint8_t tileIndex = memory.Read8(mapAddr);
+        uint8_t tileIndex = ReadSnapshotVram8(vramSnapshot.data(), mapAddr);
 
         // Fetch Pixel from Tile
         // 8bpp tiles are 64 bytes
@@ -916,7 +981,7 @@ void PPU::RenderAffineBackground(int bgIndex) {
 
         uint32_t tileAddr =
             tileBase + (tileIndex * 64) + (inTileY * 8) + inTileX;
-        uint8_t colorIndex = memory.Read8(tileAddr);
+        uint8_t colorIndex = ReadSnapshotVram8(vramSnapshot.data(), tileAddr);
 
         if (colorIndex != 0) {
           // Check if this BG layer is enabled by window settings at this pixel
@@ -929,7 +994,8 @@ void PPU::RenderAffineBackground(int bgIndex) {
           int pixelIndex = scanline * SCREEN_WIDTH + x;
           if (bgPriority <= priorityBuffer[pixelIndex]) {
             uint32_t paletteAddr = 0x05000000 + (colorIndex * 2);
-            uint16_t color = memory.Read16(paletteAddr);
+            uint16_t color =
+                ReadSnapshotPalette16(paletteSnapshot.data(), paletteAddr);
 
             uint8_t r = (color & 0x1F) << 3;
             uint8_t g = ((color >> 5) & 0x1F) << 3;
@@ -977,14 +1043,16 @@ void PPU::RenderAffineBackground(int bgIndex) {
 
         const uint32_t mapAddr =
             mapBase + (uint32_t)(tileY * tileMapWidth) + (uint32_t)tileX;
-        const uint8_t tileIndex = memory.Read8(mapAddr);
+        const uint8_t tileIndex =
+            ReadSnapshotVram8(vramSnapshot.data(), mapAddr);
 
         const int inTileX = mapX % 8;
         const int inTileY = mapY % 8;
 
         const uint32_t tileAddr = tileBase + (uint32_t)(tileIndex * 64) +
                                   (uint32_t)(inTileY * 8) + (uint32_t)inTileX;
-        const uint8_t colorIndex = memory.Read8(tileAddr);
+        const uint8_t colorIndex =
+            ReadSnapshotVram8(vramSnapshot.data(), tileAddr);
 
         if (colorIndex != 0) {
           if (!IsLayerEnabledAtPixel(x, scanline, bgIndex)) {
@@ -995,7 +1063,8 @@ void PPU::RenderAffineBackground(int bgIndex) {
           if (bgPriority <= priorityBuffer[pixelIndex]) {
             const uint32_t paletteAddr =
                 0x05000000u + (uint32_t)colorIndex * 2u;
-            const uint16_t color = memory.Read16(paletteAddr);
+            const uint16_t color =
+                ReadSnapshotPalette16(paletteSnapshot.data(), paletteAddr);
 
             const uint8_t r = (color & 0x1F) << 3;
             const uint8_t g = ((color >> 5) & 0x1F) << 3;
@@ -1033,7 +1102,7 @@ void PPU::RenderMode3() {
       continue;
     }
     uint32_t addr = vramBase + (scanline * SCREEN_WIDTH + x) * 2;
-    uint16_t color = memory.Read16(addr);
+    uint16_t color = ReadSnapshotVram16(vramSnapshot.data(), addr);
 
     uint8_t r = (color & 0x1F) << 3;
     uint8_t g = ((color >> 5) & 0x1F) << 3;
@@ -1069,12 +1138,13 @@ void PPU::RenderMode4() {
       continue;
     }
     uint32_t addr = vramBase + scanline * SCREEN_WIDTH + x;
-    uint8_t colorIndex = memory.Read8(addr);
+    uint8_t colorIndex = ReadSnapshotVram8(vramSnapshot.data(), addr);
 
     // Bitmap modes do not have per-pixel transparency. Palette index 0 is a
     // valid color.
     const uint32_t paletteAddr = 0x05000000 + (uint32_t)colorIndex * 2u;
-    const uint16_t color = memory.Read16(paletteAddr);
+    const uint16_t color =
+        ReadSnapshotPalette16(paletteSnapshot.data(), paletteAddr);
 
     const uint8_t r = (color & 0x1F) << 3;
     const uint8_t g = ((color >> 5) & 0x1F) << 3;
@@ -1119,7 +1189,7 @@ void PPU::RenderMode5() {
         continue;
       }
       uint32_t addr = vramBase + (scanline * MODE5_WIDTH + x) * 2;
-      uint16_t color = memory.Read16(addr);
+      uint16_t color = ReadSnapshotVram16(vramSnapshot.data(), addr);
 
       uint8_t r = (color & 0x1F) << 3;
       uint8_t g = ((color >> 5) & 0x1F) << 3;
@@ -1234,8 +1304,8 @@ void PPU::RenderBackground(int bgIndex) {
 
   uint16_t bgcnt = ReadRegister(0x08 + (bgIndex * 2));
 
-  uint16_t bghofs = ReadRegister(0x10 + (bgIndex * 4)) & 0x01FF;
-  uint16_t bgvofs = ReadRegister(0x12 + (bgIndex * 4)) & 0x01FF;
+  uint16_t bghofs = latchedBGHOFS[bgIndex];
+  uint16_t bgvofs = latchedBGVOFS[bgIndex];
 
   const bool mosaicEnable = ((bgcnt >> 6) & 1) != 0;
   int mosaicH = 1;
@@ -1266,10 +1336,10 @@ void PPU::RenderBackground(int bgIndex) {
   uint32_t mapBase = vramBase + (screenBaseBlock * 2048);
   uint32_t tileBase = vramBase + (charBaseBlock * 16384);
 
-  const uint8_t *vramData = memory.GetVRAMData();
-  const size_t vramSize = memory.GetVRAMSize();
-  const uint8_t *palData = memory.GetPaletteData();
-  const size_t palSize = memory.GetPaletteSize();
+  const uint8_t *vramData = vramSnapshot.data();
+  const size_t vramSize = VRAM_SNAPSHOT_SIZE;
+  const uint8_t *palData = paletteSnapshot.data();
+  const size_t palSize = PALETTE_SNAPSHOT_SIZE;
 
   for (int x = 0; x < SCREEN_WIDTH; ++x) {
     // Wrap based on the actual BG size (256 or 512). For 256x256 backgrounds,
@@ -1459,6 +1529,13 @@ void PPU::SwapBuffers() {
   std::swap(frontBuffer, backBuffer);
 }
 
+void PPU::SnapshotGraphicsMemory() {
+  std::memcpy(vramSnapshot.data(), memory.GetVRAMData(), VRAM_SNAPSHOT_SIZE);
+  std::memcpy(paletteSnapshot.data(), memory.GetPaletteData(),
+              PALETTE_SNAPSHOT_SIZE);
+  std::memcpy(oamSnapshot.data(), memory.GetOAMData(), OAM_SNAPSHOT_SIZE);
+}
+
 void PPU::RestoreFramebuffer(const uint32_t *data, size_t count) {
   std::lock_guard<std::mutex> lock(bufferMutex);
   if (count == frontBuffer.size()) {
@@ -1472,6 +1549,22 @@ void PPU::OnIOWrite(void *context, uint32_t offset, uint16_t value) {
 }
 
 void PPU::HandleIOWrite(uint32_t offset, uint16_t value) {
+  // BG scroll register writes (0x10-0x1E): immediately update latched values.
+  // On real hardware the scroll is sampled once per scanline, but with CPU
+  // batch-timing jitter the write can land anywhere within a batch window.
+  // Updating the latch at write time makes the value deterministic regardless
+  // of batch alignment.
+  if (offset >= 0x10 && offset <= 0x1E) {
+    int bgIndex = (offset - 0x10) / 4;
+    bool isVertical = ((offset - 0x10) % 4) >= 2;
+    if (isVertical) {
+      latchedBGVOFS[bgIndex] = value & 0x01FF;
+    } else {
+      latchedBGHOFS[bgIndex] = value & 0x01FF;
+    }
+    return;
+  }
+
   // Per GBATEK: writing BGxX/BGxY mid-frame immediately re-latches the
   // internal reference point registers. This is used by games for wavy
   // backgrounds, screen-shake, and parallax effects (e.g. Metroid Zero
@@ -1616,10 +1709,10 @@ void PPU::BuildObjWindowMaskForScanline() {
   const bool mapping1D = ((dispcnt >> 6) & 1) != 0;
   const uint32_t tileBase = 0x06010000;
 
-  const uint8_t *oamData = memory.GetOAMData();
-  const size_t oamSize = memory.GetOAMSize();
-  const uint8_t *vramData = memory.GetVRAMData();
-  const size_t vramSize = memory.GetVRAMSize();
+  const uint8_t *oamData = oamSnapshot.data();
+  const size_t oamSize = OAM_SNAPSHOT_SIZE;
+  const uint8_t *vramData = vramSnapshot.data();
+  const size_t vramSize = VRAM_SNAPSHOT_SIZE;
 
   static const int sizes[3][4][2] = {
       {{8, 8}, {16, 16}, {32, 32}, {64, 64}}, // Square
@@ -1699,10 +1792,10 @@ void PPU::BuildObjWindowMaskForScanline() {
     if (isAffine) {
       const int affineIndex = (attr1 >> 9) & 0x1F;
       const uint32_t affineBase = 0x07000006u + (uint32_t)(affineIndex * 32);
-      pa = (int16_t)memory.Read16(affineBase);
-      pb = (int16_t)memory.Read16(affineBase + 8);
-      pc = (int16_t)memory.Read16(affineBase + 16);
-      pd = (int16_t)memory.Read16(affineBase + 24);
+      pa = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase);
+      pb = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase + 8);
+      pc = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase + 16);
+      pd = (int16_t)ReadSnapshotOam16(oamSnapshot.data(), affineBase + 24);
     }
 
     const int centerX = width / 2;

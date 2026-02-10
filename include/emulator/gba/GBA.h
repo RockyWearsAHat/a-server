@@ -79,10 +79,15 @@ private:
   static constexpr uint64_t STALL_CYCLE_THRESHOLD =
       167800000ULL; // ~10s @16.78MHz
 
-  // Performance: batch peripheral updates instead of updating PPU/APU/Timers
-  // every single CPU instruction.
+  // Peripheral cycle batching: instead of updating PPU/APU/timers after
+  // every CPU instruction, we accumulate cycles and flush right before
+  // the next PPU event (HBlank at cycle 960, or end-of-line at cycle 1232).
+  // This gives the CPU maximum lead time before HBlank DMA fires, which
+  // is critical for games whose CPU fills per-scanline DMA source tables
+  // (e.g., Classic NES Series scroll tables).  Timing-sensitive IO reads
+  // (DISPSTAT/VCOUNT/timers) call FlushPendingPeripheralCycles() before
+  // returning, so batching doesn't affect observable accuracy.
   int pendingPeripheralCycles = 0;
-  static constexpr int PERIPHERAL_BATCH_CYCLES = 8;
 
   std::atomic<uint64_t> totalCyclesExecuted{0};
 };

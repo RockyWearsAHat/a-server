@@ -333,10 +333,15 @@ int GBA::Step() {
   int peripheralCycles = cpuCycles;
   if (cpu->IsHalted()) {
     // During HALT the CPU stops executing instructions, but hardware
-    // peripherals (PPU, timers, APU) keep running. Fast-forward time by one
-    // scanline (~1232 cycles) so timers fire at the correct rate and audio
-    // FIFOs are fed properly.
-    totalCycles = 1232;
+    // peripherals (PPU, timers, APU) keep running. Advance time only to the
+    // next PPU event boundary (HBlank at cycle 960, or end-of-line at 1232).
+    // On real hardware, the CPU resumes at the exact cycle when an enabled
+    // interrupt fires. Advancing to the next event ensures the CPU wakes up
+    // at the right time rather than overshooting by up to a full scanline.
+    int haltCycles = ppu->CyclesToNextEvent();
+    if (haltCycles <= 0)
+      haltCycles = 1;
+    totalCycles = haltCycles;
     peripheralCycles = totalCycles;
   }
 
@@ -360,11 +365,15 @@ int GBA::Step() {
     stallCrashTriggered = false;
   }
 
-  // Batch peripheral time advancement to avoid doing 3 updates + IRQ polling
-  // on every instruction. This is a major speed win and still preserves
-  // ordering (peripherals advance after each instruction, just grouped).
+  // Flush peripheral cycles right before the next PPU event boundary.
+  // CyclesToNextEvent() returns how many more cycles the PPU needs to reach
+  // HBlank (cycle 960) or end-of-line (cycle 1232).  Waiting until we've
+  // accumulated that many CPU cycles means the CPU runs ahead of the PPU by
+  // up to a full visible period (~960 cycles), giving it maximum lead time
+  // to fill DMA source tables before HBlank DMA fires.  Timing-sensitive
+  // IO reads still call FlushPendingPeripheralCycles() on demand.
   pendingPeripheralCycles += peripheralCycles;
-  if (pendingPeripheralCycles >= PERIPHERAL_BATCH_CYCLES || cpu->IsHalted()) {
+  if (pendingPeripheralCycles >= ppu->CyclesToNextEvent() || cpu->IsHalted()) {
     memory->AdvanceCycles(pendingPeripheralCycles);
     pendingPeripheralCycles = 0;
     cpu->PollInterrupts();

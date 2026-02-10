@@ -36,6 +36,12 @@ public:
 
   uint64_t GetInstanceId() const { return instanceId; }
 
+  int CyclesToNextEvent() const {
+    if (cycleCounter < 960)
+      return 960 - cycleCounter;
+    return 1232 - cycleCounter;
+  }
+
 private:
   void DrawScanline();
   void RenderMode0(bool objEnabled);
@@ -65,6 +71,17 @@ private:
   void HandleIOWrite(uint32_t offset, uint16_t value);
 
   GBAMemory &memory;
+
+  // Frame-stable VRAM/palette snapshots. Copied at frame start (scanline 0)
+  // so DrawScanline reads consistent tile/palette data even if the CPU is
+  // mid-update during VBlank.
+  static constexpr size_t VRAM_SNAPSHOT_SIZE = 0x18000;  // 96 KB
+  static constexpr size_t PALETTE_SNAPSHOT_SIZE = 0x400; // 1 KB
+  static constexpr size_t OAM_SNAPSHOT_SIZE = 0x400;     // 1 KB
+  std::vector<uint8_t> vramSnapshot;
+  std::vector<uint8_t> paletteSnapshot;
+  std::vector<uint8_t> oamSnapshot;
+  void SnapshotGraphicsMemory();
 
   // Double buffering for thread-safe framebuffer access
   std::vector<uint32_t> backBuffer;  // PPU renders to this
@@ -104,6 +121,13 @@ private:
 
   // Per-scanline OBJ rendering budget. 1=this OAM entry is renderable.
   std::array<uint8_t, 128> objRenderable{};
+
+  // BG scroll registers latched at the start of each visible scanline.
+  // Latching prevents CPU batch-timing jitter from shifting scroll values
+  // when DrawScanline executes at HBlank (cycle 960).
+  uint16_t latchedBGHOFS[4]{};
+  uint16_t latchedBGVOFS[4]{};
+  bool scrollLatchedForScanline{false};
 };
 
 } // namespace AIO::Emulator::GBA

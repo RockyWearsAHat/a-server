@@ -304,11 +304,12 @@ bool AVRecorder::EncodeOutput() {
   // Audio input: WAV file
   cmd << "-i \"" << tempAudioPath_ << "\" ";
 
-  // Output encoding
+  // Output encoding — lossless H.264 with full chroma resolution to preserve
+  // pixel-perfect GBA framebuffer output without color subsampling artifacts.
   cmd << "-c:v libx264 ";
   cmd << "-preset fast ";
-  cmd << "-crf 18 ";
-  cmd << "-pix_fmt yuv420p ";
+  cmd << "-crf 0 ";
+  cmd << "-pix_fmt yuv444p ";
   cmd << "-c:a aac ";
   cmd << "-b:a 192k ";
   cmd << "-shortest ";

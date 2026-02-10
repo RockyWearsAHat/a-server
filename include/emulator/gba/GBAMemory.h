@@ -97,6 +97,8 @@ public:
     ioWriteContext = context;
   }
 
+  bool IsDMAInProgress() const { return dmaInProgress; }
+
   // Callback for Graphics Memory Writes (palette/VRAM/OAM) - forces PPU sync
   using GraphicsWriteCallback = void (*)(void *context);
   void SetGraphicsWriteCallback(GraphicsWriteCallback callback, void *context) {
@@ -108,7 +110,6 @@ public:
   void CheckDMA(int timing);
   void UpdateTimers(int cycles);
   void AdvanceCycles(int cycles); // Advance timers, PPU, and APU together
-  void ApplyDeferredWrites();     // Apply queued palette/VRAM/OAM writes
 
   // PPU timing helper: publishes the current scanline/cycle so memory
   // access rules (VRAM/OAM/Palette visibility) can be enforced accurately.
@@ -220,16 +221,6 @@ private:
   int ppuTimingScanline = 0;
   int ppuTimingCycle = 0;
 
-  // Deferred write queue for graphics memory (palette/VRAM/OAM)
-  // Writes during unsafe timing (VISIBLE period) are queued and applied at
-  // HBlank/VBlank
-  struct DeferredWrite {
-    uint32_t address;
-    uint8_t value;
-    uint8_t region; // 5=palette, 6=VRAM, 7=OAM
-  };
-  std::vector<DeferredWrite> deferredWrites;
-
   // Internal DMA address registers (shadow registers for repeat DMAs)
   uint32_t dmaInternalSrc[4] = {0};
   uint32_t dmaInternalDst[4] = {0};
@@ -288,29 +279,19 @@ private:
   std::vector<uint8_t> vram;
   std::vector<uint8_t> oam;
 
-  // Shadow buffers for deferred graphics writes (timing-gated)
-  // Block size for dirty tracking (64 bytes = good balance of granularity vs
-  // overhead)
-  static constexpr uint32_t kDeferredBlockSize = 64u;
-  std::vector<uint8_t> palette_shadow;
-  std::vector<uint8_t> vram_shadow;
-  std::vector<uint8_t> oam_shadow;
-  std::vector<uint8_t> palette_dirtyBlocks; // 1 = dirty, 0 = clean
-  std::vector<uint8_t> vram_dirtyBlocks;
-  std::vector<uint8_t> oam_dirtyBlocks;
-  std::vector<uint32_t> palette_dirtyList; // List of dirty block indices
-  std::vector<uint32_t> vram_dirtyList;
-  std::vector<uint32_t> oam_dirtyList;
-
   // True when a user-provided BIOS image has been loaded into `bios`.
   // When set, the CPU should treat the BIOS region as real code/data and
   // avoid High-Level Emulation shortcuts for BIOS entry points.
   bool lleBiosLoaded = false;
 
+  // Set during LoadGamePak after verifying the ROM header complement check.
+  // Reset() uses this to restore the BIOS validation flag at 0x03007FFA.
+  bool headerChecksumValid = false;
+
   // BIOS open bus prefetch value. When reading from BIOS while executing
   // outside of BIOS, this value is returned instead of actual BIOS data.
-  // Classic NES Series games check this value as an anti-emulation measure.
-  // The value is set to 0xE3A02004 (MOV R2, #4) after SWI calls return.
+  // Set to 0xE3A02004 (MOV R2, #4) — the last instruction fetched before
+  // returning from SWI.
   uint32_t biosPrefetch = 0xE3A02004;
   std::vector<uint8_t> rom;
   size_t romSize = 0; // Actual ROM file size

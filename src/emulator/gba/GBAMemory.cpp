@@ -101,25 +101,6 @@ GBAMemory::GBAMemory() {
   vram.resize(MemoryMap::VRAM_SIZE);
   oam.resize(MemoryMap::OAM_SIZE);
 
-  // Shadow buffers for timing-gated graphics writes.
-  palette_shadow = palette_ram;
-  vram_shadow = vram;
-  oam_shadow = oam;
-
-  const uint32_t palBlocks =
-      (uint32_t)((palette_ram.size() + kDeferredBlockSize - 1u) /
-                 kDeferredBlockSize);
-  const uint32_t vramBlocks =
-      (uint32_t)((vram.size() + kDeferredBlockSize - 1u) / kDeferredBlockSize);
-  const uint32_t oamBlocks =
-      (uint32_t)((oam.size() + kDeferredBlockSize - 1u) / kDeferredBlockSize);
-  palette_dirtyBlocks.assign(palBlocks, 0);
-  vram_dirtyBlocks.assign(vramBlocks, 0);
-  oam_dirtyBlocks.assign(oamBlocks, 0);
-
-  palette_dirtyList.reserve(palBlocks);
-  vram_dirtyList.reserve(vramBlocks);
-  oam_dirtyList.reserve(oamBlocks);
   // ROM and SRAM sizes depend on the loaded game, but we can set defaults
   rom.resize(MemoryMap::ROM_MAX_SIZE);
   romSize = MemoryMap::ROM_MAX_SIZE; // Default: full 32MB accessible for tests
@@ -352,21 +333,6 @@ void GBAMemory::Reset() {
   std::fill(vram.begin(), vram.end(), 0);
   std::fill(oam.begin(), oam.end(), 0);
 
-  // Keep deferred-write shadow state coherent after reset.
-  if (!palette_shadow.empty())
-    palette_shadow = palette_ram;
-  if (!vram_shadow.empty())
-    vram_shadow = vram;
-  if (!oam_shadow.empty())
-    oam_shadow = oam;
-
-  std::fill(palette_dirtyBlocks.begin(), palette_dirtyBlocks.end(), 0);
-  std::fill(vram_dirtyBlocks.begin(), vram_dirtyBlocks.end(), 0);
-  std::fill(oam_dirtyBlocks.begin(), oam_dirtyBlocks.end(), 0);
-  palette_dirtyList.clear();
-  vram_dirtyList.clear();
-  oam_dirtyList.clear();
-
   // Initialize KEYINPUT to 0x03FF (All Released)
   if (io_regs.size() > 0x131) {
     io_regs[0x130] = 0xFF;
@@ -466,9 +432,7 @@ void GBAMemory::Reset() {
   eepromWriteDelay = 0; // Reset write delay
   // saveTypeLocked = false; // Do NOT reset this, as it's set by LoadGamePak
 
-  // Reset BIOS prefetch to default value. This is what Classic NES Series
-  // games expect to see when reading BIOS from outside BIOS.
-  // 0xE3A02004 = MOV R2, #4 (the instruction that executes after SWI return)
+  // 0xE3A02004 = MOV R2, #4 (last instruction fetched before SWI return)
   biosPrefetch = 0xE3A02004;
 
   // BIOS HLE: Initialize critical system state that real BIOS sets up.
@@ -492,7 +456,12 @@ void GBAMemory::Reset() {
       // 0x3007FF8: BIOS_IF (interrupt acknowledge from BIOS)
       wram_chip[0x7FF8] = 0x00;
       wram_chip[0x7FF9] = 0x00;
-      wram_chip[0x7FFA] = 0x00;
+
+      // 0x3007FFA: BIOS header validation flag
+      // Real BIOS sets this to 0x01 after verifying the ROM header checksum.
+      // Games (especially those with anti-piracy) check this on boot —
+      // if it's 0x00 they show "GAME PAK ERROR".
+      wram_chip[0x7FFA] = headerChecksumValid ? 0x01 : 0x00;
       wram_chip[0x7FFB] = 0x00;
 
       // 0x3007FFC: User IRQ handler (already set above to 0x3FF0)
@@ -694,22 +663,15 @@ void GBAMemory::LoadGamePak(const std::vector<uint8_t> &data) {
 
     // Check against stored checksum at 0xBD
     if (chk == data[0xBD]) {
-      // Header valid - Set BIOS validation flag in IWRAM
-      // Real BIOS writes 01h to 0x03007FFA after successful validation
+      headerChecksumValid = true;
       std::cout << "[GBAMemory] ROM header checksum valid (0x" << std::hex
                 << (int)chk << std::dec << ")" << std::endl;
-      if (wram_chip.size() >= 0x7FFB) {
-        wram_chip[0x7FFA] = 0x01; // Header validated
-      }
     } else {
+      headerChecksumValid = false;
       std::cerr << "[GBAMemory] WARNING: ROM header checksum mismatch!"
                 << std::endl;
       std::cerr << "[GBAMemory] Expected: 0x" << std::hex << (int)data[0xBD]
                 << ", Calculated: 0x" << (int)chk << std::dec << std::endl;
-      // Set flag to 0 (validation failed)
-      if (wram_chip.size() >= 0x7FFB) {
-        wram_chip[0x7FFA] = 0x00; // Header validation failed
-      }
     }
   }
 
@@ -891,7 +853,13 @@ void GBAMemory::SetSaveType(SaveType type) {
     break;
   }
 
-  saveTypeLocked = true; // Prevent further dynamic detection
+  // Lock save type for SRAM/Flash (definitive from string markers).
+  // For EEPROM, DON'T lock — string markers (EEPROM_V*) can't distinguish
+  // 4K from 64K. The runtime DMA transfer count detection (9 bits = 4K,
+  // 17 bits = 64K) will refine the size on the first EEPROM access.
+  if (type != SaveType::EEPROM_4K && type != SaveType::EEPROM_64K) {
+    saveTypeLocked = true;
+  }
 }
 
 void GBAMemory::FlushSave() {
@@ -1494,7 +1462,31 @@ uint8_t GBAMemory::Read8(uint32_t address) {
     return ((address >> 1) >> ((address & 1) * 8)) & 0xFF;
   }
   case 0x0E: // SRAM/Flash (GBATEK: 0x0E000000-0x0E00FFFF)
-    break;
+  {
+    if (hasSRAM) {
+      uint32_t offset = address & 0xFFFF;
+      if (isFlash) {
+        // Flash ID mode returns manufacturer/device ID
+        if (flashState == 3) {
+          if (offset == 0x0000)
+            return 0x62; // Sanyo manufacturer ID
+          if (offset == 0x0001)
+            return 0x13; // Device ID (64KB)
+          return 0;
+        }
+        uint32_t flashOffset = (flashBank * 0x10000) + offset;
+        if (flashOffset < sram.size()) {
+          return sram[flashOffset];
+        }
+        return 0xFF;
+      }
+      // Plain SRAM: 8-bit bus, 32KB mirrored
+      if (offset < sram.size()) {
+        return sram[offset];
+      }
+    }
+    return 0xFF;
+  }
   }
   return 0;
 }
@@ -1704,9 +1696,6 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
 
     if (offset < palette_ram.size()) {
       palette_ram[offset] = value;
-      // Keep shadow coherent for later deferred apply.
-      if (offset < palette_shadow.size())
-        palette_shadow[offset] = value;
     }
     break;
   }
@@ -1721,46 +1710,11 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
 
     if (offset < vram.size()) {
       vram[offset] = value;
-      // Keep shadow coherent for later deferred apply.
-      if (offset < vram_shadow.size())
-        vram_shadow[offset] = value;
     }
     break;
   }
-  case 0x07: // OAM (GBATEK: 0x07000000-0x070003FF)
-  {
-    uint32_t offset = address & MemoryMap::OAM_MASK;
-    if (offset < oam.size()) {
-      // Enforce visibility rules: writes to OAM during the visible period are
-      // blocked. HBlank writes are only allowed when H-Blank Interval Free is
-      // enabled (DISPCNT bit 5). Forced blank allows all writes.
-      const uint16_t dispcnt = (uint16_t)(io_regs[IORegs::DISPCNT] |
-                                          (io_regs[IORegs::DISPCNT + 1] << 8));
-      const bool forcedBlank = (dispcnt & 0x0080u) != 0;
-      const bool inVisible =
-          ppuTimingValid && (ppuTimingScanline < 160) && (ppuTimingCycle < 960);
-      const bool inHBlank = ppuTimingValid && (ppuTimingCycle >= 960) &&
-                            (ppuTimingScanline < 160);
-      const bool hBlankIntervalFree = (dispcnt & 0x0020u) != 0;
-
-      if (!forcedBlank) {
-        if (inVisible) {
-          // Block write silently.
-          break;
-        }
-        if (inHBlank && !hBlankIntervalFree) {
-          // Block write during HBlank when H-Blank Interval Free is disabled.
-          break;
-        }
-      }
-
-      oam[offset] = value;
-      // Keep shadow coherent for later deferred apply.
-      if (offset < oam_shadow.size())
-        oam_shadow[offset] = value;
-    }
+  case 0x07: // OAM - 8-bit writes ignored on real hardware
     break;
-  }
   }
 }
 
@@ -1929,11 +1883,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < palette_ram.size()) {
       palette_ram[alignedOffset] = value;
       palette_ram[alignedOffset + 1] = value;
-      // Keep shadow coherent for later deferred apply.
-      if (alignedOffset + 1 < palette_shadow.size()) {
-        palette_shadow[alignedOffset] = value;
-        palette_shadow[alignedOffset + 1] = value;
-      }
     }
     break;
   }
@@ -1968,10 +1917,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < vram.size()) {
       vram[alignedOffset] = value;
       vram[alignedOffset + 1] = value;
-      if (alignedOffset + 1 < vram_shadow.size()) {
-        vram_shadow[alignedOffset] = value;
-        vram_shadow[alignedOffset + 1] = value;
-      }
     }
     break;
   }
@@ -1982,9 +1927,92 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     break;
   }
   case 0x0E: // SRAM/Flash
-  case 0x0D: // EEPROM - ignore 8-bit writes
-    // Some titles may clock the EEPROM serial interface via byte writes.
-    // Treat this as a normal EEPROM bit write (D0).
+  {
+    if (hasSRAM) {
+      uint32_t offset = address & 0xFFFF;
+      if (isFlash) {
+        // Flash command protocol (GBATEK):
+        // Write 0xAA to 0x5555 → state 1
+        // Write 0x55 to 0x2AAA → state 2 (ready for command)
+        // Write command to 0x5555 → execute
+        if (flashState == 0 && offset == 0x5555 && value == 0xAA) {
+          flashState = 1;
+          break;
+        }
+        if (flashState == 1 && offset == 0x2AAA && value == 0x55) {
+          flashState = 2;
+          break;
+        }
+        if (flashState == 2 && offset == 0x5555) {
+          flashCmd = value;
+          switch (value) {
+          case 0x90: // Enter ID mode
+            flashState = 3;
+            break;
+          case 0xF0: // Exit ID mode / Reset
+            flashState = 0;
+            break;
+          case 0x80: // Erase (first part)
+            flashState = 0;
+            break;
+          case 0xA0: // Write byte (prepare)
+            flashState = 4;
+            break;
+          case 0xB0: // Bank switch (1Mbit only)
+            flashState = 5;
+            break;
+          default:
+            flashState = 0;
+            break;
+          }
+          break;
+        }
+        // Flash ID mode: 0xF0 exits
+        if (flashState == 3 && value == 0xF0) {
+          flashState = 0;
+          break;
+        }
+        // Write single byte after 0xA0 command
+        if (flashState == 4) {
+          uint32_t flashOffset = (flashBank * 0x10000) + offset;
+          if (flashOffset < sram.size()) {
+            sram[flashOffset] = value;
+          }
+          flashState = 0;
+          break;
+        }
+        // Bank switch: write bank number to 0x0000
+        if (flashState == 5 && offset == 0x0000) {
+          flashBank = value & 1;
+          flashState = 0;
+          break;
+        }
+        // Sector erase: after 0x80 command sequence, write 0x30 to sector base
+        if (flashCmd == 0x80 && value == 0x30) {
+          uint32_t sectorBase = (flashBank * 0x10000) + (offset & 0xF000);
+          for (int i = 0; i < 0x1000 && (sectorBase + i) < sram.size(); ++i) {
+            sram[sectorBase + i] = 0xFF;
+          }
+          flashState = 0;
+          break;
+        }
+        // Full chip erase: after 0x80 command sequence, write 0x10 to 0x5555
+        if (flashCmd == 0x80 && offset == 0x5555 && value == 0x10) {
+          std::fill(sram.begin(), sram.end(), 0xFF);
+          flashState = 0;
+          break;
+        }
+        flashState = 0;
+      } else {
+        // Plain SRAM: direct 8-bit write
+        if (offset < sram.size()) {
+          sram[offset] = value;
+        }
+      }
+    }
+    break;
+  }
+  case 0x0D: // EEPROM
     WriteEEPROM(value);
     break;
   }
@@ -2127,6 +2155,18 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       }
     }
 
+    // BG scroll register writes (0x10-0x1E): notify PPU for immediate
+    // re-latch so the value is captured at write time, not at DrawScanline
+    // time.
+    if (offset >= 0x10 && offset <= 0x1E) {
+      io_regs[offset] = value & 0xFF;
+      io_regs[offset + 1] = (value >> 8) & 0xFF;
+      if (ioWriteCallback) {
+        ioWriteCallback(ioWriteContext, offset, value);
+      }
+      return;
+    }
+
     // BG2X/BG2Y/BG3X/BG3Y writes: store the value to io_regs immediately
     // and notify the PPU for mid-frame re-latch of internal reference points.
     // These are write-only 32-bit registers written as two 16-bit halves;
@@ -2189,10 +2229,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       if (offset + 1 < palette_ram.size()) {
         palette_ram[offset] = b0;
         palette_ram[offset + 1] = b1;
-        if (offset + 1 < palette_shadow.size()) {
-          palette_shadow[offset] = b0;
-          palette_shadow[offset + 1] = b1;
-        }
       }
     } else if (region == 0x06) { // VRAM
       uint32_t offset = address & 0x1FFFFu;
@@ -2202,20 +2238,12 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       if (offset + 1 < vram.size()) {
         vram[offset] = b0;
         vram[offset + 1] = b1;
-        if (offset + 1 < vram_shadow.size()) {
-          vram_shadow[offset] = b0;
-          vram_shadow[offset + 1] = b1;
-        }
       }
     } else if (region == 0x07) { // OAM
       uint32_t offset = address & MemoryMap::OAM_MASK;
       if (offset + 1 < oam.size()) {
         oam[offset] = b0;
         oam[offset + 1] = b1;
-        if (offset + 1 < oam_shadow.size()) {
-          oam_shadow[offset] = b0;
-          oam_shadow[offset + 1] = b1;
-        }
       }
     }
   } else {
@@ -2343,12 +2371,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         palette_ram[offset + 1] = b1;
         palette_ram[offset + 2] = b2;
         palette_ram[offset + 3] = b3;
-        if (offset + 3 < palette_shadow.size()) {
-          palette_shadow[offset] = b0;
-          palette_shadow[offset + 1] = b1;
-          palette_shadow[offset + 2] = b2;
-          palette_shadow[offset + 3] = b3;
-        }
       }
     } else if (region == 0x06) { // VRAM
       uint32_t offset = address & 0x1FFFFu;
@@ -2362,13 +2384,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         vram[offset + 1] = b1;
         vram[offset + 2] = b2;
         vram[offset + 3] = b3;
-
-        if (offset + 3 < vram_shadow.size()) {
-          vram_shadow[offset] = b0;
-          vram_shadow[offset + 1] = b1;
-          vram_shadow[offset + 2] = b2;
-          vram_shadow[offset + 3] = b3;
-        }
       }
     } else if (region == 0x07) { // OAM
       uint32_t offset = address & MemoryMap::OAM_MASK;
@@ -2377,12 +2392,6 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         oam[offset + 1] = b1;
         oam[offset + 2] = b2;
         oam[offset + 3] = b3;
-        if (offset + 3 < oam_shadow.size()) {
-          oam_shadow[offset] = b0;
-          oam_shadow[offset + 1] = b1;
-          oam_shadow[offset + 2] = b2;
-          oam_shadow[offset + 3] = b3;
-        }
       }
     }
   } else if (region == 0x04) {
@@ -2596,48 +2605,6 @@ void GBAMemory::PerformDMA(int channel) {
     // initial dst.
     src &= mask;
     dst &= mask;
-  }
-
-  // WORKAROUND: DKC sound engine sets destCtrl=2 (Fixed) for DMA to IWRAM.
-  // With Fixed destination, all values write to the same address repeatedly.
-  // For large counts, this is audio streaming - we skip the actual writes
-  // to avoid corrupting whatever value was there before.
-  // The game expects the pre-existing value at the destination to remain.
-  bool dstIsIWRAM = (currentDst >> 24) == 0x03;
-  const bool isDKC = (gameCode == "ADKE" || gameCode == "ADKP" ||
-                      gameCode == "ADKJ" || gameCode == "ADKK");
-  const bool allowFixedIWRAMSkip =
-      EnvFlagCached("AIO_DKC_DMA_FIXED_IWRAM_SKIP") || isDKC;
-  if (allowFixedIWRAMSkip && destCtrl == 2 && dstIsIWRAM && count > 100) {
-    // Update timing as if full DMA happened using proper wait states
-    int step = is32Bit ? 4 : 2;
-    const uint32_t srcRegion = (src >> 24) & 0xF;
-    const uint32_t dstRegion = (dst >> 24) & 0xF;
-    int firstCycles = GetDmaCyclesPerWord(srcRegion, dstRegion, is32Bit, true);
-    int seqCycles = GetDmaCyclesPerWord(srcRegion, dstRegion, is32Bit, false);
-    int totalCycles =
-        2 + firstCycles + (count > 1 ? (count - 1) * seqCycles : 0);
-    if (srcCtrl == 0)
-      currentSrc += count * step;
-    else if (srcCtrl == 1)
-      currentSrc -= count * step;
-    dmaInternalSrc[channel] = currentSrc;
-    lastDMACycles += totalCycles;
-    if (timing == 3 && apu) {
-      apu->SetSuppressFifoConsumption(true);
-    }
-    UpdateTimers(totalCycles);
-    if (timing == 3 && apu) {
-      apu->SetSuppressFifoConsumption(false);
-    }
-    if (apu)
-      apu->Update(totalCycles);
-    if (ppu)
-      ppu->Update(totalCycles);
-    inImmediateDMA = wasInImmediate;
-    io_regs[baseOffset + 10] &= ~(DMAControl::ENABLE & 0xFF);
-    io_regs[baseOffset + 11] &= ~(DMAControl::ENABLE >> 8);
-    return;
   }
 
   int step = is32Bit ? 4 : 2;
@@ -3095,34 +3062,6 @@ void GBAMemory::AdvanceCycles(int cycles) {
     ppu->Update(cycles);
   if (apu)
     apu->Update(cycles);
-}
-
-void GBAMemory::ApplyDeferredWrites() {
-  if (palette_dirtyList.empty() && vram_dirtyList.empty() &&
-      oam_dirtyList.empty()) {
-    return;
-  }
-
-  auto applyBlocks =
-      [&](std::vector<uint8_t> &dst, const std::vector<uint8_t> &src,
-          std::vector<uint8_t> &dirtyFlags, std::vector<uint32_t> &dirtyList) {
-        for (uint32_t block : dirtyList) {
-          const uint32_t start = block * kDeferredBlockSize;
-          if (start >= dst.size())
-            continue;
-          const uint32_t len = (uint32_t)std::min<size_t>(
-              (size_t)kDeferredBlockSize, dst.size() - (size_t)start);
-          std::memcpy(&dst[start], &src[start], (size_t)len);
-          if (block < dirtyFlags.size())
-            dirtyFlags[block] = 0;
-        }
-        dirtyList.clear();
-      };
-
-  applyBlocks(palette_ram, palette_shadow, palette_dirtyBlocks,
-              palette_dirtyList);
-  applyBlocks(vram, vram_shadow, vram_dirtyBlocks, vram_dirtyList);
-  applyBlocks(oam, oam_shadow, oam_dirtyBlocks, oam_dirtyList);
 }
 
 uint16_t GBAMemory::GetTimerReload(int timerIdx) const {

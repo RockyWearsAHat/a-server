@@ -235,15 +235,11 @@ TEST(PPUTest, Obj2DMapping8bppUses64BlockRowStride) {
 }
 
 TEST(PPUTest, BgTileFetchDoesNotReadFromObjVram_Mode0) {
-  // NOTE: This test documents current behavior where BG tile fetches do NOT
-  // wrap within BG VRAM (64KB). GBATEK claims wrapping should occur, but SMA2
-  // breaks with that behavior. Our emulator allows BG fetches to read OBJ VRAM.
+  // BG tile fetches that would address OBJ VRAM (offset >= 0x10000) are
+  // skipped, rendering transparent. Matches mGBA behavior.
   GBAMemory mem;
   mem.Reset();
 
-  // Perform all VRAM setup before constructing the PPU. This keeps unit tests
-  // deterministic and avoids timing-dependent VRAM/OAM access restrictions
-  // during setup.
   mem.Write16(0x04000000u, 0x0100u); // mode 0, BG0 enabled
 
   // Background palette: idx1=red, idx2=green.
@@ -260,9 +256,8 @@ TEST(PPUTest, BgTileFetchDoesNotReadFromObjVram_Mode0) {
   mem.Write16(0x04000008u, bg0cnt);
   EXPECT_EQ(mem.Read16(0x04000008u), bg0cnt);
 
-  // Put a map entry at (0,0) with tile index 512 (0x200). With char base block
-  // 3 (tileBase=0x0600C000), that addresses 0x06010000 (OBJ VRAM).
-  // Current behavior: no wrapping, so we read from OBJ VRAM.
+  // Tile index 512 with char base block 3 addresses 0x06010000 (OBJ VRAM).
+  // BG fetches should NOT read from OBJ VRAM — the tile is skipped.
   const uint16_t tileEntry = 0x0200u;
   const uint32_t mapBase = 0x0600F800u;
   mem.Write16(mapBase + 0u, tileEntry);
@@ -282,11 +277,10 @@ TEST(PPUTest, BgTileFetchDoesNotReadFromObjVram_Mode0) {
 
   PPU ppu(mem);
 
-  // Render scanline 0 and sample pixel (0,0). Spec behavior: BG fetch wraps
-  // within BG VRAM, so tile 512 wraps and reads from BG VRAM => red.
+  // Tile addresses OBJ VRAM so the pixel should be transparent (black backdrop)
   ppu.Update(TestUtil::kCyclesToHBlankStart);
   ppu.SwapBuffers();
-  EXPECT_EQ(TestUtil::GetPixel(ppu, 0, 0), TestUtil::ARGBFromBGR555(0x001F));
+  EXPECT_EQ(TestUtil::GetPixel(ppu, 0, 0), 0xFF000000u);
 }
 
 TEST(PPUTest, BgTileMapWrapsWithin64K_Mode0_Size3) {
