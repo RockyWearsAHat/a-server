@@ -82,6 +82,7 @@ private:
   std::vector<uint8_t> paletteSnapshot;
   std::vector<uint8_t> oamSnapshot;
   void SnapshotGraphicsMemory();
+  void RefreshDirtySnapshots();
 
   // Double buffering for thread-safe framebuffer access
   std::vector<uint32_t> backBuffer;  // PPU renders to this

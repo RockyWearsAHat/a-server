@@ -112,6 +112,11 @@ private:
   // Real BIOS has a shell loop here; we just spin.
   static constexpr uint32_t HALT_ADDR = 0xF210;
 
+  // Kernel heap region — used by SysInitMemory/alloc_kernel_memory.
+  // Placed after all fixed kernel structures. The real BIOS uses ~8KB.
+  static constexpr uint32_t KERNEL_HEAP_ADDR = 0xF300;
+  static constexpr uint32_t KERNEL_HEAP_SIZE = 0x2000; // 8KB
+
   // Install trampoline stubs for all A0/B0/C0 table entries
   static void InstallTrampolines(PS1Memory &memory);
 
@@ -183,10 +188,21 @@ private:
   };
   static inline ExceptionFrame savedFrame;
 
-  // Heap state for malloc/free
+  // User heap state for malloc/free (A0:33h InitHeap)
   static inline uint32_t heapBase = 0;
   static inline uint32_t heapSize = 0;
   static inline uint32_t heapPtr = 0;
+
+  // Kernel heap state (C0:08h SysInitMemory / B0:00h alloc_kernel_memory)
+  static inline uint32_t kernelHeapBase = 0;
+  static inline uint32_t kernelHeapSize = 0;
+  static inline uint32_t kernelHeapPtr = 0;
+
+  // Handler chain array — 4 priority levels, stored in kernel heap RAM.
+  // Each priority has a linked list of handler entries.
+  // ToT[0x100] points to this array.
+  static constexpr int NUM_HANDLER_PRIORITIES = 4;
+  static inline uint32_t handlersArrayAddr = 0;
 
   // Random number generator
   static inline uint32_t hleSeed = 0;
@@ -200,6 +216,17 @@ private:
 
   // Pending mode=0x1000 callback from DeliverEvent (called during exception)
   static inline uint32_t pendingCallbackAddr = 0;
+
+  // Cached memory pointer for DeliverEvent and event RAM sync
+  static inline PS1Memory *memoryPtr = nullptr;
+
+  // EvCB RAM sync helpers
+  static void WriteEvCBToRAM(int slot);
+  static void ReadEvCBFromRAM(int slot);
+  static constexpr uint32_t EvCBStatusFree = 0x0000;
+  static constexpr uint32_t EvCBStatusDisabled = 0x1000;
+  static constexpr uint32_t EvCBStatusBusy = 0x2000;
+  static constexpr uint32_t EvCBStatusReady = 0x4000;
 };
 
 } // namespace AIO::Emulator::PS1

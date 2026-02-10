@@ -44,6 +44,7 @@ public:
   void SetPPU(PPU *ppuPtr) { ppu = ppuPtr; }
   // CPU connection for debug
   void SetCPU(ARM7TDMI *cpuPtr) { cpu = cpuPtr; }
+  ARM7TDMI *GetCPU() const { return cpu; }
   // GBA connection for flush callbacks
   void SetGBA(GBA *gbaPtr) { gba = gbaPtr; }
 
@@ -98,6 +99,24 @@ public:
   }
 
   bool IsDMAInProgress() const { return dmaInProgress; }
+
+  // HBlank DMA may target OAM/VRAM/Palette. These flags let the PPU
+  // selectively re-snapshot only the regions that changed.
+  bool WasOamDirtyByDMA() const { return oamDirtyByDMA; }
+  bool WasVramDirtyByDMA() const { return vramDirtyByDMA; }
+  bool WasPaletteDirtyByDMA() const { return paletteDirtyByDMA; }
+  void ClearGraphicsDMADirtyFlags() {
+    oamDirtyByDMA = false;
+    vramDirtyByDMA = false;
+    paletteDirtyByDMA = false;
+  }
+
+  bool WasPaletteDirtyByCPU() const { return paletteDirtyByCPU; }
+  bool WasVramDirtyByCPU() const { return vramDirtyByCPU; }
+  void ClearCPUGraphicsDirtyFlags() {
+    paletteDirtyByCPU = false;
+    vramDirtyByCPU = false;
+  }
 
   // Callback for Graphics Memory Writes (palette/VRAM/OAM) - forces PPU sync
   using GraphicsWriteCallback = void (*)(void *context);
@@ -225,6 +244,23 @@ private:
   uint32_t dmaInternalSrc[4] = {0};
   uint32_t dmaInternalDst[4] = {0};
   bool dmaInProgress = false;
+
+  // Bitmask of DMA timing triggers (1=VBlank, 2=HBlank, 3=Special) that
+  // were blocked because dmaInProgress was true. Fired after the current
+  // DMA completes to avoid silently dropping VBlank/HBlank DMAs when a
+  // nested ppu->Update() inside PerformDMA crosses a scanline boundary.
+  uint8_t pendingDMATiming = 0;
+
+  bool oamDirtyByDMA = false;
+  bool vramDirtyByDMA = false;
+  bool paletteDirtyByDMA = false;
+
+  // CPU-driven palette/VRAM dirty flags. Unlike the DMA flags (which track
+  // HBlank DMA), these fire on every CPU store so the PPU can re-snapshot
+  // before the next scanline. Critical for games whose software renderer
+  // (e.g. Classic NES Series) writes palette mid-frame via the CPU.
+  bool paletteDirtyByCPU = false;
+  bool vramDirtyByCPU = false;
 
   // Flash State
   int flashState = 0;   // 0=Idle, 1=Cmd1(AA), 2=Cmd2(55), 3=ID Mode

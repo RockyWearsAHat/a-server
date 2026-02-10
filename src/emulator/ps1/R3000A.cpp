@@ -95,35 +95,6 @@ int R3000A::Step() {
     LogDebug("PC=%08X INSTR=%08X", pc, currentInstruction);
   }
 
-  // TEMP: Hash search loop diagnostic
-  {
-    static int hashLoopCount = 0;
-    static bool dumpedCode = false;
-    uint32_t physPc = pc & 0x1FFFFFFF;
-    if (physPc == 0x000159A4 && !dumpedCode) {
-      dumpedCode = true;
-      LogInfo("=== HASH SEARCH FUNCTION DISASM (from RAM) ===");
-      for (uint32_t addr = 0x80015920; addr < 0x80015A20; addr += 4) {
-        uint32_t instr = memory.Read32(addr);
-        LogInfo("  %08X: %08X", addr, instr);
-      }
-      // Also dump s0-s7, fp
-      LogInfo("REGS: s0=%08X s1=%08X s2=%08X s3=%08X s4=%08X s5=%08X s6=%08X "
-              "s7=%08X fp=%08X",
-              regs[16], regs[17], regs[18], regs[19], regs[20], regs[21],
-              regs[22], regs[23], regs[30]);
-    }
-    if (physPc == 0x000159A4 || physPc == 0x000159AC) {
-      if (hashLoopCount < 20) {
-        LogInfo("HASH-LOOP[%d] PC=%08X v0=%08X v1=%08X a0=%08X a1=%08X a2=%08X "
-                "a3=%08X t0=%08X t1=%08X s0=%08X s1=%08X s2=%08X",
-                hashLoopCount, pc, regs[2], regs[3], regs[4], regs[5], regs[6],
-                regs[7], regs[8], regs[9], regs[16], regs[17], regs[18]);
-        hashLoopCount++;
-      }
-    }
-  }
-
   uint32_t currentPc = pc;
   pc = nextPc;
   nextPc += 4;

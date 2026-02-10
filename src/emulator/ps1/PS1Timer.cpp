@@ -15,6 +15,7 @@ void PS1Timer::Reset() {
     ch.mode = 0;
     ch.irqFlag = true;
   }
+  timer2Div8Accum = 0;
 }
 
 uint32_t PS1Timer::Read32(uint32_t addr) const {
@@ -82,8 +83,13 @@ void PS1Timer::Tick(uint32_t cpuCycles) {
   if (timer2Source == 0 || timer2Source == 1) {
     TickChannel(2, cpuCycles);
   } else {
-    // System clock / 8
-    TickChannel(2, cpuCycles / 8);
+    // System clock / 8 — accumulate sub-cycles to avoid integer truncation
+    timer2Div8Accum += cpuCycles;
+    uint32_t ticks = timer2Div8Accum / 8;
+    timer2Div8Accum %= 8;
+    if (ticks > 0) {
+      TickChannel(2, ticks);
+    }
   }
 
   // Timer 0 and Timer 1 use system clock unless alternative source is selected

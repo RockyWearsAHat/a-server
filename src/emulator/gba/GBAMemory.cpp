@@ -209,43 +209,29 @@ void GBAMemory::InitializeHLEBIOS() {
   bios[0x1A] = (uint8_t)((bInstr >> 16) & 0xFFu);
   bios[0x1B] = (uint8_t)((bInstr >> 24) & 0xFFu);
 
-  // IRQ Trampoline
-  // This trampoline is a minimal IRQ dispatcher suitable for DirectBoot,
-  // relocated to 0x3F00 to keep 0x188/0x194 free for VBlankIntrWait/IntrWait.
+  // IRQ Trampoline (mGBA-compatible minimal dispatcher)
+  // Relocated to 0x3F00 to keep 0x188/0x194 free for VBlankIntrWait/IntrWait.
   //
-  // Key behaviors:
-  // - Save volatile regs on SP_irq
-  // - Call user handler at [0x03FFFFFC] (mirror of 0x03007FFC)
-  // - Acknowledge/clear REG_IF using the triggered mask at 0x03007FF4
-  // - Restore regs and exception-return via SUBS PC, LR, #4
-  //
-  // NOTE: Handler runs in IRQ mode (not System mode). While real BIOS switches
-  // to System mode, many games work correctly (or even require) IRQ mode.
+  // Stays in IRQ mode throughout. Saves/restores volatile regs on the IRQ
+  // stack, calls the user handler at [0x03FFFFFC], then returns with SUBS.
+  // Games that need System mode (e.g. DKC) switch modes inside their own
+  // handler — the BIOS trampoline doesn't need to do it for them.
 
   uint32_t base = kIrqTrampolineBase;
   const uint32_t trampoline[] = {
-      // 0x3F00: STMDB SP!, {R0-R3, R12, LR}
+      // 0x3F00: STMDB SP!, {R0-R3, R12, LR} ; save volatile regs on IRQ stack
       0xE92D500F,
       // 0x3F04: MOV   R0, #0x04000000
       0xE3A00404,
-      // 0x3F08: ADD   LR, PC, #0      ; set return address (0x3F10)
+      // 0x3F08: ADD   LR, PC, #0            ; LR = 0x3F10 (return address)
       0xE28FE000,
-      // 0x3F0C: LDR   PC, [R0, #-4]   ; jump to [0x03FFFFFC] user handler
+      // 0x3F0C: LDR   PC, [R0, #-4]         ; jump to user handler [0x03FFFFFC]
       0xE510F004,
-      // 0x3F10: LDR   R1, [PC, #16]   ; &0x03007FF4 (literal at 0x3F28)
-      0xE59F1010,
-      // 0x3F14: LDRH  R1, [R1]        ; triggered mask
-      0xE1D110B0,
-      // 0x3F18: ADD   R0, R0, #0x200  ; point to IO+0x200 region
-      0xE2800F80,
-      // 0x3F1C: STRH  R1, [R0, #2]    ; REG_IF at 0x04000202 (write-1-to-clear)
-      0xE1C010B2,
-      // 0x3F20: LDMIA SP!, {R0-R3, R12, LR}
+      // 0x3F10: LDMIA SP!, {R0-R3, R12, LR} ; restore volatile regs
       0xE8BD500F,
-      // 0x3F24: SUBS  PC, LR, #4      ; exception-return from IRQ
+      // 0x3F14: SUBS  PC, LR, #4            ; exception-return (restores CPSR from SPSR)
       0xE25EF004,
-      // 0x3F28: literal 0x03007FF4
-      0x03007FF4u};
+  };
 
   for (size_t i = 0; i < sizeof(trampoline) / sizeof(uint32_t); ++i) {
     uint32_t instr = trampoline[i];
@@ -423,6 +409,8 @@ void GBAMemory::Reset() {
     io_regs[0x204] = 0x17;
     io_regs[0x205] = 0x43;
   }
+
+  pendingDMATiming = 0;
 
   eepromState = EEPROMState::Idle;
   eepromBitCounter = 0;
@@ -1690,12 +1678,9 @@ void GBAMemory::Write8Internal(uint32_t address, uint8_t value) {
   case 0x05: // Palette RAM (GBATEK: 0x05000000-0x050003FF)
   {
     uint32_t offset = address & MemoryMap::PALETTE_MASK;
-
-    // observed problem window.
-    const int frame = ppu ? (int)ppu->GetFrameCount() : -1;
-
     if (offset < palette_ram.size()) {
       palette_ram[offset] = value;
+      paletteDirtyByCPU = true;
     }
     break;
   }
@@ -1883,6 +1868,7 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
     if (alignedOffset + 1 < palette_ram.size()) {
       palette_ram[alignedOffset] = value;
       palette_ram[alignedOffset + 1] = value;
+      paletteDirtyByCPU = true;
     }
     break;
   }
@@ -2196,6 +2182,21 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   // Write8() has IRQ handler clamping logic and must not run on intermediate
   // byte states.
   if (region == 0x03 && IsIwramMappedAddress(address)) {
+    // DIAG: write watchpoint on 0x03000064 (DKC VBlank flag)
+    if ((address & 0x7FFF) == 0x0064) {
+      static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
+      if (diagOn) {
+        static int wpc = 0;
+        static FILE *wpf = nullptr;
+        if (!wpf) wpf = fopen("/tmp/dkc_write64.log", "w");
+        if (wpf && wpc < 5000) {
+          uint32_t callerPC = cpu ? cpu->GetRegister(15) : 0;
+          fprintf(wpf, "WRITE16 0x03000064 #%d: val=0x%04X PC=0x%08X\n",
+                  wpc++, value, callerPC);
+          fflush(wpf);
+        }
+      }
+    }
     const uint32_t off0 = address & 0x7FFFu;
     const uint32_t off1 = (address + 1u) & 0x7FFFu;
     if (off0 < wram_chip.size())
@@ -2229,6 +2230,7 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       if (offset + 1 < palette_ram.size()) {
         palette_ram[offset] = b0;
         palette_ram[offset + 1] = b1;
+        paletteDirtyByCPU = true;
       }
     } else if (region == 0x06) { // VRAM
       uint32_t offset = address & 0x1FFFFu;
@@ -2371,6 +2373,7 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         palette_ram[offset + 1] = b1;
         palette_ram[offset + 2] = b2;
         palette_ram[offset + 3] = b3;
+        paletteDirtyByCPU = true;
       }
     } else if (region == 0x06) { // VRAM
       uint32_t offset = address & 0x1FFFFu;
@@ -2459,6 +2462,20 @@ void GBAMemory::ClampIrqHandlerWord() {
   const uint32_t raw = ReadIrqHandlerRaw();
   const bool inEepromRange = (raw >= 0x0D000000u && raw < 0x0E000000u);
   if (raw == 0u || inEepromRange || !IsValidIrqHandlerAddress(raw)) {
+    // DIAG: Log when handler is being replaced
+    static bool traceClamp = EnvTruthy(std::getenv("AIO_TRACE_IRQ_CLAMP"));
+    if (traceClamp) {
+      static int clampLogs = 0;
+      if (clampLogs++ < 200) {
+        FILE *f = fopen("/tmp/dkc_irq_clamp.log", "a");
+        if (f) {
+          fprintf(f, "CLAMP: raw=0x%08X -> 0x%08X (eeprom=%d valid=%d)\n",
+                  raw, kIrqHandlerDefault, inEepromRange ? 1 : 0,
+                  IsValidIrqHandlerAddress(raw) ? 1 : 0);
+          fclose(f);
+        }
+      }
+    }
     WriteIrqHandlerRaw(kIrqHandlerDefault);
   }
 }
@@ -2481,6 +2498,11 @@ uint16_t GBAMemory::ReadIORegister16Internal(uint32_t offset) const {
 
 void GBAMemory::CheckDMA(int timing) {
   if (dmaInProgress) {
+    // Record the blocked trigger so PerformDMA can fire it after completing.
+    // Without this, VBlank/HBlank DMAs are silently dropped when a nested
+    // ppu->Update() inside PerformDMA crosses a scanline boundary.
+    if (timing >= 1 && timing <= 3)
+      pendingDMATiming |= (1u << timing);
     return;
   }
 
@@ -2549,6 +2571,27 @@ void GBAMemory::PerformDMA(int channel) {
 
   const bool dstIsPalette =
       (currentDst >= 0x05000000u && currentDst < 0x05000400u);
+
+  // Track DMA writes to graphics regions so the PPU can selectively
+  // re-snapshot only the dirty regions after HBlank DMA.
+  const uint8_t dstTopByte = (uint8_t)(currentDst >> 24);
+  if (dstTopByte == 0x05) {
+    paletteDirtyByDMA = true;
+    // DIAG: trace DMA palette writes with PPU timing
+    static int dmaPalLog = 0;
+    if (dmaPalLog < 50) {
+      dmaPalLog++;
+      FILE *pf = fopen("/tmp/ogdk_pal_writes.txt", "a");
+      if (pf) {
+        fprintf(pf, "DMA%d palette: dst=0x%08X src=0x%08X count=%u %s timing=%d scanline=%d cycle=%d\n",
+                channel, currentDst, currentSrc, count, is32Bit ? "32bit" : "16bit", timing,
+                ppuTimingScanline, ppuTimingCycle);
+        fclose(pf);
+      }
+    }
+  }
+  if (dstTopByte == 0x06) vramDirtyByDMA = true;
+  if (dstTopByte == 0x07) oamDirtyByDMA = true;
 
   // EEPROM Size Detection via DMA Count
   // 4Kbit EEPROM uses 6-bit address -> 9 bits total (2 cmd + 6 addr + 1 stop)
@@ -2913,6 +2956,20 @@ void GBAMemory::PerformDMA(int channel) {
   }
 
   inImmediateDMA = wasInImmediate;
+
+  // Fire deferred DMA triggers that were blocked while dmaInProgress was true.
+  // On real hardware DMA channels have priority arbitration; a VBlank DMA
+  // arriving while another channel is active would queue and fire immediately
+  // after. Without this, games like DKC that rely on VBlank DMA to copy
+  // OAM/VRAM lose an entire frame's worth of sprite/tile updates.
+  if (pendingDMATiming != 0) {
+    uint8_t pending = pendingDMATiming;
+    pendingDMATiming = 0;
+    for (int t = 1; t <= 3; ++t) {
+      if (pending & (1u << t))
+        CheckDMA(t);
+    }
+  }
 }
 
 void GBAMemory::UpdateTimers(int cycles) {

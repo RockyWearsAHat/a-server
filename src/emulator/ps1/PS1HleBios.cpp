@@ -19,6 +19,8 @@ bool PS1HleBios::InitHLE(PS1 &ps1) {
 
   ResetState();
 
+  memoryPtr = &memory;
+
   // Zero all RAM before setting up kernel state or loading the EXE.
   // The real BIOS clears RAM during boot. Many games (including Crash
   // Bandicoot) have BSS globals beyond the loaded .text section that must
@@ -47,11 +49,16 @@ void PS1HleBios::ResetState() {
   heapBase = 0;
   heapSize = 0;
   heapPtr = 0;
+  kernelHeapBase = 0;
+  kernelHeapSize = 0;
+  kernelHeapPtr = 0;
+  handlersArrayAddr = 0;
   hleSeed = 0;
   changeClearRCntFlags = {};
   b0TableRamAddr = 0;
   c0TableRamAddr = 0;
   pendingCallbackAddr = 0;
+  memoryPtr = nullptr;
 }
 
 // ─── HLE Exception Handler ──────────────────────────────────────────────
@@ -64,20 +71,21 @@ void PS1HleBios::HandleException(PS1 &ps1) {
   uint32_t cause = cpu.GetCause();
   uint32_t excCode = (cause >> 2) & 0x1F;
 
-  // Save full CPU state to the current TCB, matching real BIOS behavior.
-  // PCB holds a pointer to the current TCB. TCB layout (0xC0 bytes):
-  //   0x00: status, 0x04: unused
-  //   0x08: r0..r31 (0x80 bytes), 0x88: EPC, 0x8C: HI, 0x90: LO
-  //   0x94: SR, 0x98: Cause
+  // Save full CPU state to the current TCB for hardware interrupts only.
+  // SYSCALL exceptions (used by HLE BIOS trampolines) must NOT overwrite
+  // the TCB — ReturnFromException reads the TCB to restore state, and
+  // a SYSCALL from within exception context would corrupt the saved EPC.
   uint32_t tcbPtr = mem.ReadRAM32(PCB_ADDR) & 0x1FFFFF;
-  for (int i = 0; i < 32; i++) {
-    mem.WriteRAM32(tcbPtr + 0x08 + i * 4, cpu.GetRegister(i));
+  if (excCode == 0) {
+    for (int i = 0; i < 32; i++) {
+      mem.WriteRAM32(tcbPtr + 0x08 + i * 4, cpu.GetRegister(i));
+    }
+    mem.WriteRAM32(tcbPtr + 0x88, cpu.GetEPC());
+    mem.WriteRAM32(tcbPtr + 0x8C, cpu.GetHI());
+    mem.WriteRAM32(tcbPtr + 0x90, cpu.GetLO());
+    mem.WriteRAM32(tcbPtr + 0x94, cpu.GetCOP0(CPU::COP0::SR));
+    mem.WriteRAM32(tcbPtr + 0x98, cause);
   }
-  mem.WriteRAM32(tcbPtr + 0x88, cpu.GetEPC());
-  mem.WriteRAM32(tcbPtr + 0x8C, cpu.GetHI());
-  mem.WriteRAM32(tcbPtr + 0x90, cpu.GetLO());
-  mem.WriteRAM32(tcbPtr + 0x94, cpu.GetCOP0(CPU::COP0::SR));
-  mem.WriteRAM32(tcbPtr + 0x98, cause);
 
   {
     static int handleExcCount = 0;
@@ -112,28 +120,40 @@ void PS1HleBios::HandleException(PS1 &ps1) {
     }
 
     // Deliver BIOS events for any games using the event system.
-    // Do NOT clear I_STAT bits here — the game's own IRQ handler
-    // (registered via HookEntryInt) reads I_STAT to identify interrupt
-    // sources. If we clear the bits, the game never sees the interrupt.
+    // Auto-clear Timer 0/1/2 IRQs from I_STAT per real BIOS behavior
+    // (unless ChangeClearRCnt was called with flag=1). VBlank, CDROM,
+    // and DMA IRQs are left for the game's longjmp handler to acknowledge.
     pendingCallbackAddr = 0;
 
     if (pending & IRQ::VBLANK) {
-      DeliverEvent(0xF0000001, 0x0001); // Hardware IRQ0 class
+      DeliverEvent(0xF0000001, 0x1000); // Hardware IRQ0 class, spec=interrupt
       DeliverEvent(0xF2000003,
                    0x0002); // Root counter 3 (software VBlank timer)
+      if (changeClearRCntFlags[3] != 0) {
+        irqs.WriteStat(irqs.ReadStat() & ~IRQ::VBLANK);
+      }
     }
     if (pending & IRQ::TIMER0) {
       DeliverEvent(0xF0000005, 0x0002); // Hardware IRQ4 class, spec=interrupted
       DeliverEvent(0xF2000000, 0x0002); // Root counter 0 (dotclock)
+      if (changeClearRCntFlags[0] == 0) {
+        irqs.WriteStat(irqs.ReadStat() & ~IRQ::TIMER0);
+      }
     }
     if (pending & IRQ::TIMER1) {
       DeliverEvent(0xF0000006, 0x0002); // Hardware IRQ5 class, spec=interrupted
       DeliverEvent(0xF2000001, 0x0002); // Root counter 1 (hblank)
+      if (changeClearRCntFlags[1] == 0) {
+        irqs.WriteStat(irqs.ReadStat() & ~IRQ::TIMER1);
+      }
     }
     if (pending & IRQ::TIMER2) {
       DeliverEvent(0xF0000006,
                    0x0002); // IRQ6 shares class with IRQ5 (BIOS bug)
       DeliverEvent(0xF2000002, 0x0002); // Root counter 2 (system clock/8)
+      if (changeClearRCntFlags[2] == 0) {
+        irqs.WriteStat(irqs.ReadStat() & ~IRQ::TIMER2);
+      }
     }
     if (pending & IRQ::DMA) {
       DeliverEvent(0xF0000004, 0x1000); // Hardware IRQ3 (DMA)
@@ -175,56 +195,60 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       DeliverEvent(0xF0000003, 0x1000);
     }
 
-    // If a mode=0x1000 callback was triggered by DeliverEvent, invoke it.
-    // The callback runs in exception context and will call ReturnFromException
-    // when done, which restores CPU state from the TCB.
-    if (pendingCallbackAddr != 0) {
-      uint32_t cbAddr = pendingCallbackAddr;
-      pendingCallbackAddr = 0;
+    // Mode=0x1000 callbacks: dispatch with $ra = ReturnFromException.
+    // The callback runs (e.g. timer handler) and returns via JR $ra,
+    // which triggers ReturnFromException to restore CPU to EPC.
+    // This keeps callbacks isolated from the longjmp handler flow.
+    uint32_t cbAddr = pendingCallbackAddr;
+    pendingCallbackAddr = 0;
 
-      {
-        auto &log = AIO::Emulator::Common::Logger::Instance();
-        char dbg[256];
-        snprintf(dbg, sizeof(dbg),
-                 "ExcDispatch: invoking mode=0x1000 callback at 0x%08X "
-                 "(EPC=0x%08X)",
-                 cbAddr, cpu.GetEPC());
-        log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
-      }
-
+    if (cbAddr != 0) {
+      uint32_t rfeTrampoline = 0x80000000 | (B0_TRAMPOLINE_ADDR + 0x17 * 12);
+      cpu.SetRegister(31, rfeTrampoline);
       cpu.SetPC(cbAddr);
       return;
     }
 
-    // longjmp into the setjmp buffer registered via HookEntryInt (B0:19h)
-    uint32_t sjBuf = hookedEntryIntHandler;
-    uint32_t ra = mem.Read32(sjBuf + 0x00);
-    uint32_t sp = mem.Read32(sjBuf + 0x04);
-
-    {
-      auto &log = AIO::Emulator::Common::Logger::Instance();
-      char dbg[512];
-      snprintf(dbg, sizeof(dbg),
-               "ExcDispatch: longjmp buf=0x%08X ra=0x%08X sp=0x%08X EPC=0x%08X "
-               "SR=0x%08X tcb=0x%08X v0_saved=0x%08X v0_cpu=0x%08X "
-               "ra_saved=0x%08X sp_saved=0x%08X",
-               sjBuf, ra, sp, cpu.GetEPC(), cpu.GetCOP0(CPU::COP0::SR), tcbPtr,
-               mem.ReadRAM32(tcbPtr + 0x08 + 2 * 4),   // v0 in TCB
-               cpu.GetRegister(2),                     // v0 in CPU
-               mem.ReadRAM32(tcbPtr + 0x08 + 31 * 4),  // ra in TCB
-               mem.ReadRAM32(tcbPtr + 0x08 + 29 * 4)); // sp in TCB
-      log.Log(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE", dbg);
+    // No callback — dispatch to handler chain or longjmp handler.
+    // Walk the SysEnqIntRP handler chain (priority 0 = IRQ handlers).
+    if (handlersArrayAddr != 0) {
+      uint32_t chainHead =
+          mem.Read32(0x80000000 | handlersArrayAddr); // priority 0
+      uint32_t entry = chainHead;
+      while (entry != 0) {
+        uint32_t func2 = mem.Read32(entry + 0x04);
+        if (func2 != 0) {
+          auto &log = AIO::Emulator::Common::Logger::Instance();
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "ExcDispatch: handler chain func2=0x%08X "
+                     "(entry=0x%08X EPC=0x%08X pending=0x%04X)",
+                     func2, entry, cpu.GetEPC(), pending);
+          uint32_t rfeTrampoline =
+              0x80000000 | (B0_TRAMPOLINE_ADDR + 0x17 * 12);
+          cpu.SetRegister(31, rfeTrampoline);
+          cpu.SetPC(func2);
+          return;
+        }
+        entry = mem.Read32(entry + 0x00);
+      }
     }
 
-    cpu.SetRegister(29, sp);
-    cpu.SetRegister(30, mem.Read32(sjBuf + 0x08)); // FP
-    for (int i = 0; i < 8; i++) {
-      cpu.SetRegister(16 + i, mem.Read32(sjBuf + 0x0C + i * 4)); // s0-s7
+    // Fallback: longjmp into the setjmp buffer registered via HookEntryInt.
+    if (hookedEntryIntHandler != 0) {
+      uint32_t sjBuf = hookedEntryIntHandler;
+      uint32_t ra = mem.Read32(sjBuf + 0x00);
+      uint32_t sp = mem.Read32(sjBuf + 0x04);
+
+      cpu.SetRegister(29, sp);
+      cpu.SetRegister(30, mem.Read32(sjBuf + 0x08)); // FP
+      for (int i = 0; i < 8; i++) {
+        cpu.SetRegister(16 + i, mem.Read32(sjBuf + 0x0C + i * 4)); // s0-s7
+      }
+      cpu.SetRegister(28, mem.Read32(sjBuf + 0x2C)); // GP
+      cpu.SetRegister(2, 1);                         // $v0 = 1
+      cpu.SetPC(ra);
+      return;
     }
-    cpu.SetRegister(28, mem.Read32(sjBuf + 0x2C)); // GP
-    cpu.SetRegister(2, 1);                         // $v0 = 1
-    cpu.SetPC(ra);
-    return;
   }
 
   if (excCode == 0) {
@@ -1000,9 +1024,18 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   switch (func) {
 
   // B0:00h alloc_kernel_memory(size)
-  case 0x00:
-    cpu.SetRegister(2, 0);
+  case 0x00: {
+    uint32_t size = cpu.GetRegister(4);
+    size = (size + 3) & ~3u; // align to 4 bytes
+    if (kernelHeapPtr + size <= kernelHeapBase + kernelHeapSize) {
+      uint32_t addr = kernelHeapPtr;
+      kernelHeapPtr += size;
+      cpu.SetRegister(2, 0x80000000 | addr);
+    } else {
+      cpu.SetRegister(2, 0);
+    }
     break;
+  }
 
   // B0:01h free_kernel_memory(buf)
   case 0x01:
@@ -1108,6 +1141,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     }
     if (slot >= 0) {
       events[slot] = {classId, spec, mode, funcAddr, true, false, false};
+      WriteEvCBToRAM(slot);
     }
     cpu.SetRegister(2, (slot >= 0) ? (0xF1000000u | static_cast<uint32_t>(slot))
                                    : 0xFFFFFFFF);
@@ -1119,6 +1153,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     int slot = cpu.GetRegister(4) & 0xFF;
     if (slot < MAX_EVENTS) {
       events[slot] = {};
+      WriteEvCBToRAM(slot);
     }
     cpu.SetRegister(2, 1);
     break;
@@ -1127,8 +1162,12 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   // B0:0Ah WaitEvent(event)
   case 0x0A: {
     int slot = cpu.GetRegister(4) & 0xFF;
+    if (slot < MAX_EVENTS) {
+      ReadEvCBFromRAM(slot);
+    }
     if (slot < MAX_EVENTS && events[slot].fired) {
       events[slot].fired = false;
+      WriteEvCBToRAM(slot);
       cpu.SetRegister(2, 1);
     } else {
       cpu.SetRegister(2, 0);
@@ -1139,9 +1178,14 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   // B0:0Bh TestEvent(event)
   case 0x0B: {
     int slot = cpu.GetRegister(4) & 0xFF;
+    if (slot < MAX_EVENTS) {
+      ReadEvCBFromRAM(slot);
+    }
     bool ready = (slot < MAX_EVENTS && events[slot].fired);
-    if (ready)
+    if (ready) {
       events[slot].fired = false;
+      WriteEvCBToRAM(slot);
+    }
     cpu.SetRegister(2, ready ? 1u : 0u);
     break;
   }
@@ -1152,6 +1196,18 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     if (slot < MAX_EVENTS) {
       events[slot].enabled = true;
       events[slot].fired = false;
+      WriteEvCBToRAM(slot);
+
+      uint32_t cls = events[slot].classId;
+      if ((cls & 0xFF000000) == 0xF2000000) {
+        uint32_t rcIndex = cls & 0xF;
+        auto &irqs = ps1.GetInterrupts();
+        static constexpr uint32_t rcMasks[] = {IRQ::TIMER0, IRQ::TIMER1,
+                                               IRQ::TIMER2, IRQ::VBLANK};
+        if (rcIndex <= 3) {
+          irqs.WriteMask(irqs.ReadMask() | rcMasks[rcIndex]);
+        }
+      }
     }
     cpu.SetRegister(2, 1);
     break;
@@ -1162,6 +1218,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     int slot = cpu.GetRegister(4) & 0xFF;
     if (slot < MAX_EVENTS) {
       events[slot].enabled = false;
+      WriteEvCBToRAM(slot);
     }
     cpu.SetRegister(2, 1);
     break;
@@ -1250,10 +1307,12 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   case 0x20: {
     uint32_t classId = cpu.GetRegister(4);
     uint32_t spec = cpu.GetRegister(5);
-    for (auto &ev : events) {
+    for (int i = 0; i < MAX_EVENTS; i++) {
+      auto &ev = events[i];
       if (ev.used && ev.enabled && ev.fired && ev.classId == classId &&
           ev.spec == spec && ev.mode == 0x2000) {
         ev.fired = false;
+        WriteEvCBToRAM(i);
       }
     }
     break;
@@ -1494,23 +1553,61 @@ void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
   case 0x01:
     break;
 
-  // C0:02h SysEnqIntRP — no-op
-  case 0x02:
+  // C0:02h SysEnqIntRP(priority, entryPtr)
+  // Inserts a handler entry at the head of the chain for the given priority.
+  // Handler entry struct in RAM: [next_ptr, handler_func, ...]
+  case 0x02: {
+    auto &mem = ps1.GetMemory();
+    uint32_t priority = cpu.GetRegister(4);
+    uint32_t entryPtr = cpu.GetRegister(5);
+    if (priority < NUM_HANDLER_PRIORITIES && handlersArrayAddr != 0) {
+      uint32_t slotAddr = handlersArrayAddr + priority * 8;
+      uint32_t oldHead = mem.Read32(0x80000000 | slotAddr);
+      // entry->next = oldHead
+      mem.Write32(entryPtr + 0, oldHead);
+      // handlersArray[priority].first = entryPtr
+      mem.Write32(0x80000000 | slotAddr, entryPtr);
+    }
     cpu.SetRegister(2, 0);
     break;
+  }
 
-  // C0:03h SysDeqIntRP — no-op
-  case 0x03:
+  // C0:03h SysDeqIntRP(priority, entryPtr)
+  // Removes a handler entry from the chain for the given priority.
+  case 0x03: {
+    auto &mem = ps1.GetMemory();
+    uint32_t priority = cpu.GetRegister(4);
+    uint32_t entryPtr = cpu.GetRegister(5);
+    if (priority < NUM_HANDLER_PRIORITIES && handlersArrayAddr != 0) {
+      uint32_t slotAddr = handlersArrayAddr + priority * 8;
+      uint32_t prevAddr = 0x80000000 | slotAddr;
+      uint32_t current = mem.Read32(prevAddr);
+      while (current != 0 && current != entryPtr) {
+        prevAddr = current; // next pointer is at offset 0
+        current = mem.Read32(current);
+      }
+      if (current == entryPtr) {
+        uint32_t next = mem.Read32(entryPtr + 0);
+        mem.Write32(prevAddr, next);
+      }
+    }
     cpu.SetRegister(2, 0);
     break;
+  }
 
   // C0:07h InstallExceptionHandlers — no-op (HLE handles exceptions)
   case 0x07:
     break;
 
-  // C0:08h SysInitMemory — no-op (memory already available)
-  case 0x08:
+  // C0:08h SysInitMemory(addr, size) — initialize kernel heap
+  case 0x08: {
+    uint32_t addr = cpu.GetRegister(4) & 0x1FFFFF;
+    uint32_t size = cpu.GetRegister(5);
+    kernelHeapBase = addr;
+    kernelHeapSize = size;
+    kernelHeapPtr = addr;
     break;
+  }
 
   // C0:09h SysInitKMem — no-op
   case 0x09:
@@ -1525,6 +1622,8 @@ void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
     if (t < 4) {
       oldFlag = changeClearRCntFlags[t];
       changeClearRCntFlags[t] = flag;
+      if (memoryPtr)
+        memoryPtr->WriteRAM32(0x8600 + t * 4, flag);
     }
     cpu.SetRegister(2, oldFlag);
     break;
@@ -1595,18 +1694,63 @@ void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
   }
 }
 
+// ─── EvCB RAM Sync ──────────────────────────────────────────────────────
+
+void PS1HleBios::WriteEvCBToRAM(int slot) {
+  if (!memoryPtr || slot < 0 || slot >= MAX_EVENTS)
+    return;
+  uint32_t addr = EVCB_ADDR + static_cast<uint32_t>(slot) * 0x1C;
+  auto &ev = events[slot];
+  if (!ev.used) {
+    memoryPtr->WriteRAM32(addr + 0x00, 0);
+    memoryPtr->WriteRAM32(addr + 0x04, EvCBStatusFree);
+    memoryPtr->WriteRAM32(addr + 0x08, 0);
+    memoryPtr->WriteRAM32(addr + 0x0C, 0);
+    memoryPtr->WriteRAM32(addr + 0x10, 0);
+    return;
+  }
+  memoryPtr->WriteRAM32(addr + 0x00, ev.classId);
+  uint32_t status = EvCBStatusDisabled;
+  if (ev.enabled)
+    status = ev.fired ? EvCBStatusReady : EvCBStatusBusy;
+  memoryPtr->WriteRAM32(addr + 0x04, status);
+  memoryPtr->WriteRAM32(addr + 0x08, ev.spec);
+  memoryPtr->WriteRAM32(addr + 0x0C, ev.mode);
+  memoryPtr->WriteRAM32(addr + 0x10, ev.func);
+}
+
+void PS1HleBios::ReadEvCBFromRAM(int slot) {
+  if (!memoryPtr || slot < 0 || slot >= MAX_EVENTS)
+    return;
+  uint32_t addr = EVCB_ADDR + static_cast<uint32_t>(slot) * 0x1C;
+  uint32_t status = memoryPtr->ReadRAM32(addr + 0x04);
+  auto &ev = events[slot];
+  if (status == EvCBStatusFree) {
+    ev.used = false;
+    ev.enabled = false;
+    ev.fired = false;
+    return;
+  }
+  ev.used = true;
+  ev.classId = memoryPtr->ReadRAM32(addr + 0x00);
+  ev.spec = memoryPtr->ReadRAM32(addr + 0x08);
+  ev.mode = memoryPtr->ReadRAM32(addr + 0x0C);
+  ev.func = memoryPtr->ReadRAM32(addr + 0x10);
+  ev.enabled = (status == EvCBStatusBusy || status == EvCBStatusReady);
+  ev.fired = (status == EvCBStatusReady);
+}
+
 // ─── Event Delivery ─────────────────────────────────────────────────────
 
 void PS1HleBios::DeliverEvent(uint32_t classId, uint32_t spec) {
-  for (auto &ev : events) {
+  for (int i = 0; i < MAX_EVENTS; i++) {
+    auto &ev = events[i];
     if (ev.used && ev.enabled && ev.classId == classId && ev.spec == spec) {
       if (ev.mode == 0x1000 && ev.func != 0) {
-        // Callback mode: record the callback address for the exception handler
-        // to invoke. The callback will eventually call ReturnFromException.
         pendingCallbackAddr = ev.func;
       } else {
-        // Polling mode (0x2000): mark event as ready for TestEvent/WaitEvent
         ev.fired = true;
+        WriteEvCBToRAM(i);
       }
     }
   }
@@ -1835,30 +1979,45 @@ void PS1HleBios::InitKernelState(PS1Memory &memory) {
   std::memset(ram + FCB_ADDR, 0, 0x2C0);
   std::memset(ram + DCB_ADDR, 0, 0x320);
 
+  // ─── Kernel Heap ───────────────────────────────────────────────────
+  // Initialize the kernel heap so alloc_kernel_memory (B0:00h) works.
+  // The real BIOS calls SysInitMemory during boot; we do it here.
+  kernelHeapBase = KERNEL_HEAP_ADDR;
+  kernelHeapSize = KERNEL_HEAP_SIZE;
+  kernelHeapPtr = KERNEL_HEAP_ADDR;
+  std::memset(ram + KERNEL_HEAP_ADDR, 0, KERNEL_HEAP_SIZE);
+
+  // ─── Handler Chain Array ──────────────────────────────────────────
+  // Allocate from kernel heap: 4 priorities × 8 bytes (first_ptr + padding)
+  handlersArrayAddr = kernelHeapPtr;
+  kernelHeapPtr += NUM_HANDLER_PRIORITIES * 8;
+  std::memset(ram + handlersArrayAddr, 0, NUM_HANDLER_PRIORITIES * 8);
+
   // ─── Table of Tables at 0x100-0x157 ───────────────────────────────
-  // Each entry: [base_addr, total_size] as KSEG0 addresses
-  memory.WriteRAM32(0x100, 0x80000000 | EXCB_ADDR); // ExCB base
-  memory.WriteRAM32(0x104, 4 * 0x08);               // ExCB size
-  memory.WriteRAM32(0x108, 0x80000000 | PCB_ADDR);  // PCB base
-  memory.WriteRAM32(0x10C, 1 * 0x04);               // PCB size
-  memory.WriteRAM32(0x110, 0x80000000 | TCB_ADDR);  // TCB base
-  memory.WriteRAM32(0x114, 4 * 0xC0);               // TCB size
-  memory.WriteRAM32(0x118, 0);                      // unused
-  memory.WriteRAM32(0x11C, 0);                      // unused
-  memory.WriteRAM32(0x120, 0x80000000 | EVCB_ADDR); // EvCB base
-  memory.WriteRAM32(0x124, 16 * 0x1C);              // EvCB size
-  memory.WriteRAM32(0x128, 0);                      // unused
-  memory.WriteRAM32(0x12C, 0);                      // unused
-  memory.WriteRAM32(0x130, 0);                      // unused
-  memory.WriteRAM32(0x134, 0);                      // unused
-  memory.WriteRAM32(0x138, 0);                      // unused
-  memory.WriteRAM32(0x13C, 0);                      // unused
-  memory.WriteRAM32(0x140, 0x80000000 | FCB_ADDR);  // FCB base
-  memory.WriteRAM32(0x144, 16 * 0x2C);              // FCB size
-  memory.WriteRAM32(0x148, 0);                      // unused
-  memory.WriteRAM32(0x14C, 0);                      // unused
-  memory.WriteRAM32(0x150, 0x80000000 | DCB_ADDR);  // DCB base
-  memory.WriteRAM32(0x154, 10 * 0x50);              // DCB size
+  // ToT[0x00] = handlersArray (real BIOS: linked-list heads per priority)
+  // ToT[0x08] = PCB, ToT[0x10] = TCB, ToT[0x20] = EvCB, etc.
+  memory.WriteRAM32(0x100, 0x80000000 | handlersArrayAddr); // handlersArray
+  memory.WriteRAM32(0x104, NUM_HANDLER_PRIORITIES * 0x08);  // handlersArray sz
+  memory.WriteRAM32(0x108, 0x80000000 | PCB_ADDR);          // PCB base
+  memory.WriteRAM32(0x10C, 1 * 0x04);                       // PCB size
+  memory.WriteRAM32(0x110, 0x80000000 | TCB_ADDR);          // TCB base
+  memory.WriteRAM32(0x114, 4 * 0xC0);                       // TCB size
+  memory.WriteRAM32(0x118, 0);                              // unused
+  memory.WriteRAM32(0x11C, 0);                              // unused
+  memory.WriteRAM32(0x120, 0x80000000 | EVCB_ADDR);         // EvCB base
+  memory.WriteRAM32(0x124, 16 * 0x1C);                      // EvCB size
+  memory.WriteRAM32(0x128, 0);                              // unused
+  memory.WriteRAM32(0x12C, 0);                              // unused
+  memory.WriteRAM32(0x130, 0);                              // unused
+  memory.WriteRAM32(0x134, 0);                              // unused
+  memory.WriteRAM32(0x138, 0);                              // unused
+  memory.WriteRAM32(0x13C, 0);                              // unused
+  memory.WriteRAM32(0x140, 0x80000000 | FCB_ADDR);          // FCB base
+  memory.WriteRAM32(0x144, 16 * 0x2C);                      // FCB size
+  memory.WriteRAM32(0x148, 0);                              // unused
+  memory.WriteRAM32(0x14C, 0);                              // unused
+  memory.WriteRAM32(0x150, 0x80000000 | DCB_ADDR);          // DCB base
+  memory.WriteRAM32(0x154, 10 * 0x50);                      // DCB size
 
   // ─── Device Name Strings ──────────────────────────────────────────
   uint32_t strOff = DEV_STRINGS_ADDR;
@@ -1964,7 +2123,12 @@ void PS1HleBios::InitKernelState(PS1Memory &memory) {
 
 // ─── GPU Initialization ─────────────────────────────────────────────────
 
-void PS1HleBios::InitGPU(PS1GPU &gpu) { gpu.Reset(); }
+void PS1HleBios::InitGPU(PS1GPU &gpu) {
+  gpu.Reset();
+  // GP1(03h) display enable — bit 0 = 0 means display ON.
+  // Without this, the screen stays black even after the game renders.
+  gpu.WriteGP1(0x03000000);
+}
 
 void PS1HleBios::InitCDROM(CDROM &cdrom) {
   // The real BIOS boot sequence initializes the CDROM controller by writing

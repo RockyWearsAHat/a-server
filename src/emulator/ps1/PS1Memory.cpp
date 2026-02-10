@@ -216,20 +216,6 @@ void PS1Memory::Write32(uint32_t addr, uint32_t value) {
     if (!cacheIsolated) {
       uint32_t offset = phys & (MemSize::RAM - 1);
       std::memcpy(&ram[offset], &value, sizeof(uint32_t));
-      // TEMP: Track hash table base writes
-      if (offset == 0x0005C530) {
-        uint32_t pc = cpu ? cpu->GetPC() : 0;
-        LogInfo("WATCH: Write32 0x8005C530 = 0x%08X (PC=0x%08X)", value, pc);
-        // Dump instructions around the write site
-        if (cpu && value == 0xFFFFFFF0) {
-          for (int d = -8; d <= 8; d++) {
-            uint32_t addr = pc + d * 4;
-            uint32_t instr;
-            std::memcpy(&instr, &ram[(addr & 0x1FFFFF)], sizeof(uint32_t));
-            LogInfo("  CODE 0x%08X: 0x%08X", addr, instr);
-          }
-        }
-      }
     }
     return;
   }

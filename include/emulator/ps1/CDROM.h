@@ -93,6 +93,7 @@ private:
   bool seeking = false;
   uint32_t readDelay = 0;
   uint8_t mode = 0;
+  bool sectorBufferReady = false;
 
   // ─── Delayed Second Response (for multi-response commands) ──────────
   bool secondResponsePending = false;

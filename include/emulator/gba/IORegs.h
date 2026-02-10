@@ -213,7 +213,7 @@ inline constexpr uint32_t VECTOR_FIQ        = 0x0000001C;
 // IWRAM fixed locations (set by BIOS)
 inline constexpr uint32_t IWRAM_BIOS_IF     = 0x03007FF8; // Interrupt flags (read by user handler)
 inline constexpr uint32_t IWRAM_BIOS_HANDLER = 0x03007FFC; // User interrupt handler pointer
-inline constexpr uint32_t IWRAM_BIOS_VBLANK_INTR_WAIT_FLAGS = 0x03007FF4; // Pre-saved trigger bits
+
 
 // Entry point after BIOS boot
 inline constexpr uint32_t ENTRY_POINT        = 0x08000000; // Game ROM start

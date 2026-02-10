@@ -93,8 +93,6 @@ int PS1::Step() {
   // Fire VBlank IRQ on transition into VBlank
   if (!wasInVBlank && gpu->InVBlank()) {
     interrupts->RequestIRQ(IRQ::VBLANK);
-    PS1HleBios::DeliverEvent(0xF0000001, 0x0001);
-    PS1HleBios::DeliverEvent(0xF2000003, 0x0002);
   }
 
   // Fire HBlank tick for timers on each new scanline

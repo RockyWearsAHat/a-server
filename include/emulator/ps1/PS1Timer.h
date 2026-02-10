@@ -62,6 +62,8 @@ private:
   InterruptController &interrupts;
   std::array<TimerChannel, Timer::NUM_TIMERS> channels{};
 
+  uint32_t timer2Div8Accum = 0;
+
   void TickChannel(uint32_t index, uint32_t ticks);
   void CheckIRQ(uint32_t index);
 };
