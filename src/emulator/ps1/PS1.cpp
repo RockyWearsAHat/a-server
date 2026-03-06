@@ -93,6 +93,14 @@ int PS1::Step() {
   // Fire VBlank IRQ on transition into VBlank
   if (!wasInVBlank && gpu->InVBlank()) {
     interrupts->RequestIRQ(IRQ::VBLANK);
+    static int vblankCount = 0;
+    if (++vblankCount <= 5) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1",
+                 "VBlank #%d at scanline=%u cycle=%llu iMask=%08X", vblankCount,
+                 gpu->GetScanline(), totalCyclesExecuted.load(),
+                 interrupts->ReadMask());
+    }
   }
 
   // Fire HBlank tick for timers on each new scanline

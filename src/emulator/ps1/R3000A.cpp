@@ -23,14 +23,85 @@ void R3000A::Reset() {
   branchPending = false;
   branchTarget = 0;
   currentInstruction = 0;
+  currentPc = CPU::RESET_VECTOR;
   pendingLoad = {};
   nextLoad = {};
 
   instructionCount = 0;
   cycleCount = 0;
+  halted = false;
+
+  InvalidateICache();
+}
+
+void R3000A::InvalidateICache() {
+  for (auto &line : icache) {
+    line.valid = false;
+    line.tag = 0xFFFFFFFF;
+  }
+}
+
+void R3000A::FlushICache() { InvalidateICache(); }
+
+void R3000A::WriteToCacheIsolated(uint32_t addr, uint32_t value) {
+  // During cache isolation, stores go to the I-cache line at the
+  // addressed index. Writing any word in a line also sets the valid bit
+  // and overwrites the tag. The BIOS cache-flush routine writes zero
+  // to every cache line with a tag that won't match any real address,
+  // effectively invalidating the line.
+  uint32_t physAddr = addr & MemMap::KSEG_MASK;
+  uint32_t lineIndex = (physAddr >> 4) & 0xFF;
+  uint32_t wordIndex = (physAddr >> 2) & 0x3;
+
+  auto &line = icache[lineIndex];
+  line.data[wordIndex] = value;
+  // The BIOS flush writes value=0 with addresses that produce
+  // an impossible tag, effectively invalidating. Real hardware
+  // stores the tag from the address, so on next fetch the tag
+  // won't match, forcing a refill from RAM.
+  line.tag = physAddr >> 12;
+  line.valid = true;
+}
+
+uint32_t R3000A::FetchInstruction(uint32_t addr) {
+  // KSEG1 (0xA0000000-0xBFFFFFFF) is uncached — always read from memory
+  if (addr >= MemMap::KSEG1_START && addr <= MemMap::KSEG1_END) {
+    return memory.Read32(addr);
+  }
+
+  // KSEG2+ is uncached / special hardware
+  if (addr >= MemMap::KSEG2_START) {
+    return memory.Read32(addr);
+  }
+
+  // KUSEG (0x00000000-0x7FFFFFFF) and KSEG0 (0x80000000-0x9FFFFFFF) are cached
+  uint32_t physAddr = addr & MemMap::KSEG_MASK;
+  uint32_t lineIndex = (physAddr >> 4) & 0xFF;
+  uint32_t tag = physAddr >> 12;
+  uint32_t wordIndex = (physAddr >> 2) & 0x3;
+
+  auto &line = icache[lineIndex];
+  if (line.valid && line.tag == tag) {
+    return line.data[wordIndex];
+  }
+
+  // Cache miss — fill the entire line (4 words / 16 bytes)
+  uint32_t lineBase = physAddr & ~0xFu;
+  line.tag = tag;
+  line.valid = true;
+  for (uint32_t i = 0; i < ICACHE_WORDS_PER_LINE; i++) {
+    // Read via physical address + RAM region
+    line.data[i] = memory.Read32(0x80000000 | (lineBase + i * 4));
+  }
+  return line.data[wordIndex];
 }
 
 void R3000A::WriteReg(uint32_t index, uint32_t value) {
+  // Cancel pending load if the instruction in the delay slot writes to the
+  // same register — the explicit write wins over the load on real hardware
+  if (pendingLoad.active && pendingLoad.reg == index) {
+    pendingLoad.active = false;
+  }
   regs[index] = value;
   regs[0] = 0; // R0 is hardwired to zero
 }
@@ -43,9 +114,6 @@ void R3000A::ApplyPendingLoad() {
 }
 
 void R3000A::DoBranch(uint32_t target) {
-  // Set the branch target directly — it takes effect after the delay slot
-  // At this point pc = delay slot address, nextPc = delay slot + 4
-  // Overwriting nextPc means the step AFTER the delay slot fetches from target
   branchPending = true;
   nextPc = target;
 }
@@ -56,9 +124,41 @@ bool R3000A::TryHLETrap() {
 
   uint32_t physPc = pc & 0x1FFFFFFF;
 
+  // Game returned to address 0 — exec()'d code has finished.
+  // Real BIOS exec() saves context and jalr's to the entry point;
+  // if the game ever returns, exec() calls fatal() which halts.
+  // Halt the CPU and let IRQ-driven callbacks (VBlank, etc.) continue.
+  if (physPc == 0x00) {
+    static int pc0Count = 0;
+    if (pc0Count < 3) {
+      LogInfo("TryHLETrap: PC=0x00000000 → halted=true, ra=0x%08X "
+              "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X "
+              "s0=0x%08X s1=0x%08X s2=0x%08X sp=0x%08X",
+              regs[31], regs[2], regs[3], regs[4], regs[5], regs[16], regs[17],
+              regs[18], regs[29]);
+      // Read memory at jump table to see if it's been overwritten
+      if (ps1) {
+        auto &mem = ps1->GetMemory();
+        LogInfo("  Jump table check: [0x80010170]=0x%08X [0x80010174]=0x%08X "
+                "[0x80010178]=0x%08X [0x8001017C]=0x%08X",
+                mem.Read32(0x80010170), mem.Read32(0x80010174),
+                mem.Read32(0x80010178), mem.Read32(0x8001017C));
+      }
+      pc0Count++;
+    }
+    halted = true;
+    return true;
+  }
+
   // HLE exception handler at 0x80
   if (physPc == 0x80) {
     PS1HleBios::HandleException(*ps1);
+    return true;
+  }
+
+  // Mode=0x1000 callback return trampoline
+  if (physPc == PS1HleBios::CALLBACK_RETURN_ADDR) {
+    PS1HleBios::ResumeAfterCallback(*ps1);
     return true;
   }
 
@@ -82,6 +182,11 @@ bool R3000A::TryHLETrap() {
 }
 
 int R3000A::Step() {
+  if (halted) {
+    cycleCount++;
+    return 1;
+  }
+
   // HLE BIOS vector intercept — handle before fetching the stub instruction
   if (TryHLETrap()) {
     instructionCount++;
@@ -89,13 +194,13 @@ int R3000A::Step() {
     return 1;
   }
 
-  currentInstruction = memory.Read32(pc);
+  currentInstruction = FetchInstruction(pc);
 
   if constexpr (Trace::CPU) {
     LogDebug("PC=%08X INSTR=%08X", pc, currentInstruction);
   }
 
-  uint32_t currentPc = pc;
+  currentPc = pc;
   pc = nextPc;
   nextPc += 4;
 
@@ -115,8 +220,41 @@ int R3000A::Step() {
 
   ApplyPendingLoad();
 
+  // Clear delay-slot flag after instruction completes.
+  // inDelaySlot was set for this instruction's exception handling (so
+  // sync exceptions point EPC at the branch).  Once the instruction
+  // finishes, the pipeline has moved past the branch+delay-slot pair,
+  // and TriggerInterrupt (fired between steps) must NOT see BD=1.
+  inDelaySlot = false;
+
   instructionCount++;
   cycleCount++;
+
+  // Periodic RAM watchpoint: detect when tile data at 0x1041BC gets cleared
+  static bool ramWatchActive = false;
+  static uint64_t ramWatchLastNonZero = 0;
+  if (instructionCount % 100000 == 0) {
+    const uint8_t *ramPtr = memory.GetRAMPointer();
+    uint8_t b0 = ramPtr[0x1041BC];
+    uint8_t b1 = ramPtr[0x1041BD];
+    uint8_t b2 = ramPtr[0x1041BE];
+    uint8_t b3 = ramPtr[0x1041BF];
+    uint32_t sum = b0 + b1 + b2 + b3;
+    if (sum > 0 && !ramWatchActive) {
+      ramWatchActive = true;
+      ramWatchLastNonZero = instructionCount;
+      LogInfo("RAM WATCH: data appeared at 0x1041BC: %02X %02X %02X %02X (at "
+              "instr#%llu PC=%08X)",
+              b0, b1, b2, b3, instructionCount, currentPc);
+    } else if (sum == 0 && ramWatchActive) {
+      ramWatchActive = false;
+      LogInfo("RAM WATCH: data CLEARED at 0x1041BC (was nonzero at instr#%llu, "
+              "now zero at instr#%llu, delta=%llu, PC=%08X)",
+              ramWatchLastNonZero, instructionCount,
+              instructionCount - ramWatchLastNonZero, currentPc);
+    }
+  }
+
   return 1; // Each instruction takes 1 cycle (simplified)
 }
 
@@ -177,8 +315,14 @@ void R3000A::ExecuteInstruction(uint32_t instr) {
   case 0x10:
     ExecuteCOP0(instr);
     break;
+  case 0x11:
+    TriggerCopUnusable(1);
+    break;
   case 0x12:
     ExecuteCOP2(instr);
+    break;
+  case 0x13:
+    TriggerCopUnusable(3);
     break;
   case 0x20:
     OpLB(instr);
@@ -216,13 +360,27 @@ void R3000A::ExecuteInstruction(uint32_t instr) {
   case 0x2E:
     OpSWR(instr);
     break;
+  case 0x31:
+    TriggerCopUnusable(1);
+    break;
   case 0x32:
     OpLWC2(instr);
+    break;
+  case 0x33:
+    TriggerCopUnusable(3);
+    break;
+  case 0x39:
+    TriggerCopUnusable(1);
     break;
   case 0x3A:
     OpSWC2(instr);
     break;
+  case 0x3B:
+    TriggerCopUnusable(3);
+    break;
   default:
+    LogInfo("RI: unknown opcode 0x%02X instr=0x%08X at PC=0x%08X", opcode,
+            instr, currentPc);
     TriggerException(CPU::ExcCode::RESERVED_INSTR);
     break;
   }
@@ -315,6 +473,8 @@ void R3000A::ExecuteSpecial(uint32_t instr) {
     OpSLTU(instr);
     break;
   default:
+    LogInfo("RI(Special): unknown funct 0x%02X instr=0x%08X at PC=0x%08X",
+            GetFunct(instr), instr, currentPc);
     TriggerException(CPU::ExcCode::RESERVED_INSTR);
     break;
   }
@@ -550,6 +710,9 @@ void R3000A::OpLBU(uint32_t instr) {
 void R3000A::OpLH(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
   if (addr & 1) {
+    LogDebug("AdEL LH: PC=0x%08X addr=0x%08X rs=%u(0x%08X) imm=0x%04X",
+             currentPc, addr, GetRS(instr), regs[GetRS(instr)],
+             static_cast<uint16_t>(GetImm16SE(instr)));
     TriggerException(CPU::ExcCode::ADDR_LOAD);
     return;
   }
@@ -561,6 +724,9 @@ void R3000A::OpLH(uint32_t instr) {
 void R3000A::OpLHU(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
   if (addr & 1) {
+    LogDebug("AdEL LHU: PC=0x%08X addr=0x%08X rs=%u(0x%08X) imm=0x%04X",
+             currentPc, addr, GetRS(instr), regs[GetRS(instr)],
+             static_cast<uint16_t>(GetImm16SE(instr)));
     TriggerException(CPU::ExcCode::ADDR_LOAD);
     return;
   }
@@ -570,6 +736,11 @@ void R3000A::OpLHU(uint32_t instr) {
 void R3000A::OpLW(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
   if (addr & 3) {
+    // TEMP: Log misaligned LW for debugging
+    LogDebug("AdEL LW: PC=0x%08X addr=0x%08X rs=%u(0x%08X) imm=0x%04X rt=%u "
+             "instr=0x%08X",
+             currentPc, addr, GetRS(instr), regs[GetRS(instr)],
+             static_cast<uint16_t>(GetImm16SE(instr)), GetRT(instr), instr);
     TriggerException(CPU::ExcCode::ADDR_LOAD);
     return;
   }
@@ -629,7 +800,11 @@ void R3000A::OpLWR(uint32_t instr) {
 
 void R3000A::OpSB(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
-  memory.Write8(addr, static_cast<uint8_t>(regs[GetRT(instr)]));
+  if (cop0[CPU::COP0::SR] & CPU::SR::Isc)
+    return; // Isolated — ignore byte stores to cache
+  uint8_t val = static_cast<uint8_t>(regs[GetRT(instr)]);
+
+  memory.Write8(addr, val);
 }
 
 void R3000A::OpSH(uint32_t instr) {
@@ -638,6 +813,8 @@ void R3000A::OpSH(uint32_t instr) {
     TriggerException(CPU::ExcCode::ADDR_STORE);
     return;
   }
+  if (cop0[CPU::COP0::SR] & CPU::SR::Isc)
+    return; // Isolated — ignore halfword stores to cache
   memory.Write16(addr, static_cast<uint16_t>(regs[GetRT(instr)]));
 }
 
@@ -647,11 +824,18 @@ void R3000A::OpSW(uint32_t instr) {
     TriggerException(CPU::ExcCode::ADDR_STORE);
     return;
   }
+  // When cache is isolated, stores write to I-cache instead of RAM
+  if (cop0[CPU::COP0::SR] & CPU::SR::Isc) {
+    WriteToCacheIsolated(addr, regs[GetRT(instr)]);
+    return;
+  }
   memory.Write32(addr, regs[GetRT(instr)]);
 }
 
 void R3000A::OpSWL(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
+  if (cop0[CPU::COP0::SR] & CPU::SR::Isc)
+    return;
   uint32_t aligned = memory.Read32(addr & ~3u);
   uint32_t rt = regs[GetRT(instr)];
 
@@ -674,6 +858,8 @@ void R3000A::OpSWL(uint32_t instr) {
 
 void R3000A::OpSWR(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
+  if (cop0[CPU::COP0::SR] & CPU::SR::Isc)
+    return;
   uint32_t aligned = memory.Read32(addr & ~3u);
   uint32_t rt = regs[GetRT(instr)];
 
@@ -751,7 +937,7 @@ void R3000A::OpRFE([[maybe_unused]] uint32_t instr) {
 
 void R3000A::ExecuteCOP2(uint32_t instr) {
   if (!(cop0[CPU::COP0::SR] & CPU::SR::CU2)) {
-    TriggerException(CPU::ExcCode::COP_UNUSABLE);
+    TriggerCopUnusable(2);
     return;
   }
 
@@ -787,6 +973,9 @@ void R3000A::ExecuteCOP2(uint32_t instr) {
 void R3000A::OpLWC2(uint32_t instr) {
   uint32_t addr = regs[GetRS(instr)] + static_cast<uint32_t>(GetImm16SE(instr));
   if (addr & 3) {
+    LogDebug("AdEL LWC2: PC=0x%08X addr=0x%08X rs=%u(0x%08X) imm=0x%04X",
+             currentPc, addr, GetRS(instr), regs[GetRS(instr)],
+             static_cast<uint16_t>(GetImm16SE(instr)));
     TriggerException(CPU::ExcCode::ADDR_LOAD);
     return;
   }
@@ -822,11 +1011,12 @@ void R3000A::TriggerException(uint32_t excCode) {
   cause &= ~0x7C; // Clear ExcCode field
   cause |= (excCode << 2);
   if (inDelaySlot) {
-    cause |= (1u << 31);           // BD bit
-    cop0[CPU::COP0::EPC] = pc - 4; // Point to branch instruction
+    cause |= (1u << 31); // BD bit
+    cop0[CPU::COP0::EPC] =
+        currentPc - 4; // Branch instruction that precedes this delay slot
   } else {
     cause &= ~(1u << 31);
-    cop0[CPU::COP0::EPC] = pc;
+    cop0[CPU::COP0::EPC] = currentPc; // Faulting instruction itself
   }
   cop0[CPU::COP0::CAUSE] = cause;
 
@@ -838,6 +1028,9 @@ void R3000A::TriggerException(uint32_t excCode) {
   pc = handlerAddr;
   nextPc = handlerAddr + 4;
   branchPending = false;
+  inDelaySlot = false;
+  pendingLoad = {};
+  nextLoad = {};
 
   if constexpr (Trace::EXCEPTIONS) {
     LogDebug("Exception: code=%u EPC=%08X handler=%08X", excCode,
@@ -845,9 +1038,41 @@ void R3000A::TriggerException(uint32_t excCode) {
   }
 }
 
-void R3000A::TriggerInterrupt() { TriggerException(CPU::ExcCode::INTERRUPT); }
+void R3000A::TriggerCopUnusable(uint32_t copNumber) {
+  TriggerException(CPU::ExcCode::COP_UNUSABLE);
+  // Set CE field (bits 29-28) to identify the coprocessor
+  uint32_t cause = cop0[CPU::COP0::CAUSE];
+  cause = (cause & ~(3u << 28)) | ((copNumber & 3u) << 28);
+  cop0[CPU::COP0::CAUSE] = cause;
+}
+
+void R3000A::TriggerInterrupt() {
+  halted = false;
+
+  // Commit any in-flight load-delay result before taking the exception.
+  // TriggerInterrupt fires between instructions (after Step() returns),
+  // so the previous instruction's load has architecturally completed —
+  // it must be written to the register file before we save EPC/state.
+  // Without this, TriggerException clears nextLoad and the load result
+  // is lost, corrupting the register that was being loaded (e.g. $ra
+  // from a stack restore, causing a crash on the subsequent jr $ra).
+  if (nextLoad.active) {
+    WriteReg(nextLoad.reg, nextLoad.value);
+    nextLoad = {};
+  }
+
+  currentPc = pc;
+
+  TriggerException(CPU::ExcCode::INTERRUPT);
+}
 
 bool R3000A::IsInterruptPending() const {
+  // MIPS branch + delay-slot pairs are atomic w.r.t. interrupts.
+  // If a branch was just decoded (branchPending), the next step is
+  // the delay slot — defer the interrupt until after it completes.
+  if (branchPending)
+    return false;
+
   uint32_t sr = cop0[CPU::COP0::SR];
   uint32_t cause = cop0[CPU::COP0::CAUSE];
 

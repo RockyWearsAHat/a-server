@@ -229,7 +229,8 @@ void GBAMemory::InitializeHLEBIOS() {
       0xE510F004,
       // 0x3F10: LDMIA SP!, {R0-R3, R12, LR} ; restore volatile regs
       0xE8BD500F,
-      // 0x3F14: SUBS  PC, LR, #4            ; exception-return (restores CPSR from SPSR)
+      // 0x3F14: SUBS  PC, LR, #4            ; exception-return (restores CPSR
+      // from SPSR)
       0xE25EF004,
   };
 
@@ -2182,21 +2183,6 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
   // Write8() has IRQ handler clamping logic and must not run on intermediate
   // byte states.
   if (region == 0x03 && IsIwramMappedAddress(address)) {
-    // DIAG: write watchpoint on 0x03000064 (DKC VBlank flag)
-    if ((address & 0x7FFF) == 0x0064) {
-      static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-      if (diagOn) {
-        static int wpc = 0;
-        static FILE *wpf = nullptr;
-        if (!wpf) wpf = fopen("/tmp/dkc_write64.log", "w");
-        if (wpf && wpc < 5000) {
-          uint32_t callerPC = cpu ? cpu->GetRegister(15) : 0;
-          fprintf(wpf, "WRITE16 0x03000064 #%d: val=0x%04X PC=0x%08X\n",
-                  wpc++, value, callerPC);
-          fflush(wpf);
-        }
-      }
-    }
     const uint32_t off0 = address & 0x7FFFu;
     const uint32_t off1 = (address + 1u) & 0x7FFFu;
     if (off0 < wram_chip.size())
@@ -2240,12 +2226,14 @@ void GBAMemory::Write16(uint32_t address, uint16_t value) {
       if (offset + 1 < vram.size()) {
         vram[offset] = b0;
         vram[offset + 1] = b1;
+        vramDirtyByCPU = true;
       }
     } else if (region == 0x07) { // OAM
       uint32_t offset = address & MemoryMap::OAM_MASK;
       if (offset + 1 < oam.size()) {
         oam[offset] = b0;
         oam[offset + 1] = b1;
+        oamDirtyByCPU = true;
       }
     }
   } else {
@@ -2380,13 +2368,12 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
       if (offset >= MemoryMap::VRAM_ACTUAL_SIZE)
         offset -= 0x8000u;
 
-      // mysteriously changes
-
       if (offset + 3 < vram.size()) {
         vram[offset] = b0;
         vram[offset + 1] = b1;
         vram[offset + 2] = b2;
         vram[offset + 3] = b3;
+        vramDirtyByCPU = true;
       }
     } else if (region == 0x07) { // OAM
       uint32_t offset = address & MemoryMap::OAM_MASK;
@@ -2395,6 +2382,7 @@ void GBAMemory::Write32(uint32_t address, uint32_t value) {
         oam[offset + 1] = b1;
         oam[offset + 2] = b2;
         oam[offset + 3] = b3;
+        oamDirtyByCPU = true;
       }
     }
   } else if (region == 0x04) {
@@ -2469,8 +2457,8 @@ void GBAMemory::ClampIrqHandlerWord() {
       if (clampLogs++ < 200) {
         FILE *f = fopen("/tmp/dkc_irq_clamp.log", "a");
         if (f) {
-          fprintf(f, "CLAMP: raw=0x%08X -> 0x%08X (eeprom=%d valid=%d)\n",
-                  raw, kIrqHandlerDefault, inEepromRange ? 1 : 0,
+          fprintf(f, "CLAMP: raw=0x%08X -> 0x%08X (eeprom=%d valid=%d)\n", raw,
+                  kIrqHandlerDefault, inEepromRange ? 1 : 0,
                   IsValidIrqHandlerAddress(raw) ? 1 : 0);
           fclose(f);
         }
@@ -2583,15 +2571,20 @@ void GBAMemory::PerformDMA(int channel) {
       dmaPalLog++;
       FILE *pf = fopen("/tmp/ogdk_pal_writes.txt", "a");
       if (pf) {
-        fprintf(pf, "DMA%d palette: dst=0x%08X src=0x%08X count=%u %s timing=%d scanline=%d cycle=%d\n",
-                channel, currentDst, currentSrc, count, is32Bit ? "32bit" : "16bit", timing,
-                ppuTimingScanline, ppuTimingCycle);
+        fprintf(pf,
+                "DMA%d palette: dst=0x%08X src=0x%08X count=%u %s timing=%d "
+                "scanline=%d cycle=%d\n",
+                channel, currentDst, currentSrc, count,
+                is32Bit ? "32bit" : "16bit", timing, ppuTimingScanline,
+                ppuTimingCycle);
         fclose(pf);
       }
     }
   }
-  if (dstTopByte == 0x06) vramDirtyByDMA = true;
-  if (dstTopByte == 0x07) oamDirtyByDMA = true;
+  if (dstTopByte == 0x06)
+    vramDirtyByDMA = true;
+  if (dstTopByte == 0x07)
+    oamDirtyByDMA = true;
 
   // EEPROM Size Detection via DMA Count
   // 4Kbit EEPROM uses 6-bit address -> 9 bits total (2 cmd + 6 addr + 1 stop)

@@ -55,6 +55,12 @@ public:
     return transferCounts[channel];
   }
 
+  uint32_t GetDICR() const { return dicr; }
+  void AcknowledgeDICRFlags(uint32_t channelMask) {
+    dicr &= ~(channelMask << 24);
+    UpdateMasterIRQ();
+  }
+
 private:
   PS1Memory &memory;
   PS1GPU &gpu;

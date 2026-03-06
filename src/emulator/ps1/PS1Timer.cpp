@@ -63,16 +63,16 @@ void PS1Timer::Write32(uint32_t addr, uint32_t value) {
     ch.counter = 0;
     ch.irqFlag = true; // Reset IRQ flag (not requesting)
     ch.clearReachedFlags();
-    if constexpr (Trace::TIMER_TRACE) {
-      LogDebug("Timer%u mode=%04X (sync=%d syncMode=%u resetOnTarget=%d "
-               "irqTarget=%d irqOvf=%d repeat=%d toggle=%d clkSrc=%u)",
-               timerIndex, ch.mode, ch.syncEnable(), ch.syncMode(),
-               ch.resetOnTarget(), ch.irqOnTarget(), ch.irqOnOverflow(),
-               ch.irqRepeat(), ch.irqToggle(), ch.clockSource());
-    }
+    LogInfo(
+        "Timer%u mode=%04X target=%04X (sync=%d syncMode=%u resetOnTarget=%d "
+        "irqTarget=%d irqOvf=%d repeat=%d toggle=%d clkSrc=%u)",
+        timerIndex, ch.mode, ch.target, ch.syncEnable(), ch.syncMode(),
+        ch.resetOnTarget(), ch.irqOnTarget(), ch.irqOnOverflow(),
+        ch.irqRepeat(), ch.irqToggle(), ch.clockSource());
     break;
   case 0x08:
     ch.target = static_cast<uint16_t>(value);
+    LogInfo("Timer%u target=%04X (mode=%04X)", timerIndex, ch.target, ch.mode);
     break;
   }
 }

@@ -35,11 +35,13 @@ TEST(BIOSTest, IRQTrampolineInstructionsPresent) {
 
   constexpr uint32_t base = 0x00003F00u;
 
-  EXPECT_EQ(mem.Read32(base + 0x00), 0xE92D500Fu); // STMDB SP!, {R0-R3, R12, LR}
+  EXPECT_EQ(mem.Read32(base + 0x00),
+            0xE92D500Fu); // STMDB SP!, {R0-R3, R12, LR}
   EXPECT_EQ(mem.Read32(base + 0x04), 0xE3A00404u); // MOV   R0, #0x04000000
   EXPECT_EQ(mem.Read32(base + 0x08), 0xE28FE000u); // ADD   LR, PC, #0
   EXPECT_EQ(mem.Read32(base + 0x0C), 0xE510F004u); // LDR   PC, [R0, #-4]
-  EXPECT_EQ(mem.Read32(base + 0x10), 0xE8BD500Fu); // LDMIA SP!, {R0-R3, R12, LR}
+  EXPECT_EQ(mem.Read32(base + 0x10),
+            0xE8BD500Fu); // LDMIA SP!, {R0-R3, R12, LR}
   EXPECT_EQ(mem.Read32(base + 0x14), 0xE25EF004u); // SUBS  PC, LR, #4
 }
 

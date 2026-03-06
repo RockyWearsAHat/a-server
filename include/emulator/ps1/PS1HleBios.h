@@ -52,6 +52,14 @@ public:
   // Reset HLE state (events, etc.)
   static void ResetState();
 
+  // Callback return trampoline — mode=0x1000 event callbacks return here.
+  // TryHLETrap intercepts this address and dispatches next pending callback
+  // or resumes exception handling.
+  static constexpr uint32_t CALLBACK_RETURN_ADDR = 0xF220;
+
+  // Called from R3000A when CPU returns to CALLBACK_RETURN_ADDR trampoline
+  static void ResumeAfterCallback(PS1 &ps1);
+
 private:
   static bool FindAndLoadExe(PS1Memory &memory, CDROM &cdrom, R3000A &cpu,
                              PS1GPU &gpu);
@@ -210,15 +218,41 @@ private:
   // ChangeClearRCnt flags per timer (0..2) and vblank (3)
   static inline std::array<uint32_t, 4> changeClearRCntFlags{};
 
+  // Whether the BIOS CDROM state-machine handlers are registered.
+  // When true, the HLE processes CDROM IRQs inline (deliver events, ack).
+  // When false, CDROM IRQs pass through to the game's longjmp handler.
+  static inline bool cdromHandlersRegistered = false;
+
   // RAM addresses of B0/C0 jump tables (returned by GetB0Table/GetC0Table)
   static inline uint32_t b0TableRamAddr = 0;
   static inline uint32_t c0TableRamAddr = 0;
 
-  // Pending mode=0x1000 callback from DeliverEvent (called during exception)
-  static inline uint32_t pendingCallbackAddr = 0;
+  // Nested exception guard: prevents TCB corruption when a second IRQ fires
+  // while the longjmp/handler chain handler is still executing. The real PSX
+  // kernel doesn't support nested exceptions — re-entrant IRQs are deferred
+  // until ReturnFromException re-enables interrupts via RFE.
+  static inline bool inExceptionHandler = false;
+
+  // TCB pointer and CPU state captured at HandleException entry, before
+  // callbacks can corrupt kernel data via decompressor mirror writes.
+  static inline uint32_t savedTcbPtr = 0;
+  static inline uint32_t savedRegs[32] = {};
+  static inline uint32_t savedEpc = 0;
+  static inline uint32_t savedHI = 0;
+  static inline uint32_t savedLO = 0;
+  static inline uint32_t savedSR = 0;
 
   // Cached memory pointer for DeliverEvent and event RAM sync
   static inline PS1Memory *memoryPtr = nullptr;
+
+  // Mode=0x1000 callback execution queue. On real hardware, DeliverEvent
+  // calls callbacks inline as subroutines. In HLE, we redirect the CPU to
+  // execute each callback, returning via the CALLBACK_RETURN trampoline.
+  static inline std::vector<uint32_t> pendingCallbacks;
+  static inline PS1 *callbackPS1 = nullptr;
+
+  // Dispatch the next pending callback or resume exception flow
+  static void DispatchNextCallbackOrResume(PS1 &ps1);
 
   // EvCB RAM sync helpers
   static void WriteEvCBToRAM(int slot);

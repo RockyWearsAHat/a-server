@@ -160,8 +160,41 @@ uint32_t PS1Memory::Read32(uint32_t addr) {
 void PS1Memory::Write8(uint32_t addr, uint8_t value) {
   uint32_t phys = TranslateAddress(addr);
 
+  static uint64_t tileW8 = 0;
+  static bool tileW8Populated = false;
+  if (phys >= 0x001041BC && phys < 0x001042BC) {
+    tileW8++;
+    if (value != 0 && !tileW8Populated) {
+      tileW8Populated = true;
+      LogInfo(
+          "WATCH Write8 FIRST POPULATE phys=%08X val=%02X (addr=%08X) iso=%d",
+          phys, value, addr, cacheIsolated ? 1 : 0);
+    }
+    if (tileW8 <= 10)
+      LogInfo("WATCH Write8 tile phys=%08X val=%02X (addr=%08X) #%llu iso=%d",
+              phys, value, addr, tileW8, cacheIsolated ? 1 : 0);
+    if (tileW8 == 256) {
+      uint32_t baseOff = 0x001041BC & (MemSize::RAM - 1);
+      LogInfo("WATCH Write8 READBACK after 256 writes: %02X %02X %02X %02X "
+              "%02X %02X %02X %02X",
+              ram[baseOff], ram[baseOff + 1], ram[baseOff + 2],
+              ram[baseOff + 3], ram[baseOff + 4], ram[baseOff + 5],
+              ram[baseOff + 6], ram[baseOff + 7]);
+    }
+    if (tileW8 == 512 || tileW8 == 1024 || tileW8 == 2048 || tileW8 == 4096) {
+      uint32_t baseOff = 0x001041BC & (MemSize::RAM - 1);
+      LogInfo("WATCH Write8 READBACK at #%llu: %02X %02X %02X %02X %02X %02X "
+              "%02X %02X",
+              tileW8, ram[baseOff], ram[baseOff + 1], ram[baseOff + 2],
+              ram[baseOff + 3], ram[baseOff + 4], ram[baseOff + 5],
+              ram[baseOff + 6], ram[baseOff + 7]);
+    }
+  }
+
   if (phys < MemMap::RAM_REGION_SIZE) {
     if (!cacheIsolated) {
+      if (phys >= MemSize::RAM && ((ramSizeReg >> 9) & 7) == 4)
+        return;
       uint32_t offset = phys & (MemSize::RAM - 1);
       ram[offset] = value;
     }
@@ -187,8 +220,18 @@ void PS1Memory::Write8(uint32_t addr, uint8_t value) {
 void PS1Memory::Write16(uint32_t addr, uint16_t value) {
   uint32_t phys = TranslateAddress(addr);
 
+  static uint64_t tileW16 = 0;
+  if (phys >= 0x001041BC && phys < 0x001042BC && value != 0) {
+    tileW16++;
+    if (tileW16 <= 5)
+      LogInfo("WATCH Write16 tile phys=%08X val=%04X (addr=%08X)", phys, value,
+              addr);
+  }
+
   if (phys < MemMap::RAM_REGION_SIZE) {
     if (!cacheIsolated) {
+      if (phys >= MemSize::RAM && ((ramSizeReg >> 9) & 7) == 4)
+        return;
       uint32_t offset = phys & (MemSize::RAM - 1);
       std::memcpy(&ram[offset], &value, sizeof(uint16_t));
     }
@@ -212,8 +255,45 @@ void PS1Memory::Write16(uint32_t addr, uint16_t value) {
 void PS1Memory::Write32(uint32_t addr, uint32_t value) {
   uint32_t phys = TranslateAddress(addr);
 
+  // Watchpoint: first tile pixel data address (any write, including zero)
+  uint32_t watchAddr = 0x001041BC;
+  if (phys >= watchAddr && phys < watchAddr + 256) {
+    static uint64_t watchWrites = 0;
+    static bool wasPopulated = false;
+    watchWrites++;
+    // Track when first non-zero write arrives
+    if (value != 0 && !wasPopulated) {
+      wasPopulated = true;
+      LogInfo("WATCH Write32 FIRST POPULATE phys=%08X val=%08X (addr=%08X)",
+              phys, value, addr);
+    }
+    // Log when zero is written AFTER data was populated (the clear!)
+    if (value == 0 && wasPopulated && watchWrites <= 200) {
+      LogInfo("WATCH Write32 CLEARING phys=%08X val=0 (addr=%08X) write#%llu",
+              phys, addr, watchWrites);
+    }
+    if (watchWrites <= 10) {
+      LogInfo("WATCH Write32 phys=%08X val=%08X (addr=%08X) #%llu", phys, value,
+              addr, watchWrites);
+    }
+  }
+  // Broader check: any write (including zero) to tile entry region
+  static uint64_t tileRegionWrites = 0;
+  if (phys >= 0x00104000 && phys < 0x00120000) {
+    tileRegionWrites++;
+    if (tileRegionWrites <= 10) {
+      LogInfo("TILE_REGION Write32 #%llu: phys=%08X val=%08X (addr=%08X)",
+              tileRegionWrites, phys, value, addr);
+    }
+    if (tileRegionWrites == 100000) {
+      LogInfo("TILE_REGION total writes so far: %llu", tileRegionWrites);
+    }
+  }
+
   if (phys < MemMap::RAM_REGION_SIZE) {
     if (!cacheIsolated) {
+      if (phys >= MemSize::RAM && ((ramSizeReg >> 9) & 7) == 4)
+        return;
       uint32_t offset = phys & (MemSize::RAM - 1);
       std::memcpy(&ram[offset], &value, sizeof(uint32_t));
     }
@@ -376,6 +456,22 @@ void PS1Memory::WriteIO32(uint32_t addr, uint32_t value) {
 
   // GPU
   if (addr == IO::GPU_GP0 && gpu) {
+    // Track CopyRect writes: log all 3 words (cmd, dest, size)
+    static int copyRectState = 0;
+    static int copyRectCount = 0;
+    if ((value >> 24) == 0xA0 && cpu) {
+      copyRectCount++;
+      if (copyRectCount <= 5) {
+        LogInfo("GPU_GP0 CopyRect#%d cmd from PC=0x%08X val=0x%08X",
+                copyRectCount, cpu->GetPC(), value);
+      }
+      copyRectState = 2; // Expect 2 more words
+    } else if (copyRectState > 0 && cpu && copyRectCount <= 5) {
+      LogInfo(
+          "GPU_GP0 CopyRect#%d param from PC=0x%08X val=0x%08X (remaining=%d)",
+          copyRectCount, cpu->GetPC(), value, copyRectState);
+      copyRectState--;
+    }
     gpu->WriteGP0(value);
     return;
   }
@@ -471,6 +567,15 @@ uint32_t PS1Memory::ReadRAM32(uint32_t offset) const {
 
 void PS1Memory::WriteRAM32(uint32_t offset, uint32_t value) {
   uint32_t actualOffset = offset & (MemSize::RAM - 1);
+  // Watchpoint for tile pixel data via DMA WriteRAM32 path
+  static uint64_t ramWatchCount = 0;
+  if (actualOffset >= 0x00104000 && actualOffset < 0x00120000) {
+    ramWatchCount++;
+    if (ramWatchCount <= 5) {
+      LogInfo("TILE_REGION WriteRAM32 #%llu: offset=%08X val=%08X",
+              ramWatchCount, actualOffset, value);
+    }
+  }
   std::memcpy(&ram[actualOffset], &value, sizeof(uint32_t));
 }
 

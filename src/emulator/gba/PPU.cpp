@@ -1,13 +1,10 @@
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <cstring>
 #include <emulator/gba/ARM7TDMI.h>
 #include <emulator/gba/GBAMemory.h>
 #include <emulator/gba/PPU.h>
 #include <mutex>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace AIO::Emulator::GBA {
@@ -67,21 +64,6 @@ std::atomic<uint64_t> g_ppuInstanceCounter{1};
 
 inline uint64_t NextPpuInstanceId() {
   return g_ppuInstanceCounter.fetch_add(1, std::memory_order_relaxed);
-}
-inline bool EnvTruthy(const char *v) {
-  return v != nullptr && v[0] != '\0' && v[0] != '0';
-}
-
-// Cache for env-flag lookups used by functional logic
-inline bool EnvFlagCached(const char *name) {
-  static std::unordered_map<std::string, bool> cache;
-  auto it = cache.find(name);
-  if (it != cache.end()) {
-    return it->second;
-  }
-  bool enabled = EnvTruthy(std::getenv(name));
-  cache[name] = enabled;
-  return enabled;
 }
 
 inline uint16_t ReadLE16(const uint8_t *data, size_t size, uint32_t offset) {
@@ -281,8 +263,10 @@ void PPU::Update(int cycles) {
         // scanline — CPU stores OR immediate DMA (timing=0). Without this,
         // software renderers (e.g. Classic NES Series) that update palette
         // mid-frame via immediate DMA render with stale snapshot data.
-        bool palDirty = memory.WasPaletteDirtyByCPU() || memory.WasPaletteDirtyByDMA();
-        bool vramDirty = memory.WasVramDirtyByCPU() || memory.WasVramDirtyByDMA();
+        bool palDirty =
+            memory.WasPaletteDirtyByCPU() || memory.WasPaletteDirtyByDMA();
+        bool vramDirty =
+            memory.WasVramDirtyByCPU() || memory.WasVramDirtyByDMA();
 
         if (palDirty) {
           std::memcpy(paletteSnapshot.data(), memory.GetPaletteData(),
@@ -292,32 +276,12 @@ void PPU::Update(int cycles) {
           std::memcpy(vramSnapshot.data(), memory.GetVRAMData(),
                       VRAM_SNAPSHOT_SIZE);
         }
-        if (memory.WasOamDirtyByDMA()) {
-          std::memcpy(oamSnapshot.data(), memory.GetOAMData(), OAM_SNAPSHOT_SIZE);
+        if (memory.WasOamDirtyByDMA() || memory.WasOamDirtyByCPU()) {
+          std::memcpy(oamSnapshot.data(), memory.GetOAMData(),
+                      OAM_SNAPSHOT_SIZE);
         }
         memory.ClearCPUGraphicsDirtyFlags();
         memory.ClearGraphicsDMADirtyFlags();
-
-        // DIAG: dump palette bank 2 at text scanlines to detect per-scanline changes
-        {
-          static int palDiag = 0;
-          if (palDiag < 20 && frameCount == 200 && scanline >= 135 && scanline <= 155) {
-            palDiag++;
-            FILE *pf = fopen("/tmp/ogdk_pal_at_sl135.txt", "a");
-            if (pf) {
-              fprintf(pf, "Frame %d SL %d dirty(D=%d C=%d): Bank2: ",
-                      frameCount, scanline, palDirty ? 1 : 0, memory.WasPaletteDirtyByCPU() ? 1 : 0);
-              for (int ci = 0; ci < 16; ci++) {
-                int offset = 64 + ci * 2;
-                uint16_t c = paletteSnapshot[offset] | (paletteSnapshot[offset+1] << 8);
-                if (c != 0)
-                  fprintf(pf, "[%d]=0x%04x ", ci, c);
-              }
-              fprintf(pf, "\n");
-              fclose(pf);
-            }
-          }
-        }
 
         DrawScanline();
       }
@@ -437,29 +401,6 @@ void PPU::Update(int cycles) {
             memory.WriteIORegisterInternal(0x202, if_reg);
           }
 
-          // DIAG: Log VBlank IRQ state during cutscene freeze window
-          {
-            static bool vblankDiag = EnvTruthy(std::getenv("AIO_TRACE_OAM_Y"));
-            if (vblankDiag && frameCount >= 1610 && frameCount <= 1760) {
-              uint16_t ie = memory.ReadIORegister16Internal(0x200);
-              uint16_t if_now = memory.ReadIORegister16Internal(0x202);
-              uint16_t ime = memory.ReadIORegister16Internal(0x208);
-              uint16_t biosIF = memory.Read16(0x03007FF8);
-              auto *cpuPtr = memory.GetCPU();
-              uint32_t pc = cpuPtr ? cpuPtr->GetRegister(15) : 0;
-              uint32_t cpsr_val = cpuPtr ? cpuPtr->GetCPSR() : 0;
-              bool halted = cpuPtr ? cpuPtr->IsHalted() : false;
-              static FILE *vf = nullptr;
-              if (!vf) vf = fopen("/tmp/dkc_vblank.log", "w");
-              if (vf) {
-                fprintf(vf, "F%d VBlank: DISPSTAT=0x%04X IE=0x%04X IF=0x%04X IME=%d BIOS_IF=0x%04X PC=0x%08X CPSR=0x%08X IRQdis=%d halted=%d mode=0x%02X\n",
-                        frameCount, dispstat, ie, if_now, ime & 1, biosIF,
-                        pc, cpsr_val, (cpsr_val >> 7) & 1, halted ? 1 : 0, cpsr_val & 0x1F);
-                fflush(vf);
-              }
-            }
-          }
-
           // Defer VBlank DMA until after all end-of-line bookkeeping
           // (VCOUNT/VCOUNT-match/DISPSTAT) is committed.
           triggerVBlankDMA = true;
@@ -496,60 +437,6 @@ void PPU::Update(int cycles) {
 
 void PPU::DrawScanline() {
   if (scanline == 0) {
-    // DIAG: Log OAM Y-coordinates at frame start for DKC falling sprite debug
-    {
-      static bool dkcOamLogEnabled = EnvTruthy(std::getenv("AIO_TRACE_OAM_Y"));
-      // Log every frame in the critical window (1680-1760), every 10th elsewhere
-      bool inCritical = (frameCount >= 1680 && frameCount <= 1760);
-      bool shouldLog = dkcOamLogEnabled && frameCount >= 200 && frameCount <= 4000 &&
-                       (inCritical || (frameCount % 10 == 0));
-      if (shouldLog) {
-        const uint8_t *oam = memory.GetOAMData();
-        FILE *f = fopen("/tmp/dkc_oam_y.log", "a");
-        if (f) {
-          // Log BG scroll registers for camera tracking
-          uint16_t bg0hofs = ReadRegister(0x10) & 0x01FF;
-          uint16_t bg0vofs = ReadRegister(0x12) & 0x01FF;
-          uint16_t bg1hofs = ReadRegister(0x14) & 0x01FF;
-          uint16_t bg1vofs = ReadRegister(0x16) & 0x01FF;
-          uint16_t bg2hofs = ReadRegister(0x18) & 0x01FF;
-          uint16_t bg2vofs = ReadRegister(0x1A) & 0x01FF;
-          uint16_t bg3hofs = ReadRegister(0x1C) & 0x01FF;
-          uint16_t bg3vofs = ReadRegister(0x1E) & 0x01FF;
-          uint16_t dispcnt = ReadRegister(0x00);
-          uint16_t bg0cnt = ReadRegister(0x08);
-          uint16_t bg1cnt = ReadRegister(0x0A);
-          uint16_t bg2cnt = ReadRegister(0x0C);
-          uint16_t bg3cnt = ReadRegister(0x0E);
-          fprintf(f, "F%d DISP=0x%04X BG0=%d,%d(0x%04X) BG1=%d,%d(0x%04X) BG2=%d,%d(0x%04X) BG3=%d,%d(0x%04X) OAM:",
-                  frameCount, dispcnt,
-                  bg0hofs, bg0vofs, bg0cnt,
-                  bg1hofs, bg1vofs, bg1cnt,
-                  bg2hofs, bg2vofs, bg2cnt,
-                  bg3hofs, bg3vofs, bg3cnt);
-          int printed = 0;
-          for (int i = 0; i < 128 && printed < 30; i++) {
-            uint16_t a0 = oam[i * 8] | (oam[i * 8 + 1] << 8);
-            uint16_t a1 = oam[i * 8 + 2] | (oam[i * 8 + 3] << 8);
-            int y = a0 & 0xFF;
-            uint16_t a2 = oam[i * 8 + 4] | (oam[i * 8 + 5] << 8);
-            int tile = a2 & 0x3FF;
-            int x = a1 & 0x1FF;
-            if (x >= 256) x -= 512;
-            bool affine = ((a0 >> 8) & 1) != 0;
-            bool dblOrDis = ((a0 >> 9) & 1) != 0;
-            bool disabled = !affine && dblOrDis;
-            // Skip truly zeroed entries
-            if (a0 == 0 && a1 == 0 && a2 == 0) continue;
-            fprintf(f, " [%d]a0=%04X,y=%d,x=%d,t=%d", i, a0, y, x, tile);
-            printed++;
-          }
-          fprintf(f, "\n");
-          fclose(f);
-        }
-      }
-    }
-
     SnapshotGraphicsMemory();
   }
 
@@ -1660,14 +1547,15 @@ void PPU::SnapshotGraphicsMemory() {
 }
 
 void PPU::RefreshDirtySnapshots() {
-  if (memory.WasOamDirtyByDMA())
+  if (memory.WasOamDirtyByDMA() || memory.WasOamDirtyByCPU())
     std::memcpy(oamSnapshot.data(), memory.GetOAMData(), OAM_SNAPSHOT_SIZE);
-  if (memory.WasVramDirtyByDMA())
+  if (memory.WasVramDirtyByDMA() || memory.WasVramDirtyByCPU())
     std::memcpy(vramSnapshot.data(), memory.GetVRAMData(), VRAM_SNAPSHOT_SIZE);
-  if (memory.WasPaletteDirtyByDMA())
+  if (memory.WasPaletteDirtyByDMA() || memory.WasPaletteDirtyByCPU())
     std::memcpy(paletteSnapshot.data(), memory.GetPaletteData(),
                 PALETTE_SNAPSHOT_SIZE);
   memory.ClearGraphicsDMADirtyFlags();
+  memory.ClearCPUGraphicsDirtyFlags();
 }
 
 void PPU::RestoreFramebuffer(const uint32_t *data, size_t count) {

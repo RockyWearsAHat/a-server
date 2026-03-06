@@ -43,6 +43,13 @@ public:
 
   // ─── Interrupt State (for HLE BIOS event delivery) ──────────────────
   uint8_t GetInterruptFlag() const { return interruptFlag & 0x07; }
+  // HLE BIOS calls this after reading the interrupt type so the CDROM
+  // controller can deliver queued interrupts for subsequent commands.
+  void AcknowledgeInterrupt();
+
+  // ─── Read State (for HLE BIOS Timer2 suppression) ──────────────────
+  bool IsReading() const { return reading; }
+  bool IsCDBusy() const { return reading || readCooldown > 0; }
 
   // ─── DMA Interface ──────────────────────────────────────────────────
   uint8_t DMARead();
@@ -92,6 +99,7 @@ private:
   bool reading = false;
   bool seeking = false;
   uint32_t readDelay = 0;
+  uint32_t readCooldown = 0;
   uint8_t mode = 0;
   bool sectorBufferReady = false;
 

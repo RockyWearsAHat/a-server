@@ -57,6 +57,17 @@ void PS1GPU::Reset() {
   texWindowOffsetX = 0;
   texWindowOffsetY = 0;
 
+  primSemiTransparent = false;
+  polyLineLastXY = 0;
+  polyLineLastR = 0;
+  polyLineLastG = 0;
+  polyLineLastB = 0;
+  polyLineSemiTransparent = false;
+  shadedPolyExpectVertex = false;
+  shadedPolyPendingR = 0;
+  shadedPolyPendingG = 0;
+  shadedPolyPendingB = 0;
+
   currentScanline = 0;
   dotCounter = 0;
   vblank = false;
@@ -107,8 +118,8 @@ uint32_t PS1GPU::ReadGPUSTAT() const {
 
   stat |= static_cast<uint32_t>(dmaDirection) << 29;
 
-  // Bit 31: even/odd scanline (interlace)
-  stat |= static_cast<uint32_t>(currentScanline & 1) << 31;
+  // Bit 31: toggles each frame (interlace field / odd-frame flag)
+  stat |= static_cast<uint32_t>(oddFrame) << 31;
 
   return stat;
 }
@@ -122,8 +133,120 @@ void PS1GPU::WriteGP0(uint32_t value) {
     LogDebug("GP0 write: %08X (mode=%d)", value, static_cast<int>(gp0Mode));
   }
 
+  // Handle active polyline collection
+  if (gp0Mode == GP0Mode::PolyLine || gp0Mode == GP0Mode::ShadedPolyLine) {
+    // Terminator check: upper nibble of the vertex (or color) word == 0x5
+    if ((value & 0xF0000000) == 0x50000000) {
+      gp0Mode = GP0Mode::Command;
+      return;
+    }
+
+    if (gp0Mode == GP0Mode::PolyLine) {
+      // Next vertex — draw segment from last vertex to this one
+      int16_t x0 =
+          static_cast<int16_t>(
+              static_cast<int32_t>((polyLineLastXY & 0x7FF) << 21) >> 21) +
+          drawOffsetX;
+      int16_t y0 =
+          static_cast<int16_t>(
+              static_cast<int32_t>(((polyLineLastXY >> 16) & 0x7FF) << 21) >>
+              21) +
+          drawOffsetY;
+      int16_t x1 = static_cast<int16_t>(
+                       static_cast<int32_t>((value & 0x7FF) << 21) >> 21) +
+                   drawOffsetX;
+      int16_t y1 =
+          static_cast<int16_t>(
+              static_cast<int32_t>(((value >> 16) & 0x7FF) << 21) >> 21) +
+          drawOffsetY;
+      uint16_t color = ColorToVRAM(polyLineLastR, polyLineLastG, polyLineLastB);
+      // Bresenham line
+      int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+      int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+      int err = dx + dy;
+      while (true) {
+        PutPixel(x0, y0, color);
+        if (x0 == x1 && y0 == y1)
+          break;
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+          err += dy;
+          x0 += sx;
+        }
+        if (e2 <= dx) {
+          err += dx;
+          y0 += sy;
+        }
+      }
+      polyLineLastXY = value;
+    } else {
+      // ShadedPolyLine: alternating color / vertex words
+      if (!shadedPolyExpectVertex) {
+        shadedPolyPendingR = static_cast<uint8_t>(value);
+        shadedPolyPendingG = static_cast<uint8_t>(value >> 8);
+        shadedPolyPendingB = static_cast<uint8_t>(value >> 16);
+        shadedPolyExpectVertex = true;
+      } else {
+        // Vertex word — draw from last vertex
+        int16_t x0 =
+            static_cast<int16_t>(
+                static_cast<int32_t>((polyLineLastXY & 0x7FF) << 21) >> 21) +
+            drawOffsetX;
+        int16_t y0 =
+            static_cast<int16_t>(
+                static_cast<int32_t>(((polyLineLastXY >> 16) & 0x7FF) << 21) >>
+                21) +
+            drawOffsetY;
+        int16_t x1 = static_cast<int16_t>(
+                         static_cast<int32_t>((value & 0x7FF) << 21) >> 21) +
+                     drawOffsetX;
+        int16_t y1 =
+            static_cast<int16_t>(
+                static_cast<int32_t>(((value >> 16) & 0x7FF) << 21) >> 21) +
+            drawOffsetY;
+        int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+        int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        int totalSteps = std::max(std::abs(x1 - x0), std::abs(y1 - y0));
+        if (totalSteps == 0)
+          totalSteps = 1;
+        int step = 0;
+        int16_t cx = x0, cy = y0;
+        while (true) {
+          uint8_t r = static_cast<uint8_t>(
+              polyLineLastR +
+              (shadedPolyPendingR - polyLineLastR) * step / totalSteps);
+          uint8_t g = static_cast<uint8_t>(
+              polyLineLastG +
+              (shadedPolyPendingG - polyLineLastG) * step / totalSteps);
+          uint8_t b = static_cast<uint8_t>(
+              polyLineLastB +
+              (shadedPolyPendingB - polyLineLastB) * step / totalSteps);
+          PutPixel(cx, cy, ColorToVRAM(r, g, b));
+          if (cx == x1 && cy == y1)
+            break;
+          int e2 = 2 * err;
+          if (e2 >= dy) {
+            err += dy;
+            cx += sx;
+          }
+          if (e2 <= dx) {
+            err += dx;
+            cy += sy;
+          }
+          step++;
+        }
+        polyLineLastXY = value;
+        polyLineLastR = shadedPolyPendingR;
+        polyLineLastG = shadedPolyPendingG;
+        polyLineLastB = shadedPolyPendingB;
+        shadedPolyExpectVertex = false;
+      }
+    }
+    return;
+  }
+
   if (gp0Mode == GP0Mode::CopyToVRAM) {
-    // Receiving pixel data for VRAM copy
     uint16_t pixel1 = static_cast<uint16_t>(value);
     uint16_t pixel2 = static_cast<uint16_t>(value >> 16);
 
@@ -134,16 +257,21 @@ void PS1GPU::WriteGP0(uint32_t value) {
       vramTransferCurrY++;
     }
 
-    WriteVRAM(vramTransferCurrX, vramTransferCurrY, pixel2);
-    vramTransferCurrX++;
-    if (vramTransferCurrX >= vramTransferX + vramTransferW) {
-      vramTransferCurrX = vramTransferX;
-      vramTransferCurrY++;
+    // Only write the second pixel if still within the transfer bounds (handles
+    // odd W*H)
+    bool done = (vramTransferCurrY >= vramTransferY + vramTransferH);
+    if (!done) {
+      WriteVRAM(vramTransferCurrX, vramTransferCurrY, pixel2);
+      vramTransferCurrX++;
+      if (vramTransferCurrX >= vramTransferX + vramTransferW) {
+        vramTransferCurrX = vramTransferX;
+        vramTransferCurrY++;
+      }
+      done = (vramTransferCurrY >= vramTransferY + vramTransferH);
     }
 
-    if (vramTransferCurrY >= vramTransferY + vramTransferH) {
+    if (done)
       gp0Mode = GP0Mode::Command;
-    }
     return;
   }
 
@@ -264,6 +392,14 @@ void PS1GPU::ProcessGP0Command() {
   uint8_t cmd = static_cast<uint8_t>(gp0CommandBuffer[0] >> 24);
   gp0CommandCount++;
 
+  // Only drawing primitives (0x20-0x7F) carry a semi-transparency bit (bit 1).
+  // Environment setup commands (0xE1-0xE6) must NOT alter this flag — their
+  // command bytes happen to have bit 1 set (e.g. 0xE2, 0xE3, 0xE6) which would
+  // otherwise corrupt all subsequent rendering with unwanted blending.
+  if (cmd >= 0x20 && cmd <= 0x7F) {
+    primSemiTransparent = (cmd & 2) != 0;
+  }
+
   switch (cmd) {
   case 0x00:
     GP0_Nop(gp0CommandBuffer[0]);
@@ -309,10 +445,26 @@ void PS1GPU::ProcessGP0Command() {
   case 0x40:
   case 0x42:
     GP0_MonoLine(gp0CommandBuffer);
+    // Transition to polyline mode: retain color and last vertex for
+    // continuation
+    primSemiTransparent = (cmd == 0x42);
+    polyLineLastXY = gp0CommandBuffer[2];
+    polyLineLastR = static_cast<uint8_t>(gp0CommandBuffer[0]);
+    polyLineLastG = static_cast<uint8_t>(gp0CommandBuffer[0] >> 8);
+    polyLineLastB = static_cast<uint8_t>(gp0CommandBuffer[0] >> 16);
+    gp0Mode = GP0Mode::PolyLine;
     break;
   case 0x50:
   case 0x52:
     GP0_ShadedLine(gp0CommandBuffer);
+    // Transition to shaded polyline mode with last vertex/color for
+    // continuation
+    primSemiTransparent = (cmd == 0x52);
+    polyLineLastXY = gp0CommandBuffer[3];
+    polyLineLastR = static_cast<uint8_t>(gp0CommandBuffer[2]);
+    polyLineLastG = static_cast<uint8_t>(gp0CommandBuffer[2] >> 8);
+    polyLineLastB = static_cast<uint8_t>(gp0CommandBuffer[2] >> 16);
+    gp0Mode = GP0Mode::ShadedPolyLine;
     break;
   case 0x34:
   case 0x36:
@@ -448,7 +600,6 @@ void PS1GPU::GP0_DrawAreaBottomRight(uint32_t cmd) {
 void PS1GPU::GP0_DrawOffset(uint32_t cmd) {
   uint32_t x = cmd & 0x7FF;
   uint32_t y = (cmd >> 11) & 0x7FF;
-  // Sign-extend from 11 bits
   drawOffsetX = static_cast<int16_t>((x ^ 0x400) - 0x400);
   drawOffsetY = static_cast<int16_t>((y ^ 0x400) - 0x400);
 }
@@ -560,6 +711,17 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
   uint8_t v1 = static_cast<uint8_t>(params[4] >> 8);
   uint16_t texPage = static_cast<uint16_t>(params[4] >> 16);
 
+  // Textured polygon commands carry an embedded texPage that updates the GPU's
+  // draw-mode state — subsequent sprite rectangles rely on this for correct
+  // texture page selection.
+  texPageBaseX = texPage & 0xF;
+  texPageBaseY = (texPage >> 4) & 1;
+  semiTransparencyMode = (texPage >> 5) & 3;
+  texPageColorDepth = (texPage >> 7) & 3;
+  // Explicitly set OR clear from the embedded texPage bit — never leave it
+  // sticky.
+  textureDisable = (texPage >> 11) & 1;
+
   int16_t x2 = static_cast<int16_t>(
                    static_cast<int32_t>((params[5] & 0x7FF) << 21) >> 21) +
                drawOffsetX;
@@ -570,11 +732,23 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
   uint8_t u2 = static_cast<uint8_t>(params[6]);
   uint8_t v2 = static_cast<uint8_t>(params[6] >> 8);
 
+  // When textureDisable is set, render as flat/Gouraud using vertex colour only
+  if (textureDisable) {
+    RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r0, g0, b0, x2, y2, r0, g0,
+                      b0);
+    return;
+  }
+
   // Bounding box
   int16_t minX = std::min({x0, x1, x2});
   int16_t maxX = std::max({x0, x1, x2});
   int16_t minY = std::min({y0, y1, y2});
   int16_t maxY = std::max({y0, y1, y2});
+
+  // Hardware guard: skip primitives wider or taller than 1023 pixels
+  if (maxX - minX > 1023 || maxY - minY > 1023)
+    return;
+
   minX = std::max(minX, static_cast<int16_t>(drawAreaLeft));
   maxX = std::min(maxX, static_cast<int16_t>(drawAreaRight));
   minY = std::max(minY, static_cast<int16_t>(drawAreaTop));
@@ -608,9 +782,12 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
       if (texel == 0)
         continue; // Transparent black
 
-      // For raw textures (bit 0 of cmd), use texel directly; otherwise modulate
+      // Semi-transparent pixels have bit 15 set; blend when the command is also
+      // semi-transparent
+      bool blendThisPixel = primSemiTransparent && (texel & 0x8000);
+      uint16_t finalColor;
       if (!opaque) {
-        PutPixel(px, py, texel);
+        finalColor = texel;
       } else {
         uint8_t tr = ((texel & 0x1F) << 3);
         uint8_t tg = (((texel >> 5) & 0x1F) << 3);
@@ -618,23 +795,36 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
         tr = static_cast<uint8_t>(std::min(255, (tr * r0) >> 7));
         tg = static_cast<uint8_t>(std::min(255, (tg * g0) >> 7));
         tb = static_cast<uint8_t>(std::min(255, (tb * b0) >> 7));
-        PutPixel(px, py, ColorToVRAM(tr, tg, tb));
+        finalColor = ColorToVRAM(tr, tg, tb);
       }
+      if (blendThisPixel) {
+        // Temporarily clear primSemiTransparent so PutPixel does not
+        // double-blend
+        primSemiTransparent = false;
+        uint16_t dst =
+            ReadVRAM(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+        finalColor = BlendPixels(finalColor, dst);
+        primSemiTransparent = true;
+      }
+      PutPixel(px, py, finalColor);
     }
   }
 }
 
 void PS1GPU::GP0_TexturedQuad(const std::vector<uint32_t> &params,
                               [[maybe_unused]] bool opaque) {
-  // Split into two textured triangles
-  // Tri 1: verts 0,1,2 with tex coords
+  // 9 words: cmd+c(0), v0(1), t0+clut(2), v1(3), t1+texpage(4), v2(5), t2(6),
+  // v3(7), t3(8) Tri 1: verts 0,1,2
   std::vector<uint32_t> tri1 = {params[0], params[1], params[2], params[3],
                                 params[4], params[5], params[6]};
   GP0_TexturedTriangle(tri1, opaque);
 
-  // Tri 2: verts 1,2,3 — repack
-  std::vector<uint32_t> tri2 = {params[0], params[3], params[4], params[5],
-                                params[6], params[7], params[8]};
+  // Tri 2: verts 1,2,3 — preserve original CLUT (params[2] upper) and texPage
+  // (params[4] upper)
+  uint32_t t1WithClut = (params[4] & 0x0000FFFF) | (params[2] & 0xFFFF0000);
+  uint32_t t2WithTexPage = (params[6] & 0x0000FFFF) | (params[4] & 0xFFFF0000);
+  std::vector<uint32_t> tri2 = {params[0],     params[3], t1WithClut, params[5],
+                                t2WithTexPage, params[7], params[8]};
   GP0_TexturedTriangle(tri2, opaque);
 }
 
@@ -644,20 +834,35 @@ void PS1GPU::GP0_ShadedTriangle(const std::vector<uint32_t> &params,
   uint8_t r0 = static_cast<uint8_t>(params[0]);
   uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
-  int16_t x0 = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
-  int16_t y0 = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   uint8_t r1 = static_cast<uint8_t>(params[2]);
   uint8_t g1 = static_cast<uint8_t>(params[2] >> 8);
   uint8_t b1 = static_cast<uint8_t>(params[2] >> 16);
-  int16_t x1 = static_cast<int16_t>(params[3] & 0xFFFF) + drawOffsetX;
-  int16_t y1 = static_cast<int16_t>(params[3] >> 16) + drawOffsetY;
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[3] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[3] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   uint8_t r2 = static_cast<uint8_t>(params[4]);
   uint8_t g2 = static_cast<uint8_t>(params[4] >> 8);
   uint8_t b2 = static_cast<uint8_t>(params[4] >> 16);
-  int16_t x2 = static_cast<int16_t>(params[5] & 0xFFFF) + drawOffsetX;
-  int16_t y2 = static_cast<int16_t>(params[5] >> 16) + drawOffsetY;
+  int16_t x2 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[5] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y2 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[5] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r1, g1, b1, x2, y2, r2, g2, b2);
 }
@@ -745,6 +950,15 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
   uint8_t v1 = static_cast<uint8_t>(params[5] >> 8);
   uint16_t texPage = static_cast<uint16_t>(params[5] >> 16);
 
+  // Propagate embedded texPage to GPU draw-mode state (same as
+  // TexturedTriangle). Explicitly set OR clear — never leave textureDisable
+  // sticky.
+  texPageBaseX = texPage & 0xF;
+  texPageBaseY = (texPage >> 4) & 1;
+  semiTransparencyMode = (texPage >> 5) & 3;
+  texPageColorDepth = (texPage >> 7) & 3;
+  textureDisable = (texPage >> 11) & 1;
+
   uint8_t r2 = static_cast<uint8_t>(params[6]);
   uint8_t g2 = static_cast<uint8_t>(params[6] >> 8);
   uint8_t b2 = static_cast<uint8_t>(params[6] >> 16);
@@ -758,6 +972,13 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
   uint8_t u2 = static_cast<uint8_t>(params[8]);
   uint8_t v2 = static_cast<uint8_t>(params[8] >> 8);
 
+  // When textureDisable is set, use Gouraud shading without texture
+  if (textureDisable) {
+    RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r1, g1, b1, x2, y2, r2, g2,
+                      b2);
+    return;
+  }
+
   int16_t minX =
       std::max(std::min({x0, x1, x2}), static_cast<int16_t>(drawAreaLeft));
   int16_t maxX =
@@ -766,6 +987,12 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
       std::max(std::min({y0, y1, y2}), static_cast<int16_t>(drawAreaTop));
   int16_t maxY =
       std::min(std::max({y0, y1, y2}), static_cast<int16_t>(drawAreaBottom));
+
+  // Hardware guard: skip oversized primitives
+  if (std::max({x0, x1, x2}) - std::min({x0, x1, x2}) > 1023)
+    return;
+  if (std::max({y0, y1, y2}) - std::min({y0, y1, y2}) > 1023)
+    return;
 
   int32_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
   if (area == 0)
@@ -794,8 +1021,10 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
       if (texel == 0)
         continue;
 
+      bool blendThisPixel = primSemiTransparent && (texel & 0x8000);
+      uint16_t finalColor;
       if (!opaque) {
-        PutPixel(px, py, texel);
+        finalColor = texel;
       } else {
         // Interpolate vertex color for modulation
         uint8_t cr =
@@ -804,31 +1033,42 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
             static_cast<uint8_t>((bw0 * g0 + bw1 * g1 + bw2 * g2) / absArea);
         uint8_t cb =
             static_cast<uint8_t>((bw0 * b0 + bw1 * b1 + bw2 * b2) / absArea);
-
         uint8_t tr = ((texel & 0x1F) << 3);
         uint8_t tg = (((texel >> 5) & 0x1F) << 3);
         uint8_t tb = (((texel >> 10) & 0x1F) << 3);
         tr = static_cast<uint8_t>(std::min(255, (tr * cr) >> 7));
         tg = static_cast<uint8_t>(std::min(255, (tg * cg) >> 7));
         tb = static_cast<uint8_t>(std::min(255, (tb * cb) >> 7));
-        PutPixel(px, py, ColorToVRAM(tr, tg, tb));
+        finalColor = ColorToVRAM(tr, tg, tb);
       }
+      if (blendThisPixel) {
+        primSemiTransparent = false;
+        uint16_t dst =
+            ReadVRAM(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+        finalColor = BlendPixels(finalColor, dst);
+        primSemiTransparent = true;
+      }
+      PutPixel(px, py, finalColor);
     }
   }
 }
 
 void PS1GPU::GP0_ShadedTexturedQuad(const std::vector<uint32_t> &params,
                                     [[maybe_unused]] bool opaque) {
-  // 12 words: split into two shaded-textured triangles
-  // Tri 1: verts 0,1,2 → params[0..8]
+  // 12 words: c0+cmd(0), v0(1), t0+clut(2), c1(3), v1(4), t1+texpage(5),
+  //           c2(6), v2(7), t2(8), c3(9), v3(10), t3(11)
+  // Tri 1: verts 0,1,2
   std::vector<uint32_t> tri1 = {params[0], params[1], params[2],
                                 params[3], params[4], params[5],
                                 params[6], params[7], params[8]};
   GP0_ShadedTexturedTriangle(tri1, opaque);
 
-  // Tri 2: verts 1,2,3 → repack
-  std::vector<uint32_t> tri2 = {params[3], params[4],  params[5],
-                                params[6], params[7],  params[8],
+  // Tri 2: verts 1,2,3 — preserve CLUT from params[2] upper and texPage from
+  // params[5] upper
+  uint32_t t1WithClut = (params[5] & 0x0000FFFF) | (params[2] & 0xFFFF0000);
+  uint32_t t2WithTexPage = (params[8] & 0x0000FFFF) | (params[5] & 0xFFFF0000);
+  std::vector<uint32_t> tri2 = {params[3], params[4],  t1WithClut,
+                                params[6], params[7],  t2WithTexPage,
                                 params[9], params[10], params[11]};
   GP0_ShadedTexturedTriangle(tri2, opaque);
 }
@@ -839,8 +1079,13 @@ void PS1GPU::GP0_MonoRect(const std::vector<uint32_t> &params) {
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
   uint16_t color = ColorToVRAM(r, g, b);
 
-  int16_t x = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
-  int16_t y = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+  int16_t x = static_cast<int16_t>(
+                  static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+              drawOffsetX;
+  int16_t y =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   uint16_t w = 1, h = 1;
   uint8_t cmd = static_cast<uint8_t>(params[0] >> 24);
@@ -863,28 +1108,33 @@ void PS1GPU::GP0_MonoRect(const std::vector<uint32_t> &params) {
 }
 
 void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
-  // Format: color+cmd, vertex, texcoord+clut, size (for variable)
   uint8_t r = static_cast<uint8_t>(params[0]);
   uint8_t g = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
   uint8_t cmd = static_cast<uint8_t>(params[0] >> 24);
 
-  int16_t x = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
-  int16_t y = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+  // PS1 GPU vertex positions are 11-bit signed (-1024 to +1023)
+  uint32_t rawXBits = params[1] & 0x7FF;
+  uint32_t rawYBits = (params[1] >> 16) & 0x7FF;
+  int16_t rawX = static_cast<int16_t>((rawXBits ^ 0x400) - 0x400);
+  int16_t rawY = static_cast<int16_t>((rawYBits ^ 0x400) - 0x400);
+  int16_t x = rawX + drawOffsetX;
+  int16_t y = rawY + drawOffsetY;
 
   uint8_t u = static_cast<uint8_t>(params[2]);
   uint8_t v = static_cast<uint8_t>(params[2] >> 8);
   uint16_t clut = static_cast<uint16_t>(params[2] >> 16);
 
-  // Use current texture page from draw mode settings
-  uint16_t texPage =
-      texPageBaseX | (texPageBaseY << 4) | (texPageColorDepth << 7);
+  // Rect sprites always derive their texPage from the current GPU draw-mode
+  // state (set by E1 or updated by the last textured polygon command).
+  uint16_t texPage = texPageBaseX | (texPageBaseY << 4) |
+                     (semiTransparencyMode << 5) | (texPageColorDepth << 7);
 
   uint16_t w = 0, h = 0;
-  if ((cmd & 0xF8) == 0x74) {
+  if ((cmd & 0xF8) == 0x70) {
     w = 8;
     h = 8;
-  } else if ((cmd & 0xF8) == 0x7C) {
+  } else if ((cmd & 0xF8) == 0x78) {
     w = 16;
     h = 16;
   } else if (params.size() >= 4) {
@@ -892,18 +1142,31 @@ void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
     h = params[3] >> 16;
   }
 
-  bool rawTexture =
-      (cmd & 1); // Odd commands = raw texture (no color modulation)
+  // When textureDisable is set, render as a solid colour rectangle using the
+  // vertex colour so the primitive is still visible.
+  if (textureDisable) {
+    for (int16_t dy = 0; dy < static_cast<int16_t>(h); dy++) {
+      for (int16_t dx = 0; dx < static_cast<int16_t>(w); dx++) {
+        PutPixel(x + dx, y + dy, ColorToVRAM(r, g, b));
+      }
+    }
+    return;
+  }
 
+  bool rawTexture = (cmd & 1);
+
+  uint32_t pixelsDrawn = 0;
   for (int16_t dy = 0; dy < static_cast<int16_t>(h); dy++) {
     for (int16_t dx = 0; dx < static_cast<int16_t>(w); dx++) {
       uint16_t texel =
           SampleTexture((u + dx) & 0xFF, (v + dy) & 0xFF, clut, texPage);
       if (texel == 0)
-        continue; // Transparent
+        continue;
 
+      bool blendThisPixel = primSemiTransparent && (texel & 0x8000);
+      uint16_t finalColor;
       if (rawTexture) {
-        PutPixel(x + dx, y + dy, texel);
+        finalColor = texel;
       } else {
         uint8_t tr = ((texel & 0x1F) << 3);
         uint8_t tg = (((texel >> 5) & 0x1F) << 3);
@@ -911,9 +1174,22 @@ void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
         tr = static_cast<uint8_t>(std::min(255, (tr * r) >> 7));
         tg = static_cast<uint8_t>(std::min(255, (tg * g) >> 7));
         tb = static_cast<uint8_t>(std::min(255, (tb * b) >> 7));
-        PutPixel(x + dx, y + dy, ColorToVRAM(tr, tg, tb));
+        finalColor = ColorToVRAM(tr, tg, tb);
       }
+      if (blendThisPixel) {
+        primSemiTransparent = false;
+        uint16_t dst = ReadVRAM(static_cast<uint32_t>(x + dx),
+                                static_cast<uint32_t>(y + dy));
+        finalColor = BlendPixels(finalColor, dst);
+        primSemiTransparent = true;
+      }
+      PutPixel(x + dx, y + dy, finalColor);
+      pixelsDrawn++;
     }
+  }
+  if constexpr (Trace::GPU_CMD) {
+    LogDebug("TexRect: cmd=%02X pos=(%d,%d) uv=(%u,%u) wh=%ux%u drawn=%u", cmd,
+             x, y, u, v, w, h, pixelsDrawn);
   }
 }
 
@@ -923,8 +1199,13 @@ void PS1GPU::GP0_MonoDot(const std::vector<uint32_t> &params) {
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
   uint16_t color = ColorToVRAM(r, g, b);
 
-  int16_t x = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
-  int16_t y = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+  int16_t x = static_cast<int16_t>(
+                  static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+              drawOffsetX;
+  int16_t y =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
   PutPixel(x, y, color);
 }
 
@@ -934,10 +1215,20 @@ void PS1GPU::GP0_MonoLine(const std::vector<uint32_t> &params) {
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
   uint16_t color = ColorToVRAM(r, g, b);
 
-  int16_t x0 = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
-  int16_t y0 = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
-  int16_t x1 = static_cast<int16_t>(params[2] & 0xFFFF) + drawOffsetX;
-  int16_t y1 = static_cast<int16_t>(params[2] >> 16) + drawOffsetY;
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[2] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[2] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   // Bresenham line drawing
   int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
@@ -961,18 +1252,27 @@ void PS1GPU::GP0_MonoLine(const std::vector<uint32_t> &params) {
 }
 
 void PS1GPU::GP0_ShadedLine(const std::vector<uint32_t> &params) {
-  // Format: color0+cmd, vert0, color1, vert1
   uint8_t r0 = static_cast<uint8_t>(params[0]);
   uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b0 = static_cast<uint8_t>(params[0] >> 16);
-  int16_t x0 = static_cast<int16_t>(params[1] & 0xFFFF) + drawOffsetX;
-  int16_t y0 = static_cast<int16_t>(params[1] >> 16) + drawOffsetY;
+  int16_t x0 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[1] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y0 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[1] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   uint8_t r1 = static_cast<uint8_t>(params[2]);
   uint8_t g1 = static_cast<uint8_t>(params[2] >> 8);
   uint8_t b1 = static_cast<uint8_t>(params[2] >> 16);
-  int16_t x1 = static_cast<int16_t>(params[3] & 0xFFFF) + drawOffsetX;
-  int16_t y1 = static_cast<int16_t>(params[3] >> 16) + drawOffsetY;
+  int16_t x1 = static_cast<int16_t>(
+                   static_cast<int32_t>((params[3] & 0x7FF) << 21) >> 21) +
+               drawOffsetX;
+  int16_t y1 =
+      static_cast<int16_t>(
+          static_cast<int32_t>(((params[3] >> 16) & 0x7FF) << 21) >> 21) +
+      drawOffsetY;
 
   int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
   int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
@@ -1035,6 +1335,7 @@ void PS1GPU::GP0_CopyRectCPUtoVRAM(const std::vector<uint32_t> &params) {
     vramTransferW = 0x400;
   if (vramTransferH == 0)
     vramTransferH = 0x200;
+
   vramTransferCurrX = vramTransferX;
   vramTransferCurrY = vramTransferY;
   gp0Mode = GP0Mode::CopyToVRAM;
@@ -1204,6 +1505,7 @@ void PS1GPU::Tick(uint32_t cpuCycles) {
 
     if (currentScanline >= totalScanlines) {
       currentScanline = 0;
+      oddFrame = !oddFrame;
     }
 
     vblank = (currentScanline >= visibleScanlines);
@@ -1292,6 +1594,10 @@ uint32_t PS1GPU::GetDisplayHeight() const { return vRes480 ? 480 : 240; }
 void PS1GPU::PutPixel(int16_t x, int16_t y, uint16_t color) {
   if (!IsInDrawingArea(x, y))
     return;
+  if (primSemiTransparent) {
+    uint16_t dst = ReadVRAM(static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+    color = BlendPixels(color, dst);
+  }
   WriteVRAM(static_cast<uint32_t>(x), static_cast<uint32_t>(y), color);
 }
 
@@ -1306,12 +1612,53 @@ uint16_t PS1GPU::ColorToVRAM(uint8_t r, uint8_t g, uint8_t b) {
   return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
 }
 
+// Blend src (foreground) into dst (background) using the current
+// semi-transparency mode. All arithmetic is in 5-bit channel space (PS1 15-bit
+// color).
+uint16_t PS1GPU::BlendPixels(uint16_t src, uint16_t dst) const {
+  int32_t sr = src & 0x1F, sg = (src >> 5) & 0x1F, sb = (src >> 10) & 0x1F;
+  int32_t dr = dst & 0x1F, dg = (dst >> 5) & 0x1F, db = (dst >> 10) & 0x1F;
+  int32_t r, g, b;
+  switch (semiTransparencyMode) {
+  case 0: // B/2 + F/2
+    r = (dr + sr) / 2;
+    g = (dg + sg) / 2;
+    b = (db + sb) / 2;
+    break;
+  case 1: // B + F (additive)
+    r = std::min(31, dr + sr);
+    g = std::min(31, dg + sg);
+    b = std::min(31, db + sb);
+    break;
+  case 2: // B - F (subtractive)
+    r = std::max(0, dr - sr);
+    g = std::max(0, dg - sg);
+    b = std::max(0, db - sb);
+    break;
+  case 3: // B + F/4
+    r = std::min(31, dr + sr / 4);
+    g = std::min(31, dg + sg / 4);
+    b = std::min(31, db + sb / 4);
+    break;
+  default:
+    return src;
+  }
+  return static_cast<uint16_t>(r | (g << 5) | (b << 10));
+}
+
 // ─── Triangle Rasterizer (Gouraud shading via half-space method) ────────
 
 void PS1GPU::RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,
                                uint8_t b0, int16_t x1, int16_t y1, uint8_t r1,
                                uint8_t g1, uint8_t b1, int16_t x2, int16_t y2,
                                uint8_t r2, uint8_t g2, uint8_t b2) {
+  // Hardware guard: ignore primitives whose bounding box exceeds 1023 pixels
+  // in either dimension (PS1 GPU behaviour).
+  if (std::max({x0, x1, x2}) - std::min({x0, x1, x2}) > 1023)
+    return;
+  if (std::max({y0, y1, y2}) - std::min({y0, y1, y2}) > 1023)
+    return;
+
   // Bounding box clipped to drawing area
   int16_t minX =
       std::max(std::min({x0, x1, x2}), static_cast<int16_t>(drawAreaLeft));

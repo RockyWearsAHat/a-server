@@ -1172,25 +1172,16 @@ int64_t GTE::DivideUNR(uint32_t dividend, uint16_t divisor) {
     return 0x1FFFF;
   }
 
-  if (static_cast<uint32_t>(dividend) * 2 > static_cast<uint32_t>(divisor)) {
-    // UNR division algorithm (unrolled Newton-Raphson)
-    // Using a lookup table approximation
-    uint32_t shift = 0;
-    uint32_t d = divisor;
-    while (d < 0x8000) {
-      d <<= 1;
-      shift++;
-    }
-
-    int64_t result = (static_cast<int64_t>(dividend) << (16 + shift)) / divisor;
-    if (result > 0x1FFFF) {
-      SetFlag(1 << 17);
-      return 0x1FFFF;
-    }
-    return result;
+  // Overflow: result would exceed 17-bit unsigned range (0x1FFFF).
+  // This happens when dividend >= 2 * divisor (perspective scale >= 2.0).
+  if (dividend >= static_cast<uint32_t>(divisor) * 2) {
+    SetFlag(1 << 17);
+    return 0x1FFFF;
   }
 
-  return (static_cast<int64_t>(dividend) << 16) / divisor;
+  // Standard perspective divide — result is dividend/divisor in Q16 format.
+  int64_t result = (static_cast<int64_t>(dividend) << 16) / divisor;
+  return std::min<int64_t>(result, 0x1FFFF);
 }
 
 void GTE::SetFlag(uint32_t bit) { flag |= bit; }

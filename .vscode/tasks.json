@@ -1,92 +1,164 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "Build",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && make build"],
-      "group": { "kind": "build", "isDefault": true },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "CTest",
-      "type": "shell",
-      "command": "zsh",
-      "args": [
-        "-lc",
-        "cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure"
-      ],
-      "group": { "kind": "test", "isDefault": true },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "Test",
-      "type": "shell",
-      "command": "echo Running tests",
-      "dependsOn": ["Build", "CTest"],
-      "group": { "kind": "test" },
-      "problemMatcher": []
-    },
-    {
-      "label": "Clean Workspace",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/clean.sh"],
-      "group": { "kind": "build" },
-      "problemMatcher": []
-    },
-    {
-      "label": "CPUTests",
-      "type": "process",
-      "command": "${workspaceFolder}/build/bin/CPUTests",
-      "group": { "kind": "test" },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "EEPROMTests",
-      "type": "process",
-      "command": "${workspaceFolder}/build/bin/EEPROMTests",
-      "group": { "kind": "test" },
-      "problemMatcher": ["$gcc"]
-    },
-    {
-      "label": "Test Suite",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && ./scripts/test_suite.py"],
-      "group": { "kind": "test" },
-      "problemMatcher": []
-    },
-    {
-      "label": "Coverage (Full)",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && make coverage"],
-      "group": { "kind": "test" },
-      "problemMatcher": ["$gcc"],
-      "detail": "Full clean rebuild with coverage instrumentation + run tests + generate lcov.info"
-    },
-    {
-      "label": "Coverage (Regen)",
-      "type": "shell",
-      "command": "zsh",
-      "args": ["-lc", "cd \"${workspaceFolder}\" && make coverage-regen"],
-      "group": { "kind": "test" },
-      "problemMatcher": [],
-      "detail": "Regenerate coverage report from last test run (no rebuild)"
-    },
-    {
-      "label": "Test with Coverage",
-      "type": "shell",
-      "command": "zsh",
-      "args": [
-        "-lc",
-        "cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure && cd \"${workspaceFolder}\" && make coverage-regen"
-      ],
-      "group": { "kind": "test" },
-      "problemMatcher": ["$gcc"],
-      "detail": "Run tests then regenerate coverage for Coverage Gutters"
-    }
-  ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && make build"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "CTest",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure"
+			],
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "Test",
+			"type": "shell",
+			"command": "echo Running tests",
+			"dependsOn": [
+				"Build",
+				"CTest"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Clean Workspace",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && ./scripts/clean.sh"
+			],
+			"group": {
+				"kind": "build"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "CPUTests",
+			"type": "process",
+			"command": "${workspaceFolder}/build/bin/CPUTests",
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "EEPROMTests",
+			"type": "process",
+			"command": "${workspaceFolder}/build/bin/EEPROMTests",
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "Test Suite",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && ./scripts/test_suite.py"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Coverage (Full)",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && make coverage"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Full clean rebuild with coverage instrumentation + run tests + generate lcov.info"
+		},
+		{
+			"label": "Coverage (Regen)",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}\" && make coverage-regen"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [],
+			"detail": "Regenerate coverage report from last test run (no rebuild)"
+		},
+		{
+			"label": "Test with Coverage",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd \"${workspaceFolder}/build/generated/cmake\" && ctest --output-on-failure && cd \"${workspaceFolder}\" && make coverage-regen"
+			],
+			"group": {
+				"kind": "test"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Run tests then regenerate coverage for Coverage Gutters"
+		},
+		{
+			"label": "MIPS Decode",
+			"type": "shell",
+			"command": "python3 /tmp/dm.py"
+		},
+		{
+			"label": "Read Bytes",
+			"type": "shell",
+			"command": "python3 -c \"import struct; f=open('/Users/alexwaldmann/Desktop/AIO Server/test_roms/Crash Bandicoot (USA).bin','rb'); f.seek(263485776); d=f.read(64); f.close(); ws=[(0x80013A58+i, struct.unpack_from('<I',d,i)[0]) for i in range(0,64,4)]; [print(hex(a),hex(w)) for a,w in ws]\""
+		},
+		{
+			"label": "Read Bytes 2",
+			"type": "shell",
+			"command": "python3 -c \"import struct; f=open('/Users/alexwaldmann/Desktop/AIO Server/test_roms/Crash Bandicoot (USA).bin','rb'); f.seek(263485776); d=f.read(64); f.close(); print('---START---'); ws=[(0x80013A58+i, struct.unpack_from('<I',d,i)[0]) for i in range(0,64,4)]; [print(f'{a:08X} {w:08X}') for a,w in ws]; print('---END---')\""
+		},
+		{
+			"label": "First 8 Words",
+			"type": "shell",
+			"command": "python3 -c \"import struct; f=open('/Users/alexwaldmann/Desktop/AIO Server/test_roms/Crash Bandicoot (USA).bin','rb'); f.seek(263485776); d=f.read(32); f.close(); [print(f'0x{0x80013A58+i:08X}: 0x{struct.unpack_from(chr(60)+chr(73),d,i)[0]:08X}') for i in range(0,32,4)]\""
+		}
+	]
 }

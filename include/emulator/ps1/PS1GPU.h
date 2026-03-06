@@ -66,7 +66,13 @@ private:
   uint32_t gp0WordsRemaining = 0;
   uint32_t gp0CommandCount = 0;
 
-  enum class GP0Mode { Command, CopyToVRAM, CopyFromVRAM };
+  enum class GP0Mode {
+    Command,
+    CopyToVRAM,
+    CopyFromVRAM,
+    PolyLine,
+    ShadedPolyLine
+  };
   GP0Mode gp0Mode = GP0Mode::Command;
 
   // VRAM transfer state
@@ -121,10 +127,26 @@ private:
   uint8_t texWindowOffsetX = 0;
   uint8_t texWindowOffsetY = 0;
 
+  // ─── Polyline State ─────────────────────────────────────────────────
+  uint32_t polyLineLastXY = 0;
+  uint8_t polyLineLastR = 0;
+  uint8_t polyLineLastG = 0;
+  uint8_t polyLineLastB = 0;
+  bool polyLineSemiTransparent = false;
+  // Shaded-polyline pending next-segment color (replaces the unsafe static locals)
+  bool shadedPolyExpectVertex = false;
+  uint8_t shadedPolyPendingR = 0;
+  uint8_t shadedPolyPendingG = 0;
+  uint8_t shadedPolyPendingB = 0;
+
+  // ─── Per-primitive Semi-transparency ────────────────────────────────
+  bool primSemiTransparent = false;
+
   // ─── Timing ─────────────────────────────────────────────────────────
   uint32_t currentScanline = 0;
   uint32_t dotCounter = 0;
   bool vblank = false;
+  bool oddFrame = false;
 
   // ─── GPU Read Buffer ────────────────────────────────────────────────
   uint32_t gpuReadBuffer = 0;
@@ -181,6 +203,7 @@ private:
   void PutPixel(int16_t x, int16_t y, uint16_t color);
   bool IsInDrawingArea(int16_t x, int16_t y) const;
   static uint16_t ColorToVRAM(uint8_t r, uint8_t g, uint8_t b);
+  uint16_t BlendPixels(uint16_t src, uint16_t dst) const;
 
   // Triangle rasterization via edge function (half-space) method
   void RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,

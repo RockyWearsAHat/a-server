@@ -590,30 +590,42 @@ void MainWindow::EmulatorThreadMain() {
         ps1CycleCarry = 0;
       int totalCycles = ps1CycleCarry;
 
-      // Map input: GBA KEYINPUT (active-low) → PS1 pad buttons (active-low)
+      // Map logical input state directly to PS1 pad buttons (both active-low).
+      // Uses the logical snapshot — not the GBA keyinput proxy — so all
+      // buttons including Square/Triangle/Aux are correctly propagated.
       const auto inputSnap = AIO::Input::InputManager::instance().snapshot();
-      uint16_t gbaInput = inputSnap.keyinput;
-      uint16_t ps1Buttons = 0xFFFF;
-      if (!(gbaInput & (1 << 0)))
+      const uint32_t logical = inputSnap.logical;
+
+      auto logPressed = [&](AIO::Input::LogicalButton b) -> bool {
+        const uint32_t m = 1u << static_cast<uint32_t>(b);
+        return (logical & m) == 0; // 0 = pressed (active-low)
+      };
+
+      uint16_t ps1Buttons = 0xFFFF; // All released
+      if (logPressed(AIO::Input::LogicalButton::Confirm))
         ps1Buttons &= ~Emulator::PS1::PadButton::Cross;
-      if (!(gbaInput & (1 << 1)))
+      if (logPressed(AIO::Input::LogicalButton::Back))
         ps1Buttons &= ~Emulator::PS1::PadButton::Circle;
-      if (!(gbaInput & (1 << 2)))
+      if (logPressed(AIO::Input::LogicalButton::Aux1))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Square;
+      if (logPressed(AIO::Input::LogicalButton::Aux2))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Triangle;
+      if (logPressed(AIO::Input::LogicalButton::Select))
         ps1Buttons &= ~Emulator::PS1::PadButton::Select;
-      if (!(gbaInput & (1 << 3)))
+      if (logPressed(AIO::Input::LogicalButton::Start))
         ps1Buttons &= ~Emulator::PS1::PadButton::Start;
-      if (!(gbaInput & (1 << 4)))
-        ps1Buttons &= ~Emulator::PS1::PadButton::Right;
-      if (!(gbaInput & (1 << 5)))
-        ps1Buttons &= ~Emulator::PS1::PadButton::Left;
-      if (!(gbaInput & (1 << 6)))
-        ps1Buttons &= ~Emulator::PS1::PadButton::Up;
-      if (!(gbaInput & (1 << 7)))
-        ps1Buttons &= ~Emulator::PS1::PadButton::Down;
-      if (!(gbaInput & (1 << 8)))
-        ps1Buttons &= ~Emulator::PS1::PadButton::R1;
-      if (!(gbaInput & (1 << 9)))
+      if (logPressed(AIO::Input::LogicalButton::L))
         ps1Buttons &= ~Emulator::PS1::PadButton::L1;
+      if (logPressed(AIO::Input::LogicalButton::R))
+        ps1Buttons &= ~Emulator::PS1::PadButton::R1;
+      if (logPressed(AIO::Input::LogicalButton::Up))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Up;
+      if (logPressed(AIO::Input::LogicalButton::Down))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Down;
+      if (logPressed(AIO::Input::LogicalButton::Left))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Left;
+      if (logPressed(AIO::Input::LogicalButton::Right))
+        ps1Buttons &= ~Emulator::PS1::PadButton::Right;
       ps1Emulator.UpdateInput(ps1Buttons);
 
       while (totalCycles < kPs1CyclesPerFrame && emulatorRunning) {
@@ -929,12 +941,22 @@ void MainWindow::UpdateDisplay() {
       const int srcW = displayImage.width();
       const int srcH = displayImage.height();
 
+      // PS1 (and other CRT-era consoles) always output a 4:3 signal to the TV
+      // regardless of the GPU pixel resolution. The logical display size drives
+      // the aspect-ratio-correct fit calculation, while scaling still operates
+      // on the actual source pixel buffer.
+      int logicalW = srcW;
+      int logicalH = srcH;
+      if (currentEmulator == EmulatorType::PS1 && srcH > 0) {
+        logicalW = srcH * 4 / 3;
+      }
+
       const auto mode = (videoScaleMode_ == VideoScaleMode::FitNearest)
                             ? AIO::Common::ScaleMode::FitNearest
                             : AIO::Common::ScaleMode::IntegerNearest;
 
       const auto scaled = AIO::Common::ComputeScaledSize(
-          srcW, srcH, targetW, targetH, mode, videoIntegerScale_);
+          logicalW, logicalH, targetW, targetH, mode, videoIntegerScale_);
 
       if (scaled.width > 0 && scaled.height > 0) {
         if (scaledDisplayImage_.isNull() ||
@@ -951,6 +973,9 @@ void MainWindow::UpdateDisplay() {
             reinterpret_cast<uint32_t *>(scaledDisplayImage_.bits());
         const int dstStride = scaledDisplayImage_.bytesPerLine() / 4;
 
+        // Use the fast integer path only when no aspect-ratio correction is
+        // needed (source and logical dimensions match), otherwise fall back to
+        // the general nearest-neighbor scaler which handles non-square pixels.
         if (mode == AIO::Common::ScaleMode::IntegerNearest &&
             scaled.integerScale > 0 &&
             scaled.width == srcW * scaled.integerScale &&

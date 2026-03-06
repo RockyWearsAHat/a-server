@@ -357,117 +357,22 @@ void ARM7TDMI::CheckInterrupts() {
 
   // Wake from HALT/STOP/IntrWait if any enabled interrupt is pending.
   // Do NOT auto-resume debugger breakpoints/stepback halts.
-  // DIAG: track whether a wake occurred on THIS call
-  bool justWoke = false;
-
   if (halted && sleepHalt && (ie & if_reg)) {
     halted = false;
     sleepHalt = false;
-    justWoke = true;
-  }
-
-  // DIAG: trace every step for wake-then-no-IRQ investigation
-  // Log the full path taken through CheckInterrupts after a wake
-  if (justWoke) {
-    static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-    if (diagOn) {
-      static int wc = 0;
-      static FILE *f = nullptr;
-      if (!f) f = fopen("/tmp/dkc_irq_wake.log", "w");
-      if (f && wc < 200) {
-        bool chkIME = !(ime & 1);
-        bool chkIRQdis = IRQDisabled(cpsr);
-        bool chkIEIF = (ie & if_reg) != 0;
-        fprintf(f, "WAKE #%d: PC=0x%08X IME=%d(%s) CPSR=0x%08X IRQdis=%d(%s) IE=0x%04X IF=0x%04X IE&IF=0x%04X(%s)\n",
-                wc++, registers[15], ime, chkIME ? "FAIL" : "pass",
-                cpsr, (cpsr>>7)&1, chkIRQdis ? "FAIL" : "pass",
-                ie, if_reg, (uint16_t)(ie & if_reg), chkIEIF ? "pass" : "FAIL");
-        fflush(f);
-      }
-    }
   }
 
   if (!(ime & 1)) {
-    // DIAG: log if we JUST woke but can't take IRQ due to IME=0
-    if (justWoke) {
-      static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-      if (diagOn) {
-        static int c = 0;
-        static FILE *f = nullptr;
-        if (!f) f = fopen("/tmp/dkc_irq_wake.log", "a");
-        if (f && c < 50) {
-          fprintf(f, "WAKE_BUT_IME0 #%d: PC=0x%08X IME=%d IE=0x%04X IF=0x%04X CPSR=0x%08X\n",
-                  c++, registers[15], ime, ie, if_reg, cpsr);
-          fflush(f);
-        }
-      }
-    }
     return;
   }
   if (IRQDisabled(cpsr)) {
-    // DIAG: log if we JUST woke but CPSR.I is set
-    if (justWoke) {
-      static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-      if (diagOn) {
-        static int c = 0;
-        static FILE *f = nullptr;
-        if (!f) f = fopen("/tmp/dkc_irq_wake.log", "a");
-        if (f && c < 50) {
-          fprintf(f, "WAKE_BUT_IRQDIS #%d: PC=0x%08X CPSR=0x%08X mode=0x%02X IE=0x%04X IF=0x%04X\n",
-                  c++, registers[15], cpsr, cpsr & 0x1F, ie, if_reg);
-          fflush(f);
-        }
-      }
-    }
     return;
   }
 
   if (ie & if_reg) {
-    // DIAG: log IRQ taken, and whether it was after a wake
-    {
-      static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-      if (diagOn) {
-        static int c = 0;
-        static FILE *f = nullptr;
-        if (!f) f = fopen("/tmp/dkc_irq_wake.log", "a");
-        if (f && c < 500) {
-          uint32_t handlerAddr = memory.Read32(0x03FFFFFC);
-          uint16_t flag64 = memory.Read16(0x03000064);
-          uint16_t biosIF = memory.Read16(0x03007FF8);
-          uint32_t vblankFuncPtr = memory.Read32(0x03000E20);
-          fprintf(f, "IRQ_TAKEN #%d: woke=%d PC=0x%08X IE=0x%04X IF=0x%04X triggered=0x%04X handler=0x%08X vblankFunc=0x%08X flag64=0x%04X biosIF=0x%04X mode=0x%02X\n",
-                  c++, (int)justWoke, registers[15], ie, if_reg, (uint16_t)(ie & if_reg), handlerAddr, vblankFuncPtr, flag64, biosIF, cpsr & 0x1F);
-          fflush(f);
-        }
-      }
-    }
     // Calculate triggered interrupts NOW before PPU/Timers run
     // On real GBA, BIOS reads IE & IF atomically at IRQ entry
     uint16_t triggered = ie & if_reg;
-
-    // DIAG: One-shot dump of game's IRQ handler code
-    {
-      static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-      static bool dumped = false;
-      if (diagOn && !dumped) {
-        dumped = true;
-        FILE *hf = fopen("/tmp/dkc_handler_dump.txt", "w");
-        if (hf) {
-          uint32_t hAddr = memory.Read32(0x03FFFFFC);
-          bool isThumb = hAddr & 1;
-          uint32_t realAddr = hAddr & ~1u;
-          fprintf(hf, "Handler pointer [0x03FFFFFC] = 0x%08X\n", hAddr);
-          fprintf(hf, "Mode: %s\n\n", isThumb ? "Thumb" : "ARM");
-          // Dump 200 ARM instructions (800 bytes)
-          for (int i = 0; i < 200; i++) {
-            uint32_t addr = realAddr + i * 4;
-            uint32_t instr = memory.Read32(addr);
-            fprintf(hf, "0x%08X: 0x%08X\n", addr, instr);
-          }
-          fclose(hf);
-        }
-      }
-    }
 
     // NOTE: The real GBA BIOS IRQ handler (0x128-0x13C) does NOT write
     // BIOS_IF or any scratch locations. The game's own handler is responsible
@@ -1839,26 +1744,6 @@ void ARM7TDMI::ExecuteHalfwordDataTransfer(uint32_t instruction) {
 void ARM7TDMI::ExecuteBX(uint32_t instruction) {
   uint32_t rm = ExtractRegisterField(instruction, 0);
   uint32_t target = registers[rm];
-
-  // DIAG: trace BX calls to the VBlank function area
-  {
-    static bool diagOn = []{ auto e = std::getenv("AIO_TRACE_OAM_Y"); return e && (e[0]=='1'); }();
-    if (diagOn) {
-      uint32_t targetPC = target & 0xFFFFFFFE;
-      if (targetPC >= 0x08000360 && targetPC <= 0x080003C0) {
-        static int bxc = 0;
-        static FILE *bxf = nullptr;
-        if (!bxf) bxf = fopen("/tmp/dkc_bx_vblank.log", "w");
-        if (bxf && bxc < 2000) {
-          fprintf(bxf, "BX_VBLANK #%d: from=0x%08X target=0x%08X thumb=%d mode=0x%02X SP=0x%08X LR=0x%08X R0=0x%08X R1=0x%08X R2=0x%08X R3=0x%08X\n",
-                  bxc++, registers[15]-4, target, (int)(target & 1),
-                  cpsr & 0x1F, registers[13], registers[14],
-                  registers[0], registers[1], registers[2], registers[3]);
-          fflush(bxf);
-        }
-      }
-    }
-  }
 
   LogBranch(registers[15] - 4, target);
 

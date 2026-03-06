@@ -35,6 +35,7 @@ void CDROM::Reset() {
   reading = false;
   seeking = false;
   readDelay = 0;
+  readCooldown = 0;
   mode = 0;
   sectorBufferReady = false;
   secondResponsePending = false;
@@ -167,14 +168,14 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
   case 1:
     switch (index) {
     case 0:
-      // Command register
-      commandPending = true;
-      pendingCommand = value;
-      commandDelay =
-          5000; // ~150μs — close to real hardware first-response timing
-      if constexpr (Trace::CDROM_TRACE) {
-        LogDebug("CD command %02X queued", value);
-      }
+      // Command register — new command cancels any pending second response
+      // from a previous command (real hardware behaves this way)
+      secondResponsePending = false;
+      // Execute commands immediately to prevent timer callbacks from firing
+      // during the command-processing window and interfering with game
+      // timeout counters. The actual delay before data arrives is modeled
+      // by readDelay (for ReadN/ReadS) and secondResponseDelay.
+      ExecuteCommand(value);
       break;
     case 1:
       break; // Sound Map Data Out
@@ -205,19 +206,14 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
     case 0:
       // Request register
       if (value & 0x80) {
+        // Load current sector buffer for DMA reading — does NOT trigger
+        // the next sector. The next sector fires on its own inter-sector
+        // timing or when the game acks the INT (where we shorten the delay).
         dataReadPos = 0;
-        sectorBufferReady = false;
-        // If still reading, deliver the next sector quickly after DMA
-        // completes. Hardware delivers at CD speed (225k cycles double-speed),
-        // but HLE BIOS polling is ~100x faster so the game's timeout counter
-        // expires first. Deliver after a short delay so the IRQ handler chain
-        // can complete.
-        if (reading && readDelay > 500) {
-          readDelay = 500;
-        }
         LogInfo("CDROM request data: dataBuf.size=%zu dataReadPos=0 "
-                "reading=%s readDelay=%u",
-                dataBuf.size(), reading ? "true" : "false", readDelay);
+                "reading=%s readDelay=%u sectorBufferReady=%s",
+                dataBuf.size(), reading ? "true" : "false", readDelay,
+                sectorBufferReady ? "true" : "false");
       } else {
         LogInfo("CDROM clear data: dataBuf had %zu bytes", dataBuf.size());
         dataBuf.clear();
@@ -266,6 +262,10 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
 // ─── Timing ─────────────────────────────────────────────────────────────
 
 void CDROM::Tick(uint32_t cpuCycles) {
+  if (readCooldown > 0) {
+    readCooldown = (cpuCycles >= readCooldown) ? 0 : readCooldown - cpuCycles;
+  }
+
   // Deliver queued interrupts after a short delay so the game has time
   // to return from the previous exception handler before the next fires.
   if (queuedDeliveryPending) {
@@ -327,11 +327,12 @@ void CDROM::Tick(uint32_t cpuCycles) {
   }
 
   // Handle ongoing reads.
-  // Don't deliver next sector while previous INT1 is unacknowledged —
-  // the game must ACK, DMA the data, then clear the buffer before we
-  // overwrite dataBuf with the next sector. This prevents the race
-  // where a queued INT1 causes the game to DMA stale/empty data.
-  if (reading && readDelay > 0 && !sectorBufferReady) {
+  // Gate: only deliver the next sector when:
+  // 1. INT cleared (game acked previous sector)
+  // 2. Data consumed (DMARead exhausted the buffer)
+  // 3. No command pending (game hasn't issued CmdPause/CmdStop etc.)
+  if (reading && readDelay > 0 && (interruptFlag & 0x07) == 0 &&
+      !sectorBufferReady && !commandPending) {
     if (readDelay <= cpuCycles) {
       readDelay = 0;
       uint32_t sectorOffset =
@@ -349,15 +350,20 @@ void CDROM::Tick(uint32_t cpuCycles) {
                        discData.begin() + sectorOffset + dataSize);
         dataReadPos = 0;
         sectorBufferReady = true;
+
+        PushResponse(GetStatusByte());
+        SetInterrupt(1);
       } else {
         LogError("Sector read OOB: offset=0x%X size=0x%X discSize=0x%zX "
                  "pos=%02u:%02u:%02u",
                  sectorOffset, dataSize, discData.size(), seekMinutes,
                  seekSeconds, seekSector);
+        reading = false;
+        uint8_t errorStat = GetStatusByte() | 0x01; // Error flag
+        PushResponse(errorStat);
+        PushResponse(0x10); // Seek error
+        SetInterrupt(5);
       }
-
-      PushResponse(GetStatusByte());
-      SetInterrupt(1);
 
       seekSector++;
       if (seekSector >= 75) {
@@ -369,10 +375,11 @@ void CDROM::Tick(uint32_t cpuCycles) {
         }
       }
 
-      // Hardware-accurate inter-sector delay. The request-data handler above
-      // will shorten this when the game signals it's ready for the next sector.
-      bool doubleSpeed = mode & 0x80;
-      readDelay = doubleSpeed ? (Clock::CPU_HZ / 150) : (Clock::CPU_HZ / 75);
+      // PS1 2x speed CD-ROM: ~150 sectors/sec → ~6.67ms per sector
+      // ~225,000 CPU cycles at 33.868 MHz. Games like Crash Bandicoot
+      // rely on realistic inter-sector timing to process data between
+      // sector deliveries.
+      readDelay = 225000;
     } else {
       readDelay -= cpuCycles;
     }
@@ -467,15 +474,19 @@ void CDROM::CmdGetStat() {
 
 void CDROM::CmdSetLoc() {
   if (parameterFIFO.size() >= 3) {
-    seekMinutes = BCDToDecimal(parameterFIFO.front());
+    uint8_t rawM = parameterFIFO.front();
+    seekMinutes = BCDToDecimal(rawM);
     parameterFIFO.pop();
-    seekSeconds = BCDToDecimal(parameterFIFO.front());
+    uint8_t rawS = parameterFIFO.front();
+    seekSeconds = BCDToDecimal(rawS);
     parameterFIFO.pop();
-    seekSector = BCDToDecimal(parameterFIFO.front());
+    uint8_t rawF = parameterFIFO.front();
+    seekSector = BCDToDecimal(rawF);
     parameterFIFO.pop();
 
-    LogInfo("SetLoc: %02u:%02u:%02u (offset=0x%X)", seekMinutes, seekSeconds,
-            seekSector, GetSectorOffset(seekMinutes, seekSeconds, seekSector));
+    LogInfo("SetLoc: raw=%02X:%02X:%02X dec=%02u:%02u:%02u (offset=0x%X)", rawM,
+            rawS, rawF, seekMinutes, seekSeconds, seekSector,
+            GetSectorOffset(seekMinutes, seekSeconds, seekSector));
   }
   PushResponse(GetStatusByte());
   SetInterrupt(3);
@@ -484,13 +495,14 @@ void CDROM::CmdSetLoc() {
 void CDROM::CmdReadN() {
   reading = true;
   sectorBufferReady = false;
-  bool doubleSpeed = mode & 0x80;
-  readDelay = 5000;
+  readCooldown = 0;
+  // Seek + first read — faster than inter-sector delay but still
+  // gives the CPU time to set up DMA before data arrives.
+  readDelay = 50000;
 
-  LogInfo("CmdReadN: reading=true readDelay=%u mode=0x%02X doubleSpeed=%d "
+  LogInfo("CmdReadN: reading=true readDelay=%u mode=0x%02X "
           "pos=%02u:%02u:%02u",
-          readDelay, mode, doubleSpeed ? 1 : 0, seekMinutes, seekSeconds,
-          seekSector);
+          readDelay, mode, seekMinutes, seekSeconds, seekSector);
 
   PushResponse(GetStatusByte());
   SetInterrupt(3);
@@ -500,6 +512,15 @@ void CDROM::CmdPause() {
   LogInfo("CmdPause: reading was %s, sectorBufferReady=%s readDelay=%u",
           reading ? "true" : "false", sectorBufferReady ? "true" : "false",
           readDelay);
+  if (reading) {
+    // After a multi-sector read, the game typically decompresses data.
+    // The decompressor may overwrite code near its own execution address
+    // (self-modifying code protected by I-cache on real hardware).
+    // Timer2 interrupts during decompression can evict I-cache lines,
+    // causing the CPU to fetch overwritten code from RAM.
+    // Cooldown suppresses Timer2 for ~300ms, covering decompression.
+    readCooldown = Clock::CPU_HZ / 3;
+  }
   reading = false;
   PushResponse(GetStatusByte());
   SetInterrupt(3);
@@ -684,6 +705,18 @@ void CDROM::CmdSetFilter() {
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
+void CDROM::AcknowledgeInterrupt() {
+  uint8_t oldFlag = interruptFlag;
+  interruptFlag = 0;
+  LogInfo("CDROM HLE ack: old=0x%02X new=0x%00X pending=%zu", oldFlag,
+          interruptFlag, pendingIRQs.size());
+
+  if (!pendingIRQs.empty() && !queuedDeliveryPending) {
+    queuedDeliveryPending = true;
+    queuedDeliveryDelay = 4000;
+  }
+}
+
 void CDROM::PushResponse(uint8_t value) { responseFIFO.push(value); }
 
 void CDROM::SetInterrupt(uint8_t type) {
@@ -766,7 +799,12 @@ bool CDROM::ReadSectorData(uint32_t sectorNum, uint8_t *out,
 
 uint8_t CDROM::DMARead() {
   if (dataReadPos < dataBuf.size()) {
-    return dataBuf[dataReadPos++];
+    uint8_t byte = dataBuf[dataReadPos++];
+    // All sector data consumed — allow next sector to be delivered
+    if (dataReadPos >= dataBuf.size()) {
+      sectorBufferReady = false;
+    }
+    return byte;
   }
   return 0;
 }

@@ -113,9 +113,11 @@ public:
 
   bool WasPaletteDirtyByCPU() const { return paletteDirtyByCPU; }
   bool WasVramDirtyByCPU() const { return vramDirtyByCPU; }
+  bool WasOamDirtyByCPU() const { return oamDirtyByCPU; }
   void ClearCPUGraphicsDirtyFlags() {
     paletteDirtyByCPU = false;
     vramDirtyByCPU = false;
+    oamDirtyByCPU = false;
   }
 
   // Callback for Graphics Memory Writes (palette/VRAM/OAM) - forces PPU sync
@@ -261,6 +263,7 @@ private:
   // (e.g. Classic NES Series) writes palette mid-frame via the CPU.
   bool paletteDirtyByCPU = false;
   bool vramDirtyByCPU = false;
+  bool oamDirtyByCPU = false;
 
   // Flash State
   int flashState = 0;   // 0=Idle, 1=Cmd1(AA), 2=Cmd2(55), 3=ID Mode

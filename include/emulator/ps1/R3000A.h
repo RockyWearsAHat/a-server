@@ -43,6 +43,12 @@ public:
   void SetPC(uint32_t value) {
     pc = value;
     nextPc = value + 4;
+    // Clear pipeline state — used for HLE context switches where
+    // stale branch/load delay state would corrupt the new context
+    branchPending = false;
+    inDelaySlot = false;
+    pendingLoad = {};
+    nextLoad = {};
   }
   uint32_t GetHI() const { return hi; }
   uint32_t GetLO() const { return lo; }
@@ -58,6 +64,7 @@ public:
 
   // ─── Exception Handling ─────────────────────────────────────────────
   void TriggerException(uint32_t excCode);
+  void TriggerCopUnusable(uint32_t copNumber);
   void TriggerInterrupt();
   bool IsInterruptPending() const;
 
@@ -72,6 +79,13 @@ public:
   // Total instructions executed (for deterministic tooling)
   uint64_t GetInstructionCount() const { return instructionCount; }
   uint64_t GetCycleCount() const { return cycleCount; }
+
+  // CPU halt (unresolved exception — stops execution)
+  bool IsHalted() const { return halted; }
+  void SetHalted(bool h) { halted = h; }
+
+  // Flush the entire I-cache (used by BIOS FlushCache function)
+  void FlushICache();
 
 private:
   PS1Memory &memory;
@@ -91,6 +105,7 @@ private:
   bool branchPending = false;
   uint32_t branchTarget = 0;
   uint32_t currentInstruction = 0;
+  uint32_t currentPc = 0; // PC of instruction currently being executed
 
   // Load delay slot
   PendingLoad pendingLoad{};
@@ -99,6 +114,23 @@ private:
   // ─── Statistics ─────────────────────────────────────────────────────
   uint64_t instructionCount = 0;
   uint64_t cycleCount = 0;
+  bool halted = false;
+
+  // ─── Instruction Cache (I-cache) ───────────────────────────────────
+  // PS1 R3000A: 4KB, 256 lines × 4 words, direct-mapped
+  static constexpr uint32_t ICACHE_LINES = 256;
+  static constexpr uint32_t ICACHE_WORDS_PER_LINE = 4;
+
+  struct ICacheLine {
+    uint32_t tag = 0xFFFFFFFF; // Physical address tag (bits 31:12)
+    uint32_t data[ICACHE_WORDS_PER_LINE] = {};
+    bool valid = false;
+  };
+  std::array<ICacheLine, ICACHE_LINES> icache{};
+
+  uint32_t FetchInstruction(uint32_t addr);
+  void InvalidateICache();
+  void WriteToCacheIsolated(uint32_t addr, uint32_t value);
 
   // ─── Instruction Decoding & Execution ───────────────────────────────
   void ExecuteInstruction(uint32_t instr);

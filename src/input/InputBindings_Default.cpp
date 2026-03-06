@@ -26,7 +26,10 @@ const InputBindings &DefaultInputBindings() {
     out.ui.keyboard[Qt::Key_Left] = LogicalButton::Left;
     out.ui.keyboard[Qt::Key_Right] = LogicalButton::Right;
 
-    // Emulator defaults (GBA-friendly)
+    // Emulator defaults — works for both GBA and PS1 layouts.
+    // Face buttons: Z=Cross/A, X=Circle/B, C=Square/Aux1, V=Triangle/Aux2
+    // Shoulders:    A=L1, S=R1
+    // Navigation:   arrows=D-pad, Shift=Select, Enter/Space=Start
     out.emulator.keyboard[Qt::Key_Up] = LogicalButton::Up;
     out.emulator.keyboard[Qt::Key_Down] = LogicalButton::Down;
     out.emulator.keyboard[Qt::Key_Left] = LogicalButton::Left;
@@ -34,6 +37,10 @@ const InputBindings &DefaultInputBindings() {
 
     out.emulator.keyboard[Qt::Key_Z] = LogicalButton::Confirm;
     out.emulator.keyboard[Qt::Key_X] = LogicalButton::Back;
+    out.emulator.keyboard[Qt::Key_C] =
+        LogicalButton::Aux1; // Square / GBA unused
+    out.emulator.keyboard[Qt::Key_V] =
+        LogicalButton::Aux2; // Triangle / GBA unused
     out.emulator.keyboard[Qt::Key_Shift] = LogicalButton::Select;
     out.emulator.keyboard[Qt::Key_Return] = LogicalButton::Start;
     out.emulator.keyboard[Qt::Key_Enter] = LogicalButton::Start;
