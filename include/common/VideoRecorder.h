@@ -163,6 +163,8 @@ public:
   double GetRecordingDuration() const;
   uint64_t GetTotalFrames() const;
   uint64_t GetTotalAudioSamples() const;
+  int GetVideoWidth() const { return config_.videoWidth; }
+  int GetVideoHeight() const { return config_.videoHeight; }
 
 private:
   bool EncodeOutput();

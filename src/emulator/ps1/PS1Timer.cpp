@@ -14,6 +14,7 @@ void PS1Timer::Reset() {
     ch.target = 0;
     ch.mode = 0;
     ch.irqFlag = true;
+    ch.oneShotFired = false;
   }
   timer2Div8Accum = 0;
 }
@@ -62,6 +63,7 @@ void PS1Timer::Write32(uint32_t addr, uint32_t value) {
     ch.mode = static_cast<uint16_t>(value & 0x03FF); // Bits 0-9 are writable
     ch.counter = 0;
     ch.irqFlag = true; // Reset IRQ flag (not requesting)
+    ch.oneShotFired = false;
     ch.clearReachedFlags();
     LogInfo(
         "Timer%u mode=%04X target=%04X (sync=%d syncMode=%u resetOnTarget=%d "
@@ -78,7 +80,7 @@ void PS1Timer::Write32(uint32_t addr, uint32_t value) {
 }
 
 void PS1Timer::Tick(uint32_t cpuCycles) {
-  // Timer 2 always uses system clock (or system/8)
+  // Timer 2: PSX-SPX specifies sources 0,1 = system clock and 2,3 = system/8.
   uint32_t timer2Source = channels[2].clockSource();
   if (timer2Source == 0 || timer2Source == 1) {
     TickChannel(2, cpuCycles);
@@ -148,6 +150,10 @@ void PS1Timer::TickChannel(uint32_t index, uint32_t ticks) {
 void PS1Timer::CheckIRQ(uint32_t index) {
   auto &ch = channels[index];
 
+  if (!ch.irqRepeat() && ch.oneShotFired) {
+    return;
+  }
+
   bool shouldFire = false;
 
   if (ch.irqToggle()) {
@@ -172,7 +178,7 @@ void PS1Timer::CheckIRQ(uint32_t index) {
 
     // Non-repeat mode: disable further IRQs
     if (!ch.irqRepeat()) {
-      // Don't fire again (pulse once)
+      ch.oneShotFired = true;
       ch.irqFlag = true;
     }
   }

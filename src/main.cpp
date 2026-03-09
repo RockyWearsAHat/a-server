@@ -375,12 +375,25 @@ int main(int argc, char *argv[]) {
       }
 
       if (headless && headlessMaxMs > 0) {
-        QTimer::singleShot(headlessMaxMs, [headlessMaxMs]() {
-          AIO::Emulator::Common::Logger::Instance().LogFmt(
-              AIO::Emulator::Common::LogLevel::Info, "main",
-              "Headless max time reached (%d ms), exiting...", headlessMaxMs);
-          QCoreApplication::quit();
-        });
+        auto *headlessEmuTimer = new QTimer(&window);
+        headlessEmuTimer->setInterval(50);
+        QObject::connect(
+            headlessEmuTimer, &QTimer::timeout,
+            [&window, headlessMaxMs, headlessEmuTimer]() {
+              const uint64_t emuMs = window.GetEmulatedMilliseconds();
+              if (emuMs < static_cast<uint64_t>(headlessMaxMs)) {
+                return;
+              }
+
+              AIO::Emulator::Common::Logger::Instance().LogFmt(
+                  AIO::Emulator::Common::LogLevel::Info, "main",
+                  "Headless emulated-time max reached (%llu ms >= %d ms), "
+                  "exiting...",
+                  static_cast<unsigned long long>(emuMs), headlessMaxMs);
+              headlessEmuTimer->stop();
+              QCoreApplication::quit();
+            });
+        headlessEmuTimer->start();
       }
 
       if (headless && parser.isSet(headlessDumpPpmOption)) {

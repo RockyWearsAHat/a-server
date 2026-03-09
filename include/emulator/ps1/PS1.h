@@ -7,6 +7,7 @@
 #include "PS1Controller.h"
 #include "PS1DMA.h"
 #include "PS1GPU.h"
+#include "PS1MDEC.h"
 #include "PS1Memory.h"
 #include "PS1SPU.h"
 #include "PS1Timer.h"
@@ -46,6 +47,7 @@ public:
   CDROM &GetCDROM() { return *cdrom; }
   PS1Controller &GetController() { return *controller; }
   GTE &GetGTE() { return *gte; }
+  PS1MDEC &GetMDEC() { return *mdec; }
 
   // Debug helpers
   uint32_t ReadMem32(uint32_t addr) { return memory->Read32(addr); }
@@ -70,6 +72,7 @@ private:
   std::unique_ptr<PS1GPU> gpu;
   std::unique_ptr<PS1SPU> spu;
   std::unique_ptr<PS1DMA> dma;
+  std::unique_ptr<PS1MDEC> mdec;
   std::unique_ptr<InterruptController> interrupts;
   std::unique_ptr<PS1Timer> timers;
   std::unique_ptr<CDROM> cdrom;
@@ -78,6 +81,7 @@ private:
 
   bool biosLoaded = false;
   bool discLoaded = false;
+  uint32_t dotClockAccum = 0;
 
   std::atomic<uint64_t> totalCyclesExecuted{0};
 };

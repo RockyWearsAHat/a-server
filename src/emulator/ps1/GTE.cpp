@@ -2,12 +2,53 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 
 namespace AIO::Emulator::PS1 {
 
-GTE::GTE() : Loggable("PS1.GTE") {}
+namespace {
+
+bool IsPs1GteDiagEnabled() {
+  const char *value = std::getenv("AIO_PS1_GTE_DIAG");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+void AppendGteDiagSummary(
+    uint64_t totalCommands, const std::array<uint64_t, 64> &opcodeCounts,
+    const std::array<std::array<std::array<uint64_t, 4>, 4>, 4> &mvmvaCounts) {
+  std::ofstream out("/tmp/ps1_gte_diag_summary.txt", std::ios::app);
+  out << "total=" << totalCommands;
+  for (uint32_t opcode = 0; opcode < opcodeCounts.size(); ++opcode) {
+    if (opcodeCounts[opcode] == 0)
+      continue;
+    out << ' ' << std::hex << std::uppercase << std::setw(2)
+        << std::setfill('0') << opcode << std::dec << '='
+        << opcodeCounts[opcode];
+  }
+  for (uint32_t mx = 0; mx < 4; ++mx) {
+    for (uint32_t vx = 0; vx < 4; ++vx) {
+      for (uint32_t tx = 0; tx < 4; ++tx) {
+        const uint64_t count = mvmvaCounts[mx][vx][tx];
+        if (count == 0)
+          continue;
+        out << " m" << mx << 'v' << vx << 't' << tx << '=' << count;
+      }
+    }
+  }
+  out << '\n';
+}
+
+} // namespace
+
+GTE::GTE() : Loggable("PS1.GTE") {
+  if (IsPs1GteDiagEnabled()) {
+    std::ofstream("/tmp/ps1_gte_diag_summary.txt", std::ios::trunc)
+        << "PS1 GTE diagnostics enabled\n";
+  }
+}
 
 void GTE::Reset() {
   for (auto &row : v)
@@ -449,9 +490,28 @@ void GTE::WriteControl(uint32_t reg, uint32_t value) {
 // ─── Command Execution ─────────────────────────────────────────────────
 
 void GTE::Execute(uint32_t command) {
+  static const bool gteDiagEnabled = IsPs1GteDiagEnabled();
+  static uint64_t totalCommands = 0;
+  static std::array<uint64_t, 64> opcodeCounts{};
+  static std::array<std::array<std::array<uint64_t, 4>, 4>, 4> mvmvaCounts{};
+
   flag = 0; // Clear flags before each command
 
   uint32_t opcode = command & 0x3F;
+
+  if (gteDiagEnabled) {
+    totalCommands++;
+    opcodeCounts[opcode]++;
+    if (opcode == 0x12) {
+      const uint32_t mx = (command >> 17) & 3;
+      const uint32_t vx = (command >> 15) & 3;
+      const uint32_t tx = (command >> 13) & 3;
+      mvmvaCounts[mx][vx][tx]++;
+    }
+    if ((totalCommands % 1000) == 0) {
+      AppendGteDiagSummary(totalCommands, opcodeCounts, mvmvaCounts);
+    }
+  }
 
   if constexpr (Trace::GTE_TRACE) {
     LogDebug("GTE command %02X (full: %08X)", opcode, command);
@@ -562,6 +622,8 @@ void GTE::Execute(uint32_t command) {
 void GTE::CmdRTPS(uint32_t cmd) {
   // Perspective Transformation Single (on V0)
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
+  uint32_t shift = sf * 12;
 
   // MAC1 = TRX*1000h + RT11*VX0 + RT12*VY0 + RT13*VZ0
   int64_t mac1 = static_cast<int64_t>(tr[0]) * 0x1000 + rt[0][0] * v[0][0] +
@@ -571,16 +633,17 @@ void GTE::CmdRTPS(uint32_t cmd) {
   int64_t mac3 = static_cast<int64_t>(tr[2]) * 0x1000 + rt[2][0] * v[0][0] +
                  rt[2][1] * v[0][1] + rt[2][2] * v[0][2];
 
-  mac[1] = static_cast<int32_t>(CheckMAC(1, mac1));
-  mac[2] = static_cast<int32_t>(CheckMAC(2, mac2));
-  mac[3] = static_cast<int32_t>(CheckMAC(3, mac3));
+  mac[1] = CheckMAC(1, mac1);
+  mac[2] = CheckMAC(2, mac2);
+  mac[3] = CheckMAC(3, mac3);
 
-  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
-  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
-  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> shift, lmBit));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> shift, lmBit));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> shift, lmBit));
 
   // SZ FIFO push
-  PushSZ(static_cast<uint16_t>(std::clamp<int32_t>(mac[3] >> 12, 0, 0xFFFF)));
+  PushSZ(
+      static_cast<uint16_t>(std::clamp<int64_t>(mac[3] >> shift, 0, 0xFFFF)));
 
   // Perspective divide
   int64_t divResult = DivideUNR(static_cast<uint32_t>(h), sz[3]);
@@ -596,13 +659,15 @@ void GTE::CmdRTPS(uint32_t cmd) {
   // Depth cueing
   int64_t mac0val =
       static_cast<int64_t>(dqb) + static_cast<int64_t>(dqa) * divResult;
-  mac[0] = static_cast<int32_t>(CheckMAC(0, mac0val));
-  ir[0] = static_cast<int16_t>(std::clamp<int32_t>(mac[0] >> 12, 0, 0x1000));
+  mac[0] = CheckMAC(0, mac0val);
+  ir[0] = static_cast<int16_t>(CheckIR(0, mac[0] >> 12, false));
 }
 
 void GTE::CmdRTPT(uint32_t cmd) {
   // Perspective transform triple — apply RTPS to V0, V1, V2
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
+  uint32_t shift = sf * 12;
 
   for (int vi = 0; vi < 3; vi++) {
     int64_t mac1 = static_cast<int64_t>(tr[0]) * 0x1000 + rt[0][0] * v[vi][0] +
@@ -612,15 +677,16 @@ void GTE::CmdRTPT(uint32_t cmd) {
     int64_t mac3 = static_cast<int64_t>(tr[2]) * 0x1000 + rt[2][0] * v[vi][0] +
                    rt[2][1] * v[vi][1] + rt[2][2] * v[vi][2];
 
-    mac[1] = static_cast<int32_t>(CheckMAC(1, mac1));
-    mac[2] = static_cast<int32_t>(CheckMAC(2, mac2));
-    mac[3] = static_cast<int32_t>(CheckMAC(3, mac3));
+    mac[1] = CheckMAC(1, mac1);
+    mac[2] = CheckMAC(2, mac2);
+    mac[3] = CheckMAC(3, mac3);
 
-    ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
-    ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
-    ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+    ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> shift, lmBit));
+    ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> shift, lmBit));
+    ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> shift, lmBit));
 
-    PushSZ(static_cast<uint16_t>(std::clamp<int32_t>(mac[3] >> 12, 0, 0xFFFF)));
+    PushSZ(
+        static_cast<uint16_t>(std::clamp<int64_t>(mac[3] >> shift, 0, 0xFFFF)));
 
     int64_t divResult = DivideUNR(static_cast<uint32_t>(h), sz[3]);
 
@@ -634,9 +700,8 @@ void GTE::CmdRTPT(uint32_t cmd) {
     if (vi == 2) {
       int64_t mac0val =
           static_cast<int64_t>(dqb) + static_cast<int64_t>(dqa) * divResult;
-      mac[0] = static_cast<int32_t>(CheckMAC(0, mac0val));
-      ir[0] =
-          static_cast<int16_t>(std::clamp<int32_t>(mac[0] >> 12, 0, 0x1000));
+      mac[0] = CheckMAC(0, mac0val);
+      ir[0] = static_cast<int16_t>(CheckIR(0, mac[0] >> 12, false));
     }
   }
 }
@@ -651,35 +716,37 @@ void GTE::CmdNCLIP([[maybe_unused]] uint32_t cmd) {
                    static_cast<int64_t>(sxy[2][0]) * sxy[0][1] -
                    static_cast<int64_t>(sxy[0][0]) * sxy[2][1];
 
-  mac[0] = static_cast<int32_t>(CheckMAC(0, result));
+  mac[0] = CheckMAC(0, result);
 }
 
 void GTE::CmdAVSZ3([[maybe_unused]] uint32_t cmd) {
   // Average of SZ1, SZ2, SZ3
   int64_t result = static_cast<int64_t>(zsf3) * (sz[1] + sz[2] + sz[3]);
-  mac[0] = static_cast<int32_t>(CheckMAC(0, result));
+  mac[0] = CheckMAC(0, result);
   otz = static_cast<uint16_t>(std::clamp<int32_t>(mac[0] >> 12, 0, 0xFFFF));
 }
 
 void GTE::CmdAVSZ4([[maybe_unused]] uint32_t cmd) {
   // Average of SZ0, SZ1, SZ2, SZ3
   int64_t result = static_cast<int64_t>(zsf4) * (sz[0] + sz[1] + sz[2] + sz[3]);
-  mac[0] = static_cast<int32_t>(CheckMAC(0, result));
+  mac[0] = CheckMAC(0, result);
   otz = static_cast<uint16_t>(std::clamp<int32_t>(mac[0] >> 12, 0, 0xFFFF));
 }
 
 void GTE::CmdSQR(uint32_t cmd) {
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
   mac[1] = ir[1] * ir[1];
   mac[2] = ir[2] * ir[2];
   mac[3] = ir[3] * ir[3];
-  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
-  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
-  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> (sf * 12), lmBit));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> (sf * 12), lmBit));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> (sf * 12), lmBit));
 }
 
 void GTE::CmdOP(uint32_t cmd) {
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
   // Outer product of D and IR
   mac[1] = static_cast<int32_t>(static_cast<int64_t>(rt[1][1]) * ir[3] -
                                 static_cast<int64_t>(rt[2][2]) * ir[2]);
@@ -687,13 +754,14 @@ void GTE::CmdOP(uint32_t cmd) {
                                 static_cast<int64_t>(rt[0][0]) * ir[3]);
   mac[3] = static_cast<int32_t>(static_cast<int64_t>(rt[0][0]) * ir[2] -
                                 static_cast<int64_t>(rt[1][1]) * ir[1]);
-  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
-  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
-  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> (sf * 12), lmBit));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> (sf * 12), lmBit));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> (sf * 12), lmBit));
 }
 
 void GTE::CmdMVMVA(uint32_t cmd) {
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
   uint32_t mx = (cmd >> 17) & 3;
   uint32_t vx = (cmd >> 15) & 3;
   uint32_t tx = (cmd >> 13) & 3;
@@ -773,8 +841,9 @@ void GTE::CmdMVMVA(uint32_t cmd) {
     int64_t result = static_cast<int64_t>(tvec[i]) * 0x1000 +
                      matrix[i][0] * vec[0] + matrix[i][1] * vec[1] +
                      matrix[i][2] * vec[2];
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
-    ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+    mac[i + 1] = CheckMAC(i + 1, result);
+    ir[i + 1] =
+        static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> (sf * 12), lmBit));
   }
 }
 
@@ -792,7 +861,7 @@ void GTE::CmdDPCS(uint32_t cmd) {
   for (int i = 0; i < 3; i++) {
     int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
     result = mac[i + 1] + ir[0] * (result >> 12);
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -803,9 +872,29 @@ void GTE::CmdDPCS(uint32_t cmd) {
 }
 
 void GTE::CmdDPCT([[maybe_unused]] uint32_t cmd) {
-  // Depth cue triple — apply DPCS three times using RGB FIFO
-  for (int i = 0; i < 3; i++) {
-    CmdDPCS(cmd);
+  bool lmBit = (cmd >> 10) & 1;
+
+  // Depth cue triple — reads from RGB FIFO front (rgb[0]), not rgbc
+  for (int iter = 0; iter < 3; iter++) {
+    uint8_t r = rgb[0] & 0xFF;
+    uint8_t g = (rgb[0] >> 8) & 0xFF;
+    uint8_t b = (rgb[0] >> 16) & 0xFF;
+
+    mac[1] = static_cast<int32_t>(r) << 16;
+    mac[2] = static_cast<int32_t>(g) << 16;
+    mac[3] = static_cast<int32_t>(b) << 16;
+
+    for (int i = 0; i < 3; i++) {
+      int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
+      result = mac[i + 1] + ir[0] * (result >> 12);
+      mac[i + 1] = CheckMAC(i + 1, result);
+      ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
+    }
+
+    PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
+            static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
+            (rgbc >> 24) & 0xFF);
   }
 }
 
@@ -815,7 +904,7 @@ void GTE::CmdINTPL(uint32_t cmd) {
     int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 -
                      (static_cast<int64_t>(ir[i + 1]) << 12);
     result = (static_cast<int64_t>(ir[i + 1]) << 12) + ir[0] * (result >> 12);
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -833,7 +922,7 @@ void GTE::NCSCore(int vIdx, uint32_t cmd) {
     int64_t result = static_cast<int64_t>(l[i][0]) * v[vIdx][0] +
                      static_cast<int64_t>(l[i][1]) * v[vIdx][1] +
                      static_cast<int64_t>(l[i][2]) * v[vIdx][2];
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -843,7 +932,7 @@ void GTE::NCSCore(int vIdx, uint32_t cmd) {
                      static_cast<int64_t>(lr[i][0]) * ir[1] +
                      static_cast<int64_t>(lr[i][1]) * ir[2] +
                      static_cast<int64_t>(lr[i][2]) * ir[3];
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 }
@@ -887,7 +976,7 @@ void GTE::CmdNCDS(uint32_t cmd) {
   for (int i = 0; i < 3; i++) {
     int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
     result = mac[i + 1] + ir[0] * (result >> 12);
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -916,7 +1005,7 @@ void GTE::CmdNCDT(uint32_t cmd) {
     for (int i = 0; i < 3; i++) {
       int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
       result = mac[i + 1] + ir[0] * (result >> 12);
-      mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+      mac[i + 1] = CheckMAC(i + 1, result);
       ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
     }
 
@@ -985,7 +1074,7 @@ void GTE::CmdCDP(uint32_t cmd) {
                      static_cast<int64_t>(lr[i][0]) * ir[1] +
                      static_cast<int64_t>(lr[i][1]) * ir[2] +
                      static_cast<int64_t>(lr[i][2]) * ir[3];
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -1004,7 +1093,7 @@ void GTE::CmdCDP(uint32_t cmd) {
   for (int i = 0; i < 3; i++) {
     int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
     result = mac[i + 1] + ir[0] * (result >> 12);
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -1023,7 +1112,7 @@ void GTE::CmdCC(uint32_t cmd) {
                      static_cast<int64_t>(lr[i][0]) * ir[1] +
                      static_cast<int64_t>(lr[i][1]) * ir[2] +
                      static_cast<int64_t>(lr[i][2]) * ir[3];
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -1066,7 +1155,7 @@ void GTE::CmdDCPL(uint32_t cmd) {
   for (int i = 0; i < 3; i++) {
     int64_t result = static_cast<int64_t>(fc[i]) * 0x1000 - mac[i + 1];
     result = mac[i + 1] + ir[0] * (result >> 12);
-    mac[i + 1] = static_cast<int32_t>(CheckMAC(i + 1, result));
+    mac[i + 1] = CheckMAC(i + 1, result);
     ir[i + 1] = static_cast<int16_t>(CheckIR(i + 1, mac[i + 1] >> 12, lmBit));
   }
 
@@ -1078,12 +1167,13 @@ void GTE::CmdDCPL(uint32_t cmd) {
 
 void GTE::CmdGPF(uint32_t cmd) {
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
   mac[1] = ir[0] * ir[1];
   mac[2] = ir[0] * ir[2];
   mac[3] = ir[0] * ir[3];
-  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
-  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
-  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> (sf * 12), lmBit));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> (sf * 12), lmBit));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> (sf * 12), lmBit));
   PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
           static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
           static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
@@ -1092,12 +1182,13 @@ void GTE::CmdGPF(uint32_t cmd) {
 
 void GTE::CmdGPL(uint32_t cmd) {
   bool lmBit = (cmd >> 10) & 1;
+  uint32_t sf = (cmd >> 19) & 1;
   mac[1] = mac[1] + ir[0] * ir[1];
   mac[2] = mac[2] + ir[0] * ir[2];
   mac[3] = mac[3] + ir[0] * ir[3];
-  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> 12, lmBit));
-  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> 12, lmBit));
-  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> 12, lmBit));
+  ir[1] = static_cast<int16_t>(CheckIR(1, mac[1] >> (sf * 12), lmBit));
+  ir[2] = static_cast<int16_t>(CheckIR(2, mac[2] >> (sf * 12), lmBit));
+  ir[3] = static_cast<int16_t>(CheckIR(3, mac[3] >> (sf * 12), lmBit));
   PushRGB(static_cast<uint8_t>(std::clamp<int32_t>(mac[1] >> 4, 0, 255)),
           static_cast<uint8_t>(std::clamp<int32_t>(mac[2] >> 4, 0, 255)),
           static_cast<uint8_t>(std::clamp<int32_t>(mac[3] >> 4, 0, 255)),
@@ -1114,11 +1205,11 @@ int64_t GTE::CheckMAC(int macIndex, int64_t value) {
     if (value < -static_cast<int64_t>(0x80000000))
       SetFlag(1 << 15);
   } else {
-    // MAC1-3: 43-bit + sign
+    // MAC1-3: 43-bit + sign (bits 30/29/28 positive, 27/26/25 negative)
     if (value > 0x7FFFFFFFFFF)
-      SetFlag(1 << (30 - macIndex));
+      SetFlag(1 << (31 - macIndex));
     if (value < -static_cast<int64_t>(0x80000000000))
-      SetFlag(1 << (27 - macIndex));
+      SetFlag(1 << (28 - macIndex));
   }
   return value;
 }
@@ -1127,17 +1218,22 @@ int32_t GTE::CheckIR(int irIndex, int64_t value, bool lmBit) {
   int32_t min = lmBit ? 0 : -0x8000;
   int32_t max = 0x7FFF;
 
+  // IR0 uses bit 12; IR1/2/3 use bits 24/23/22
+  uint32_t flagBit;
   if (irIndex == 0) {
     min = 0;
     max = 0x1000;
+    flagBit = 1 << 12;
+  } else {
+    flagBit = 1 << (25 - irIndex);
   }
 
   if (value < min) {
-    SetFlag(1 << (24 - irIndex));
+    SetFlag(flagBit);
     return min;
   }
   if (value > max) {
-    SetFlag(1 << (24 - irIndex));
+    SetFlag(flagBit);
     return max;
   }
   return static_cast<int32_t>(value);
@@ -1166,22 +1262,56 @@ void GTE::PushRGB(uint8_t r, uint8_t g, uint8_t b, uint8_t c) {
            (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(c) << 24);
 }
 
+// Hardware-accurate PS1 UNR (Unsigned Newton-Raphson) division table
+static constexpr uint8_t unrTable[257] = {
+    0xFF, 0xFD, 0xFB, 0xF9, 0xF7, 0xF5, 0xF3, 0xF1, 0xEF, 0xEE, 0xEC, 0xEA,
+    0xE8, 0xE6, 0xE4, 0xE3, 0xE1, 0xDF, 0xDD, 0xDC, 0xDA, 0xD8, 0xD6, 0xD5,
+    0xD3, 0xD1, 0xD0, 0xCE, 0xCD, 0xCB, 0xC9, 0xC8, 0xC6, 0xC5, 0xC3, 0xC1,
+    0xC0, 0xBE, 0xBD, 0xBB, 0xBA, 0xB8, 0xB7, 0xB5, 0xB4, 0xB2, 0xB1, 0xAF,
+    0xAE, 0xAC, 0xAB, 0xA9, 0xA8, 0xA7, 0xA5, 0xA4, 0xA2, 0xA1, 0xA0, 0x9E,
+    0x9D, 0x9C, 0x9A, 0x99, 0x98, 0x96, 0x95, 0x94, 0x92, 0x91, 0x90, 0x8F,
+    0x8D, 0x8C, 0x8B, 0x8A, 0x88, 0x87, 0x86, 0x85, 0x84, 0x82, 0x81, 0x80,
+    0x7F, 0x7E, 0x7D, 0x7B, 0x7A, 0x79, 0x78, 0x77, 0x76, 0x75, 0x74, 0x73,
+    0x71, 0x70, 0x6F, 0x6E, 0x6D, 0x6C, 0x6B, 0x6A, 0x69, 0x68, 0x67, 0x66,
+    0x65, 0x64, 0x63, 0x62, 0x61, 0x60, 0x5F, 0x5E, 0x5D, 0x5D, 0x5C, 0x5B,
+    0x5A, 0x59, 0x58, 0x57, 0x56, 0x55, 0x54, 0x54, 0x53, 0x52, 0x51, 0x50,
+    0x4F, 0x4F, 0x4E, 0x4D, 0x4C, 0x4B, 0x4B, 0x4A, 0x49, 0x48, 0x47, 0x47,
+    0x46, 0x45, 0x44, 0x44, 0x43, 0x42, 0x42, 0x41, 0x40, 0x3F, 0x3F, 0x3E,
+    0x3D, 0x3D, 0x3C, 0x3B, 0x3B, 0x3A, 0x39, 0x39, 0x38, 0x37, 0x37, 0x36,
+    0x35, 0x35, 0x34, 0x33, 0x33, 0x32, 0x32, 0x31, 0x30, 0x30, 0x2F, 0x2F,
+    0x2E, 0x2D, 0x2D, 0x2C, 0x2C, 0x2B, 0x2B, 0x2A, 0x29, 0x29, 0x28, 0x28,
+    0x27, 0x27, 0x26, 0x26, 0x25, 0x25, 0x24, 0x24, 0x23, 0x23, 0x22, 0x22,
+    0x21, 0x21, 0x20, 0x20, 0x1F, 0x1F, 0x1E, 0x1E, 0x1D, 0x1D, 0x1C, 0x1C,
+    0x1B, 0x1B, 0x1B, 0x1A, 0x1A, 0x19, 0x19, 0x18, 0x18, 0x18, 0x17, 0x17,
+    0x16, 0x16, 0x16, 0x15, 0x15, 0x14, 0x14, 0x14, 0x13, 0x13, 0x12, 0x12,
+    0x12, 0x11, 0x11, 0x11, 0x10, 0x10, 0x0F, 0x0F, 0x0F, 0x0E, 0x0E, 0x0E,
+    0x0D, 0x0D, 0x0D, 0x0C, 0x0C,
+};
+
 int64_t GTE::DivideUNR(uint32_t dividend, uint16_t divisor) {
   if (divisor == 0) {
-    SetFlag(1 << 17); // Division overflow
+    SetFlag(1 << 17);
     return 0x1FFFF;
   }
 
-  // Overflow: result would exceed 17-bit unsigned range (0x1FFFF).
-  // This happens when dividend >= 2 * divisor (perspective scale >= 2.0).
   if (dividend >= static_cast<uint32_t>(divisor) * 2) {
     SetFlag(1 << 17);
     return 0x1FFFF;
   }
 
-  // Standard perspective divide — result is dividend/divisor in Q16 format.
-  int64_t result = (static_cast<int64_t>(dividend) << 16) / divisor;
-  return std::min<int64_t>(result, 0x1FFFF);
+  // PS1 hardware UNR algorithm (NOCASH spec): CLZ normalization, table lookup,
+  // Newton-Raphson reciprocal refinement
+  int z = std::countl_zero(divisor);
+  uint64_t n = static_cast<uint64_t>(dividend) << z;
+  uint64_t d = static_cast<uint64_t>(divisor) << z;
+  uint32_t u =
+      unrTable[static_cast<uint32_t>((d - 0x7FC0) >> 7) & 0x1FF] + 0x101;
+  d = (0x2000080 - d * u) >> 8;
+  d = (0x80 + d * u) >> 8;
+
+  int64_t result =
+      std::min<int64_t>(0x1FFFF, static_cast<int64_t>((n * d + 0x8000) >> 16));
+  return result;
 }
 
 void GTE::SetFlag(uint32_t bit) { flag |= bit; }

@@ -14,7 +14,7 @@ protected:
     irq = std::make_unique<InterruptController>();
     memory = std::make_unique<PS1Memory>();
     gpu = std::make_unique<PS1GPU>(*memory);
-    spu = std::make_unique<PS1SPU>(*memory);
+    spu = std::make_unique<PS1SPU>(*memory, *irq);
     dma = std::make_unique<PS1DMA>(*memory, *gpu, *spu, *irq);
   }
   std::unique_ptr<InterruptController> irq;

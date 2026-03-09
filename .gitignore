@@ -31,6 +31,10 @@ dumps*/
 
 # Local environment secrets
 .env
+server/.env
+server/node_modules/
+server/dist/
+server/data/
 
 # Local Python venv
 .venv/

@@ -71,6 +71,7 @@ void PS1Controller::WriteStat(uint32_t value) {
 void PS1Controller::WriteMode(uint16_t value) { mode = value; }
 
 void PS1Controller::WriteCtrl(uint16_t value) {
+  uint16_t prevCtrl = ctrl;
   ctrl = value;
 
   if (value & (1 << 4)) {
@@ -85,6 +86,15 @@ void PS1Controller::WriteCtrl(uint16_t value) {
     baud = 0;
     txReady = true;
     rxReady = false;
+  }
+
+  // JOY Select (bit 1) deasserted → reset SIO state machine
+  bool wasSelected = prevCtrl & (1 << 1);
+  bool nowSelected = value & (1 << 1);
+  if (wasSelected && !nowSelected) {
+    commState = CommState::Idle;
+    rxReady = false;
+    txReady = true;
   }
 }
 

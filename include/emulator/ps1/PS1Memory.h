@@ -18,6 +18,7 @@ class PS1Timer;
 class InterruptController;
 class CDROM;
 class PS1Controller;
+class PS1MDEC;
 class PS1;
 
 class PS1Memory : public Common::Loggable {
@@ -37,6 +38,7 @@ public:
   void SetInterrupts(InterruptController *irq) { this->interrupts = irq; }
   void SetCDROM(CDROM *cdrom) { this->cdrom = cdrom; }
   void SetController(PS1Controller *ctrl) { this->controller = ctrl; }
+  void SetMDEC(PS1MDEC *mdec) { this->mdec = mdec; }
   void SetPS1(PS1 *ps1) { this->ps1 = ps1; }
 
   // ─── Bus Read/Write ─────────────────────────────────────────────────
@@ -86,6 +88,7 @@ private:
   InterruptController *interrupts = nullptr;
   CDROM *cdrom = nullptr;
   PS1Controller *controller = nullptr;
+  PS1MDEC *mdec = nullptr;
   PS1 *ps1 = nullptr;
 
   bool cacheIsolated = false;

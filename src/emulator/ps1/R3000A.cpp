@@ -230,31 +230,6 @@ int R3000A::Step() {
   instructionCount++;
   cycleCount++;
 
-  // Periodic RAM watchpoint: detect when tile data at 0x1041BC gets cleared
-  static bool ramWatchActive = false;
-  static uint64_t ramWatchLastNonZero = 0;
-  if (instructionCount % 100000 == 0) {
-    const uint8_t *ramPtr = memory.GetRAMPointer();
-    uint8_t b0 = ramPtr[0x1041BC];
-    uint8_t b1 = ramPtr[0x1041BD];
-    uint8_t b2 = ramPtr[0x1041BE];
-    uint8_t b3 = ramPtr[0x1041BF];
-    uint32_t sum = b0 + b1 + b2 + b3;
-    if (sum > 0 && !ramWatchActive) {
-      ramWatchActive = true;
-      ramWatchLastNonZero = instructionCount;
-      LogInfo("RAM WATCH: data appeared at 0x1041BC: %02X %02X %02X %02X (at "
-              "instr#%llu PC=%08X)",
-              b0, b1, b2, b3, instructionCount, currentPc);
-    } else if (sum == 0 && ramWatchActive) {
-      ramWatchActive = false;
-      LogInfo("RAM WATCH: data CLEARED at 0x1041BC (was nonzero at instr#%llu, "
-              "now zero at instr#%llu, delta=%llu, PC=%08X)",
-              ramWatchLastNonZero, instructionCount,
-              instructionCount - ramWatchLastNonZero, currentPc);
-    }
-  }
-
   return 1; // Each instruction takes 1 cycle (simplified)
 }
 

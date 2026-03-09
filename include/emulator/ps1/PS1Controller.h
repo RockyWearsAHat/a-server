@@ -41,6 +41,7 @@ public:
   // ─── Input State ────────────────────────────────────────────────────
   void SetButtonState(uint16_t buttons);
   void SetControllerConnected(bool connected);
+  uint16_t GetButtonState() const { return pad.buttons; }
 
   // ─── Timing ─────────────────────────────────────────────────────────
   void Tick(uint32_t cpuCycles);

@@ -1,4 +1,5 @@
 #include "emulator/ps1/PS1SPU.h"
+#include "emulator/ps1/InterruptController.h"
 #include "emulator/ps1/PS1Memory.h"
 #include <algorithm>
 #include <cstring>
@@ -7,9 +8,9 @@
 
 namespace AIO::Emulator::PS1 {
 
-PS1SPU::PS1SPU(PS1Memory &memory)
-    : Loggable("PS1.SPU"), memory(memory), spuRAM(MemSize::SPU_RAM / 2, 0) {
-} // SPU RAM in 16-bit words
+PS1SPU::PS1SPU(PS1Memory &memory, InterruptController &interrupts)
+    : Loggable("PS1.SPU"), memory(memory), interrupts(interrupts),
+      spuRAM(MemSize::SPU_RAM / 2, 0) {} // SPU RAM in 16-bit words
 
 void PS1SPU::Reset() {
   std::fill(spuRAM.begin(), spuRAM.end(), 0);
@@ -40,6 +41,7 @@ void PS1SPU::Reset() {
   extVolumeR = 0;
   transferAddr = 0;
   cycleAccumulator = 0;
+  spuIRQFired = false;
 }
 
 // ─── Register Interface ─────────────────────────────────────────────────
@@ -224,6 +226,10 @@ void PS1SPU::WriteRegister(uint32_t addr, uint16_t value) {
     break;
   case IO::SPU_IRQ_ADDR:
     irqAddr = value;
+    // Writing a new IRQ address re-arms the IRQ so the next address match
+    // fires.
+    spuIRQFired = false;
+    spuStat &= ~0x40;
     break;
   case IO::SPU_DATA_ADDR:
     dataAddr = value;
@@ -232,11 +238,23 @@ void PS1SPU::WriteRegister(uint32_t addr, uint16_t value) {
   case IO::SPU_DATA_FIFO:
     DMAWrite(value);
     break;
-  case IO::SPU_CTRL:
+  case IO::SPU_CTRL: {
+    uint16_t prev = spuCtrl;
     spuCtrl = value;
     // Update status to mirror some control bits
     spuStat = (spuStat & ~0x3F) | (value & 0x3F);
+    // Re-arm IRQ when bit 6 transitions from 0 to 1 (game re-enables SPU IRQ)
+    if (!(prev & 0x40) && (value & 0x40)) {
+      spuIRQFired = false;
+      spuStat &= ~0x40;
+    }
+    // Disable IRQ clears the latch
+    if (!(value & 0x40)) {
+      spuIRQFired = false;
+      spuStat &= ~0x40;
+    }
     break;
+  }
   case IO::SPU_TRANSFER_CTRL:
     transferCtrl = value;
     break;
@@ -245,6 +263,12 @@ void PS1SPU::WriteRegister(uint32_t addr, uint16_t value) {
     break;
   case IO::SPU_CD_VOL_R:
     cdVolumeR = static_cast<int16_t>(value);
+    break;
+  case IO::SPU_VOICE_STATUS:
+    voiceStatus &= 0xFFFF0000;
+    break;
+  case IO::SPU_VOICE_STATUS + 2:
+    voiceStatus &= 0x0000FFFF;
     break;
   default:
     if constexpr (Trace::SPU_TRACE) {
@@ -290,6 +314,7 @@ void PS1SPU::ProcessKeyOn() {
       v.adsrPhase = ADSRPhase::Attack;
       v.adsrLevel = 0;
       v.currentAddr = static_cast<uint32_t>(v.startAddr) * 8;
+      voiceStatus &= ~(1u << i);
       v.sampleCounter = 0;
       v.prevSamples[0] = 0;
       v.prevSamples[1] = 0;
@@ -346,7 +371,7 @@ uint32_t PS1SPU::GetSamples(int16_t *buffer, uint32_t maxSamples) {
       if (voices[v].adsrPhase == ADSRPhase::Off)
         continue;
 
-      int16_t sample = DecodeSample(voices[v]);
+      int16_t sample = DecodeSample(voices[v], v);
       int32_t vol = voices[v].adsrLevel;
 
       // Apply voice volume and ADSR
@@ -368,7 +393,7 @@ uint32_t PS1SPU::GetSamples(int16_t *buffer, uint32_t maxSamples) {
 
 // ─── ADPCM Decoding ────────────────────────────────────────────────────
 
-int16_t PS1SPU::DecodeSample(SPUVoice &voice) {
+int16_t PS1SPU::DecodeSample(SPUVoice &voice, uint32_t voiceIndex) {
   // Advance sample position using fixed-point counter
   voice.sampleCounter += voice.sampleRate;
 
@@ -381,17 +406,25 @@ int16_t PS1SPU::DecodeSample(SPUVoice &voice) {
     if (voice.sampleIndex >= 28) {
       voice.sampleIndex = 0;
 
-      // Read the 16-byte ADPCM block from SPU RAM
+      // Read the 16-byte ADPCM block from SPU RAM (wrap within bounds)
       uint32_t blockAddr = voice.currentAddr;
+
+      // SPU IRQ fires when a voice reads from the programmed IRQ address.
+      // Uses a latch so it fires once per re-arm (game re-arms by writing
+      // a new IRQ address or toggling SPUCTRL bit 6).
+      if ((spuCtrl & 0x40) && !spuIRQFired &&
+          (blockAddr == static_cast<uint32_t>(irqAddr) * 8)) {
+        spuIRQFired = true;
+        spuStat |= 0x40;
+        interrupts.RequestIRQ(IRQ::SPU);
+      }
+
       uint8_t block[16];
       for (int i = 0; i < 16; i++) {
-        uint32_t wordAddr = (blockAddr + i) / 2;
-        if (wordAddr >= spuRAM.size()) {
-          block[i] = 0;
-          continue;
-        }
+        uint32_t byteAddr = blockAddr + i;
+        uint32_t wordAddr = (byteAddr / 2) % spuRAM.size();
         uint16_t word = spuRAM[wordAddr];
-        block[i] = (blockAddr + i) & 1 ? (word >> 8) : (word & 0xFF);
+        block[i] = byteAddr & 1 ? (word >> 8) : (word & 0xFF);
       }
 
       // Check flags (byte 1): bit 0=loop end, bit 1=loop repeat, bit 2=loop
@@ -405,11 +438,11 @@ int16_t PS1SPU::DecodeSample(SPUVoice &voice) {
       DecodeADPCMBlock(block, voice.decodedSamples, voice.prevSamples[0],
                        voice.prevSamples[1]);
 
-      // Advance to next block
-      voice.currentAddr += 16;
+      // Advance to next block, wrapping within SPU RAM (512KB = 0x80000 bytes)
+      voice.currentAddr = (voice.currentAddr + 16) % (spuRAM.size() * 2);
 
       if (flags & 0x01) {
-        // Loop end
+        voiceStatus |= (1u << voiceIndex);
         if (flags & 0x02) {
           // Loop repeat — jump back to loop start
           voice.currentAddr = static_cast<uint32_t>(voice.repeatAddr) * 8;
@@ -514,7 +547,8 @@ void PS1SPU::UpdateADSR(SPUVoice &voice) {
   case ADSRPhase::Decay: {
     // Decay is always exponential decrease
     int32_t decayShift = (voice.adsrLo >> 4) & 0x0F;
-    int32_t sustainLevel = ((voice.adsrLo & 0x0F) + 1) * 0x800;
+    int32_t sustainLevel =
+        std::min(((voice.adsrLo & 0x0F) + 1) * 0x800, 0x7FFF);
 
     int32_t step = -1;
     if (decayShift < 11) {

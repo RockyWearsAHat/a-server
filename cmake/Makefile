@@ -4,25 +4,45 @@
 
 BUILD_TYPE ?= Release
 
-.PHONY: all clean configure build test help
+BUILD_DIR := ../build/generated/cmake
+# Sentinel file — only re-configure when CMake files are newer than this
+CMAKE_SENTINEL := $(BUILD_DIR)/.cmake_configured
+# All cmake input files that, if changed, require a reconfigure
+CMAKE_INPUTS := CMakeLists.txt core.cmake tests.cmake $(wildcard qt/*.cmake)
+
+# Point ccache to the project config file (sloppiness, max_size, compiler_check=content)
+# This works regardless of XDG_CONFIG_HOME or shell environment
+export CCACHE_CONFIGPATH := $(HOME)/.config/ccache/ccache.conf
+
+.PHONY: all clean configure reconfigure build test help
 
 all:
 	@$(MAKE) clean
 	@$(MAKE) build
 
-configure:
-	@mkdir -p ../build/generated/cmake
-	@cd ../build/generated/cmake && cmake ../../../cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
-	@# Help clangd: place compile_commands.json where VS Code clangd expects it
-	@cd ../build/generated/cmake && test -f compile_commands.json && cp -f compile_commands.json ../compile_commands.json || true
+# Configure only when CMakeLists.txt or cmake/*.cmake files are newer than the sentinel.
+# Touch the sentinel after a successful configure so subsequent builds skip this.
+$(CMAKE_SENTINEL): $(CMAKE_INPUTS)
+	@mkdir -p $(BUILD_DIR)
+	@cd $(BUILD_DIR) && cmake ../../../cmake \
+		-G Ninja \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+	@cd $(BUILD_DIR) && test -f compile_commands.json && cp -f compile_commands.json ../compile_commands.json || true
+	@touch $(CMAKE_SENTINEL)
 
-build: configure
-	@# Clean stale coverage data to prevent corrupt .gcda merge errors
+configure: $(CMAKE_SENTINEL)
+
+# Force a full cmake re-run regardless of sentinel state
+reconfigure:
+	@rm -f $(CMAKE_SENTINEL)
+	@$(MAKE) configure
+
+build: $(CMAKE_SENTINEL)
+	@# Only build the main AIOServer binary — not the full test suite.
+	@# Use 'make test' to build and run tests.
 	@find ../build -name "*.gcda" -delete 2>/dev/null || true
-	@cd ../build/generated/cmake && $(MAKE) -j8
-	@# Remove empty bin/lib folders created by CMake in generated/cmake
-	@rmdir ../build/generated/cmake/bin 2>/dev/null || true
-	@rmdir ../build/generated/cmake/lib 2>/dev/null || true
+	@cd $(BUILD_DIR) && ninja AIOServer
 	@echo ""
 	@echo "Build complete!"
 	@echo "Executables: build/bin/"
@@ -31,18 +51,21 @@ build: configure
 
 clean:
 	@rm -rf ../build
-	@echo "Build directory cleaned"
+	@echo "Build directory cleaned (run 'make reconfigure' or 'make build' to re-configure)"
 
-test: build
-	@cd ../build/generated/cmake && ctest --output-on-failure
+test: $(CMAKE_SENTINEL)
+	@# Build all targets (including test binaries) then run tests.
+	@find ../build -name "*.gcda" -delete 2>/dev/null || true
+	@cd $(BUILD_DIR) && ninja
+	@cd $(BUILD_DIR) && ctest --output-on-failure
 
 # Coverage build and report generation (requires lcov: brew install lcov)
 # Does a full clean build to ensure gcno/gcda files are in sync
 coverage:
 	@rm -rf ../build
 	@mkdir -p ../build/generated/cmake
-	@cd ../build/generated/cmake && cmake ../../../cmake -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
-	@cd ../build/generated/cmake && $(MAKE) -j8
+	@cd ../build/generated/cmake && cmake ../../../cmake -G Ninja -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+	@cd ../build/generated/cmake && ninja
 	@cd ../build/generated/cmake && ctest --output-on-failure || true
 	@echo "Generating coverage report..."
 	@cd ../build/generated/cmake && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format

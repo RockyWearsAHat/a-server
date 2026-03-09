@@ -1,6 +1,7 @@
 #include "emulator/ps1/PS1.h"
 #include "emulator/common/Logger.h"
 #include "emulator/ps1/PS1HleBios.h"
+#include "emulator/ps1/PS1MDEC.h"
 #include <fstream>
 
 namespace AIO::Emulator::PS1 {
@@ -10,8 +11,9 @@ PS1::PS1() {
   interrupts = std::make_unique<InterruptController>();
   memory = std::make_unique<PS1Memory>();
   gpu = std::make_unique<PS1GPU>(*memory);
-  spu = std::make_unique<PS1SPU>(*memory);
+  spu = std::make_unique<PS1SPU>(*memory, *interrupts);
   dma = std::make_unique<PS1DMA>(*memory, *gpu, *spu, *interrupts);
+  mdec = std::make_unique<PS1MDEC>();
   timers = std::make_unique<PS1Timer>(*interrupts);
   cdrom = std::make_unique<CDROM>(*memory, *interrupts);
   controller = std::make_unique<PS1Controller>(*interrupts);
@@ -20,6 +22,7 @@ PS1::PS1() {
 
   // Wire DMA to CDROM (setter injection — CDROM depends on DMA and vice versa)
   dma->SetCDROM(cdrom.get());
+  dma->SetMDEC(mdec.get());
 
   // Wire PS1Memory to all subsystems it dispatches I/O to
   memory->SetCPU(cpu.get());
@@ -30,6 +33,7 @@ PS1::PS1() {
   memory->SetInterrupts(interrupts.get());
   memory->SetCDROM(cdrom.get());
   memory->SetController(controller.get());
+  memory->SetMDEC(mdec.get());
   memory->SetPS1(this);
 
   // Wire GTE into CPU for COP2 operations
@@ -108,8 +112,10 @@ int PS1::Step() {
     timers->TickHBlank();
   }
 
-  // Dot clock for timers
-  uint32_t dots = cpuCycles * 8;
+  // Dot clock for Timer0: DOTS_PER_SCANLINE / CPU_CYCLES_PER_SCANLINE ≈ 1.57
+  dotClockAccum += cpuCycles * Clock::DOTS_PER_SCANLINE_NTSC;
+  uint32_t dots = dotClockAccum / Clock::CPU_CYCLES_PER_SCANLINE_NTSC;
+  dotClockAccum %= Clock::CPU_CYCLES_PER_SCANLINE_NTSC;
   timers->TickDotClock(dots);
 
   // Tick other subsystems

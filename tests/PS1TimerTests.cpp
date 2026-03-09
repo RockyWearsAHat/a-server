@@ -77,6 +77,40 @@ TEST_F(PS1TimerTest, Timer_TargetIRQ) {
   EXPECT_TRUE(irq->HasPendingIRQ());
 }
 
+TEST_F(PS1TimerTest, Timer_TargetIRQ_OneShotPulseDoesNotRefireAfterAck) {
+  irq->WriteMask(IRQ::TIMER0);
+
+  // Target IRQ + reset-on-target, non-repeat pulse mode.
+  timers->Write32(0x1F801108, 1);
+  timers->Write32(0x1F801104, 0x18);
+
+  timers->Tick(1);
+  EXPECT_TRUE(irq->HasPendingIRQ());
+
+  irq->ClearIRQ(IRQ::TIMER0);
+  EXPECT_FALSE(irq->HasPendingIRQ());
+
+  timers->Tick(8);
+  EXPECT_FALSE(irq->HasPendingIRQ());
+}
+
+TEST_F(PS1TimerTest, Timer_TargetIRQ_RepeatPulseRefiresAfterAck) {
+  irq->WriteMask(IRQ::TIMER0);
+
+  // Target IRQ + reset-on-target + repeat mode.
+  timers->Write32(0x1F801108, 1);
+  timers->Write32(0x1F801104, 0x58);
+
+  timers->Tick(1);
+  EXPECT_TRUE(irq->HasPendingIRQ());
+
+  irq->ClearIRQ(IRQ::TIMER0);
+  EXPECT_FALSE(irq->HasPendingIRQ());
+
+  timers->Tick(1);
+  EXPECT_TRUE(irq->HasPendingIRQ());
+}
+
 TEST_F(PS1TimerTest, Reset_ClearsAllTimers) {
   timers->Tick(100);
   timers->Reset();

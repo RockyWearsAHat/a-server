@@ -1,0 +1,590 @@
+import cors from "cors";
+import dotenv from "dotenv";
+import express, { type Request, type Response } from "express";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
+dotenv.config();
+
+const port = Number.parseInt(process.env.PORT ?? "8916", 10);
+const youtubeApiKey = process.env.YOUTUBE_API_KEY ?? "";
+const youtubeClientId = process.env.YOUTUBE_OAUTH_CLIENT_ID ?? "";
+const youtubeClientSecret = process.env.YOUTUBE_OAUTH_CLIENT_SECRET ?? "";
+const youtubeRegion = process.env.YOUTUBE_REGION ?? "US";
+const serverLogFile = path.resolve(
+  process.cwd(),
+  process.env.SERVER_LOG_FILE ?? "./debug.log",
+);
+const sessionStoreFile = path.resolve(
+  process.cwd(),
+  process.env.SESSION_STORE_FILE ?? "./data/youtube-sessions.json",
+);
+const youtubeReadonlyScope = "https://www.googleapis.com/auth/youtube.readonly";
+const allowedProxyEndpoints = new Set([
+  "channels",
+  "playlistItems",
+  "search",
+  "subscriptions",
+  "videos",
+]);
+
+type StoredSession = {
+  sessionId: string;
+  active: boolean;
+  authenticated: boolean;
+  deviceCode?: string;
+  userCode?: string;
+  verificationUrl?: string;
+  verificationUrlComplete?: string;
+  statusMessage?: string;
+  pollIntervalSeconds: number;
+  expiresInSeconds: number;
+  createdAtSeconds: number;
+  accessToken?: string;
+  refreshToken?: string;
+  accountDisplayName?: string;
+  accountAvatarUrl?: string;
+};
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "64kb" }));
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on("finish", () => {
+    if (res.statusCode >= 400) {
+      logServer("WARN", "HTTP request completed with error status", {
+        method: req.method,
+        path: req.originalUrl,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - startedAt,
+      });
+    }
+  });
+  next();
+});
+
+const sessions = loadSessions();
+
+function ensureFileDir(filePath: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+function logServer(
+  level: "INFO" | "WARN" | "ERROR",
+  message: string,
+  details?: unknown,
+): void {
+  ensureFileDir(serverLogFile);
+  const suffix = details === undefined ? "" : ` ${JSON.stringify(details)}`;
+  const line = `${new Date().toISOString()} [${level}] ${message}${suffix}`;
+  fs.appendFileSync(serverLogFile, `${line}\n`, "utf8");
+
+  if (level === "ERROR") {
+    console.error(line);
+    return;
+  }
+  if (level === "WARN") {
+    console.warn(line);
+    return;
+  }
+  console.log(line);
+}
+
+function ensureStoreDir(): void {
+  fs.mkdirSync(path.dirname(sessionStoreFile), { recursive: true });
+}
+
+function loadSessions(): Map<string, StoredSession> {
+  ensureStoreDir();
+  if (!fs.existsSync(sessionStoreFile)) {
+    return new Map<string, StoredSession>();
+  }
+
+  try {
+    const raw = fs.readFileSync(sessionStoreFile, "utf8");
+    const parsed = JSON.parse(raw) as StoredSession[];
+    return new Map(parsed.map((entry) => [entry.sessionId, entry]));
+  } catch {
+    return new Map<string, StoredSession>();
+  }
+}
+
+function saveSessions(): void {
+  ensureStoreDir();
+  fs.writeFileSync(
+    sessionStoreFile,
+    JSON.stringify([...sessions.values()], null, 2),
+    "utf8",
+  );
+}
+
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function secondsRemaining(session: StoredSession): number {
+  if (!session.active) {
+    return 0;
+  }
+  return Math.max(
+    0,
+    session.expiresInSeconds - (nowSeconds() - session.createdAtSeconds),
+  );
+}
+
+function sessionView(session: StoredSession) {
+  return {
+    sessionId: session.sessionId,
+    active: session.active,
+    authenticated: session.authenticated,
+    verificationUrl: session.verificationUrl ?? "",
+    verificationUrlComplete: session.verificationUrlComplete ?? "",
+    userCode: session.userCode ?? "",
+    statusMessage: session.statusMessage ?? "",
+    pollIntervalSeconds: session.pollIntervalSeconds,
+    expiresInSeconds: session.expiresInSeconds,
+    secondsRemaining: secondsRemaining(session),
+    accountDisplayName: session.accountDisplayName ?? "",
+    accountAvatarUrl: session.accountAvatarUrl ?? "",
+  };
+}
+
+async function postForm(
+  url: string,
+  form: URLSearchParams,
+): Promise<{ status: number; body: string }> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: form,
+  });
+  return {
+    status: response.status,
+    body: await response.text(),
+  };
+}
+
+async function fetchYouTubeJson(
+  endpoint: string,
+  params: string,
+  session?: StoredSession,
+): Promise<{ status: number; body: string }> {
+  const url = new URL(`https://www.googleapis.com/youtube/v3/${endpoint}`);
+  const search = new URLSearchParams(params);
+  search.forEach((value, key) => url.searchParams.set(key, value));
+  if (!session?.accessToken && youtubeApiKey) {
+    url.searchParams.set("key", youtubeApiKey);
+  }
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  if (session?.accessToken) {
+    headers.Authorization = `Bearer ${session.accessToken}`;
+  }
+
+  const response = await fetch(url, { headers });
+  return {
+    status: response.status,
+    body: await response.text(),
+  };
+}
+
+async function refreshSessionAccessToken(
+  session: StoredSession,
+): Promise<boolean> {
+  if (!session.refreshToken || !youtubeClientId) {
+    return false;
+  }
+
+  const form = new URLSearchParams({
+    client_id: youtubeClientId,
+    refresh_token: session.refreshToken,
+    grant_type: "refresh_token",
+  });
+  if (youtubeClientSecret) {
+    form.set("client_secret", youtubeClientSecret);
+  }
+
+  const response = await postForm("https://oauth2.googleapis.com/token", form);
+  if (response.status < 200 || response.status >= 300) {
+    return false;
+  }
+
+  const parsed = JSON.parse(response.body) as {
+    access_token?: string;
+    refresh_token?: string;
+  };
+  if (!parsed.access_token) {
+    return false;
+  }
+
+  session.accessToken = parsed.access_token;
+  if (parsed.refresh_token) {
+    session.refreshToken = parsed.refresh_token;
+  }
+  session.authenticated = true;
+  saveSessions();
+  return true;
+}
+
+async function ensureAccountProfile(session: StoredSession): Promise<void> {
+  if (
+    !session.authenticated ||
+    !session.accessToken ||
+    (session.accountDisplayName && session.accountAvatarUrl)
+  ) {
+    return;
+  }
+
+  const response = await fetchYouTubeJson(
+    "channels",
+    "part=snippet&mine=true",
+    session,
+  );
+  if (response.status === 401 && (await refreshSessionAccessToken(session))) {
+    await ensureAccountProfile(session);
+    return;
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return;
+  }
+
+  const parsed = JSON.parse(response.body) as {
+    items?: Array<{
+      snippet?: {
+        title?: string;
+        thumbnails?: Record<string, { url?: string }>;
+      };
+    }>;
+  };
+  const snippet = parsed.items?.[0]?.snippet;
+  const title = snippet?.title;
+  if (title) {
+    session.accountDisplayName = title;
+  }
+  const thumbs = snippet?.thumbnails;
+  session.accountAvatarUrl =
+    thumbs?.high?.url ??
+    thumbs?.medium?.url ??
+    thumbs?.default?.url ??
+    session.accountAvatarUrl;
+  saveSessions();
+}
+
+function requireSession(req: Request, res: Response): StoredSession | null {
+  const sessionId =
+    req.header("x-aio-youtube-session") ??
+    (typeof req.body?.sessionId === "string" ? req.body.sessionId : "");
+  if (!sessionId) {
+    res.status(401).json({ message: "Missing YouTube session id." });
+    return null;
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    res.status(401).json({ message: "Unknown YouTube session." });
+    return null;
+  }
+  return session;
+}
+
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    region: youtubeRegion,
+    hasApiKey: Boolean(youtubeApiKey),
+    hasOAuthClientId: Boolean(youtubeClientId),
+  });
+});
+
+app.all("/api/youtube/device/start", async (_req, res) => {
+  if (!youtubeClientId) {
+    res.status(503).json({
+      message: "Server is missing YOUTUBE_OAUTH_CLIENT_ID.",
+      active: false,
+      authenticated: false,
+    });
+    return;
+  }
+
+  const form = new URLSearchParams({
+    client_id: youtubeClientId,
+    scope: youtubeReadonlyScope,
+  });
+  const response = await postForm(
+    "https://oauth2.googleapis.com/device/code",
+    form,
+  );
+  if (response.status < 200 || response.status >= 300) {
+    let upstreamMessage = "Google device sign-in could not be started.";
+    try {
+      const parsed = JSON.parse(response.body) as {
+        error?: string;
+        error_description?: string;
+      };
+      if (parsed.error_description) {
+        upstreamMessage = parsed.error_description;
+      } else if (parsed.error) {
+        upstreamMessage = `Google device auth error: ${parsed.error}`;
+      }
+    } catch {
+      if (response.body.trim().length > 0) {
+        upstreamMessage = response.body.trim();
+      }
+    }
+
+    console.error(
+      "[YouTubeServer] Device auth start failed",
+      JSON.stringify({
+        upstreamStatus: response.status,
+        message: upstreamMessage,
+        body: response.body,
+      }),
+    );
+    logServer("ERROR", "Device auth start failed", {
+      upstreamStatus: response.status,
+      message: upstreamMessage,
+      body: response.body,
+    });
+
+    res.status(502).json({
+      message: upstreamMessage,
+      upstreamStatus: response.status,
+      active: false,
+      authenticated: false,
+    });
+    return;
+  }
+
+  const parsed = JSON.parse(response.body) as {
+    device_code?: string;
+    user_code?: string;
+    verification_url?: string;
+    verification_uri?: string;
+    verification_url_complete?: string;
+    verification_uri_complete?: string;
+    interval?: number;
+    expires_in?: number;
+  };
+  if (!parsed.device_code || !parsed.user_code) {
+    res.status(502).json({
+      message: "Google returned an incomplete device-code response.",
+      active: false,
+      authenticated: false,
+    });
+    return;
+  }
+
+  const session: StoredSession = {
+    sessionId: randomUUID(),
+    active: true,
+    authenticated: false,
+    deviceCode: parsed.device_code,
+    userCode: parsed.user_code,
+    verificationUrl: parsed.verification_url ?? parsed.verification_uri ?? "",
+    verificationUrlComplete:
+      parsed.verification_url_complete ??
+      parsed.verification_uri_complete ??
+      "",
+    statusMessage:
+      "Approve the code on another device to finish connecting YouTube.",
+    pollIntervalSeconds: Math.max(5, parsed.interval ?? 5),
+    expiresInSeconds: Math.max(60, parsed.expires_in ?? 1800),
+    createdAtSeconds: nowSeconds(),
+  };
+  sessions.set(session.sessionId, session);
+  saveSessions();
+  res.json(sessionView(session));
+});
+
+app.post("/api/youtube/device/poll", async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) {
+    return;
+  }
+
+  if (!session.active) {
+    await ensureAccountProfile(session);
+    res.json(sessionView(session));
+    return;
+  }
+
+  if (secondsRemaining(session) <= 0) {
+    session.active = false;
+    session.statusMessage =
+      "This connection code expired. Start sign-in again.";
+    saveSessions();
+    res.json(sessionView(session));
+    return;
+  }
+
+  const form = new URLSearchParams({
+    client_id: youtubeClientId,
+    device_code: session.deviceCode ?? "",
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+  });
+  if (youtubeClientSecret) {
+    form.set("client_secret", youtubeClientSecret);
+  }
+
+  const response = await postForm("https://oauth2.googleapis.com/token", form);
+  const parsed = JSON.parse(response.body) as {
+    access_token?: string;
+    refresh_token?: string;
+    error?: string;
+  };
+
+  if (parsed.access_token) {
+    session.accessToken = parsed.access_token;
+    if (parsed.refresh_token) {
+      session.refreshToken = parsed.refresh_token;
+    }
+    session.active = false;
+    session.authenticated = true;
+    session.statusMessage = "YouTube account connected.";
+    await ensureAccountProfile(session);
+    saveSessions();
+    res.json(sessionView(session));
+    return;
+  }
+
+  switch (parsed.error) {
+    case "authorization_pending":
+      session.statusMessage = "Waiting for approval from Google...";
+      break;
+    case "slow_down":
+      session.pollIntervalSeconds += 5;
+      session.statusMessage =
+        "Google asked for slower polling. Still waiting...";
+      break;
+    case "access_denied":
+      session.active = false;
+      session.statusMessage = "YouTube sign-in was denied.";
+      break;
+    default:
+      session.active = false;
+      session.statusMessage = "YouTube sign-in failed or expired.";
+      break;
+  }
+
+  saveSessions();
+  res.json(sessionView(session));
+});
+
+app.get("/api/youtube/account", async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) {
+    return;
+  }
+  await ensureAccountProfile(session);
+  res.json({
+    authenticated: session.authenticated,
+    accountDisplayName: session.accountDisplayName ?? "",
+    accountAvatarUrl: session.accountAvatarUrl ?? "",
+  });
+});
+
+app.post("/api/youtube/logout", (req, res) => {
+  const sessionId =
+    typeof req.body?.sessionId === "string" ? req.body.sessionId : "";
+  if (sessionId) {
+    sessions.delete(sessionId);
+    saveSessions();
+  }
+  res.json({ ok: true });
+});
+
+app.get("/api/youtube/proxy", async (req, res) => {
+  const endpoint =
+    typeof req.query.endpoint === "string" ? req.query.endpoint : "";
+  const params = typeof req.query.params === "string" ? req.query.params : "";
+  const requireAuth = req.query.requireAuth === "1";
+
+  if (!allowedProxyEndpoints.has(endpoint)) {
+    res.status(400).json({ message: "Endpoint is not allowed." });
+    return;
+  }
+
+  let session: StoredSession | undefined;
+  const sessionId = req.header("x-aio-youtube-session");
+  if (sessionId) {
+    session = sessions.get(sessionId);
+  }
+
+  if (requireAuth && !session?.authenticated) {
+    res.status(401).json({
+      message: "This request requires an authenticated YouTube session.",
+    });
+    return;
+  }
+  if (!requireAuth && !youtubeApiKey && !session?.accessToken) {
+    res.status(503).json({ message: "Server is missing YOUTUBE_API_KEY." });
+    return;
+  }
+
+  let response = await fetchYouTubeJson(endpoint, params, session);
+  if (
+    response.status === 401 &&
+    session &&
+    (await refreshSessionAccessToken(session))
+  ) {
+    response = await fetchYouTubeJson(endpoint, params, session);
+  }
+
+  res.status(response.status).type("application/json").send(response.body);
+});
+
+app.use((req, res) => {
+  logServer("WARN", "Unhandled route", {
+    method: req.method,
+    path: req.originalUrl,
+  });
+  res.status(404).json({ message: "Route not found." });
+});
+
+app.use(
+  (
+    error: unknown,
+    req: Request,
+    res: Response,
+    _next: express.NextFunction,
+  ) => {
+    logServer("ERROR", "Unhandled server error", {
+      method: req.method,
+      path: req.originalUrl,
+      error:
+        error instanceof Error ? (error.stack ?? error.message) : String(error),
+    });
+    res.status(500).json({ message: "Internal server error." });
+  },
+);
+
+process.on("uncaughtException", (error) => {
+  logServer("ERROR", "Uncaught exception", {
+    error: error.stack ?? error.message,
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  logServer("ERROR", "Unhandled promise rejection", {
+    reason:
+      reason instanceof Error
+        ? (reason.stack ?? reason.message)
+        : String(reason),
+  });
+});
+
+app.listen(port, () => {
+  logServer("INFO", "YouTube server listening", {
+    url: `http://127.0.0.1:${port}`,
+    logFile: serverLogFile,
+    hasApiKey: Boolean(youtubeApiKey),
+    hasOAuthClientId: Boolean(youtubeClientId),
+  });
+});

@@ -8,6 +8,7 @@ add_library(PS1Emulator STATIC
     ${PROJECT_ROOT}/src/emulator/ps1/PS1GPU.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/PS1SPU.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/PS1DMA.cpp
+    ${PROJECT_ROOT}/src/emulator/ps1/PS1MDEC.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/InterruptController.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/PS1Timer.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/CDROM.cpp
@@ -140,9 +141,59 @@ target_include_directories(AIOServer PRIVATE
     $<TARGET_PROPERTY:Qt6::Widgets,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network GBAEmulator SwitchEmulator PS1Emulator SDL2::SDL2 CURL::libcurl)
+target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets GBAEmulator SwitchEmulator PS1Emulator SDL2::SDL2 CURL::libcurl)
+
+# Precompiled headers — compile heavy Qt + stdlib headers once, reuse across all TUs
+target_precompile_headers(AIOServer PRIVATE
+    <QCheckBox>
+    <QElapsedTimer>
+    <QImage>
+    <QLabel>
+    <QListWidget>
+    <QMainWindow>
+    <QPushButton>
+    <QSettings>
+    <QStackedWidget>
+    <QTimer>
+    <array>
+    <atomic>
+    <cstdint>
+    <memory>
+    <mutex>
+    <string>
+    <thread>
+    <vector>
+)
+
+target_precompile_headers(GBAEmulator PRIVATE
+    <array>
+    <atomic>
+    <cstdint>
+    <memory>
+    <mutex>
+    <string>
+    <vector>
+)
+
+target_precompile_headers(PS1Emulator PRIVATE
+    <array>
+    <cstdint>
+    <memory>
+    <string>
+    <vector>
+)
 
 # Set autogen directory for AIOServer
 set_target_properties(AIOServer PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/AIOServer"
 )
+
+# Sign with get-task-allow so AMFI permits kernel core dumps on macOS Sequoia+
+if(APPLE)
+    add_custom_command(TARGET AIOServer POST_BUILD
+        COMMAND codesign --force --sign - --entitlements
+            "${PROJECT_ROOT}/cmake/debuggable.entitlements.plist"
+            "$<TARGET_FILE:AIOServer>"
+        COMMENT "Re-signing AIOServer with get-task-allow for core dump support"
+    )
+endif()

@@ -215,6 +215,13 @@ private:
   // Random number generator
   static inline uint32_t hleSeed = 0;
 
+  // Pad buffer state for HLE pad polling (InitPAD/StartPAD)
+  static inline uint32_t padBuf1Addr = 0;
+  static inline uint32_t padBuf1Size = 0;
+  static inline uint32_t padBuf2Addr = 0;
+  static inline uint32_t padBuf2Size = 0;
+  static inline bool padStarted = false;
+
   // ChangeClearRCnt flags per timer (0..2) and vblank (3)
   static inline std::array<uint32_t, 4> changeClearRCntFlags{};
 

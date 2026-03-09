@@ -1,3 +1,4 @@
+#include "emulator/ps1/InterruptController.h"
 #include "emulator/ps1/PS1Constants.h"
 #include "emulator/ps1/PS1Memory.h"
 #include "emulator/ps1/PS1SPU.h"
@@ -8,9 +9,11 @@ using namespace AIO::Emulator::PS1;
 class PS1SPUTest : public ::testing::Test {
 protected:
   void SetUp() override {
+    irq = std::make_unique<InterruptController>();
     memory = std::make_unique<PS1Memory>();
-    spu = std::make_unique<PS1SPU>(*memory);
+    spu = std::make_unique<PS1SPU>(*memory, *irq);
   }
+  std::unique_ptr<InterruptController> irq;
   std::unique_ptr<PS1Memory> memory;
   std::unique_ptr<PS1SPU> spu;
 };

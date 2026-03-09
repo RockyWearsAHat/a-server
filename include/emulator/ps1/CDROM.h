@@ -103,6 +103,10 @@ private:
   uint8_t mode = 0;
   bool sectorBufferReady = false;
 
+  // ─── XA-ADPCM Filter ───────────────────────────────────────────────
+  uint8_t xaFilterFile = 0;
+  uint8_t xaFilterChannel = 0;
+
   // ─── Delayed Second Response (for multi-response commands) ──────────
   bool secondResponsePending = false;
   uint32_t secondResponseDelay = 0;

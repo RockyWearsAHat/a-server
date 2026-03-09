@@ -5,9 +5,19 @@
 #include "emulator/ps1/PS1GPU.h"
 #include "emulator/ps1/PS1Memory.h"
 #include "emulator/ps1/R3000A.h"
+#include <cstdlib>
 #include <cstring>
 
 namespace AIO::Emulator::PS1 {
+
+namespace {
+
+bool IsPs1HleTraceEnabled() {
+  const char *value = std::getenv("AIO_TRACE_PS1_HLE");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+} // namespace
 
 // ─── Public Entry Point ─────────────────────────────────────────────────
 
@@ -72,6 +82,11 @@ void PS1HleBios::ResetState() {
   memoryPtr = nullptr;
   pendingCallbacks.clear();
   callbackPS1 = nullptr;
+  padBuf1Addr = 0;
+  padBuf1Size = 0;
+  padBuf2Addr = 0;
+  padBuf2Size = 0;
+  padStarted = false;
 }
 
 // ─── HLE Exception Handler ──────────────────────────────────────────────
@@ -84,7 +99,7 @@ void PS1HleBios::HandleException(PS1 &ps1) {
   uint32_t cause = cpu.GetCause();
   uint32_t excCode = (cause >> 2) & 0x1F;
 
-  {
+  if (IsPs1HleTraceEnabled()) {
     auto &log = AIO::Emulator::Common::Logger::Instance();
     uint32_t istat = irqs.ReadStat();
     uint32_t imask = irqs.ReadMask();
@@ -106,10 +121,12 @@ void PS1HleBios::HandleException(PS1 &ps1) {
   if (inExceptionHandler && excCode != 0x08) {
     auto &log = AIO::Emulator::Common::Logger::Instance();
     uint32_t epc = cpu.GetEPC();
-    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-               "HandleException: nested guard RFE → EPC=0x%08X SR=0x%08X "
-               "PC=0x%08X excCode=%u",
-               epc, cpu.GetCOP0(CPU::COP0::SR), cpu.GetPC(), excCode);
+    if (IsPs1HleTraceEnabled()) {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "HandleException: nested guard RFE → EPC=0x%08X SR=0x%08X "
+                 "PC=0x%08X excCode=%u",
+                 epc, cpu.GetCOP0(CPU::COP0::SR), cpu.GetPC(), excCode);
+    }
     uint32_t sr = cpu.GetCOP0(CPU::COP0::SR);
     sr = (sr & ~0xF) | ((sr >> 2) & 0xF);
     cpu.SetCOP0(CPU::COP0::SR, sr);
@@ -164,6 +181,26 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       // deliver it directly here.
       DeliverEvent(0xF0000009, 0x0020);
 
+      // HLE pad polling: write controller state to game's pad buffers.
+      // Real BIOS priority-2 PadCard handler does SIO transactions here.
+      if (padStarted) {
+        auto &ctrl = ps1.GetController();
+        uint16_t buttons = ctrl.GetButtonState();
+
+        if (padBuf1Addr != 0 && padBuf1Size >= 4) {
+          mem.Write8(padBuf1Addr + 0, 0x00); // status OK
+          mem.Write8(padBuf1Addr + 1, 0x41); // digital pad ID
+          mem.Write8(padBuf1Addr + 2, buttons & 0xFF);
+          mem.Write8(padBuf1Addr + 3, (buttons >> 8) & 0xFF);
+        }
+        if (padBuf2Addr != 0 && padBuf2Size >= 4) {
+          mem.Write8(padBuf2Addr + 0, 0xFF); // no controller
+          mem.Write8(padBuf2Addr + 1, 0xFF);
+          mem.Write8(padBuf2Addr + 2, 0xFF);
+          mem.Write8(padBuf2Addr + 3, 0xFF);
+        }
+      }
+
       if (changeClearRCntFlags[3] != 0)
         deliveredIrqs |= IRQ::VBLANK;
     }
@@ -180,10 +217,14 @@ void PS1HleBios::HandleException(PS1 &ps1) {
         deliveredIrqs |= IRQ::TIMER1;
     }
     if (pending & IRQ::TIMER2) {
-      if (!ps1.GetCDROM().IsCDBusy()) {
-        DeliverEvent(0xF0000007, 0x0002);
-        DeliverEvent(0xF2000002, 0x0002);
-      }
+      // Always deliver Timer2 events — the old IsCDBusy() guard was added to
+      // prevent Timer2 from interrupting in-flight CD decompression on
+      // real hardware (I-cache eviction risk), but our emulator has no
+      // I-cache simulation.  Suppressing Timer2 during CD streaming was
+      // inadvertently blocking animation timers in games like Crash
+      // Bandicoot that stream continuously from the CD.
+      DeliverEvent(0xF0000007, 0x0002);
+      DeliverEvent(0xF2000002, 0x0002);
       if (changeClearRCntFlags[2] != 0)
         deliveredIrqs |= IRQ::TIMER2;
     }
@@ -242,7 +283,6 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       // Leave the IRQ pending so the longjmp path runs.
     }
     if (pending & IRQ::SPU) {
-      DeliverEvent(0xF0000009, 0x0020);
       DeliverEvent(0xF0000009, 0x1000);
       deliveredIrqs |= IRQ::SPU;
     }
@@ -290,11 +330,13 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       cpu.SetPC(savedEpc);
       inExceptionHandler = false;
 
-      auto &log = AIO::Emulator::Common::Logger::Instance();
-      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                 "HandleException: hooked-path fast RFE epc=0x%08X "
-                 "sr=0x%08X ackedIrqs=0x%04X",
-                 savedEpc, sr, deliveredIrqs);
+      if (IsPs1HleTraceEnabled()) {
+        auto &log = AIO::Emulator::Common::Logger::Instance();
+        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                   "HandleException: hooked-path fast RFE epc=0x%08X "
+                   "sr=0x%08X ackedIrqs=0x%04X",
+                   savedEpc, sr, deliveredIrqs);
+      }
       return;
     }
 
@@ -336,11 +378,13 @@ void PS1HleBios::HandleException(PS1 &ps1) {
           uint32_t epc = cpu.GetEPC();
           uint32_t sr = cpu.GetCOP0(CPU::COP0::SR);
 
-          auto &log = AIO::Emulator::Common::Logger::Instance();
-          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                     "HandleException: quick-RFE epc=0x%08X ra=0x%08X "
-                     "sr=0x%08X ackedBits=0x%04X",
-                     epc, cpu.GetRegister(31), sr, ackedBits);
+          if (IsPs1HleTraceEnabled()) {
+            auto &log = AIO::Emulator::Common::Logger::Instance();
+            log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                       "HandleException: quick-RFE epc=0x%08X ra=0x%08X "
+                       "sr=0x%08X ackedBits=0x%04X",
+                       epc, cpu.GetRegister(31), sr, ackedBits);
+          }
 
           sr = (sr & ~0xF) | ((sr >> 2) & 0xF);
           cpu.SetCOP0(CPU::COP0::SR, sr);
@@ -360,11 +404,13 @@ void PS1HleBios::HandleException(PS1 &ps1) {
   // We skip IRQ event delivery for non-interrupt exceptions but still
   // dispatch to the handler chain / longjmp handler.
   if (excCode != 0 && excCode != 0x08 && hookedEntryIntHandler != 0) {
-    auto &log = AIO::Emulator::Common::Logger::Instance();
-    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-               "HandleException: non-IRQ exception excCode=%u "
-               "EPC=0x%08X → dispatching to handler chain",
-               excCode, cpu.GetEPC());
+    if (IsPs1HleTraceEnabled()) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "HandleException: non-IRQ exception excCode=%u "
+                 "EPC=0x%08X → dispatching to handler chain",
+                 excCode, cpu.GetEPC());
+    }
     // Fall through to handler chain / longjmp dispatch below
   }
 
@@ -395,7 +441,7 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       uint32_t ra = mem.Read32(sjBuf + 0x00);
       uint32_t sp = mem.Read32(sjBuf + 0x04);
 
-      {
+      if (IsPs1HleTraceEnabled()) {
         auto &log = AIO::Emulator::Common::Logger::Instance();
         log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
                    "HandleException: longjmp dispatch excCode=%u "
@@ -548,27 +594,33 @@ bool PS1HleBios::Dispatch(PS1 &ps1, uint8_t table, uint8_t func) {
     bool isNotKSEG0 = (actualEntry >> 29) != 4; // 0x80000000 >> 29 = 4
 
     if (isKernelRAM || isUnaligned || isNotKSEG0) {
-      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                 "Table 0x%02X[0x%02X] entry corrupted/invalid: 0x%08X — "
-                 "using HLE handler (kernel=%d unaligned=%d notKSEG0=%d)",
-                 table, func, actualEntry, isKernelRAM, isUnaligned,
-                 isNotKSEG0);
+      if (IsPs1HleTraceEnabled()) {
+        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                   "Table 0x%02X[0x%02X] entry corrupted/invalid: 0x%08X — "
+                   "using HLE handler (kernel=%d unaligned=%d notKSEG0=%d)",
+                   table, func, actualEntry, isKernelRAM, isUnaligned,
+                   isNotKSEG0);
+      }
     } else {
-      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                 "Table 0x%02X[0x%02X] patched: expected=0x%08X "
-                 "actual=0x%08X → redirecting",
-                 table, func, expectedTrampoline, actualEntry);
+      if (IsPs1HleTraceEnabled()) {
+        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                   "Table 0x%02X[0x%02X] patched: expected=0x%08X "
+                   "actual=0x%08X → redirecting",
+                   table, func, expectedTrampoline, actualEntry);
+      }
       cpu.SetPC(actualEntry);
       return false;
     }
   }
 
-  log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-             "BIOS call: table=0x%02X func=0x%02X ($ra=0x%08X) "
-             "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t1=0x%08X",
-             table, func, cpu.GetRegister(31), cpu.GetRegister(4),
-             cpu.GetRegister(5), cpu.GetRegister(6), cpu.GetRegister(7),
-             cpu.GetRegister(9));
+  if (IsPs1HleTraceEnabled()) {
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+               "BIOS call: table=0x%02X func=0x%02X ($ra=0x%08X) "
+               "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t1=0x%08X",
+               table, func, cpu.GetRegister(31), cpu.GetRegister(4),
+               cpu.GetRegister(5), cpu.GetRegister(6), cpu.GetRegister(7),
+               cpu.GetRegister(9));
+  }
 
   switch (table) {
   case 0xA0:
@@ -591,7 +643,7 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
   auto &gpu = ps1.GetGPU();
   auto &mem = ps1.GetMemory();
 
-  {
+  if (IsPs1HleTraceEnabled()) {
     auto &log = AIO::Emulator::Common::Logger::Instance();
     log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.BIOS",
                "A0:0x%02X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X RA=0x%08X",
@@ -1298,7 +1350,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
   auto &cpu = ps1.GetCPU();
   auto &mem = ps1.GetMemory();
 
-  {
+  if (IsPs1HleTraceEnabled()) {
     auto &log = AIO::Emulator::Common::Logger::Instance();
     log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.BIOS",
                "B0:0x%02X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X RA=0x%08X",
@@ -1426,6 +1478,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     }
     if (slot >= 0) {
       events[slot] = {classId, spec, mode, funcAddr, true, false, false};
+      events[slot].enabled = false;
       WriteEvCBToRAM(slot);
     }
     {
@@ -1518,26 +1571,39 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
 
   // B0:12h InitPAD2(buf1,siz1,buf2,siz2)
   case 0x12:
+    padBuf1Addr = cpu.GetRegister(4);
+    padBuf1Size = cpu.GetRegister(5);
+    padBuf2Addr = cpu.GetRegister(6);
+    padBuf2Size = cpu.GetRegister(7);
+    padStarted = false;
     cpu.SetRegister(2, 1);
     break;
 
   // B0:13h StartPAD2
   case 0x13:
+    padStarted = true;
     break;
 
   // B0:14h StopPAD2
   case 0x14:
+    padStarted = false;
     break;
 
   // B0:15h PAD_init2(type, button_dest, unused, unused)
   case 0x15:
+    padBuf1Addr = cpu.GetRegister(5);
+    padBuf1Size = 4;
+    padStarted = true;
     cpu.SetRegister(2, 2);
     break;
 
-  // B0:16h PAD_dr
-  case 0x16:
-    cpu.SetRegister(2, 0xFFFFFFFF);
+  // B0:16h PAD_dr — return current button state from controller
+  case 0x16: {
+    auto &ctrl = ps1.GetController();
+    uint16_t buttons = ctrl.GetButtonState();
+    cpu.SetRegister(2, static_cast<uint32_t>(buttons));
     break;
+  }
 
   // B0:17h ReturnFromException — restore CPU state from exception entry.
   // Game DMA and decompressor can overwrite the TCB in RAM, so we use the
@@ -1558,7 +1624,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     cpu.SetHI(savedHI);
     cpu.SetLO(savedLO);
 
-    {
+    if (IsPs1HleTraceEnabled()) {
       auto &log = AIO::Emulator::Common::Logger::Instance();
       log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
                  "ReturnFromException: epc=0x%08X ra=0x%08X sr=0x%08X "
@@ -1808,7 +1874,7 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
 void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
   auto &cpu = ps1.GetCPU();
 
-  {
+  if (IsPs1HleTraceEnabled()) {
     auto &log = AIO::Emulator::Common::Logger::Instance();
     log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.BIOS",
                "C0:0x%02X a0=0x%08X a1=0x%08X RA=0x%08X", func,
@@ -2037,6 +2103,7 @@ void PS1HleBios::ReadEvCBFromRAM(int slot) {
 
 void PS1HleBios::DeliverEvent(uint32_t classId, uint32_t spec) {
   auto &log = AIO::Emulator::Common::Logger::Instance();
+  bool traceEnabled = IsPs1HleTraceEnabled();
   bool anyMatch = false;
   for (int i = 0; i < MAX_EVENTS; i++) {
     auto &ev = events[i];
@@ -2047,21 +2114,25 @@ void PS1HleBios::DeliverEvent(uint32_t classId, uint32_t spec) {
         // Real BIOS calls these inline as subroutines during exception
         // handling.
         pendingCallbacks.push_back(ev.func);
-        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                   "DeliverEvent: class=0x%08X spec=0x%04X → slot %d "
-                   "callback=0x%08X (mode=0x1000, queued)",
-                   classId, spec, i, ev.func);
+        if (traceEnabled) {
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "DeliverEvent: class=0x%08X spec=0x%04X → slot %d "
+                     "callback=0x%08X (mode=0x1000, queued)",
+                     classId, spec, i, ev.func);
+        }
       } else {
-        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                   "DeliverEvent: class=0x%08X spec=0x%04X → slot %d "
-                   "FIRED (mode=0x%04X)",
-                   classId, spec, i, ev.mode);
+        if (traceEnabled) {
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "DeliverEvent: class=0x%08X spec=0x%04X → slot %d "
+                     "FIRED (mode=0x%04X)",
+                     classId, spec, i, ev.mode);
+        }
         ev.fired = true;
         WriteEvCBToRAM(i);
       }
     }
   }
-  if (!anyMatch) {
+  if (traceEnabled && !anyMatch) {
     log.LogFmt(AIO::Emulator::Common::LogLevel::Debug, "PS1.HLE",
                "DeliverEvent: class=0x%08X spec=0x%04X → NO MATCH", classId,
                spec);
@@ -2743,17 +2814,20 @@ void PS1HleBios::WriteRAMInstr(PS1Memory &memory, uint32_t offset,
 // ─── Mode=0x1000 Callback Continuation ──────────────────────────────────
 
 void PS1HleBios::ResumeAfterCallback(PS1 &ps1) {
-  auto &log = AIO::Emulator::Common::Logger::Instance();
   auto &cpu = ps1.GetCPU();
-  log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-             "ResumeAfterCallback entered, CPU ra=0x%08X SP=0x%08X",
-             cpu.GetRegister(31), cpu.GetRegister(29));
+  if (IsPs1HleTraceEnabled()) {
+    auto &log = AIO::Emulator::Common::Logger::Instance();
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+               "ResumeAfterCallback entered, CPU ra=0x%08X SP=0x%08X",
+               cpu.GetRegister(31), cpu.GetRegister(29));
+  }
   DispatchNextCallbackOrResume(ps1);
 }
 
 void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
   auto &cpu = ps1.GetCPU();
   auto &log = AIO::Emulator::Common::Logger::Instance();
+  bool traceEnabled = IsPs1HleTraceEnabled();
 
   // If more callbacks are queued, dispatch the next one
   if (!pendingCallbacks.empty()) {
@@ -2763,8 +2837,10 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
     uint32_t trampoline = 0x80000000 | CALLBACK_RETURN_ADDR;
     cpu.SetRegister(31, trampoline);
     cpu.SetPC(cbAddr);
-    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-               "DispatchNextCB: dispatching next callback 0x%08X", cbAddr);
+    if (traceEnabled) {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "DispatchNextCB: dispatching next callback 0x%08X", cbAddr);
+    }
     return;
   }
 
@@ -2796,25 +2872,9 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
       if (!(pending & rc.irqBit))
         continue;
 
+      // Only auto-ack when changeClearRCntFlags says to.
+      // When flag is 0, the game's longjmp handler owns acknowledgment.
       if (changeClearRCntFlags[rc.flagIndex] != 0) {
-        ackedBits |= rc.irqBit;
-        continue;
-      }
-
-      bool hasAnyEvent = false;
-      bool allCallbackOnly = true;
-      for (int i = 0; i < MAX_EVENTS; i++) {
-        auto &ev = events[i];
-        if (ev.used && ev.enabled && ev.classId == rc.rootCounterClass &&
-            ev.spec == 0x0002) {
-          hasAnyEvent = true;
-          if (ev.mode != 0x1000) {
-            allCallbackOnly = false;
-            break;
-          }
-        }
-      }
-      if (hasAnyEvent && allCallbackOnly) {
         ackedBits |= rc.irqBit;
       }
     }
@@ -2839,19 +2899,23 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
         cpu.SetCOP0(CPU::COP0::SR, sr);
         cpu.SetPC(savedEpc);
         inExceptionHandler = false;
-        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                   "DispatchNextCB: fast return to EPC=0x%08X SR=0x%08X "
-                   "ackedBits=0x%04X",
-                   savedEpc, sr, ackedBits);
+        if (traceEnabled) {
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "DispatchNextCB: fast return to EPC=0x%08X SR=0x%08X "
+                     "ackedBits=0x%04X",
+                     savedEpc, sr, ackedBits);
+        }
         return;
       }
     }
   }
 
   // Still pending IRQs — dispatch to handler chain or longjmp
-  log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-             "DispatchNextCB: still pending=0x%04X istat=0x%04X imask=0x%04X",
-             pending, istat, imask);
+  if (traceEnabled) {
+    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+               "DispatchNextCB: still pending=0x%04X istat=0x%04X imask=0x%04X",
+               pending, istat, imask);
+  }
 
   if (handlersArrayAddr != 0) {
     uint32_t chainHead = mem.Read32(0x80000000 | handlersArrayAddr);
@@ -2863,9 +2927,11 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
         uint32_t rfeTrampoline = 0x80000000 | (B0_TRAMPOLINE_ADDR + 0x17 * 12);
         cpu.SetRegister(31, rfeTrampoline);
         cpu.SetPC(func2);
-        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-                   "DispatchNextCB: handler chain func=0x%08X ra=0x%08X", func2,
-                   rfeTrampoline);
+        if (traceEnabled) {
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "DispatchNextCB: handler chain func=0x%08X ra=0x%08X",
+                     func2, rfeTrampoline);
+        }
         return;
       }
       entry = mem.Read32(entry + 0x00);
@@ -2886,8 +2952,10 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
     cpu.SetRegister(28, mem.Read32(sjBuf + 0x2C));
     cpu.SetRegister(2, 1);
     cpu.SetPC(ra);
-    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-               "DispatchNextCB: longjmp to ra=0x%08X sp=0x%08X", ra, sp);
+    if (traceEnabled) {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "DispatchNextCB: longjmp to ra=0x%08X sp=0x%08X", ra, sp);
+    }
     return;
   }
 
@@ -2904,8 +2972,10 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
     cpu.SetCOP0(CPU::COP0::SR, sr);
     cpu.SetPC(savedEpc);
     inExceptionHandler = false;
-    log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
-               "DispatchNextCB: fallback RFE to EPC=0x%08X", savedEpc);
+    if (traceEnabled) {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "DispatchNextCB: fallback RFE to EPC=0x%08X", savedEpc);
+    }
   }
 }
 

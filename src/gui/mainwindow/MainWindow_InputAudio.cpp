@@ -1,5 +1,8 @@
 #include "gui/MainWindow.h"
 
+#include "emulator/gba/GBA.h"
+#include "emulator/ps1/PS1.h"
+
 #include "gui/MainMenuAdapter.h"
 
 #include "input/InputManager.h"
@@ -56,7 +59,7 @@ void MainWindow::initAudio() {
   // prefers 48000Hz). Keep the emulator's audio resampler aligned to the
   // actual device rate.
   if (have.freq > 0) {
-    gba.GetAPU().SetOutputSampleRate(have.freq);
+    gba->GetAPU().SetOutputSampleRate(have.freq);
     audioRecorder_.SetSampleRate(have.freq);
   }
   audioInstance.store(this, std::memory_order_release);
@@ -98,7 +101,7 @@ bool MainWindow::StartAVRecording(const std::string &path) {
     cfg.videoHeight = 160;
     cfg.videoFps = 60;
   } else if (currentEmulator == EmulatorType::PS1) {
-    cfg.videoWidth = 320;
+    cfg.videoWidth = 512;
     cfg.videoHeight = 240;
     cfg.videoFps = 60;
   } else if (currentEmulator == EmulatorType::Switch) {
@@ -128,9 +131,9 @@ void MainWindow::audioCallback(void *userdata, Uint8 *stream, int len) {
   }
 
   if (self->currentEmulator == EmulatorType::GBA) {
-    self->gba.GetAPU().GetSamples(buffer, numSamples);
+    self->gba->GetAPU().GetSamples(buffer, numSamples);
   } else if (self->currentEmulator == EmulatorType::PS1) {
-    self->ps1Emulator.GetSPU().GetSamples(buffer, numSamples);
+    self->ps1Emulator->GetSPU().GetSamples(buffer, numSamples);
   } else {
     memset(stream, 0, len);
   }
@@ -178,12 +181,12 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
   if (inEmu && debuggerEnabled) {
     if (event->key() == Qt::Key_Down || event->key() == Qt::Key_Return ||
         event->key() == Qt::Key_Enter) {
-      gba.SetSingleStep(true);
-      gba.Step();
+      gba->SetSingleStep(true);
+      gba->Step();
       return;
     }
     if (event->key() == Qt::Key_Up) {
-      gba.StepBack();
+      gba->StepBack();
       return;
     }
     if (event->key() == Qt::Key_C) {

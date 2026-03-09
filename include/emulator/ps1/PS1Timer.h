@@ -33,6 +33,7 @@ struct TimerChannel {
 
   // Internal
   bool irqFlag = true; // Starts high (not requesting), toggled/pulsed
+  bool oneShotFired = false;
 };
 
 class PS1Timer : public Common::Loggable {

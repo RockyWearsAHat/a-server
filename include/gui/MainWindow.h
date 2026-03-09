@@ -35,10 +35,19 @@ class NASAdapter;
 } // namespace AIO::GUI
 
 class QKeyEvent;
+class QProcess;
 
-#include "emulator/gba/GBA.h"
-#include "emulator/ps1/PS1.h"
-#include "emulator/switch/SwitchEmulator.h"
+// Forward declarations break the emulator→GUI include chain.
+// Full headers are only needed in the .cpp files that call emulator methods.
+namespace AIO::Emulator::GBA {
+class GBA;
+}
+namespace AIO::Emulator::PS1 {
+class PS1;
+}
+namespace AIO::Emulator::Switch {
+class SwitchEmulator;
+}
 
 namespace AIO {
 namespace GUI {
@@ -95,6 +104,7 @@ public:
   bool StartAVRecording(const std::string &path);
   bool StopAVRecording();
   bool IsAVRecording() const;
+  uint64_t GetEmulatedMilliseconds() const;
 
   struct ScriptEvent {
     int64_t ms = 0;
@@ -174,6 +184,8 @@ private:
   void setupSettingsPage();
   void setupStreamingPages();
   void setupNASPage();
+  void maybeAutostartYouTubeServer();
+  void stopAutostartedYouTubeServer();
 
   void loadSettings();
   void saveSettings();
@@ -226,9 +238,9 @@ private:
   enum class EmulatorType { None, GBA, Switch, PS1 };
   EmulatorType currentEmulator = EmulatorType::None;
 
-  AIO::Emulator::GBA::GBA gba;
-  AIO::Emulator::Switch::SwitchEmulator switchEmulator;
-  AIO::Emulator::PS1::PS1 ps1Emulator;
+  std::unique_ptr<AIO::Emulator::GBA::GBA> gba;
+  std::unique_ptr<AIO::Emulator::Switch::SwitchEmulator> switchEmulator;
+  std::unique_ptr<AIO::Emulator::PS1::PS1> ps1Emulator;
 
   QTimer *displayTimer; // UI update timer (60 Hz)
   QImage displayImage;
@@ -333,6 +345,7 @@ private:
   // Published by UI/input polling; consumed/applied by emulation thread.
   // 0x03FF = all released (GBA KEYINPUT is active-low).
   std::atomic<uint16_t> pendingEmuKeyinput{0x03FF};
+  QProcess *youtubeServerProcess_ = nullptr;
 };
 
 } // namespace GUI

@@ -1,4 +1,3 @@
-#include "emulator/ps1/PS1Constants.h"
 #include "emulator/ps1/PS1GPU.h"
 #include "emulator/ps1/PS1Memory.h"
 #include <gtest/gtest.h>
@@ -29,6 +28,73 @@ TEST_F(PS1GPUTest, GetFramebuffer_NotNull) {
 TEST_F(PS1GPUTest, DisplayDimensions_Default) {
   EXPECT_GT(gpu->GetDisplayWidth(), 0u);
   EXPECT_GT(gpu->GetDisplayHeight(), 0u);
+}
+
+TEST_F(PS1GPUTest, DisplayWidth_UsesDisplayRangeForCurrentMode) {
+  gpu->WriteGP1(0x08000001); // GP1(08h) — 320-pixel mode
+
+  const uint32_t x1 = 0x260;
+  const uint32_t x2 = x1 + 160 * 8;
+  gpu->WriteGP1(0x06000000 | x1 | (x2 << 12));
+
+  EXPECT_EQ(gpu->GetDisplayWidth(), 160u);
+}
+
+TEST_F(PS1GPUTest, DisplayHeight_UsesVerticalDisplayRange) {
+  const uint32_t y1 = 0x20;
+  const uint32_t y2 = 0x90;
+  gpu->WriteGP1(0x07000000 | y1 | (y2 << 10));
+
+  EXPECT_EQ(gpu->GetDisplayHeight(), y2 - y1);
+}
+
+TEST_F(PS1GPUTest, TexturedRect_XFlipSamplesTextureBackwards) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+  gpu->WriteGP0(0xE1001100);
+
+  gpu->WriteVRAM(4, 8, 0x001F);
+  gpu->WriteVRAM(5, 8, 0x03E0);
+
+  gpu->WriteGP0(0x65000000);
+  gpu->WriteGP0(0x00000000);
+  gpu->WriteGP0((8u << 8) | 4u);
+  gpu->WriteGP0((1u << 16) | 2u);
+
+  EXPECT_EQ(gpu->ReadVRAM(0, 0), 0x001F);
+  EXPECT_EQ(gpu->ReadVRAM(1, 0), 0x0000);
+}
+
+TEST_F(PS1GPUTest, TexturedRect_YFlipSamplesTextureBackwards) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+  gpu->WriteGP0(0xE1002100);
+
+  gpu->WriteVRAM(12, 6, 0x03E0);
+  gpu->WriteVRAM(12, 7, 0x7C00);
+
+  gpu->WriteGP0(0x65000000);
+  gpu->WriteGP0(0x00000000);
+  gpu->WriteGP0((7u << 8) | 12u);
+  gpu->WriteGP0((2u << 16) | 1u);
+
+  EXPECT_EQ(gpu->ReadVRAM(0, 0), 0x7C00);
+  EXPECT_EQ(gpu->ReadVRAM(0, 1), 0x03E0);
+}
+
+TEST_F(PS1GPUTest, CopyRectVRAMtoVRAM_HandlesOverlappingRegions) {
+  gpu->WriteVRAM(10, 10, 0x001F);
+  gpu->WriteVRAM(11, 10, 0x03E0);
+  gpu->WriteVRAM(12, 10, 0x7C00);
+
+  gpu->WriteGP0(0x80000000);
+  gpu->WriteGP0((10u << 16) | 10u);
+  gpu->WriteGP0((10u << 16) | 11u);
+  gpu->WriteGP0((1u << 16) | 3u);
+
+  EXPECT_EQ(gpu->ReadVRAM(11, 10), 0x001Fu);
+  EXPECT_EQ(gpu->ReadVRAM(12, 10), 0x03E0u);
+  EXPECT_EQ(gpu->ReadVRAM(13, 10), 0x7C00u);
 }
 
 // ─── GPUSTAT ────────────────────────────────────────────────────────────
@@ -98,6 +164,75 @@ TEST_F(PS1GPUTest, GP0_MonoQuad_DoesNotCrash) {
   gpu->WriteGP0(0x00200010); // Vertex 1
   gpu->WriteGP0(0x00100020); // Vertex 2
   gpu->WriteGP0(0x00200020); // Vertex 3
+}
+
+TEST_F(PS1GPUTest, GP0_MonoTriangle_IsWindingInvariant) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+
+  gpu->WriteGP0(0x20FF0000); // Mono triangle, color = red
+  gpu->WriteGP0(0x00000000); // Vertex 0 = (0,0)
+  gpu->WriteGP0(0x00000002); // Vertex 1 = (2,0)
+  gpu->WriteGP0(0x00020000); // Vertex 2 = (0,2)
+
+  const uint16_t ccwEdge = gpu->ReadVRAM(1, 0);
+  const uint16_t ccwInterior = gpu->ReadVRAM(0, 1);
+
+  gpu->Reset();
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+
+  gpu->WriteGP0(0x20FF0000); // Same triangle with reversed winding
+  gpu->WriteGP0(0x00000000); // Vertex 0 = (0,0)
+  gpu->WriteGP0(0x00020000); // Vertex 1 = (0,2)
+  gpu->WriteGP0(0x00000002); // Vertex 2 = (2,0)
+
+  EXPECT_EQ(gpu->ReadVRAM(1, 0), ccwEdge);
+  EXPECT_EQ(gpu->ReadVRAM(0, 1), ccwInterior);
+}
+
+TEST_F(PS1GPUTest, GP0_MonoTriangles_UseLowerRightEdgeOwnership) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+
+  gpu->WriteGP0(0x20FF0000); // Blue triangle
+  gpu->WriteGP0(0x00000000); // (0,0)
+  gpu->WriteGP0(0x00000002); // (2,0)
+  gpu->WriteGP0(0x00020000); // (0,2)
+
+  gpu->WriteGP0(0x2000FF00); // Green triangle sharing the same diagonal
+  gpu->WriteGP0(0x00000002); // (2,0)
+  gpu->WriteGP0(0x00020000); // (0,2)
+  gpu->WriteGP0(0x00020002); // (2,2)
+
+  EXPECT_EQ(gpu->ReadVRAM(1, 1), 0x03E0u);
+}
+
+TEST_F(PS1GPUTest, GP0_TexturedTriangles_UseLowerRightEdgeOwnership) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+  gpu->WriteGP0(0xE1001100);
+
+  gpu->WriteVRAM(4, 8, 0x001F);
+  gpu->WriteVRAM(5, 8, 0x03E0);
+
+  gpu->WriteGP0(0x25000000); // Raw textured triangle
+  gpu->WriteGP0(0x00000000); // (0,0)
+  gpu->WriteGP0((8u << 8) | 4u);
+  gpu->WriteGP0(0x00000002); // (2,0)
+  gpu->WriteGP0((0x1100u << 16) | (8u << 8) | 4u);
+  gpu->WriteGP0(0x00020000); // (0,2)
+  gpu->WriteGP0((8u << 8) | 4u);
+
+  gpu->WriteGP0(0x25000000); // Raw textured triangle sharing the same diagonal
+  gpu->WriteGP0(0x00000002); // (2,0)
+  gpu->WriteGP0((8u << 8) | 5u);
+  gpu->WriteGP0(0x00020000); // (0,2)
+  gpu->WriteGP0((0x1100u << 16) | (8u << 8) | 5u);
+  gpu->WriteGP0(0x00020002); // (2,2)
+  gpu->WriteGP0((8u << 8) | 5u);
+
+  EXPECT_EQ(gpu->ReadVRAM(1, 1), 0x03E0u);
 }
 
 // ─── Tick / VBlank ──────────────────────────────────────────────────────

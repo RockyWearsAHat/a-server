@@ -14,6 +14,7 @@ class PS1GPU;
 class PS1SPU;
 class CDROM;
 class InterruptController;
+class PS1MDEC;
 
 struct DMAChannel {
   uint32_t baseAddr = 0;       // MADR
@@ -47,6 +48,9 @@ public:
   // ─── CDROM reference (set after construction) ───────────────────────
   void SetCDROM(CDROM *cdrom) { this->cdrom = cdrom; }
 
+  // ─── MDEC reference (set after construction) ────────────────────────
+  void SetMDEC(PS1MDEC *mdec) { this->mdec = mdec; }
+
   // ─── Debug ──────────────────────────────────────────────────────────
   void DumpState(std::ostream &os) const;
   std::string GetDebugSummary() const;
@@ -67,6 +71,7 @@ private:
   PS1SPU &spu;
   InterruptController &interrupts;
   CDROM *cdrom = nullptr;
+  PS1MDEC *mdec = nullptr;
 
   std::array<DMAChannel, DMA::NUM_CHANNELS> channels{};
   uint32_t dpcr = 0x07654321; // Default DPCR value

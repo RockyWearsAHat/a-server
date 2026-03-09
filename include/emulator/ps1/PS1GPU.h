@@ -2,7 +2,6 @@
 
 #include "PS1Constants.h"
 #include "emulator/common/Loggable.h"
-#include <array>
 #include <cstdint>
 #include <ostream>
 #include <string>
@@ -43,6 +42,9 @@ public:
   }
   uint32_t GetDisplayWidth() const;
   uint32_t GetDisplayHeight() const;
+  uint32_t GetDisplayStartX() const { return displayVRAMStartX; }
+  uint32_t GetDisplayStartY() const { return displayVRAMStartY; }
+  bool IsDisplay24Bit() const { return colorDepth24; }
   uint32_t GetVRAMStride() const { return GPU::VRAM_WIDTH; }
 
   // ─── DMA Interface ──────────────────────────────────────────────────
@@ -90,11 +92,13 @@ private:
   uint8_t texPageColorDepth = 0;
   bool dither = false;
   bool drawToDisplay = false;
+  bool texturedRectXFlip = false;
+  bool texturedRectYFlip = false;
   bool maskBitSet = false;
   bool maskBitCheck = false;
   bool interlaceField = false;
   bool reverseFlag = false;
-  bool textureDisable = false;
+  bool texPageBaseYMsb = false;
   uint8_t hRes = 0;
   uint8_t hRes2 = 0;
   bool vRes480 = false;
@@ -133,7 +137,8 @@ private:
   uint8_t polyLineLastG = 0;
   uint8_t polyLineLastB = 0;
   bool polyLineSemiTransparent = false;
-  // Shaded-polyline pending next-segment color (replaces the unsafe static locals)
+  // Shaded-polyline pending next-segment color (replaces the unsafe static
+  // locals)
   bool shadedPolyExpectVertex = false;
   uint8_t shadedPolyPendingR = 0;
   uint8_t shadedPolyPendingG = 0;
@@ -141,6 +146,27 @@ private:
 
   // ─── Per-primitive Semi-transparency ────────────────────────────────
   bool primSemiTransparent = false;
+  bool diagTracingEnabled = false;
+  bool diagCountingTexturedWrites = false;
+  enum class DiagTexturedPrimitiveKind { None, Triangle, Rectangle };
+  DiagTexturedPrimitiveKind diagTexturedPrimitiveKind =
+      DiagTexturedPrimitiveKind::None;
+  uint64_t diagTriTexelZeroSkips = 0;
+  uint64_t diagTriWriteAttempts = 0;
+  uint64_t diagTriWritesCommitted = 0;
+  uint64_t diagTriDrawAreaRejects = 0;
+  uint64_t diagMonoTriangleCommands = 0;
+  uint64_t diagShadedTriangleCommands = 0;
+  uint64_t diagTexturedTriangleCommands = 0;
+  uint64_t diagMonoQuadCommands = 0;
+  uint64_t diagShadedQuadCommands = 0;
+  uint64_t diagTexturedQuadCommands = 0;
+  uint64_t diagRectTexelZeroSkips = 0;
+  uint64_t diagRectWriteAttempts = 0;
+  uint64_t diagRectWritesCommitted = 0;
+  uint64_t diagRectDrawAreaRejects = 0;
+  uint64_t diagTexturedMaskRejects = 0;
+  uint64_t diagFrameCounter = 0;
 
   // ─── Timing ─────────────────────────────────────────────────────────
   uint32_t currentScanline = 0;

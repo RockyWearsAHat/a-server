@@ -11,6 +11,7 @@
 namespace AIO::Emulator::PS1 {
 
 class PS1Memory;
+class InterruptController;
 
 // ADSR envelope phase
 enum class ADSRPhase { Off, Attack, Decay, Sustain, Release };
@@ -42,7 +43,7 @@ struct SPUVoice {
 
 class PS1SPU : public Common::Loggable {
 public:
-  explicit PS1SPU(PS1Memory &memory);
+  PS1SPU(PS1Memory &memory, InterruptController &interrupts);
   ~PS1SPU() = default;
 
   void Reset();
@@ -71,6 +72,7 @@ public:
 
 private:
   PS1Memory &memory;
+  InterruptController &interrupts;
 
   // ─── SPU RAM ────────────────────────────────────────────────────────
   std::vector<uint16_t> spuRAM;
@@ -103,11 +105,14 @@ private:
   // Transfer address counter
   uint32_t transferAddr = 0;
 
+  // IRQ latch — prevents re-firing until re-armed by irqAddr write or SPUCTRL
+  bool spuIRQFired = false;
+
   // ─── Timing ─────────────────────────────────────────────────────────
   uint32_t cycleAccumulator = 0;
 
   // ─── Voice Processing ───────────────────────────────────────────────
-  int16_t DecodeSample(SPUVoice &voice);
+  int16_t DecodeSample(SPUVoice &voice, uint32_t voiceIndex);
   void UpdateADSR(SPUVoice &voice);
   void ProcessKeyOn();
   void ProcessKeyOff();

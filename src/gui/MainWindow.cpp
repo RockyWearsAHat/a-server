@@ -1,8 +1,16 @@
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
+#include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QLabel>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QProcess>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTextStream>
@@ -13,10 +21,15 @@
 
 #include <atomic>
 
+#include <iostream>
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
 
 #include "emulator/gba/ARM7TDMI.h"
+#include "emulator/gba/GBA.h"
+#include "emulator/ps1/PS1.h"
+#include "emulator/switch/SwitchEmulator.h"
 
 #include "common/AssetPaths.h"
 #include "gui/EmulatorSelectAdapter.h"
@@ -71,11 +84,211 @@ static void ShowCrashPopup(const char *logPath) {
   QCoreApplication::quit();
 }
 
+struct YouTubeServerAutobootConfig {
+  QString nodeExecutable;
+  QString workDir;
+  QString entryPath;
+  int port = 8916;
+};
+
+static QString ResolveLocalServerWorkDir() {
+  const QString configured = qEnvironmentVariable("AIO_YOUTUBE_SERVER_WORKDIR");
+  if (!configured.isEmpty()) {
+    return QFileInfo(configured).absoluteFilePath();
+  }
+
+  const QStringList candidates = {
+      QDir(QDir::currentPath()).filePath(QStringLiteral("server")),
+      QDir(QCoreApplication::applicationDirPath())
+          .filePath(QStringLiteral("../server")),
+      QDir(QCoreApplication::applicationDirPath())
+          .filePath(QStringLiteral("../../server")),
+      QDir(QCoreApplication::applicationDirPath())
+          .filePath(QStringLiteral("../../../AIO Server/server")),
+  };
+
+  for (const QString &candidate : candidates) {
+    const QFileInfo info(candidate);
+    if (info.exists() && info.isDir()) {
+      return info.absoluteFilePath();
+    }
+  }
+
+  return QDir(QDir::currentPath()).filePath(QStringLiteral("server"));
+}
+
+static QString ReadEnvValueFromFile(const QString &envPath,
+                                    const QString &key) {
+  QFile file(envPath);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    return QString();
+  }
+
+  QTextStream stream(&file);
+  while (!stream.atEnd()) {
+    QString line = stream.readLine().trimmed();
+    if (line.isEmpty() || line.startsWith('#')) {
+      continue;
+    }
+
+    const int separator = line.indexOf('=');
+    if (separator <= 0) {
+      continue;
+    }
+
+    if (line.left(separator).trimmed() != key) {
+      continue;
+    }
+
+    QString value = line.mid(separator + 1).trimmed();
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith('\'') && value.endsWith('\''))) {
+      value = value.mid(1, value.size() - 2);
+    }
+    return value;
+  }
+
+  return QString();
+}
+
+static int ResolveLocalServerPort(const QString &workDir) {
+  const QString envPath = QDir(workDir).filePath(QStringLiteral(".env"));
+  bool ok = false;
+  const int port =
+      ReadEnvValueFromFile(envPath, QStringLiteral("PORT")).toInt(&ok);
+  if (ok && port > 0 && port <= 65535) {
+    return port;
+  }
+  return 8916;
+}
+
+static bool WaitForYouTubeServerReady(int port, int timeoutMs) {
+  QNetworkAccessManager manager;
+  QElapsedTimer elapsed;
+  elapsed.start();
+
+  while (elapsed.elapsed() < timeoutMs) {
+    QNetworkRequest request(
+        QUrl(QStringLiteral("http://127.0.0.1:%1/health").arg(port)));
+    QNetworkReply *reply = manager.get(request);
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(500);
+    loop.exec();
+
+    const bool ok =
+        reply->isFinished() && reply->error() == QNetworkReply::NoError &&
+        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() ==
+            200;
+    reply->deleteLater();
+    if (ok) {
+      return true;
+    }
+
+    QThread::msleep(150);
+  }
+
+  return false;
+}
+
+static std::optional<YouTubeServerAutobootConfig>
+ResolveYouTubeServerAutobootConfig() {
+  const QByteArray enabled = qgetenv("AIO_YOUTUBE_SERVER_AUTOBOOT");
+  if (enabled.isEmpty() || enabled == "0") {
+    return std::nullopt;
+  }
+
+  const QString nodeExecutable =
+      qEnvironmentVariable("AIO_YOUTUBE_SERVER_NODE", QStringLiteral("node"));
+  QString workDir = qEnvironmentVariable("AIO_YOUTUBE_SERVER_WORKDIR");
+  QString entryScript = qEnvironmentVariable("AIO_YOUTUBE_SERVER_ENTRY");
+
+  if (workDir.isEmpty()) {
+    workDir = ResolveLocalServerWorkDir();
+  }
+  if (entryScript.isEmpty()) {
+    entryScript = QStringLiteral("dist/index.js");
+  }
+
+  const int port = ResolveLocalServerPort(workDir);
+
+  const QString entryPath =
+      QFileInfo(QDir(workDir).filePath(entryScript)).absoluteFilePath();
+  if (!QFileInfo::exists(entryPath)) {
+    std::cout << "[YouTube] Server autoboot skipped; entry script missing at "
+              << entryPath.toStdString() << std::endl;
+    return std::nullopt;
+  }
+
+  return YouTubeServerAutobootConfig{nodeExecutable, workDir, entryPath, port};
+}
+
 namespace AIO {
 namespace GUI {
 
+void MainWindow::maybeAutostartYouTubeServer() {
+  if (youtubeServerProcess_) {
+    return;
+  }
+
+  const auto config = ResolveYouTubeServerAutobootConfig();
+  if (!config.has_value()) {
+    return;
+  }
+
+  youtubeServerProcess_ = new QProcess(this);
+  youtubeServerProcess_->setProgram(config->nodeExecutable);
+  youtubeServerProcess_->setArguments({config->entryPath});
+  youtubeServerProcess_->setWorkingDirectory(config->workDir);
+  youtubeServerProcess_->setProcessChannelMode(QProcess::ForwardedChannels);
+  youtubeServerProcess_->start();
+
+  if (!youtubeServerProcess_->waitForStarted(5000)) {
+    std::cerr << "[YouTube] Failed to autostart server from "
+              << config->entryPath.toStdString() << std::endl;
+    youtubeServerProcess_->deleteLater();
+    youtubeServerProcess_ = nullptr;
+    return;
+  }
+
+  if (!WaitForYouTubeServerReady(config->port, 6000)) {
+    std::cerr << "[YouTube] Autostarted server did not become healthy on port "
+              << config->port << std::endl;
+  }
+
+  std::cout << "[YouTube] Autostarted local YouTube server on port "
+            << config->port << std::endl;
+}
+
+void MainWindow::stopAutostartedYouTubeServer() {
+  if (!youtubeServerProcess_) {
+    return;
+  }
+
+  if (youtubeServerProcess_->state() != QProcess::NotRunning) {
+    youtubeServerProcess_->terminate();
+    if (!youtubeServerProcess_->waitForFinished(3000)) {
+      youtubeServerProcess_->kill();
+      youtubeServerProcess_->waitForFinished(2000);
+    }
+  }
+
+  youtubeServerProcess_->deleteLater();
+  youtubeServerProcess_ = nullptr;
+}
+
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), settings("AIOServer", "GBAEmulator") {
+    : QMainWindow(parent), settings("AIOServer", "GBAEmulator"),
+      gba(std::make_unique<AIO::Emulator::GBA::GBA>()),
+      switchEmulator(std::make_unique<AIO::Emulator::Switch::SwitchEmulator>()),
+      ps1Emulator(std::make_unique<AIO::Emulator::PS1::PS1>()) {
+  maybeAutostartYouTubeServer();
+  QObject::connect(qApp, &QCoreApplication::aboutToQuit, this,
+                   [this]() { stopAutostartedYouTubeServer(); });
+
   // Register crash callback for GUI mode.
   AIO::Emulator::GBA::CrashPopupCallback = &ShowCrashPopup;
 
@@ -112,18 +325,16 @@ MainWindow::MainWindow(QWidget *parent)
   setupEmulatorSettingsPage();
   setupSettingsPage();
   setupNASPage();
-  // QtWebEngine on macOS can assert inside AppKit when the app isn't running
-  // from a proper .app bundle (mainBundlePath == nil). That crash happens
-  // before we can validate navigation/input. Keep streaming disabled unless
-  // explicitly enabled.
+  // Streaming is enabled by default. Keep a kill switch so WebEngine can be
+  // disabled quickly on machines with driver/platform issues.
   streamingEnabled_ =
-      (qEnvironmentVariableIntValue("AIO_ENABLE_STREAMING") == 1);
+      (qEnvironmentVariableIntValue("AIO_DISABLE_STREAMING") == 0);
   if (streamingEnabled_) {
     setupStreamingPages();
   } else {
     streamingHubPage = new QWidget(this);
     auto *layout = new QVBoxLayout(streamingHubPage);
-    auto *label = new QLabel("Streaming disabled (set AIO_ENABLE_STREAMING=1)",
+    auto *label = new QLabel("Streaming disabled by AIO_DISABLE_STREAMING=1",
                              streamingHubPage);
     label->setAlignment(Qt::AlignCenter);
     auto *backBtn = new QPushButton("Back", streamingHubPage);
@@ -190,6 +401,7 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
+  stopAutostartedYouTubeServer();
   StopEmulatorThread();
   closeAudio();
 }

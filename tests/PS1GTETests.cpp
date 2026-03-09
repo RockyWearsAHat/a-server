@@ -210,6 +210,21 @@ TEST_F(PS1GTETest, GPF_ScalesIRByIR0) {
   EXPECT_EQ(mac3, 0x1000 * 30);
 }
 
+TEST_F(PS1GTETest, RTPS_UsesFullMACPrecisionForIRAndSZ) {
+  gte->WriteControl(5, 0);          // TRX
+  gte->WriteControl(6, 0);          // TRY
+  gte->WriteControl(7, 0x10000000); // TRZ large enough to overflow 32-bit MAC
+  gte->WriteControl(26, 0x100);     // H
+
+  gte->WriteData(0, 0); // V0.XY
+  gte->WriteData(1, 0); // V0.Z
+
+  gte->Execute(0x01 | (1 << 10) | (1 << 19)); // RTPS, lm=1, sf=1
+
+  EXPECT_EQ(gte->ReadData(11) & 0xFFFF, 0x7FFFu);
+  EXPECT_EQ(gte->ReadData(19), 0xFFFFu);
+}
+
 // ─── Reset ──────────────────────────────────────────────────────────────
 
 TEST_F(PS1GTETest, Reset_ClearsAllRegisters) {

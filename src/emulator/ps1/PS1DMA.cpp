@@ -2,6 +2,7 @@
 #include "emulator/ps1/CDROM.h"
 #include "emulator/ps1/InterruptController.h"
 #include "emulator/ps1/PS1GPU.h"
+#include "emulator/ps1/PS1MDEC.h"
 #include "emulator/ps1/PS1Memory.h"
 #include "emulator/ps1/PS1SPU.h"
 #include <iomanip>
@@ -179,40 +180,6 @@ void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
   int32_t step = ch.stepBackward() ? -4 : 4;
   uint32_t addr = ch.baseAddr;
 
-  // Log first few GPU block transfers to see tile upload source addresses
-  static uint64_t gpuBlockCount = 0;
-  if (channelIndex == DMA::Channel::GPU && ch.directionFromRAM()) {
-    gpuBlockCount++;
-    if (gpuBlockCount <= 20) {
-      uint32_t firstWord = memory.ReadRAM32(addr & 0x001FFFFC);
-      bool allZero = true;
-      uint32_t nonZeroCount = 0;
-      for (uint32_t probe = 0; probe < std::min(wordCount, 64u); probe++) {
-        uint32_t pa = (addr + probe * 4) & 0x001FFFFC;
-        if (memory.ReadRAM32(pa) != 0) {
-          allZero = false;
-          nonZeroCount++;
-        }
-      }
-      LogInfo("DMA GPU block#%llu: addr=%08X words=%u first=0x%08X allZero=%d "
-              "nonZero=%u",
-              gpuBlockCount, ch.baseAddr, wordCount, firstWord, allZero ? 1 : 0,
-              nonZeroCount);
-      // For tile blocks, also read bytes directly to check for Write8 data
-      if (gpuBlockCount >= 4 && gpuBlockCount <= 6) {
-        const uint8_t *ramPtr = memory.GetRAMPointer();
-        uint32_t ramOffset = (addr & 0x001FFFFC) & (0x200000 - 1);
-        LogInfo("DMA GPU block#%llu byte probe: ram[%06X]=%02X %02X %02X %02X "
-                "%02X %02X %02X %02X",
-                gpuBlockCount, ramOffset, ramPtr[ramOffset],
-                ramPtr[ramOffset + 1], ramPtr[ramOffset + 2],
-                ramPtr[ramOffset + 3], ramPtr[ramOffset + 4],
-                ramPtr[ramOffset + 5], ramPtr[ramOffset + 6],
-                ramPtr[ramOffset + 7]);
-      }
-    }
-  }
-
   for (uint32_t i = 0; i < wordCount; i++) {
     uint32_t currentAddr = addr & 0x001FFFFC; // Mask to RAM and align
 
@@ -228,7 +195,9 @@ void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
         spu.DMAWrite(static_cast<uint16_t>(word >> 16));
         break;
       case DMA::Channel::MDEC_IN:
-        break; // TODO: MDEC
+        if (mdec)
+          mdec->WriteDMAWord(word);
+        break;
       default:
         break;
       }
@@ -256,7 +225,8 @@ void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
         word |= static_cast<uint32_t>(spu.DMARead()) << 16;
         break;
       case DMA::Channel::MDEC_OUT:
-        break; // TODO: MDEC
+        word = mdec ? mdec->ReadDMAWord() : 0xFFFFFFFF;
+        break;
       default:
         break;
       }

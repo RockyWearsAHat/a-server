@@ -1,5 +1,9 @@
 #include "gui/MainWindow.h"
 
+#include "emulator/gba/GBA.h"
+#include "emulator/ps1/PS1.h"
+#include "emulator/switch/SwitchEmulator.h"
+
 #include "emulator/switch/GpuCore.h"
 
 #include "emulator/common/Logger.h"
@@ -33,6 +37,53 @@
 
 namespace AIO {
 namespace GUI {
+
+namespace {
+
+std::string ReplaceExtension(const std::string &path,
+                             const std::string &suffix) {
+  const size_t dot = path.find_last_of('.');
+  if (dot == std::string::npos)
+    return path + suffix;
+  return path.substr(0, dot) + suffix + path.substr(dot);
+}
+
+bool WriteRgb555Ppm(const std::string &path, const uint16_t *pixels,
+                    uint32_t width, uint32_t height, uint32_t stride,
+                    uint32_t startX, uint32_t startY,
+                    double *outNonBlackRatio = nullptr) {
+  std::ofstream out(path, std::ios::binary);
+  if (!out.is_open()) {
+    return false;
+  }
+
+  out << "P6\n" << width << " " << height << "\n255\n";
+
+  uint64_t nonBlack = 0;
+  const uint64_t total = static_cast<uint64_t>(width) * height;
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint16_t *row = pixels + (startY + y) * stride + startX;
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint16_t px = row[x];
+      const uint8_t r = static_cast<uint8_t>((px & 0x1F) << 3);
+      const uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x1F) << 3);
+      const uint8_t b = static_cast<uint8_t>(((px >> 10) & 0x1F) << 3);
+      if ((r | g | b) != 0) {
+        ++nonBlack;
+      }
+      out.put(static_cast<char>(r));
+      out.put(static_cast<char>(g));
+      out.put(static_cast<char>(b));
+    }
+  }
+
+  if (outNonBlackRatio) {
+    *outNonBlackRatio = total > 0 ? static_cast<double>(nonBlack) / total : 0.0;
+  }
+  return true;
+}
+
+} // namespace
 
 bool MainWindow::DumpCurrentFramePPM(const std::string &path,
                                      double *outNonBlackRatio) const {
@@ -96,7 +147,55 @@ bool MainWindow::DumpCurrentFramePPM(const std::string &path,
       AIO::Emulator::Common::LogLevel::Info, "MainWindow",
       "DumpCurrentFramePPM: wrote %dx%d PPM to '%s' (nonBlackRatio=%.6f)", w, h,
       path.c_str(), ratio);
+
+  if (currentEmulator == EmulatorType::PS1 && ps1Emulator) {
+    const uint16_t *vram = ps1Emulator->GetGPU().GetVRAMPointer();
+    const uint32_t stride = ps1Emulator->GetVRAMStride();
+    const uint32_t bufferWidth = 512;
+    const uint32_t bufferHeight =
+        std::min<uint32_t>(ps1Emulator->GetDisplayHeight(), 240);
+
+    double bufARatio = 0.0;
+    double bufBRatio = 0.0;
+    const std::string bufAPath = ReplaceExtension(path, "_bufA");
+    const std::string bufBPath = ReplaceExtension(path, "_bufB");
+
+    const bool wroteA = WriteRgb555Ppm(bufAPath, vram, bufferWidth,
+                                       bufferHeight, stride, 0, 0, &bufARatio);
+    const bool wroteB = WriteRgb555Ppm(
+        bufBPath, vram, bufferWidth, bufferHeight, stride, 512, 0, &bufBRatio);
+
+    AIO::Emulator::Common::Logger::Instance().LogFmt(
+        AIO::Emulator::Common::LogLevel::Info, "MainWindow",
+        "DumpCurrentFramePPM: PS1 buffer sidecars A=%s (ratio=%.6f) B=%s "
+        "(ratio=%.6f)",
+        wroteA ? bufAPath.c_str() : "<failed>", bufARatio,
+        wroteB ? bufBPath.c_str() : "<failed>", bufBRatio);
+  }
+
   return true;
+}
+
+uint64_t MainWindow::GetEmulatedMilliseconds() const {
+  switch (currentEmulator) {
+  case EmulatorType::GBA:
+    if (gba) {
+      constexpr uint64_t kGbaCpuHz = 16777216ULL;
+      return (gba->GetTotalCycles() * 1000ULL) / kGbaCpuHz;
+    }
+    break;
+  case EmulatorType::PS1:
+    if (ps1Emulator) {
+      constexpr uint64_t kPs1CpuHz = 33868800ULL;
+      return (ps1Emulator->GetTotalCycles() * 1000ULL) / kPs1CpuHz;
+    }
+    break;
+  case EmulatorType::Switch:
+  case EmulatorType::None:
+    break;
+  }
+
+  return 0;
 }
 
 static uint16_t ScriptKeyMaskFromName(const std::string &name) {
@@ -210,7 +309,7 @@ void MainWindow::toggleDevPanel(bool enabled) {
 void MainWindow::EnableDebugger(bool enabled) {
   debuggerEnabled = enabled;
   if (enabled) {
-    gba.SetSingleStep(true);
+    gba->SetSingleStep(true);
     // Enable terminal raw mode for arrow/enter handling
     struct termios tio;
     if (tcgetattr(STDIN_FILENO, &tio) == 0) {
@@ -222,7 +321,7 @@ void MainWindow::EnableDebugger(bool enabled) {
       stdinRawEnabled = true;
     }
   } else {
-    gba.SetSingleStep(false);
+    gba->SetSingleStep(false);
     if (stdinRawEnabled) {
       tcsetattr(STDIN_FILENO, TCSANOW, &rawTermios);
       stdinRawEnabled = false;
@@ -230,7 +329,7 @@ void MainWindow::EnableDebugger(bool enabled) {
   }
 }
 
-void MainWindow::AddBreakpoint(uint32_t addr) { gba.AddBreakpoint(addr); }
+void MainWindow::AddBreakpoint(uint32_t addr) { gba->AddBreakpoint(addr); }
 
 QString MainWindow::formatInputState(uint16_t state) {
   // GBA KEYINPUT: 0 = pressed, 1 = released
@@ -267,7 +366,7 @@ void MainWindow::LoadROM(const std::string &path) {
   bool success = false;
 
   if (currentEmulator == EmulatorType::GBA) {
-    success = gba.LoadROM(path);
+    success = gba->LoadROM(path);
     if (success) {
       // GBA Resolution
       displayImage = QImage(240, 160, QImage::Format_ARGB32);
@@ -292,21 +391,21 @@ void MainWindow::LoadROM(const std::string &path) {
     }
 
     if (!biosPath.empty()) {
-      ps1Emulator.LoadBIOS(biosPath);
+      ps1Emulator->LoadBIOS(biosPath);
     }
 
-    success = ps1Emulator.LoadDisc(path);
+    success = ps1Emulator->LoadDisc(path);
 
     // If no real BIOS was loaded, boot via HLE (parse EXE from disc)
-    if (success && !ps1Emulator.IsBIOSLoaded()) {
-      if (!ps1Emulator.InitHLE()) {
+    if (success && !ps1Emulator->IsBIOSLoaded()) {
+      if (!ps1Emulator->InitHLE()) {
         statusLabel->setText("Failed to initialize PS1 HLE BIOS from disc.");
         return;
       }
     }
     if (success) {
-      uint32_t w = ps1Emulator.GetDisplayWidth();
-      uint32_t h = ps1Emulator.GetDisplayHeight();
+      uint32_t w = ps1Emulator->GetDisplayWidth();
+      uint32_t h = ps1Emulator->GetDisplayHeight();
       if (w == 0)
         w = 320;
       if (h == 0)
@@ -321,7 +420,7 @@ void MainWindow::LoadROM(const std::string &path) {
       }
     }
   } else if (currentEmulator == EmulatorType::Switch) {
-    success = switchEmulator.LoadROM(path);
+    success = switchEmulator->LoadROM(path);
     if (success) {
       // Switch Resolution (720p)
       // Scale down for display if needed, or show smaller window
@@ -443,7 +542,7 @@ void MainWindow::StopEmulatorThread() {
   }
 
   if (currentEmulator == EmulatorType::GBA) {
-    gba.GetMemory().FlushSave();
+    gba->GetMemory().FlushSave();
   }
 }
 
@@ -481,7 +580,7 @@ void MainWindow::EmulatorThreadMain() {
             ? pendingEmuKeyinput.load(std::memory_order_relaxed)
             : AIO::Input::InputManager::instance().snapshot().keyinput;
     if (desired != lastAppliedKeyinput) {
-      gba.UpdateInput(desired);
+      gba->UpdateInput(desired);
       lastAppliedKeyinput = desired;
     }
   };
@@ -497,7 +596,7 @@ void MainWindow::EmulatorThreadMain() {
 
         const auto &snap = (*frameHistory)[snapshotIdx];
 
-        auto &mem = gba.GetMemory();
+        auto &mem = gba->GetMemory();
         std::memcpy(mem.GetIWRAM(), snap.iwram.data(),
                     FrameSnapshot::IWRAM_SIZE);
         std::memcpy(mem.GetEWRAM(), snap.ewram.data(),
@@ -510,11 +609,11 @@ void MainWindow::EmulatorThreadMain() {
                     FrameSnapshot::IO_SIZE);
 
         for (int i = 0; i < 16; i++) {
-          gba.SetRegister(i, snap.cpuRegisters[i]);
+          gba->SetRegister(i, snap.cpuRegisters[i]);
         }
 
-        gba.GetPPU().RestoreFramebuffer(snap.framebuffer.data(),
-                                        FrameSnapshot::FB_SIZE);
+        gba->GetPPU().RestoreFramebuffer(snap.framebuffer.data(),
+                                         FrameSnapshot::FB_SIZE);
 
         emulatorFrameNumber.store(snap.frameNum, std::memory_order_relaxed);
 
@@ -559,7 +658,7 @@ void MainWindow::EmulatorThreadMain() {
         int chunkCycles = 0;
         while (chunkCycles < chunkCyclesTarget &&
                totalCycles < kGbaCyclesPerFrame && emulatorRunning) {
-          const int stepCycles = gba.Step();
+          const int stepCycles = gba->Step();
           chunkCycles += stepCycles;
           totalCycles += stepCycles;
         }
@@ -567,7 +666,7 @@ void MainWindow::EmulatorThreadMain() {
 
       // Catch any remainder cycles due to integer division.
       while (totalCycles < kGbaCyclesPerFrame && emulatorRunning) {
-        totalCycles += gba.Step();
+        totalCycles += gba->Step();
       }
 
       // Carry over excess cycles to the next frame for accurate timing
@@ -579,7 +678,7 @@ void MainWindow::EmulatorThreadMain() {
       saveFlushCounter++;
       if (saveFlushCounter >= SAVE_FLUSH_INTERVAL) {
         saveFlushCounter = 0;
-        gba.GetMemory().FlushSave();
+        gba->GetMemory().FlushSave();
       }
     } else if (currentEmulator == EmulatorType::PS1) {
       // PS1: 33.8688 MHz CPU, 263 scanlines × 2171 cycles/scanline ≈ 570,973
@@ -626,14 +725,14 @@ void MainWindow::EmulatorThreadMain() {
         ps1Buttons &= ~Emulator::PS1::PadButton::Left;
       if (logPressed(AIO::Input::LogicalButton::Right))
         ps1Buttons &= ~Emulator::PS1::PadButton::Right;
-      ps1Emulator.UpdateInput(ps1Buttons);
+      ps1Emulator->UpdateInput(ps1Buttons);
 
       while (totalCycles < kPs1CyclesPerFrame && emulatorRunning) {
-        totalCycles += ps1Emulator.Step();
+        totalCycles += ps1Emulator->Step();
       }
       ps1CycleCarry = totalCycles - kPs1CyclesPerFrame;
     } else if (currentEmulator == EmulatorType::Switch) {
-      switchEmulator.RunFrame();
+      switchEmulator->RunFrame();
     }
 
     // Always save frame snapshot for step-back capability (BEFORE incrementing
@@ -642,7 +741,7 @@ void MainWindow::EmulatorThreadMain() {
       auto &snap = (*frameHistory)[frameHistoryIndex];
       snap.frameNum = emulatorFrameNumber.load();
 
-      const auto &mem = gba.GetMemory();
+      const auto &mem = gba->GetMemory();
       std::memcpy(snap.iwram.data(), mem.GetIWRAM(), FrameSnapshot::IWRAM_SIZE);
       std::memcpy(snap.ewram.data(), mem.GetEWRAM(), FrameSnapshot::EWRAM_SIZE);
       std::memcpy(snap.vram.data(), mem.GetVRAMData(),
@@ -652,13 +751,13 @@ void MainWindow::EmulatorThreadMain() {
                   FrameSnapshot::PALETTE_SIZE);
       std::memcpy(snap.ioRegs.data(), mem.GetIORegs(), FrameSnapshot::IO_SIZE);
 
-      gba.GetPPU().CopyFramebufferTo(snap.framebuffer.data(),
-                                     FrameSnapshot::FB_SIZE);
+      gba->GetPPU().CopyFramebufferTo(snap.framebuffer.data(),
+                                      FrameSnapshot::FB_SIZE);
 
       for (int i = 0; i < 16; i++) {
-        snap.cpuRegisters[i] = gba.GetRegister(i);
+        snap.cpuRegisters[i] = gba->GetRegister(i);
       }
-      snap.cpsr = gba.GetCPSR();
+      snap.cpsr = gba->GetCPSR();
 
       frameHistoryWritten =
           std::min(frameHistoryWritten + 1, MAX_FRAME_HISTORY);
@@ -735,7 +834,7 @@ void MainWindow::UpdateDisplay() {
       (current == youTubeBrowsePage) || (current == youTubePlayerPage);
 
   // Sub-app layer: synthesize basic keys for pages that rely on keyPressEvent.
-  // Note: emulator runtime itself is fed via gba.UpdateInput below.
+  // Note: emulator runtime itself is fed via gba->UpdateInput below.
   if (isSubAppPage && current != emulatorPage) {
     // Fallback: synthesize key presses so existing keyPressEvent handlers work.
     // Includes repeat for held directions to make controller navigation
@@ -841,7 +940,8 @@ void MainWindow::UpdateDisplay() {
           qEnvironmentVariable("AIO_INPUT_SCRIPT_TIMEBASE").trimmed().toUpper();
       if (timebase == "EMU") {
         constexpr uint64_t CYCLES_PER_SECOND = 16780000ULL;
-        nowMs = (int64_t)((gba.GetTotalCycles() * 1000ULL) / CYCLES_PER_SECOND);
+        nowMs =
+            (int64_t)((gba->GetTotalCycles() * 1000ULL) / CYCLES_PER_SECOND);
       } else {
         nowMs = (int64_t)scriptTimer_.elapsed();
       }
@@ -854,18 +954,18 @@ void MainWindow::UpdateDisplay() {
           scriptKeyState_ = (uint16_t)(scriptKeyState_ | ev.mask);
         }
 
-        const uint16_t dispcnt = gba.ReadMem16(0x04000000);
-        const uint16_t winin = gba.ReadMem16(0x04000048);
-        const uint16_t winout = gba.ReadMem16(0x0400004A);
-        const uint16_t bldcnt = gba.ReadMem16(0x04000050);
-        const uint16_t bldalpha = gba.ReadMem16(0x04000052);
-        const uint16_t win0h = gba.ReadMem16(0x04000040);
-        const uint16_t win0v = gba.ReadMem16(0x04000044);
+        const uint16_t dispcnt = gba->ReadMem16(0x04000000);
+        const uint16_t winin = gba->ReadMem16(0x04000048);
+        const uint16_t winout = gba->ReadMem16(0x0400004A);
+        const uint16_t bldcnt = gba->ReadMem16(0x04000050);
+        const uint16_t bldalpha = gba->ReadMem16(0x04000052);
+        const uint16_t win0h = gba->ReadMem16(0x04000040);
+        const uint16_t win0v = gba->ReadMem16(0x04000044);
         std::cout << "[SCRIPT] t_ms=" << nowMs << " event_ms=" << ev.ms
                   << " key=" << ScriptNameFromMask(ev.mask)
                   << " action=" << (ev.down ? "DOWN" : "UP") << " keyState=0x"
                   << std::hex << scriptKeyState_ << std::dec << " pc=0x"
-                  << std::hex << gba.GetPC() << std::dec << " DISPCNT=0x"
+                  << std::hex << gba->GetPC() << std::dec << " DISPCNT=0x"
                   << std::hex << dispcnt << " WININ=0x" << winin << " WINOUT=0x"
                   << winout << " WIN0H=0x" << win0h << " WIN0V=0x" << win0v
                   << " BLDCNT=0x" << bldcnt << " BLDALPHA=0x" << bldalpha
@@ -887,14 +987,14 @@ void MainWindow::UpdateDisplay() {
     // SwapBuffers race
     constexpr size_t FB_PIXELS = 240 * 160;
     uint32_t localFb[FB_PIXELS];
-    gba.GetPPU().CopyFramebufferTo(localFb, FB_PIXELS);
+    gba->GetPPU().CopyFramebufferTo(localFb, FB_PIXELS);
     for (int y = 0; y < 160; ++y) {
       memcpy(displayImage.scanLine(y), &localFb[y * 240],
              240 * sizeof(uint32_t));
     }
     avRecorder_.RecordVideoFrame(localFb);
   } else if (currentEmulator == EmulatorType::Switch) {
-    auto *gpu = switchEmulator.GetGPU();
+    auto *gpu = switchEmulator->GetGPU();
     if (gpu) {
       const auto &buffer = gpu->GetFramebuffer();
       if (buffer.size() >= 1280 * 720) {
@@ -906,10 +1006,11 @@ void MainWindow::UpdateDisplay() {
     }
   } else if (currentEmulator == EmulatorType::PS1) {
     // PS1 framebuffer is RGB555 (uint16_t) — convert to ARGB32 for display
-    const uint16_t *ps1Fb = ps1Emulator.GetFramebuffer();
-    const uint32_t w = ps1Emulator.GetDisplayWidth();
-    const uint32_t h = ps1Emulator.GetDisplayHeight();
-    const uint32_t stride = ps1Emulator.GetVRAMStride();
+    const uint16_t *ps1Fb = ps1Emulator->GetFramebuffer();
+    const auto &ps1Gpu = ps1Emulator->GetGPU();
+    const uint32_t w = ps1Emulator->GetDisplayWidth();
+    const uint32_t h = ps1Emulator->GetDisplayHeight();
+    const uint32_t stride = ps1Emulator->GetVRAMStride();
     if (ps1Fb && w > 0 && h > 0) {
       // Resize display image if GPU resolution changed
       if (static_cast<uint32_t>(displayImage.width()) != w ||
@@ -917,18 +1018,61 @@ void MainWindow::UpdateDisplay() {
         displayImage = QImage(w, h, QImage::Format_ARGB32);
       }
       auto *dst = reinterpret_cast<uint32_t *>(displayImage.bits());
-      for (uint32_t y = 0; y < h; ++y) {
-        const uint16_t *srcRow = ps1Fb + y * stride;
-        uint32_t *dstRow = dst + y * w;
-        for (uint32_t x = 0; x < w; ++x) {
-          uint16_t px = srcRow[x];
-          uint8_t r = static_cast<uint8_t>((px & 0x1F) << 3);
-          uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x1F) << 3);
-          uint8_t b = static_cast<uint8_t>(((px >> 10) & 0x1F) << 3);
-          dstRow[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+      if (ps1Gpu.IsDisplay24Bit()) {
+        const auto *vramBytes =
+            reinterpret_cast<const uint8_t *>(ps1Gpu.GetVRAMPointer());
+        const uint32_t strideBytes = stride * sizeof(uint16_t);
+        const uint32_t startXBytes = ps1Gpu.GetDisplayStartX() * 2u;
+        const uint32_t startY = ps1Gpu.GetDisplayStartY();
+
+        for (uint32_t y = 0; y < h; ++y) {
+          const uint32_t srcY =
+              (startY + y) & (AIO::Emulator::PS1::GPU::VRAM_HEIGHT - 1);
+          const uint8_t *srcRow = vramBytes + srcY * strideBytes;
+          uint32_t *dstRow = dst + y * w;
+          for (uint32_t x = 0; x < w; ++x) {
+            const uint32_t byteIndex = (startXBytes + x * 3u) % strideBytes;
+            const uint8_t r = srcRow[byteIndex];
+            const uint8_t g = srcRow[(byteIndex + 1u) % strideBytes];
+            const uint8_t b = srcRow[(byteIndex + 2u) % strideBytes];
+            dstRow[x] = 0xFF000000u | (static_cast<uint32_t>(r) << 16) |
+                        (static_cast<uint32_t>(g) << 8) | b;
+          }
+        }
+      } else {
+        for (uint32_t y = 0; y < h; ++y) {
+          const uint16_t *srcRow = ps1Fb + y * stride;
+          uint32_t *dstRow = dst + y * w;
+          for (uint32_t x = 0; x < w; ++x) {
+            uint16_t px = srcRow[x];
+            uint8_t r = static_cast<uint8_t>((px & 0x1F) << 3);
+            uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x1F) << 3);
+            uint8_t b = static_cast<uint8_t>(((px >> 10) & 0x1F) << 3);
+            dstRow[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+          }
         }
       }
-      avRecorder_.RecordVideoFrame(dst);
+
+      if (avRecorder_.IsRecording()) {
+        const int recordWidth = avRecorder_.GetVideoWidth();
+        const int recordHeight = avRecorder_.GetVideoHeight();
+        if (recordWidth == static_cast<int>(w) &&
+            recordHeight == static_cast<int>(h)) {
+          avRecorder_.RecordVideoFrame(dst);
+        } else if (recordWidth > 0 && recordHeight > 0) {
+          std::vector<uint32_t> recordFrame(
+              static_cast<size_t>(recordWidth) * recordHeight, 0xFF000000u);
+          const uint32_t copyWidth =
+              std::min<uint32_t>(w, static_cast<uint32_t>(recordWidth));
+          const uint32_t copyHeight =
+              std::min<uint32_t>(h, static_cast<uint32_t>(recordHeight));
+          for (uint32_t row = 0; row < copyHeight; ++row) {
+            std::memcpy(recordFrame.data() + row * recordWidth, dst + row * w,
+                        copyWidth * sizeof(uint32_t));
+          }
+          avRecorder_.RecordVideoFrame(recordFrame);
+        }
+      }
     }
   }
 
@@ -1013,19 +1157,19 @@ void MainWindow::UpdateDisplay() {
        << "<br>";
 
     if (currentEmulator == EmulatorType::GBA) {
-      uint16_t gameKeyInput = gba.ReadMem16(0x04000130);
+      uint16_t gameKeyInput = gba->ReadMem16(0x04000130);
       ss << "<b>PC:</b> 0x" << ::std::hex << ::std::setfill('0')
-         << ::std::setw(8) << gba.GetPC() << "<br>";
+         << ::std::setw(8) << gba->GetPC() << "<br>";
       ss << "<b>Input:</b> " << formatInputState(inputState).toStdString()
          << "<br>";
       ss << "<b>KEYINPUT:</b> 0x" << ::std::hex << ::std::setw(4)
          << gameKeyInput << "<br>";
-      ss << "<b>VCount:</b> " << ::std::dec << gba.ReadMem16(0x04000006)
+      ss << "<b>VCount:</b> " << ::std::dec << gba->ReadMem16(0x04000006)
          << "<br>";
       ss << "<b>DISPCNT:</b> 0x" << ::std::hex << ::std::setw(4)
-         << gba.ReadMem16(0x04000000);
+         << gba->ReadMem16(0x04000000);
     } else if (currentEmulator == EmulatorType::Switch) {
-      ss << switchEmulator.GetDebugInfo();
+      ss << switchEmulator->GetDebugInfo();
     }
 
     devPanelLabel->setText(QString::fromStdString(ss.str()));

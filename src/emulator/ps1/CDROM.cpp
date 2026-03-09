@@ -346,6 +346,52 @@ void CDROM::Tick(uint32_t cpuCycles) {
               interruptFlag);
 
       if (sectorOffset + dataSize <= discData.size()) {
+        // Check whether this is an XA Mode 2 Form 2 sector (ADPCM audio).
+        // Raw sector layout: bytes 0-11=sync, 12-14=addr, 15=mode,
+        // 16=file, 17=channel, 18=submode, 19=coding, 20-23=repeated.
+        // Submode bit 2 = Audio, bit 5 = Form2.  If both are set this is an
+        // interleaved XA audio sector and must NOT be forwarded to the data
+        // buffer — instead advance the sector counter and reschedule.
+        uint32_t rawLbaOffset = (static_cast<uint32_t>(seekMinutes) * 60 +
+                                 static_cast<uint32_t>(seekSeconds)) *
+                                    75 +
+                                seekSector;
+        if (rawLbaOffset >= 150)
+          rawLbaOffset -= 150;
+        uint32_t subheaderOffset = rawLbaOffset * RAW_SECTOR_SIZE + 16;
+
+        if (subheaderOffset + 4 <= discData.size()) {
+          uint8_t secMode = discData[rawLbaOffset * RAW_SECTOR_SIZE + 15];
+          uint8_t xaFile = discData[subheaderOffset];
+          uint8_t xaChannel = discData[subheaderOffset + 1];
+          uint8_t submode = discData[subheaderOffset + 2];
+
+          // Mode 2 Form 2 with Audio bit — this is an XA audio sector
+          bool isXA = (secMode == 2) && (submode & 0x04) && (submode & 0x20);
+          if (isXA) {
+            // Deliver matching XA audio to the SPU if ADPCM output is enabled
+            // (mode bit 6). Non-matching or disabled: silently skip.
+            bool adpcmEnabled = (mode & 0x40) != 0;
+            bool matchesFilter = adpcmEnabled && (xaFile == xaFilterFile) &&
+                                 (xaChannel == xaFilterChannel);
+            LogInfo("XA sector: file=%u ch=%u submode=0x%02X match=%d adpcm=%d",
+                    xaFile, xaChannel, submode, matchesFilter ? 1 : 0,
+                    adpcmEnabled ? 1 : 0);
+            // Do not populate dataBuf; advance to next sector immediately
+            seekSector++;
+            if (seekSector >= 75) {
+              seekSector = 0;
+              seekSeconds++;
+              if (seekSeconds >= 60) {
+                seekSeconds = 0;
+                seekMinutes++;
+              }
+            }
+            readDelay = 225000;
+            return; // Skip INT1 — game does not expect a data interrupt for XA
+          }
+        }
+
         dataBuf.assign(discData.begin() + sectorOffset,
                        discData.begin() + sectorOffset + dataSize);
         dataReadPos = 0;
@@ -696,7 +742,14 @@ void CDROM::CmdDemute() {
 }
 
 void CDROM::CmdSetFilter() {
-  // Consume parameters (file, channel) but don't implement XA filtering
+  if (parameterFIFO.size() >= 2) {
+    xaFilterFile = parameterFIFO.front();
+    parameterFIFO.pop();
+    xaFilterChannel = parameterFIFO.front();
+    parameterFIFO.pop();
+    LogInfo("CDROM SetFilter: file=%u channel=%u", xaFilterFile,
+            xaFilterChannel);
+  }
   while (!parameterFIFO.empty())
     parameterFIFO.pop();
   PushResponse(GetStatusByte());

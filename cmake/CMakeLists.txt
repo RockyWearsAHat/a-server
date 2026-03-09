@@ -25,6 +25,14 @@ include_directories(
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Use ccache if available to speed up incremental builds
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    message(STATUS "ccache found: ${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
 # Code coverage option (use -DENABLE_COVERAGE=ON)
 option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
 if(ENABLE_COVERAGE OR CMAKE_BUILD_TYPE STREQUAL "Coverage")
@@ -61,7 +69,7 @@ endforeach()
 
 # Find Qt6
 set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
-find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets Network Multimedia MultimediaWidgets)
 
 # Find SDL2
 find_package(SDL2 REQUIRED)

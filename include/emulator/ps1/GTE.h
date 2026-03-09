@@ -43,11 +43,11 @@ private:
   int16_t sxy[4][2] = {}; // SXY0-3 FIFO (X,Y signed 16-bit)
   uint16_t sz[4] = {};    // SZ0-3 FIFO (unsigned 16-bit)
   uint32_t rgb[3] = {};   // RGB0-2 FIFO
-  int32_t mac[4] = {};    // MAC0-3 (32-bit, but internal calcs use 44-bit)
-  uint32_t irgb = 0;      // Color conversion input
-  uint32_t orgb = 0;      // Color conversion output
-  int32_t lzcs = 0;       // Leading zero count source
-  int32_t lzcr = 0;       // Leading zero count result
+  int64_t mac[4] = {}; // MAC0-3 (MAC1-3 keep full internal accumulator width)
+  uint32_t irgb = 0;   // Color conversion input
+  uint32_t orgb = 0;   // Color conversion output
+  int32_t lzcs = 0;    // Leading zero count source
+  int32_t lzcr = 0;    // Leading zero count result
 
   // ─── Control Registers (32 × 32-bit) ────────────────────────────────
   int16_t rt[3][3] = {}; // Rotation matrix 3×3

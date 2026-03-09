@@ -9,6 +9,7 @@ A high-performance Game Boy Advance (GBA) and Nintendo Switch emulator with an i
 - **10-Foot UI**: TV-friendly interface designed for controllers
 - **Network Storage**: Built-in NAS server for ROM and save file management
 - **Streaming Integration**: Quick access to streaming apps
+- **Separate YouTube Auth Server**: Optional Node/Express/TypeScript service for OAuth and YouTube API proxying without embedding secrets in the Qt app
 - **Debugging Tools**: Built-in debugger with breakpoints and step execution
 - **Deterministic Input**: Script-based input replay for testing
 - **Code Coverage**: Integrated testing and coverage reporting
@@ -128,7 +129,20 @@ AIO_INPUT_SCRIPT_TIMEBASE=EMU  # Use emulated time for scripts
 
 # Debugging
 AIO_TRACE_IE_WRITES=1     # Trace interrupt enable writes
+
+# YouTube auth proxy (optional, recommended)
+AIO_YOUTUBE_SERVER_URL=http://127.0.0.1:8916
+AIO_YOUTUBE_SERVER_AUTOBOOT=1
+AIO_YOUTUBE_SERVER_NODE=node
+AIO_YOUTUBE_SERVER_WORKDIR=/absolute/path/to/AIO Server/server
+AIO_YOUTUBE_SERVER_ENTRY=dist/index.js
 ```
+
+## Separate Server
+
+The YouTube OAuth client id, client secret, and API key can now live in the separate Node server under [server/README.md](/Users/alexwaldmann/Desktop/AIO Server/server/README.md).
+
+This keeps Google credentials out of the Qt application binary and out of the app's `.env`.
 
 ## Testing
 

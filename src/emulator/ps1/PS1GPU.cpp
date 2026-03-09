@@ -1,14 +1,86 @@
 #include "emulator/ps1/PS1GPU.h"
 #include "emulator/ps1/PS1Memory.h"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
-#include <iomanip>
+#include <fstream>
 #include <sstream>
 
 namespace AIO::Emulator::PS1 {
 
+namespace {
+
+bool IsPs1GpuDiagEnabled() {
+  const char *value = std::getenv("AIO_PS1_GPU_DIAG");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+bool IsPs1DisplayDiagEnabled() {
+  const char *value = std::getenv("AIO_PS1_DISPLAY_DIAG");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+void AppendPs1DisplayDiag(const std::string &line) {
+  std::ofstream out("/tmp/ps1_display_diag.txt", std::ios::app);
+  out << line << '\n';
+}
+
+struct TriangleRasterVertex {
+  int16_t x = 0;
+  int16_t y = 0;
+  uint8_t r = 0;
+  uint8_t g = 0;
+  uint8_t b = 0;
+  uint8_t u = 0;
+  uint8_t v = 0;
+};
+
+int32_t GetTriangleArea(const TriangleRasterVertex &v0,
+                        const TriangleRasterVertex &v1,
+                        const TriangleRasterVertex &v2) {
+  return static_cast<int32_t>(v1.x - v0.x) * (v2.y - v0.y) -
+         static_cast<int32_t>(v2.x - v0.x) * (v1.y - v0.y);
+}
+
+bool IsOversizedTriangle(const TriangleRasterVertex &v0,
+                         const TriangleRasterVertex &v1,
+                         const TriangleRasterVertex &v2) {
+  return std::max({v0.x, v1.x, v2.x}) - std::min({v0.x, v1.x, v2.x}) > 1023 ||
+         std::max({v0.y, v1.y, v2.y}) - std::min({v0.y, v1.y, v2.y}) > 511;
+}
+
+bool NormalizeTriangleForRaster(TriangleRasterVertex &v0,
+                                TriangleRasterVertex &v1,
+                                TriangleRasterVertex &v2, int32_t &area) {
+  area = GetTriangleArea(v0, v1, v2);
+  if (area == 0)
+    return false;
+
+  if (area > 0) {
+    std::swap(v1, v2);
+    area = -area;
+  }
+
+  return true;
+}
+
+bool IsInclusiveTriangleEdge(const TriangleRasterVertex &from,
+                             const TriangleRasterVertex &to) {
+  const int32_t dx = to.x - from.x;
+  const int32_t dy = to.y - from.y;
+  return dy > 0 || (dy == 0 && dx < 0);
+}
+
+bool EdgePassesFillRule(int32_t edgeValue, bool inclusiveEdge) {
+  return edgeValue < 0 || (edgeValue == 0 && inclusiveEdge);
+}
+
+} // namespace
+
 PS1GPU::PS1GPU(PS1Memory &memory)
-    : Loggable("PS1.GPU"), memory(memory), vram(GPU::VRAM_SIZE_PIXELS, 0) {}
+    : Loggable("PS1.GPU"), memory(memory), vram(GPU::VRAM_SIZE_PIXELS, 0) {
+  diagTracingEnabled = IsPs1GpuDiagEnabled();
+}
 
 void PS1GPU::Reset() {
   std::fill(vram.begin(), vram.end(), 0);
@@ -23,11 +95,13 @@ void PS1GPU::Reset() {
   texPageColorDepth = 0;
   dither = false;
   drawToDisplay = false;
+  texturedRectXFlip = false;
+  texturedRectYFlip = false;
   maskBitSet = false;
   maskBitCheck = false;
   interlaceField = false;
   reverseFlag = false;
-  textureDisable = false;
+  texPageBaseYMsb = false;
   hRes = 0;
   hRes2 = 0;
   vRes480 = false;
@@ -58,6 +132,28 @@ void PS1GPU::Reset() {
   texWindowOffsetY = 0;
 
   primSemiTransparent = false;
+  diagTracingEnabled = IsPs1GpuDiagEnabled();
+  diagCountingTexturedWrites = false;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::None;
+  diagTriTexelZeroSkips = 0;
+  diagTriWriteAttempts = 0;
+  diagTriWritesCommitted = 0;
+  diagTriDrawAreaRejects = 0;
+  diagMonoTriangleCommands = 0;
+  diagShadedTriangleCommands = 0;
+  diagTexturedTriangleCommands = 0;
+  diagMonoQuadCommands = 0;
+  diagShadedQuadCommands = 0;
+  diagTexturedQuadCommands = 0;
+  diagRectTexelZeroSkips = 0;
+  diagRectWriteAttempts = 0;
+  diagRectWritesCommitted = 0;
+  diagRectDrawAreaRejects = 0;
+  diagTexturedMaskRejects = 0;
+  diagFrameCounter = 0;
+  if (diagTracingEnabled)
+    std::ofstream("/tmp/ps1_gpu_diag_summary.txt", std::ios::trunc)
+        << "PS1 GPU textured diagnostics enabled\n";
   polyLineLastXY = 0;
   polyLineLastR = 0;
   polyLineLastG = 0;
@@ -89,7 +185,7 @@ uint32_t PS1GPU::ReadGPUSTAT() const {
   stat |= static_cast<uint32_t>(maskBitCheck) << 12;
   stat |= static_cast<uint32_t>(interlaceField) << 13;
   stat |= static_cast<uint32_t>(reverseFlag) << 14;
-  stat |= static_cast<uint32_t>(textureDisable) << 15;
+  stat |= static_cast<uint32_t>(texPageBaseYMsb) << 15;
   stat |= static_cast<uint32_t>(hRes) << 16;
   stat |= static_cast<uint32_t>(hRes2) << 18;
   stat |= static_cast<uint32_t>(vRes480) << 19;
@@ -304,67 +400,125 @@ uint32_t PS1GPU::GP0CommandLength(uint8_t cmd) const {
     return 1; // Clear cache
   case 0x02:
     return 3; // Fill rectangle
+
+  // Monochrome triangle (all 4 variants: bit0=raw(ignored), bit1=semi)
   case 0x20:
+  case 0x21:
   case 0x22:
-    return 4; // Monochrome triangle
+  case 0x23:
+    return 4;
+  // Textured triangle
   case 0x24:
   case 0x25:
   case 0x26:
   case 0x27:
-    return 7; // Textured triangle
+    return 7;
+  // Monochrome quad
   case 0x28:
+  case 0x29:
   case 0x2A:
-    return 5; // Monochrome quad
+  case 0x2B:
+    return 5;
+  // Textured quad
   case 0x2C:
   case 0x2D:
   case 0x2E:
   case 0x2F:
-    return 9; // Textured quad
+    return 9;
+  // Shaded triangle
   case 0x30:
+  case 0x31:
   case 0x32:
-    return 6; // Shaded triangle
+  case 0x33:
+    return 6;
+  // Shaded textured triangle
   case 0x34:
+  case 0x35:
   case 0x36:
-    return 9; // Shaded textured triangle
+  case 0x37:
+    return 9;
+  // Shaded quad
   case 0x38:
+  case 0x39:
   case 0x3A:
-    return 8; // Shaded quad
+  case 0x3B:
+    return 8;
+  // Shaded textured quad
   case 0x3C:
+  case 0x3D:
   case 0x3E:
-    return 12; // Shaded textured quad
+  case 0x3F:
+    return 12;
+
+  // Monochrome line
   case 0x40:
+  case 0x41:
   case 0x42:
-    return 3; // Monochrome line
+  case 0x43:
+    return 3;
+  // Monochrome polyline (initial segment — continuation handled in PolyLine
+  // mode)
+  case 0x48:
+  case 0x49:
+  case 0x4A:
+  case 0x4B:
+    return 3;
+  // Shaded line
   case 0x50:
+  case 0x51:
   case 0x52:
-    return 4; // Shaded line
+  case 0x53:
+    return 4;
+  // Shaded polyline (initial segment)
+  case 0x58:
+  case 0x59:
+  case 0x5A:
+  case 0x5B:
+    return 4;
+
+  // Variable-size rectangle
   case 0x60:
+  case 0x61:
   case 0x62:
-    return 3; // Monochrome rectangle (variable)
+  case 0x63:
+    return 3;
+  // Textured variable-size rectangle
   case 0x64:
   case 0x65:
   case 0x66:
   case 0x67:
-    return 4; // Textured rectangle (variable)
+    return 4;
+  // 1×1 dot
   case 0x68:
+  case 0x69:
   case 0x6A:
-    return 2; // Monochrome 1×1
+  case 0x6B:
+    return 2;
+  // 8×8 rectangle
   case 0x70:
+  case 0x71:
   case 0x72:
-    return 2; // Monochrome 8×8
+  case 0x73:
+    return 2;
+  // Textured 8×8 rectangle
   case 0x74:
   case 0x75:
   case 0x76:
   case 0x77:
-    return 3; // Textured 8×8
+    return 3;
+  // 16×16 rectangle
   case 0x78:
+  case 0x79:
   case 0x7A:
-    return 2; // Monochrome 16×16
+  case 0x7B:
+    return 2;
+  // Textured 16×16 rectangle
   case 0x7C:
   case 0x7D:
   case 0x7E:
   case 0x7F:
-    return 3; // Textured 16×16
+    return 3;
+
   case 0x80:
     return 4; // VRAM-to-VRAM copy
   case 0xA0:
@@ -396,9 +550,8 @@ void PS1GPU::ProcessGP0Command() {
   // Environment setup commands (0xE1-0xE6) must NOT alter this flag — their
   // command bytes happen to have bit 1 set (e.g. 0xE2, 0xE3, 0xE6) which would
   // otherwise corrupt all subsequent rendering with unwanted blending.
-  if (cmd >= 0x20 && cmd <= 0x7F) {
+  if (cmd >= 0x20 && cmd <= 0x7F)
     primSemiTransparent = (cmd & 2) != 0;
-  }
 
   switch (cmd) {
   case 0x00:
@@ -410,98 +563,177 @@ void PS1GPU::ProcessGP0Command() {
   case 0x02:
     GP0_FillRect(gp0CommandBuffer);
     break;
+
+  // Monochrome triangles (bit1 = semi-transparent)
   case 0x20:
+  case 0x21:
     GP0_MonoTriangle(gp0CommandBuffer, true);
     break;
   case 0x22:
+  case 0x23:
     GP0_MonoTriangle(gp0CommandBuffer, false);
     break;
+
+  // Monochrome quads
   case 0x28:
+  case 0x29:
     GP0_MonoQuad(gp0CommandBuffer, true);
     break;
   case 0x2A:
+  case 0x2B:
     GP0_MonoQuad(gp0CommandBuffer, false);
     break;
+
+  // Textured triangles (bit0 = raw texture, bit1 handled by
+  // primSemiTransparent)
   case 0x24:
   case 0x25:
   case 0x26:
   case 0x27:
     GP0_TexturedTriangle(gp0CommandBuffer, (cmd & 1) == 0);
     break;
+
+  // Textured quads
   case 0x2C:
   case 0x2D:
   case 0x2E:
   case 0x2F:
     GP0_TexturedQuad(gp0CommandBuffer, (cmd & 1) == 0);
     break;
+
+  // Shaded triangles
   case 0x30:
+  case 0x31:
+    GP0_ShadedTriangle(gp0CommandBuffer, true);
+    break;
   case 0x32:
-    GP0_ShadedTriangle(gp0CommandBuffer, (cmd & 1) == 0);
+  case 0x33:
+    GP0_ShadedTriangle(gp0CommandBuffer, false);
     break;
+
+  // Shaded quads
   case 0x38:
-  case 0x3A:
-    GP0_ShadedQuad(gp0CommandBuffer, (cmd & 1) == 0);
+  case 0x39:
+    GP0_ShadedQuad(gp0CommandBuffer, true);
     break;
+  case 0x3A:
+  case 0x3B:
+    GP0_ShadedQuad(gp0CommandBuffer, false);
+    break;
+
+  // Shaded textured triangles
+  case 0x34:
+  case 0x35:
+  case 0x36:
+  case 0x37:
+    GP0_ShadedTexturedTriangle(gp0CommandBuffer, (cmd & 1) == 0);
+    break;
+
+  // Shaded textured quads
+  case 0x3C:
+  case 0x3D:
+  case 0x3E:
+  case 0x3F:
+    GP0_ShadedTexturedQuad(gp0CommandBuffer, (cmd & 1) == 0);
+    break;
+
+  // Monochrome lines (transition to polyline mode for continuation)
   case 0x40:
+  case 0x41:
   case 0x42:
+  case 0x43:
     GP0_MonoLine(gp0CommandBuffer);
-    // Transition to polyline mode: retain color and last vertex for
-    // continuation
-    primSemiTransparent = (cmd == 0x42);
+    polyLineSemiTransparent = (cmd & 2) != 0;
+    polyLineLastXY = gp0CommandBuffer[2];
+    polyLineLastR = static_cast<uint8_t>(gp0CommandBuffer[0]);
+    polyLineLastG = static_cast<uint8_t>(gp0CommandBuffer[0] >> 8);
+    polyLineLastB = static_cast<uint8_t>(gp0CommandBuffer[0] >> 16);
+    break;
+
+  // Monochrome polyline (dedicated polyline commands — enter polyline mode)
+  case 0x48:
+  case 0x49:
+  case 0x4A:
+  case 0x4B:
+    GP0_MonoLine(gp0CommandBuffer);
+    polyLineSemiTransparent = (cmd & 2) != 0;
     polyLineLastXY = gp0CommandBuffer[2];
     polyLineLastR = static_cast<uint8_t>(gp0CommandBuffer[0]);
     polyLineLastG = static_cast<uint8_t>(gp0CommandBuffer[0] >> 8);
     polyLineLastB = static_cast<uint8_t>(gp0CommandBuffer[0] >> 16);
     gp0Mode = GP0Mode::PolyLine;
     break;
+
+  // Shaded lines (transition to shaded polyline mode for continuation)
   case 0x50:
+  case 0x51:
   case 0x52:
+  case 0x53:
     GP0_ShadedLine(gp0CommandBuffer);
-    // Transition to shaded polyline mode with last vertex/color for
-    // continuation
-    primSemiTransparent = (cmd == 0x52);
+    polyLineSemiTransparent = (cmd & 2) != 0;
+    polyLineLastXY = gp0CommandBuffer[3];
+    polyLineLastR = static_cast<uint8_t>(gp0CommandBuffer[2]);
+    polyLineLastG = static_cast<uint8_t>(gp0CommandBuffer[2] >> 8);
+    polyLineLastB = static_cast<uint8_t>(gp0CommandBuffer[2] >> 16);
+    break;
+
+  // Shaded polyline (dedicated polyline commands — enter shaded polyline mode)
+  case 0x58:
+  case 0x59:
+  case 0x5A:
+  case 0x5B:
+    GP0_ShadedLine(gp0CommandBuffer);
+    polyLineSemiTransparent = (cmd & 2) != 0;
     polyLineLastXY = gp0CommandBuffer[3];
     polyLineLastR = static_cast<uint8_t>(gp0CommandBuffer[2]);
     polyLineLastG = static_cast<uint8_t>(gp0CommandBuffer[2] >> 8);
     polyLineLastB = static_cast<uint8_t>(gp0CommandBuffer[2] >> 16);
     gp0Mode = GP0Mode::ShadedPolyLine;
     break;
-  case 0x34:
-  case 0x36:
-    GP0_ShadedTexturedTriangle(gp0CommandBuffer, (cmd & 1) == 0);
-    break;
-  case 0x3C:
-  case 0x3E:
-    GP0_ShadedTexturedQuad(gp0CommandBuffer, (cmd & 1) == 0);
-    break;
+
+  // Variable-size rectangles
   case 0x60:
+  case 0x61:
   case 0x62:
+  case 0x63:
     GP0_MonoRect(gp0CommandBuffer);
     break;
+  // Textured variable-size rectangles
   case 0x64:
   case 0x65:
   case 0x66:
   case 0x67:
     GP0_TexturedRect(gp0CommandBuffer);
     break;
+  // 1×1 dot
   case 0x68:
+  case 0x69:
   case 0x6A:
+  case 0x6B:
     GP0_MonoDot(gp0CommandBuffer);
     break;
+  // 8×8 rectangles
   case 0x70:
+  case 0x71:
   case 0x72:
+  case 0x73:
     GP0_MonoRect(gp0CommandBuffer);
     break;
+  // Textured 8×8 rectangles
   case 0x74:
   case 0x75:
   case 0x76:
   case 0x77:
     GP0_TexturedRect(gp0CommandBuffer);
     break;
+  // 16×16 rectangles
   case 0x78:
+  case 0x79:
   case 0x7A:
+  case 0x7B:
     GP0_MonoRect(gp0CommandBuffer);
     break;
+  // Textured 16×16 rectangles
   case 0x7C:
   case 0x7D:
   case 0x7E:
@@ -577,7 +809,9 @@ void PS1GPU::GP0_DrawMode(uint32_t cmd) {
   texPageColorDepth = (cmd >> 7) & 3;
   dither = (cmd >> 9) & 1;
   drawToDisplay = (cmd >> 10) & 1;
-  textureDisable = (cmd >> 11) & 1;
+  texPageBaseYMsb = (cmd >> 11) & 1;
+  texturedRectXFlip = (cmd >> 12) & 1;
+  texturedRectYFlip = (cmd >> 13) & 1;
 }
 
 void PS1GPU::GP0_TextureWindow(uint32_t cmd) {
@@ -613,6 +847,8 @@ void PS1GPU::GP0_MaskBitSetting(uint32_t cmd) {
 
 void PS1GPU::GP0_MonoTriangle(const std::vector<uint32_t> &params,
                               [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagMonoTriangleCommands++;
   uint8_t r = static_cast<uint8_t>(params[0]);
   uint8_t g = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
@@ -644,6 +880,8 @@ void PS1GPU::GP0_MonoTriangle(const std::vector<uint32_t> &params,
 
 void PS1GPU::GP0_MonoQuad(const std::vector<uint32_t> &params,
                           [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagMonoQuadCommands++;
   uint8_t r = static_cast<uint8_t>(params[0]);
   uint8_t g = static_cast<uint8_t>(params[0] >> 8);
   uint8_t b = static_cast<uint8_t>(params[0] >> 16);
@@ -677,13 +915,15 @@ void PS1GPU::GP0_MonoQuad(const std::vector<uint32_t> &params,
           static_cast<int32_t>(((params[4] >> 16) & 0x7FF) << 21) >> 21) +
       drawOffsetY;
 
-  // Split quad into two triangles (0-1-2, 1-2-3)
+  // Split quad into two triangles (0-1-2, 1-2-3).
   RasterizeTriangle(x0, y0, r, g, b, x1, y1, r, g, b, x2, y2, r, g, b);
   RasterizeTriangle(x1, y1, r, g, b, x2, y2, r, g, b, x3, y3, r, g, b);
 }
 
 void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
                                   [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagTexturedTriangleCommands++;
   // Format: color+cmd, vert0, tex0+clut, vert1, tex1+texpage, vert2, tex2
   uint8_t r0 = static_cast<uint8_t>(params[0]);
   uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
@@ -718,10 +958,6 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
   texPageBaseY = (texPage >> 4) & 1;
   semiTransparencyMode = (texPage >> 5) & 3;
   texPageColorDepth = (texPage >> 7) & 3;
-  // Explicitly set OR clear from the embedded texPage bit — never leave it
-  // sticky.
-  textureDisable = (texPage >> 11) & 1;
-
   int16_t x2 = static_cast<int16_t>(
                    static_cast<int32_t>((params[5] & 0x7FF) << 21) >> 21) +
                drawOffsetX;
@@ -732,59 +968,68 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
   uint8_t u2 = static_cast<uint8_t>(params[6]);
   uint8_t v2 = static_cast<uint8_t>(params[6] >> 8);
 
-  // When textureDisable is set, render as flat/Gouraud using vertex colour only
-  if (textureDisable) {
-    RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r0, g0, b0, x2, y2, r0, g0,
-                      b0);
-    return;
-  }
-
-  // Bounding box
-  int16_t minX = std::min({x0, x1, x2});
-  int16_t maxX = std::max({x0, x1, x2});
-  int16_t minY = std::min({y0, y1, y2});
-  int16_t maxY = std::max({y0, y1, y2});
-
-  // Hardware guard: skip primitives wider or taller than 1023 pixels
-  if (maxX - minX > 1023 || maxY - minY > 1023)
+  TriangleRasterVertex vtx0{x0, y0, 0, 0, 0, u0, v0};
+  TriangleRasterVertex vtx1{x1, y1, 0, 0, 0, u1, v1};
+  TriangleRasterVertex vtx2{x2, y2, 0, 0, 0, u2, v2};
+  if (IsOversizedTriangle(vtx0, vtx1, vtx2))
     return;
 
-  minX = std::max(minX, static_cast<int16_t>(drawAreaLeft));
-  maxX = std::min(maxX, static_cast<int16_t>(drawAreaRight));
-  minY = std::max(minY, static_cast<int16_t>(drawAreaTop));
-  maxY = std::min(maxY, static_cast<int16_t>(drawAreaBottom));
-
-  int32_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (area == 0)
+  int32_t area = 0;
+  if (!NormalizeTriangleForRaster(vtx0, vtx1, vtx2, area))
     return;
+
+  int16_t minX = std::max(std::min({vtx0.x, vtx1.x, vtx2.x}),
+                          static_cast<int16_t>(drawAreaLeft));
+  int16_t maxX = std::min(std::max({vtx0.x, vtx1.x, vtx2.x}),
+                          static_cast<int16_t>(drawAreaRight));
+  int16_t minY = std::max(std::min({vtx0.y, vtx1.y, vtx2.y}),
+                          static_cast<int16_t>(drawAreaTop));
+  int16_t maxY = std::min(std::max({vtx0.y, vtx1.y, vtx2.y}),
+                          static_cast<int16_t>(drawAreaBottom));
+  const bool includeW0 = IsInclusiveTriangleEdge(vtx0, vtx1);
+  const bool includeW1 = IsInclusiveTriangleEdge(vtx1, vtx2);
+  const bool includeW2 = IsInclusiveTriangleEdge(vtx2, vtx0);
+  const int32_t absArea = -area;
+
+  // Textured primitives handle semi-transparency per-texel (only texels with
+  // bit 15 set blend). Disable PutPixel's automatic blending to avoid
+  // double-blend and incorrect blending of non-STP texels.
+  bool savedSemiTransparent = primSemiTransparent;
+  primSemiTransparent = false;
+  diagCountingTexturedWrites = true;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::Triangle;
 
   for (int16_t py = minY; py <= maxY; py++) {
     for (int16_t px = minX; px <= maxX; px++) {
-      int32_t w0 = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
-      int32_t w1 = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1);
-      int32_t w2 = (x0 - x2) * (py - y2) - (px - x2) * (y0 - y2);
+      int32_t w0 = static_cast<int32_t>(vtx1.x - vtx0.x) * (py - vtx0.y) -
+                   static_cast<int32_t>(px - vtx0.x) * (vtx1.y - vtx0.y);
+      int32_t w1 = static_cast<int32_t>(vtx2.x - vtx1.x) * (py - vtx1.y) -
+                   static_cast<int32_t>(px - vtx1.x) * (vtx2.y - vtx1.y);
+      int32_t w2 = static_cast<int32_t>(vtx0.x - vtx2.x) * (py - vtx2.y) -
+                   static_cast<int32_t>(px - vtx2.x) * (vtx0.y - vtx2.y);
 
-      bool inside = (area > 0) ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-      if (!inside)
+      if (!EdgePassesFillRule(w0, includeW0) ||
+          !EdgePassesFillRule(w1, includeW1) ||
+          !EdgePassesFillRule(w2, includeW2))
         continue;
 
-      // Barycentric interpolation for texture coordinates
-      int32_t absArea = std::abs(area);
-      int32_t bw0 = std::abs(w1); // weight for v0
-      int32_t bw1 = std::abs(w2); // weight for v1
-      int32_t bw2 = std::abs(w0); // weight for v2
+      // Edge functions are evaluated on edges opposite each vertex, so rotate
+      // them into vertex weights for interpolation.
+      int32_t bw0 = -w1;
+      int32_t bw1 = -w2;
+      int32_t bw2 = -w0;
 
-      int32_t u = (bw0 * u0 + bw1 * u1 + bw2 * u2) / absArea;
-      int32_t v = (bw0 * v0 + bw1 * v1 + bw2 * v2) / absArea;
+      int32_t u = (bw0 * vtx0.u + bw1 * vtx1.u + bw2 * vtx2.u) / absArea;
+      int32_t v = (bw0 * vtx0.v + bw1 * vtx1.v + bw2 * vtx2.v) / absArea;
 
       uint16_t texel = SampleTexture(u & 0xFF, v & 0xFF, clut, texPage);
-      if (texel == 0)
+      if (texel == 0) {
+        diagTriTexelZeroSkips++;
         continue; // Transparent black
+      }
 
-      // Semi-transparent pixels have bit 15 set; blend when the command is also
-      // semi-transparent
-      bool blendThisPixel = primSemiTransparent && (texel & 0x8000);
+      // Only texels with bit 15 set blend on semi-transparent commands
+      bool blendThisPixel = savedSemiTransparent && (texel & 0x8000);
       uint16_t finalColor;
       if (!opaque) {
         finalColor = texel;
@@ -798,29 +1043,33 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
         finalColor = ColorToVRAM(tr, tg, tb);
       }
       if (blendThisPixel) {
-        // Temporarily clear primSemiTransparent so PutPixel does not
-        // double-blend
-        primSemiTransparent = false;
         uint16_t dst =
             ReadVRAM(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
         finalColor = BlendPixels(finalColor, dst);
-        primSemiTransparent = true;
       }
+      diagTriWriteAttempts++;
+      finalColor = static_cast<uint16_t>(
+          (finalColor & 0x7FFF) | (maskBitSet ? 0x8000 : (texel & 0x8000)));
       PutPixel(px, py, finalColor);
     }
   }
+
+  primSemiTransparent = savedSemiTransparent;
+  diagCountingTexturedWrites = false;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::None;
 }
 
 void PS1GPU::GP0_TexturedQuad(const std::vector<uint32_t> &params,
                               [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagTexturedQuadCommands++;
   // 9 words: cmd+c(0), v0(1), t0+clut(2), v1(3), t1+texpage(4), v2(5), t2(6),
   // v3(7), t3(8) Tri 1: verts 0,1,2
   std::vector<uint32_t> tri1 = {params[0], params[1], params[2], params[3],
                                 params[4], params[5], params[6]};
   GP0_TexturedTriangle(tri1, opaque);
 
-  // Tri 2: verts 1,2,3 — preserve original CLUT (params[2] upper) and texPage
-  // (params[4] upper)
+  // Tri 2: verts 1,2,3 — preserve original CLUT and texpage.
   uint32_t t1WithClut = (params[4] & 0x0000FFFF) | (params[2] & 0xFFFF0000);
   uint32_t t2WithTexPage = (params[6] & 0x0000FFFF) | (params[4] & 0xFFFF0000);
   std::vector<uint32_t> tri2 = {params[0],     params[3], t1WithClut, params[5],
@@ -830,6 +1079,8 @@ void PS1GPU::GP0_TexturedQuad(const std::vector<uint32_t> &params,
 
 void PS1GPU::GP0_ShadedTriangle(const std::vector<uint32_t> &params,
                                 [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagShadedTriangleCommands++;
   // Format: color0+cmd, vert0, color1, vert1, color2, vert2
   uint8_t r0 = static_cast<uint8_t>(params[0]);
   uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
@@ -869,6 +1120,8 @@ void PS1GPU::GP0_ShadedTriangle(const std::vector<uint32_t> &params,
 
 void PS1GPU::GP0_ShadedQuad(const std::vector<uint32_t> &params,
                             [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagShadedQuadCommands++;
   // Format: color0+cmd, vert0, color1, vert1, color2, vert2, color3, vert3
   uint8_t r0 = static_cast<uint8_t>(params[0]);
   uint8_t g0 = static_cast<uint8_t>(params[0] >> 8);
@@ -920,6 +1173,8 @@ void PS1GPU::GP0_ShadedQuad(const std::vector<uint32_t> &params,
 
 void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
                                         [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagTexturedTriangleCommands++;
   // 9 words: color0+cmd, vert0, tex0+clut, color1, vert1, tex1+texpage, color2,
   // vert2, tex2
   uint8_t r0 = static_cast<uint8_t>(params[0]);
@@ -951,13 +1206,11 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
   uint16_t texPage = static_cast<uint16_t>(params[5] >> 16);
 
   // Propagate embedded texPage to GPU draw-mode state (same as
-  // TexturedTriangle). Explicitly set OR clear — never leave textureDisable
-  // sticky.
+  // TexturedTriangle).
   texPageBaseX = texPage & 0xF;
   texPageBaseY = (texPage >> 4) & 1;
   semiTransparencyMode = (texPage >> 5) & 3;
   texPageColorDepth = (texPage >> 7) & 3;
-  textureDisable = (texPage >> 11) & 1;
 
   uint8_t r2 = static_cast<uint8_t>(params[6]);
   uint8_t g2 = static_cast<uint8_t>(params[6] >> 8);
@@ -972,67 +1225,74 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
   uint8_t u2 = static_cast<uint8_t>(params[8]);
   uint8_t v2 = static_cast<uint8_t>(params[8] >> 8);
 
-  // When textureDisable is set, use Gouraud shading without texture
-  if (textureDisable) {
-    RasterizeTriangle(x0, y0, r0, g0, b0, x1, y1, r1, g1, b1, x2, y2, r2, g2,
-                      b2);
-    return;
-  }
-
-  int16_t minX =
-      std::max(std::min({x0, x1, x2}), static_cast<int16_t>(drawAreaLeft));
-  int16_t maxX =
-      std::min(std::max({x0, x1, x2}), static_cast<int16_t>(drawAreaRight));
-  int16_t minY =
-      std::max(std::min({y0, y1, y2}), static_cast<int16_t>(drawAreaTop));
-  int16_t maxY =
-      std::min(std::max({y0, y1, y2}), static_cast<int16_t>(drawAreaBottom));
-
-  // Hardware guard: skip oversized primitives
-  if (std::max({x0, x1, x2}) - std::min({x0, x1, x2}) > 1023)
-    return;
-  if (std::max({y0, y1, y2}) - std::min({y0, y1, y2}) > 1023)
+  TriangleRasterVertex vtx0{x0, y0, r0, g0, b0, u0, v0};
+  TriangleRasterVertex vtx1{x1, y1, r1, g1, b1, u1, v1};
+  TriangleRasterVertex vtx2{x2, y2, r2, g2, b2, u2, v2};
+  if (IsOversizedTriangle(vtx0, vtx1, vtx2))
     return;
 
-  int32_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (area == 0)
+  int32_t area = 0;
+  if (!NormalizeTriangleForRaster(vtx0, vtx1, vtx2, area))
     return;
+
+  int16_t minX = std::max(std::min({vtx0.x, vtx1.x, vtx2.x}),
+                          static_cast<int16_t>(drawAreaLeft));
+  int16_t maxX = std::min(std::max({vtx0.x, vtx1.x, vtx2.x}),
+                          static_cast<int16_t>(drawAreaRight));
+  int16_t minY = std::max(std::min({vtx0.y, vtx1.y, vtx2.y}),
+                          static_cast<int16_t>(drawAreaTop));
+  int16_t maxY = std::min(std::max({vtx0.y, vtx1.y, vtx2.y}),
+                          static_cast<int16_t>(drawAreaBottom));
+  const bool includeW0 = IsInclusiveTriangleEdge(vtx0, vtx1);
+  const bool includeW1 = IsInclusiveTriangleEdge(vtx1, vtx2);
+  const bool includeW2 = IsInclusiveTriangleEdge(vtx2, vtx0);
+  const int32_t absArea = -area;
+
+  // Textured primitives handle semi-transparency per-texel
+  bool savedSemiTransparent = primSemiTransparent;
+  primSemiTransparent = false;
+  diagCountingTexturedWrites = true;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::Triangle;
 
   for (int16_t py = minY; py <= maxY; py++) {
     for (int16_t px = minX; px <= maxX; px++) {
-      int32_t w0 = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
-      int32_t w1 = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1);
-      int32_t w2 = (x0 - x2) * (py - y2) - (px - x2) * (y0 - y2);
+      int32_t w0 = static_cast<int32_t>(vtx1.x - vtx0.x) * (py - vtx0.y) -
+                   static_cast<int32_t>(px - vtx0.x) * (vtx1.y - vtx0.y);
+      int32_t w1 = static_cast<int32_t>(vtx2.x - vtx1.x) * (py - vtx1.y) -
+                   static_cast<int32_t>(px - vtx1.x) * (vtx2.y - vtx1.y);
+      int32_t w2 = static_cast<int32_t>(vtx0.x - vtx2.x) * (py - vtx2.y) -
+                   static_cast<int32_t>(px - vtx2.x) * (vtx0.y - vtx2.y);
 
-      bool inside = (area > 0) ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-      if (!inside)
+      if (!EdgePassesFillRule(w0, includeW0) ||
+          !EdgePassesFillRule(w1, includeW1) ||
+          !EdgePassesFillRule(w2, includeW2))
         continue;
 
-      int32_t absArea = std::abs(area);
-      int32_t bw0 = std::abs(w1);
-      int32_t bw1 = std::abs(w2);
-      int32_t bw2 = std::abs(w0);
+      int32_t bw0 = -w1;
+      int32_t bw1 = -w2;
+      int32_t bw2 = -w0;
 
-      int32_t u = (bw0 * u0 + bw1 * u1 + bw2 * u2) / absArea;
-      int32_t v = (bw0 * v0 + bw1 * v1 + bw2 * v2) / absArea;
+      int32_t u = (bw0 * vtx0.u + bw1 * vtx1.u + bw2 * vtx2.u) / absArea;
+      int32_t v = (bw0 * vtx0.v + bw1 * vtx1.v + bw2 * vtx2.v) / absArea;
 
       uint16_t texel = SampleTexture(u & 0xFF, v & 0xFF, clut, texPage);
-      if (texel == 0)
+      if (texel == 0) {
+        diagTriTexelZeroSkips++;
         continue;
+      }
 
-      bool blendThisPixel = primSemiTransparent && (texel & 0x8000);
+      bool blendThisPixel = savedSemiTransparent && (texel & 0x8000);
       uint16_t finalColor;
       if (!opaque) {
         finalColor = texel;
       } else {
         // Interpolate vertex color for modulation
-        uint8_t cr =
-            static_cast<uint8_t>((bw0 * r0 + bw1 * r1 + bw2 * r2) / absArea);
-        uint8_t cg =
-            static_cast<uint8_t>((bw0 * g0 + bw1 * g1 + bw2 * g2) / absArea);
-        uint8_t cb =
-            static_cast<uint8_t>((bw0 * b0 + bw1 * b1 + bw2 * b2) / absArea);
+        uint8_t cr = static_cast<uint8_t>(
+            (bw0 * vtx0.r + bw1 * vtx1.r + bw2 * vtx2.r) / absArea);
+        uint8_t cg = static_cast<uint8_t>(
+            (bw0 * vtx0.g + bw1 * vtx1.g + bw2 * vtx2.g) / absArea);
+        uint8_t cb = static_cast<uint8_t>(
+            (bw0 * vtx0.b + bw1 * vtx1.b + bw2 * vtx2.b) / absArea);
         uint8_t tr = ((texel & 0x1F) << 3);
         uint8_t tg = (((texel >> 5) & 0x1F) << 3);
         uint8_t tb = (((texel >> 10) & 0x1F) << 3);
@@ -1042,19 +1302,26 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
         finalColor = ColorToVRAM(tr, tg, tb);
       }
       if (blendThisPixel) {
-        primSemiTransparent = false;
         uint16_t dst =
             ReadVRAM(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
         finalColor = BlendPixels(finalColor, dst);
-        primSemiTransparent = true;
       }
+      diagTriWriteAttempts++;
+      finalColor = static_cast<uint16_t>(
+          (finalColor & 0x7FFF) | (maskBitSet ? 0x8000 : (texel & 0x8000)));
       PutPixel(px, py, finalColor);
     }
   }
+
+  primSemiTransparent = savedSemiTransparent;
+  diagCountingTexturedWrites = false;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::None;
 }
 
 void PS1GPU::GP0_ShadedTexturedQuad(const std::vector<uint32_t> &params,
                                     [[maybe_unused]] bool opaque) {
+  if (diagTracingEnabled)
+    diagTexturedQuadCommands++;
   // 12 words: c0+cmd(0), v0(1), t0+clut(2), c1(3), v1(4), t1+texpage(5),
   //           c2(6), v2(7), t2(8), c3(9), v3(10), t3(11)
   // Tri 1: verts 0,1,2
@@ -1063,8 +1330,7 @@ void PS1GPU::GP0_ShadedTexturedQuad(const std::vector<uint32_t> &params,
                                 params[6], params[7], params[8]};
   GP0_ShadedTexturedTriangle(tri1, opaque);
 
-  // Tri 2: verts 1,2,3 — preserve CLUT from params[2] upper and texPage from
-  // params[5] upper
+  // Tri 2: verts 1,2,3 — preserve original CLUT and texpage.
   uint32_t t1WithClut = (params[5] & 0x0000FFFF) | (params[2] & 0xFFFF0000);
   uint32_t t2WithTexPage = (params[8] & 0x0000FFFF) | (params[5] & 0xFFFF0000);
   std::vector<uint32_t> tri2 = {params[3], params[4],  t1WithClut,
@@ -1142,28 +1408,27 @@ void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
     h = params[3] >> 16;
   }
 
-  // When textureDisable is set, render as a solid colour rectangle using the
-  // vertex colour so the primitive is still visible.
-  if (textureDisable) {
-    for (int16_t dy = 0; dy < static_cast<int16_t>(h); dy++) {
-      for (int16_t dx = 0; dx < static_cast<int16_t>(w); dx++) {
-        PutPixel(x + dx, y + dy, ColorToVRAM(r, g, b));
-      }
-    }
-    return;
-  }
-
   bool rawTexture = (cmd & 1);
+
+  // Textured primitives handle semi-transparency per-texel
+  bool savedSemiTransparent = primSemiTransparent;
+  primSemiTransparent = false;
+  diagCountingTexturedWrites = true;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::Rectangle;
 
   uint32_t pixelsDrawn = 0;
   for (int16_t dy = 0; dy < static_cast<int16_t>(h); dy++) {
     for (int16_t dx = 0; dx < static_cast<int16_t>(w); dx++) {
-      uint16_t texel =
-          SampleTexture((u + dx) & 0xFF, (v + dy) & 0xFF, clut, texPage);
-      if (texel == 0)
+      int16_t texelOffsetX = texturedRectXFlip ? -dx : dx;
+      int16_t texelOffsetY = texturedRectYFlip ? -dy : dy;
+      uint16_t texel = SampleTexture((u + texelOffsetX) & 0xFF,
+                                     (v + texelOffsetY) & 0xFF, clut, texPage);
+      if (texel == 0) {
+        diagRectTexelZeroSkips++;
         continue;
+      }
 
-      bool blendThisPixel = primSemiTransparent && (texel & 0x8000);
+      bool blendThisPixel = savedSemiTransparent && (texel & 0x8000);
       uint16_t finalColor;
       if (rawTexture) {
         finalColor = texel;
@@ -1177,16 +1442,22 @@ void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
         finalColor = ColorToVRAM(tr, tg, tb);
       }
       if (blendThisPixel) {
-        primSemiTransparent = false;
         uint16_t dst = ReadVRAM(static_cast<uint32_t>(x + dx),
                                 static_cast<uint32_t>(y + dy));
         finalColor = BlendPixels(finalColor, dst);
-        primSemiTransparent = true;
       }
+      diagRectWriteAttempts++;
+      finalColor = static_cast<uint16_t>(
+          (finalColor & 0x7FFF) | (maskBitSet ? 0x8000 : (texel & 0x8000)));
       PutPixel(x + dx, y + dy, finalColor);
       pixelsDrawn++;
     }
   }
+
+  primSemiTransparent = savedSemiTransparent;
+  diagCountingTexturedWrites = false;
+  diagTexturedPrimitiveKind = DiagTexturedPrimitiveKind::None;
+
   if constexpr (Trace::GPU_CMD) {
     LogDebug("TexRect: cmd=%02X pos=(%d,%d) uv=(%u,%u) wh=%ux%u drawn=%u", cmd,
              x, y, u, v, w, h, pixelsDrawn);
@@ -1318,10 +1589,19 @@ void PS1GPU::GP0_CopyRectVRAMtoVRAM(const std::vector<uint32_t> &params) {
   if (h == 0)
     h = 0x200;
 
+  std::vector<uint16_t> copyBuffer;
+  copyBuffer.reserve(w * h);
   for (uint32_t y = 0; y < h; y++) {
     for (uint32_t x = 0; x < w; x++) {
-      uint16_t pixel = ReadVRAM((srcX + x) & 0x3FF, (srcY + y) & 0x1FF);
-      WriteVRAM((dstX + x) & 0x3FF, (dstY + y) & 0x1FF, pixel);
+      copyBuffer.push_back(ReadVRAM((srcX + x) & 0x3FF, (srcY + y) & 0x1FF));
+    }
+  }
+
+  size_t copyIndex = 0;
+  for (uint32_t y = 0; y < h; y++) {
+    for (uint32_t x = 0; x < w; x++) {
+      WriteVRAM((dstX + x) & 0x3FF, (dstY + y) & 0x1FF,
+                copyBuffer[copyIndex++]);
     }
   }
 }
@@ -1440,18 +1720,35 @@ void PS1GPU::GP1_DisplayEnable(uint32_t cmd) { displayDisabled = cmd & 1; }
 void PS1GPU::GP1_DMADirection(uint32_t cmd) { dmaDirection = cmd & 3; }
 
 void PS1GPU::GP1_DisplayAreaStart(uint32_t cmd) {
-  displayVRAMStartX = cmd & 0x3FE;
+  displayVRAMStartX = cmd & 0x3FF;
   displayVRAMStartY = (cmd >> 10) & 0x1FF;
+  if (IsPs1DisplayDiagEnabled()) {
+    std::ostringstream os;
+    os << "display_start x=" << displayVRAMStartX << " y=" << displayVRAMStartY;
+    AppendPs1DisplayDiag(os.str());
+  }
 }
 
 void PS1GPU::GP1_HorizontalDisplayRange(uint32_t cmd) {
   displayHorizStart = cmd & 0xFFF;
   displayHorizEnd = (cmd >> 12) & 0xFFF;
+  if (IsPs1DisplayDiagEnabled()) {
+    std::ostringstream os;
+    os << "display_hrange x1=" << displayHorizStart << " x2=" << displayHorizEnd
+       << " width=" << GetDisplayWidth();
+    AppendPs1DisplayDiag(os.str());
+  }
 }
 
 void PS1GPU::GP1_VerticalDisplayRange(uint32_t cmd) {
   displayVertStart = cmd & 0x3FF;
   displayVertEnd = (cmd >> 10) & 0x3FF;
+  if (IsPs1DisplayDiagEnabled()) {
+    std::ostringstream os;
+    os << "display_vrange y1=" << displayVertStart << " y2=" << displayVertEnd
+       << " height=" << GetDisplayHeight();
+    AppendPs1DisplayDiag(os.str());
+  }
 }
 
 void PS1GPU::GP1_DisplayMode(uint32_t cmd) {
@@ -1462,6 +1759,15 @@ void PS1GPU::GP1_DisplayMode(uint32_t cmd) {
   colorDepth24 = (cmd >> 4) & 1;
   interlace = (cmd >> 5) & 1;
   reverseFlag = (cmd >> 7) & 1;
+  if (IsPs1DisplayDiagEnabled()) {
+    std::ostringstream os;
+    os << "display_mode hRes=" << static_cast<uint32_t>(hRes)
+       << " hRes2=" << static_cast<uint32_t>(hRes2)
+       << " width=" << GetDisplayWidth() << " height=" << GetDisplayHeight()
+       << " 24bit=" << (colorDepth24 ? 1 : 0)
+       << " interlace=" << (interlace ? 1 : 0);
+    AppendPs1DisplayDiag(os.str());
+  }
 }
 
 void PS1GPU::GP1_GetGPUInfo(uint32_t cmd) {
@@ -1506,6 +1812,41 @@ void PS1GPU::Tick(uint32_t cpuCycles) {
     if (currentScanline >= totalScanlines) {
       currentScanline = 0;
       oddFrame = !oddFrame;
+      diagFrameCounter++;
+      if (diagTracingEnabled && (diagFrameCounter % 60) == 0) {
+        std::ofstream diagOut("/tmp/ps1_gpu_diag_summary.txt", std::ios::app);
+        diagOut << "frames=" << diagFrameCounter
+                << " mono_tri_cmds=" << diagMonoTriangleCommands
+                << " shaded_tri_cmds=" << diagShadedTriangleCommands
+                << " textured_tri_cmds=" << diagTexturedTriangleCommands
+                << " mono_quad_cmds=" << diagMonoQuadCommands
+                << " shaded_quad_cmds=" << diagShadedQuadCommands
+                << " textured_quad_cmds=" << diagTexturedQuadCommands
+                << " tri_attempts=" << diagTriWriteAttempts
+                << " tri_commits=" << diagTriWritesCommitted
+                << " tri_zero=" << diagTriTexelZeroSkips
+                << " tri_draw_rejects=" << diagTriDrawAreaRejects
+                << " rect_attempts=" << diagRectWriteAttempts
+                << " rect_commits=" << diagRectWritesCommitted
+                << " rect_zero=" << diagRectTexelZeroSkips
+                << " rect_draw_rejects=" << diagRectDrawAreaRejects
+                << " textured_mask_rejects=" << diagTexturedMaskRejects << '\n';
+        diagTriTexelZeroSkips = 0;
+        diagTriWriteAttempts = 0;
+        diagTriWritesCommitted = 0;
+        diagTriDrawAreaRejects = 0;
+        diagMonoTriangleCommands = 0;
+        diagShadedTriangleCommands = 0;
+        diagTexturedTriangleCommands = 0;
+        diagMonoQuadCommands = 0;
+        diagShadedQuadCommands = 0;
+        diagTexturedQuadCommands = 0;
+        diagRectTexelZeroSkips = 0;
+        diagRectWriteAttempts = 0;
+        diagRectWritesCommitted = 0;
+        diagRectDrawAreaRejects = 0;
+        diagTexturedMaskRejects = 0;
+      }
     }
 
     vblank = (currentScanline >= visibleScanlines);
@@ -1570,30 +1911,80 @@ void PS1GPU::WriteVRAM(uint32_t x, uint32_t y, uint16_t value) {
   x &= (GPU::VRAM_WIDTH - 1);
   y &= (GPU::VRAM_HEIGHT - 1);
 
-  if (maskBitCheck && (vram[y * GPU::VRAM_WIDTH + x] & 0x8000))
+  if (maskBitCheck && (vram[y * GPU::VRAM_WIDTH + x] & 0x8000)) {
+    if (diagCountingTexturedWrites)
+      diagTexturedMaskRejects++;
     return;
+  }
 
   if (maskBitSet)
     value |= 0x8000;
+
   vram[y * GPU::VRAM_WIDTH + x] = value;
+  if (diagCountingTexturedWrites) {
+    if (diagTexturedPrimitiveKind == DiagTexturedPrimitiveKind::Triangle)
+      diagTriWritesCommitted++;
+    else if (diagTexturedPrimitiveKind == DiagTexturedPrimitiveKind::Rectangle)
+      diagRectWritesCommitted++;
+  }
 }
 
 // ─── Display Dimensions ────────────────────────────────────────────────
 
-uint32_t PS1GPU::GetDisplayWidth() const {
+namespace {
+
+uint32_t GetPs1DisplayDotclockDivisor(uint8_t hRes, uint8_t hRes2) {
   if (hRes2)
-    return 368;
-  static constexpr uint32_t widths[] = {256, 320, 512, 640};
-  return widths[hRes & 3];
+    return 7;
+
+  static constexpr uint32_t kDivisors[] = {10, 8, 5, 4};
+  return kDivisors[hRes & 3];
 }
 
-uint32_t PS1GPU::GetDisplayHeight() const { return vRes480 ? 480 : 240; }
+uint32_t GetPs1NominalDisplayWidth(uint8_t hRes, uint8_t hRes2) {
+  if (hRes2)
+    return 368;
+
+  static constexpr uint32_t kWidths[] = {256, 320, 512, 640};
+  return kWidths[hRes & 3];
+}
+
+} // namespace
+
+uint32_t PS1GPU::GetDisplayWidth() const {
+  const uint32_t divisor = GetPs1DisplayDotclockDivisor(hRes, hRes2);
+  const uint32_t nominalWidth = GetPs1NominalDisplayWidth(hRes, hRes2);
+
+  if (displayHorizEnd <= displayHorizStart || divisor == 0)
+    return nominalWidth;
+
+  const uint32_t range = displayHorizEnd - displayHorizStart;
+  const uint32_t width = (((range / divisor) + 2u) & ~3u);
+  return width == 0 ? nominalWidth : width;
+}
+
+uint32_t PS1GPU::GetDisplayHeight() const {
+  const uint32_t nominalHeight = vRes480 ? 480u : 240u;
+  if (displayVertEnd <= displayVertStart)
+    return nominalHeight;
+
+  const uint32_t height = displayVertEnd - displayVertStart;
+  return height == 0 ? nominalHeight : height;
+}
 
 // ─── Rasterizer Helpers ─────────────────────────────────────────────────
 
 void PS1GPU::PutPixel(int16_t x, int16_t y, uint16_t color) {
-  if (!IsInDrawingArea(x, y))
+  if (!IsInDrawingArea(x, y)) {
+    if (diagCountingTexturedWrites) {
+      if (diagTexturedPrimitiveKind == DiagTexturedPrimitiveKind::Triangle)
+        diagTriDrawAreaRejects++;
+      else if (diagTexturedPrimitiveKind ==
+               DiagTexturedPrimitiveKind::Rectangle)
+        diagRectDrawAreaRejects++;
+    }
     return;
+  }
   if (primSemiTransparent) {
     uint16_t dst = ReadVRAM(static_cast<uint32_t>(x), static_cast<uint32_t>(y));
     color = BlendPixels(color, dst);
@@ -1652,56 +2043,59 @@ void PS1GPU::RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,
                                uint8_t b0, int16_t x1, int16_t y1, uint8_t r1,
                                uint8_t g1, uint8_t b1, int16_t x2, int16_t y2,
                                uint8_t r2, uint8_t g2, uint8_t b2) {
-  // Hardware guard: ignore primitives whose bounding box exceeds 1023 pixels
-  // in either dimension (PS1 GPU behaviour).
-  if (std::max({x0, x1, x2}) - std::min({x0, x1, x2}) > 1023)
+  TriangleRasterVertex vtx0{x0, y0, r0, g0, b0};
+  TriangleRasterVertex vtx1{x1, y1, r1, g1, b1};
+  TriangleRasterVertex vtx2{x2, y2, r2, g2, b2};
+
+  // X spans a signed 11-bit range, while Y spans a signed 10-bit range.
+  if (IsOversizedTriangle(vtx0, vtx1, vtx2))
     return;
-  if (std::max({y0, y1, y2}) - std::min({y0, y1, y2}) > 1023)
+
+  int32_t area = 0;
+  if (!NormalizeTriangleForRaster(vtx0, vtx1, vtx2, area))
     return;
 
   // Bounding box clipped to drawing area
-  int16_t minX =
-      std::max(std::min({x0, x1, x2}), static_cast<int16_t>(drawAreaLeft));
-  int16_t maxX =
-      std::min(std::max({x0, x1, x2}), static_cast<int16_t>(drawAreaRight));
-  int16_t minY =
-      std::max(std::min({y0, y1, y2}), static_cast<int16_t>(drawAreaTop));
-  int16_t maxY =
-      std::min(std::max({y0, y1, y2}), static_cast<int16_t>(drawAreaBottom));
-
-  // 2x signed area — also used as denominator for barycentric weights
-  int32_t area = static_cast<int32_t>(x1 - x0) * (y2 - y0) -
-                 static_cast<int32_t>(x2 - x0) * (y1 - y0);
-  if (area == 0)
-    return;
+  int16_t minX = std::max(std::min({vtx0.x, vtx1.x, vtx2.x}),
+                          static_cast<int16_t>(drawAreaLeft));
+  int16_t maxX = std::min(std::max({vtx0.x, vtx1.x, vtx2.x}),
+                          static_cast<int16_t>(drawAreaRight));
+  int16_t minY = std::max(std::min({vtx0.y, vtx1.y, vtx2.y}),
+                          static_cast<int16_t>(drawAreaTop));
+  int16_t maxY = std::min(std::max({vtx0.y, vtx1.y, vtx2.y}),
+                          static_cast<int16_t>(drawAreaBottom));
+  const bool includeW0 = IsInclusiveTriangleEdge(vtx0, vtx1);
+  const bool includeW1 = IsInclusiveTriangleEdge(vtx1, vtx2);
+  const bool includeW2 = IsInclusiveTriangleEdge(vtx2, vtx0);
+  const int32_t absArea = -area;
 
   for (int16_t py = minY; py <= maxY; py++) {
     for (int16_t px = minX; px <= maxX; px++) {
       // Edge functions
-      int32_t w0 = static_cast<int32_t>(x1 - x0) * (py - y0) -
-                   static_cast<int32_t>(px - x0) * (y1 - y0);
-      int32_t w1 = static_cast<int32_t>(x2 - x1) * (py - y1) -
-                   static_cast<int32_t>(px - x1) * (y2 - y1);
-      int32_t w2 = static_cast<int32_t>(x0 - x2) * (py - y2) -
-                   static_cast<int32_t>(px - x2) * (y0 - y2);
+      int32_t w0 = static_cast<int32_t>(vtx1.x - vtx0.x) * (py - vtx0.y) -
+                   static_cast<int32_t>(px - vtx0.x) * (vtx1.y - vtx0.y);
+      int32_t w1 = static_cast<int32_t>(vtx2.x - vtx1.x) * (py - vtx1.y) -
+                   static_cast<int32_t>(px - vtx1.x) * (vtx2.y - vtx1.y);
+      int32_t w2 = static_cast<int32_t>(vtx0.x - vtx2.x) * (py - vtx2.y) -
+                   static_cast<int32_t>(px - vtx2.x) * (vtx0.y - vtx2.y);
 
-      bool inside = (area > 0) ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-      if (!inside)
+      if (!EdgePassesFillRule(w0, includeW0) ||
+          !EdgePassesFillRule(w1, includeW1) ||
+          !EdgePassesFillRule(w2, includeW2))
         continue;
 
-      // Barycentric interpolation
-      int32_t absArea = std::abs(area);
-      int32_t bw0 = std::abs(w1); // weight for vertex 0
-      int32_t bw1 = std::abs(w2); // weight for vertex 1
-      int32_t bw2 = std::abs(w0); // weight for vertex 2
+      // Edge functions are evaluated on edges opposite each vertex, so rotate
+      // them into vertex weights for interpolation.
+      int32_t bw0 = -w1;
+      int32_t bw1 = -w2;
+      int32_t bw2 = -w0;
 
-      uint8_t r =
-          static_cast<uint8_t>((bw0 * r0 + bw1 * r1 + bw2 * r2) / absArea);
-      uint8_t g =
-          static_cast<uint8_t>((bw0 * g0 + bw1 * g1 + bw2 * g2) / absArea);
-      uint8_t b =
-          static_cast<uint8_t>((bw0 * b0 + bw1 * b1 + bw2 * b2) / absArea);
+      uint8_t r = static_cast<uint8_t>(
+          (bw0 * vtx0.r + bw1 * vtx1.r + bw2 * vtx2.r) / absArea);
+      uint8_t g = static_cast<uint8_t>(
+          (bw0 * vtx0.g + bw1 * vtx1.g + bw2 * vtx2.g) / absArea);
+      uint8_t b = static_cast<uint8_t>(
+          (bw0 * vtx0.b + bw1 * vtx1.b + bw2 * vtx2.b) / absArea);
 
       PutPixel(px, py, ColorToVRAM(r, g, b));
     }
