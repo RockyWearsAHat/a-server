@@ -1,0 +1,743 @@
+/* AIO YouTube TV experience
+   Scoped YouTube styling only. Keep tv.qss for global application defaults.
+*/
+
+#aioYouTubeSidebar {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(8, 9, 12, 0.995),
+    stop:1 rgba(12, 13, 18, 0.995));
+  border-right: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+#aioYouTubeSidebarBrand {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 #ff4e45,
+    stop:1 #ff1f1f);
+  color: #ffffff;
+  border-radius: 22px;
+  font-size: 24px;
+  font-weight: 900;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+#aioYouTubeMainShell {
+  background: qradialgradient(cx:0.16, cy:0.08, radius:1.15,
+    fx:0.16, fy:0.08,
+    stop:0 rgba(78, 24, 20, 0.34),
+    stop:0.34 rgba(22, 24, 31, 0.98),
+    stop:1 rgba(10, 11, 16, 1.0));
+}
+
+#aioYouTubeContentShell,
+#aioTileSlot,
+#guideTextClip,
+#aioTileThumbOverlay {
+  background: transparent;
+}
+
+#aioTopBar {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+    stop:0 rgba(18, 20, 27, 0.96),
+    stop:0.55 rgba(18, 20, 27, 0.93),
+    stop:1 rgba(28, 19, 20, 0.88));
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 28px;
+}
+
+#aioTopBar QPushButton,
+#aioTopBar QToolButton {
+  min-height: 54px;
+  padding: 0 22px;
+  border-radius: 20px;
+  font-size: 16px;
+  font-weight: 800;
+  color: #f7fafc;
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(255, 255, 255, 0.08),
+    stop:1 rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+#aioTopBar QPushButton:hover,
+#aioTopBar QToolButton:hover {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(255, 255, 255, 0.16),
+    stop:1 rgba(255, 255, 255, 0.08));
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+#aioTopBar QPushButton:pressed,
+#aioTopBar QToolButton:pressed {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#aioTopBar QPushButton {
+  min-height: 54px;
+  padding: 0 24px;
+  border-radius: 21px;
+  font-size: 16px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+QPushButton#aioYouTubeAccountButton {
+  min-height: 50px;
+  max-height: 50px;
+  min-width: 50px;
+  max-width: 50px;
+  padding: 0;
+  border-radius: 25px;
+  font-size: 16px;
+  font-weight: 900;
+  color: #f8fbff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+QPushButton#aioYouTubeAccountButton:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+QPushButton#aioYouTubeAccountButton[aio_selected="true"] {
+  background: rgba(255, 95, 88, 0.22);
+  border: 1px solid rgba(255, 118, 112, 0.55);
+}
+
+QPushButton#aioYouTubeAccountButton:pressed {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+#aioYouTubeHeroRow {
+  background: transparent;
+}
+
+#aioYouTubeHeroCard {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+    stop:0 rgba(18, 19, 26, 0.96),
+    stop:0.72 rgba(18, 19, 26, 0.93),
+    stop:1 rgba(27, 19, 20, 0.90));
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 26px;
+}
+
+#aioYouTubeHeroEyebrow,
+#aioYouTubeHeroSpotlightEyebrow {
+  color: #ff776d;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1.4px;
+}
+
+#aioYouTubeHeroTitle {
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 900;
+}
+
+#aioYouTubeHeroBody {
+  color: #d7dce6;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+QLabel[role="ytHeroChip"] {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  color: #f7fbff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+QLabel[role="ytHeroChip"][active="true"] {
+  background: rgba(255, 255, 255, 0.20);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+}
+
+#aioYouTubeHeroSpotlight {
+  background: rgba(8, 10, 16, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+}
+
+#aioYouTubeHeroSpotlightTitle {
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 900;
+}
+
+#aioYouTubeHeroSpotlightMeta {
+  color: #bcc4d2;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+QLabel[role="ytBrowseHeaderTitle"] {
+  color: #ffffff;
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+}
+
+#aioYouTubeGuideSection {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  min-height: 34px;
+}
+
+#aioYouTubeGuideSectionLabel,
+#aioYouTubeGuideSectionChevron {
+  color: #8f8f8f;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+#aioYouTubeGuideItem {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: 22px;
+  min-height: 64px;
+}
+
+#aioYouTubeGuideItem[aio_hovered="true"] {
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+#aioYouTubeGuideItem[aio_selected="true"] {
+  background: rgba(255, 71, 71, 0.16);
+  border: 1px solid rgba(255, 104, 104, 0.40);
+}
+
+#aioYouTubeGuideIconWrap {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 0;
+}
+
+#aioYouTubeGuideIconWrap[aio_hovered="true"] {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+#aioYouTubeGuideIconWrap[aio_selected="true"] {
+  background: #ff3b30;
+}
+
+QLabel[role="guideText"] {
+  color: #f8fafc;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+#aioYouTubeAccountStrip {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(24, 27, 37, 0.98),
+    stop:1 rgba(31, 18, 20, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 26px;
+  min-height: 188px;
+}
+
+#aioYouTubeAccountAvatar {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  color: #f1f1f1;
+  font-size: 16px;
+  font-weight: 900;
+}
+
+#aioYouTubeAccountStrip QLabel[role="ytSectionTitle"] {
+  font-size: 18px;
+}
+
+#aioYouTubeAccountStrip QLabel[role="ytSectionMeta"] {
+  color: #a8a8a8;
+  font-size: 13px;
+}
+
+#aioYouTubeAccountStrip QPushButton {
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 16px;
+  font-size: 15px;
+  color: #ffffff;
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(255, 84, 78, 0.96),
+    stop:1 rgba(255, 38, 38, 0.94));
+  border: 1px solid rgba(255, 176, 170, 0.22);
+}
+
+#aioYouTubeAccountStrip QPushButton[variant="secondary"] {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+}
+
+#aioYouTubeAccountStrip[aio_tile_hovered="true"] {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(28, 30, 40, 0.98),
+    stop:1 rgba(31, 18, 19, 0.96));
+}
+
+#aioYouTubeAccountStrip[aio_tile_selected="true"] {
+  border: 1px solid rgba(255, 110, 102, 0.48);
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(40, 23, 25, 0.99),
+    stop:1 rgba(29, 17, 19, 0.98));
+}
+
+#aioYouTubeStatusLabel {
+  color: #c9c9c9;
+  font-size: 13px;
+}
+
+#aioYouTubeAuthQr {
+  background: #ffffff;
+  border-radius: 18px;
+  border: 1px solid rgba(15, 18, 26, 0.22);
+  color: #111318;
+  padding: 8px;
+}
+
+QLineEdit#aioYouTubeSearch {
+  min-height: 56px;
+  font-size: 17px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+  padding: 0 24px;
+}
+
+QLineEdit#aioYouTubeSearch:focus {
+  border: 2px solid rgba(255, 255, 255, 0.25);
+}
+
+QPushButton#aioYouTubeSearchButton {
+  min-height: 50px;
+  padding: 0 24px;
+  font-size: 15px;
+  border-radius: 999px;
+  color: #ffffff;
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(255, 72, 66, 0.98),
+    stop:1 rgba(255, 24, 24, 0.96));
+  border: 1px solid rgba(255, 164, 156, 0.28);
+}
+
+QPushButton#aioYouTubeSearchButton:hover {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(255, 110, 103, 0.99),
+    stop:1 rgba(255, 54, 54, 0.98));
+}
+
+QPushButton#aioYouTubeSearchButton:pressed {
+  background: rgba(255, 52, 52, 0.92);
+}
+
+QLabel[role="ytPlayerHeaderTitle"] {
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+#aioYouTubePlayerStateChip,
+#aioYouTubePlayerFocusChip {
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 14px;
+  color: #f7fbff;
+  font-size: 13px;
+  font-weight: 800;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+#aioYouTubePlayerStateChip[state="loading"] {
+  background: rgba(88, 133, 255, 0.20);
+  border: 1px solid rgba(140, 176, 255, 0.32);
+}
+
+#aioYouTubePlayerStateChip[state="playing"] {
+  background: rgba(62, 171, 107, 0.18);
+  border: 1px solid rgba(111, 212, 151, 0.26);
+}
+
+#aioYouTubePlayerStateChip[state="paused"] {
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+#aioYouTubePlayerStateChip[state="error"] {
+  background: rgba(255, 96, 96, 0.22);
+  border: 1px solid rgba(255, 140, 140, 0.34);
+}
+
+#aioYouTubePlayerFocusChip[active="true"] {
+  background: rgba(255, 255, 255, 0.13);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+QLabel[role="ytSectionTitle"] {
+  color: #ffffff;
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: 0.15px;
+}
+
+QLabel[role="ytSectionMeta"] {
+  color: #b6bcc9;
+  font-size: 15px;
+}
+
+#aioRailBlock {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(21, 23, 32, 0.94),
+    stop:1 rgba(15, 16, 23, 0.94));
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 32px;
+}
+
+#aioRailBlock QLabel[role="ytSectionTitle"] {
+  font-size: 22px;
+}
+
+#aioRailScroller QScrollBar:horizontal {
+  background: transparent;
+  height: 8px;
+  margin: 8px 18px 0 18px;
+}
+
+#aioRailScroller QScrollBar::handle:horizontal {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  min-width: 64px;
+}
+
+#aioRailScroller QScrollBar::handle:horizontal:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+#aioRailScroller QScrollBar::add-line:horizontal,
+#aioRailScroller QScrollBar::sub-line:horizontal,
+#aioRailScroller QScrollBar::add-page:horizontal,
+#aioRailScroller QScrollBar::sub-page:horizontal {
+  background: transparent;
+  width: 0px;
+}
+
+#aioRailHeader {
+  background: transparent;
+}
+
+#aioTile {
+  background: rgba(17, 19, 26, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 26px;
+}
+
+QLabel[role="thumb"] {
+  background-color: rgba(255, 255, 255, 0.05);
+  border: 2px solid transparent;
+  border-radius: 20px;
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 800;
+}
+
+#aioTileCopy {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(18, 20, 27, 0.06),
+    stop:1 rgba(18, 20, 27, 0.38));
+  border-radius: 0 0 22px 22px;
+}
+
+#aioTile[aio_tile_selected="true"] {
+  background: rgba(33, 35, 46, 0.98);
+  border: 1px solid rgba(255, 87, 87, 0.62);
+}
+
+#aioTile[aio_tile_hovered="true"] {
+  background: rgba(24, 27, 36, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+#aioTile[aio_tile_selected="true"] QLabel[role="thumb"] {
+  border: 2px solid rgba(255, 96, 96, 0.98);
+}
+
+#aioTile[aio_tile_hovered="true"] QLabel[role="thumb"] {
+  border: 2px solid rgba(255, 255, 255, 0.32);
+}
+
+QLabel[role="tileDurationBadge"] {
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  background-color: rgba(0, 0, 0, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: #f8fbff;
+}
+
+QLabel[role="tileBadge"] {
+  border-radius: 10px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 900;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f8fbff;
+}
+
+QLabel[role="tileTitle"] {
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+QLabel[role="tileMeta"] {
+  color: #bcc4d3;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+#aioTileThumbFrame,
+#aioYouTubeRecommendationThumbFrame {
+  border-radius: 20px;
+  background: transparent;
+}
+
+#aioYouTubeVideoStage {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(12, 12, 12, 0.99),
+    stop:1 rgba(17, 17, 17, 0.99));
+}
+
+#aioYouTubeVideoStage[recommendations_active="true"] {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(10, 10, 10, 0.99),
+    stop:1 rgba(15, 15, 15, 0.99));
+}
+
+#aioYouTubePlaybackSurface,
+#aioYouTubePlaybackView {
+  background: #000000;
+  border-radius: 0px;
+}
+
+#aioYouTubePlaybackSurface {
+  border: none;
+}
+
+#aioYouTubeCenterStageCard {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 rgba(20, 22, 31, 0.96),
+    stop:1 rgba(30, 18, 19, 0.95));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 28px;
+}
+
+#aioYouTubeCenterStageEyebrow {
+  color: #ff5d57;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1.6px;
+}
+
+#aioYouTubeCenterStageTitle {
+  color: #ffffff;
+  font-size: 34px;
+  font-weight: 900;
+}
+
+#aioYouTubeCenterStageBody {
+  color: #d3d9e4;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+#aioYouTubeCenterStageAction {
+  color: #aeb7c7;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+#aioYouTubeChromeOverlay {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(0, 0, 0, 0.44),
+    stop:0.18 rgba(0, 0, 0, 0.00),
+    stop:0.78 rgba(0, 0, 0, 0.00),
+    stop:1 rgba(0, 0, 0, 0.52));
+}
+
+#aioYouTubeChromeOverlay[compact_chrome="true"] {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(0, 0, 0, 0.18),
+    stop:0.16 rgba(0, 0, 0, 0.00),
+    stop:0.84 rgba(0, 0, 0, 0.00),
+    stop:1 rgba(0, 0, 0, 0.24));
+}
+
+#aioYouTubeChromeOverlay[recommendations_active="true"] {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(0, 0, 0, 0.66),
+    stop:0.20 rgba(0, 0, 0, 0.28),
+    stop:0.62 rgba(0, 0, 0, 0.48),
+    stop:1 rgba(0, 0, 0, 0.84));
+}
+
+#aioYouTubePlayerStatus {
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.60);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+#aioYouTubePlayerOverlay,
+#aioYouTubePlayerOverlay[player_dock="true"] {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(17, 17, 17, 0.82),
+    stop:1 rgba(10, 10, 10, 0.90));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 28px;
+}
+
+#aioYouTubePlayerOverlay QLabel[role="ytSectionTitle"] {
+  font-size: 22px;
+}
+
+#aioYouTubePlayerOverlay QLabel[role="ytSectionMeta"] {
+  color: #b8b8b8;
+}
+
+#aioYouTubePlayerOverlay[recommendations_active="true"] {
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+    stop:0 rgba(16, 16, 16, 0.94),
+    stop:1 rgba(8, 8, 8, 0.97));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+#aioYouTubePlayerOverlay[recommendations_expanded="true"] {
+  border-radius: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+#aioYouTubeTransportBar {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 20px;
+}
+
+QLabel[role="ytTransportChip"] {
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+QLabel[role="ytTransportChip"][active="true"] {
+  background: rgba(255, 87, 87, 0.24);
+  border: 1px solid rgba(255, 125, 125, 0.34);
+}
+
+QLabel[role="ytTransportChip"][emphasis="true"] {
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+#aioYouTubeTimelineCard {
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(28, 28, 28, 0.94);
+}
+
+#aioYouTubeTimeline {
+  min-height: 34px;
+}
+
+#aioYouTubeTimeline::groove:horizontal {
+  border: none;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+#aioYouTubeTimeline::sub-page:horizontal {
+  border-radius: 3px;
+  background: #ff0000;
+}
+
+#aioYouTubeTimeline::add-page:horizontal {
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#aioYouTubeTimeline::handle:horizontal {
+  background: #ffffff;
+  width: 14px;
+  margin: -7px 0;
+  border-radius: 7px;
+}
+
+#aioYouTubeTimeline::handle:horizontal:hover,
+#aioYouTubeTimeline[selected="true"]::handle:horizontal {
+  background: #ffffff;
+  width: 18px;
+  border-radius: 9px;
+}
+
+#aioYouTubeTimeline[selected="true"]::groove:horizontal {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+#aioYouTubeRecommendationTile {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid transparent;
+  border-radius: 20px;
+  min-height: 236px;
+}
+
+#aioYouTubeRecommendationTile[selected="true"] {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+#aioYouTubeRecommendationTile QLabel[role="thumb"] {
+  border-radius: 16px;
+}
+
+#aioYouTubeRecommendationTile QLabel[role="tileBadge"] {
+  background: rgba(0, 0, 0, 0.56);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+#aioYouTubeRecommendationTile QLabel[role="tileTitle"] {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 700;
+  min-height: 48px;
+  max-height: 48px;
+}
+
+#aioYouTubeRecommendationTile QLabel[role="tileMeta"] {
+  color: #b5b5b5;
+  font-size: 14px;
+}
+
+#aioYouTubeRecommendationTile[selected="true"] QLabel[role="tileMeta"] {
+  color: #edf2ff;
+}
+
+#aioYouTubeRecommendationTile[selected="true"] QLabel[role="thumb"] {
+  border: 2px solid rgba(255, 255, 255, 0.92);
+}

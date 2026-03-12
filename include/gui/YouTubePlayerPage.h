@@ -17,10 +17,14 @@ class QMediaPlayer;
 class QVideoWidget;
 class QVBoxLayout;
 class QWidget;
-class YouTubePlayerOverlay;
+class QGraphicsBlurEffect;
 
 namespace AIO::Streaming {
 class YouTubeService;
+}
+
+namespace AIO::GUI {
+class YouTubePlayerOverlay;
 }
 
 namespace AIO {
@@ -69,6 +73,11 @@ private:
   void syncTimelineFromPlayback(int currentSeconds, int durationSeconds);
   void updatePlaybackSurfaceGeometry();
   void reloadCurrentVideo();
+  void applyVideoBlur(bool enabled);
+  void refreshChromeStateProperties(bool recommendationsActive,
+                                    bool compactChrome);
+  void updateStateChips();
+  void updateCenterStageCard();
 
   QWidget *videoStage_ = nullptr;
   QFrame *surfaceFrame_ = nullptr;
@@ -76,13 +85,21 @@ private:
   QMediaPlayer *mediaPlayer_ = nullptr;
   QAudioOutput *audioOutput_ = nullptr;
   QWidget *chromeOverlay_ = nullptr;
+  QFrame *centerStageCard_ = nullptr;
+  QLabel *centerStageEyebrowLabel_ = nullptr;
+  QLabel *centerStageTitleLabel_ = nullptr;
+  QLabel *centerStageBodyLabel_ = nullptr;
+  QLabel *centerStageActionLabel_ = nullptr;
   QWidget *topBar_ = nullptr;
   QLabel *titleLabel_ = nullptr;
+  QLabel *stateChipLabel_ = nullptr;
+  QLabel *focusChipLabel_ = nullptr;
   QLabel *statusLabel_ = nullptr;
   AIO::GUI::YouTubePlayerOverlay *overlayPanel_ = nullptr;
   QToolButton *backButton_ = nullptr;
   QToolButton *homeButton_ = nullptr;
   QToolButton *reloadButton_ = nullptr;
+  QGraphicsBlurEffect *videoBlurEffect_ = nullptr;
 
   std::vector<AIO::Streaming::VideoContent> recommendedVideos_;
   FocusZone focusZone_ = FocusZone::Web;
@@ -96,8 +113,6 @@ private:
   uint64_t playbackRequestSerial_ = 0;
   uint64_t relatedRequestSerial_ = 0;
   AIO::Streaming::YouTubeService *youTube_ = nullptr;
-
-  // Menu input is routed centrally by MainWindow via synthesized key events.
 };
 
 } // namespace GUI

@@ -82,6 +82,34 @@ TEST_F(PS1GPUTest, TexturedRect_YFlipSamplesTextureBackwards) {
   EXPECT_EQ(gpu->ReadVRAM(0, 1), 0x03E0);
 }
 
+TEST_F(PS1GPUTest, MonoRect_IgnoresGarbageBitsInVariableSizeWord) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+
+  gpu->WriteGP0(0x60FF0000);
+  gpu->WriteGP0(0x00000000);
+  gpu->WriteGP0((1u << 16) | 0x0401u);
+
+  EXPECT_EQ(gpu->ReadVRAM(0, 0), 0x7C00u);
+  EXPECT_EQ(gpu->ReadVRAM(1, 0), 0x0000u);
+}
+
+TEST_F(PS1GPUTest, TexturedRect_IgnoresGarbageBitsInVariableSizeWord) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE4007FFF);
+  gpu->WriteGP0(0xE1001100);
+
+  gpu->WriteVRAM(4, 8, 0x001F);
+
+  gpu->WriteGP0(0x65000000);
+  gpu->WriteGP0(0x00000000);
+  gpu->WriteGP0((8u << 8) | 4u);
+  gpu->WriteGP0((1u << 16) | 0x0401u);
+
+  EXPECT_EQ(gpu->ReadVRAM(0, 0), 0x001Fu);
+  EXPECT_EQ(gpu->ReadVRAM(1, 0), 0x0000u);
+}
+
 TEST_F(PS1GPUTest, CopyRectVRAMtoVRAM_HandlesOverlappingRegions) {
   gpu->WriteVRAM(10, 10, 0x001F);
   gpu->WriteVRAM(11, 10, 0x03E0);
@@ -233,6 +261,39 @@ TEST_F(PS1GPUTest, GP0_TexturedTriangles_UseLowerRightEdgeOwnership) {
   gpu->WriteGP0((8u << 8) | 5u);
 
   EXPECT_EQ(gpu->ReadVRAM(1, 1), 0x03E0u);
+}
+
+TEST_F(PS1GPUTest, GP0_MonoTriangle_RendersWhenTallTriangleCrossesVisibleArea) {
+  gpu->WriteGP0(0xE3000000);
+  gpu->WriteGP0(0xE407FFFF);
+
+  gpu->WriteGP0(0x20FF0000); // Red triangle
+  gpu->WriteGP0((static_cast<uint32_t>(-100) & 0x7FF) << 16 | 100u);
+  gpu->WriteGP0((500u << 16) | 50u);
+  gpu->WriteGP0((500u << 16) | 150u);
+
+  EXPECT_EQ(gpu->ReadVRAM(100, 300), 0x7C00u);
+}
+
+TEST_F(PS1GPUTest, LatchedFramebuffer_UsesContiguousDisplaySnapshot) {
+  gpu->WriteGP1(0x08000002); // 512-pixel mode
+  gpu->WriteGP1(0x05000200); // Display start X = 512
+  gpu->WriteVRAM(512, 0, 0x001Fu);
+  gpu->WriteVRAM(513, 0, 0x03E0u);
+
+  gpu->LatchDisplayBuffer();
+
+  const uint16_t *latched = gpu->GetFramebuffer();
+  ASSERT_NE(latched, nullptr);
+  EXPECT_EQ(gpu->GetFramebufferStride(), gpu->GetDisplayWidth());
+  EXPECT_EQ(latched[0], 0x001Fu);
+  EXPECT_EQ(latched[1], 0x03E0u);
+
+  gpu->WriteVRAM(512, 0, 0x7C00u);
+  EXPECT_EQ(latched[0], 0x001Fu);
+
+  gpu->LatchDisplayBuffer();
+  EXPECT_EQ(gpu->GetFramebuffer()[0], 0x7C00u);
 }
 
 // ─── Tick / VBlank ──────────────────────────────────────────────────────

@@ -436,6 +436,59 @@ void MainWindow::onUIAction(const AIO::GUI::UIActionFrame &frame) {
     nav.apply(frame);
     return;
   }
+
+  if (!current) {
+    return;
+  }
+
+  const bool forwardToStreamingPage =
+      (current == streamingHubPage) || (current == streamingWebPage) ||
+      (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+  if (!forwardToStreamingPage) {
+    return;
+  }
+
+  int qtKey = 0;
+  switch (frame.primary) {
+  case AIO::GUI::UIAction::Up:
+    qtKey = Qt::Key_Up;
+    break;
+  case AIO::GUI::UIAction::Down:
+    qtKey = Qt::Key_Down;
+    break;
+  case AIO::GUI::UIAction::Left:
+    qtKey = Qt::Key_Left;
+    break;
+  case AIO::GUI::UIAction::Right:
+    qtKey = Qt::Key_Right;
+    break;
+  case AIO::GUI::UIAction::Select:
+    qtKey = Qt::Key_Return;
+    break;
+  case AIO::GUI::UIAction::Back:
+    qtKey = Qt::Key_Escape;
+    break;
+  default:
+    break;
+  }
+
+  if (qtKey == 0) {
+    return;
+  }
+
+  QWidget *target = QApplication::focusWidget();
+  if (!target || !target->isVisible()) {
+    target = current;
+  }
+  if (target && target->focusProxy()) {
+    target = target->focusProxy();
+  }
+  if (!target) {
+    return;
+  }
+
+  QKeyEvent event(QEvent::KeyPress, qtKey, Qt::NoModifier);
+  QApplication::sendEvent(target, &event);
 }
 
 } // namespace GUI

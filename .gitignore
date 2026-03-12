@@ -28,6 +28,8 @@ debug.log
 # Diagnostics outputs (regeneratable)
 dumps*/
 *.ppm
+screenshot_*.png
+test_output/
 
 # Local environment secrets
 .env
@@ -65,3 +67,9 @@ wip_local_changes.patch
 untitled:*
 
 _worktrees/
+
+# Core dumps from development (configred to output ./core on my machine)
+core
+
+# System cache file so copilot gets less confused about what commands are available
+.github/SYSTEM.md

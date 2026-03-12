@@ -1,0 +1,111 @@
+{
+  "name": "aioserver-vision-tool",
+  "displayName": "AIOServer Vision Tool",
+  "description": "Language model tool for attaching AIOServer screenshots as real image context during agent execution.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.110.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "private": true,
+  "files": [
+    "extension.js",
+    "package.json",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguageModelTool:aioserver-inspect-screenshot",
+    "onLanguageModelTool:aioserver_inspect_screenshot",
+    "onChatParticipant:local.aioserver-vision"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "package:vsix": "npx @vscode/vsce package --allow-missing-repository",
+    "install:local": "npm run package:vsix && code --install-extension aioserver-vision-tool-0.0.1.vsix --force"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "aioserver.inspectScreenshotManual",
+        "title": "AIOServer: Inspect Screenshot With Copilot Vision"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "local.aioserver-vision",
+        "name": "aioserver-vision",
+        "fullName": "AIOServer Vision",
+        "description": "Inspects AIOServer screenshots with real image input.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "inspect",
+            "description": "Inspect a screenshot. Usage: /inspect /absolute/path/to/image.png :: question"
+          }
+        ]
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "aioserver-inspect-screenshot",
+        "displayName": "Inspect AIOServer Screenshot",
+        "userDescription": "Inspect an AIOServer screenshot or frame capture.",
+        "modelDescription": "Use this tool when you need to analyze an AIOServer screenshot or frame capture during visual testing. It reads the actual PNG or JPEG bytes, sends them to a vision-capable Copilot model as image input together with the question, and returns the model's analysis. Prefer this over reading screenshot files as text.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "imagePath",
+            "question"
+          ],
+          "properties": {
+            "imagePath": {
+              "type": "string",
+              "description": "Absolute path to the screenshot or frame image file."
+            },
+            "question": {
+              "type": "string",
+              "description": "What the model should determine from the screenshot."
+            },
+            "context": {
+              "type": "string",
+              "description": "Optional extra runtime context, expectations, or recent interaction history."
+            }
+          }
+        }
+      },
+      {
+        "name": "aioserver_inspect_screenshot",
+        "displayName": "Inspect AIOServer Screenshot",
+        "userDescription": "Inspect an AIOServer screenshot or frame capture.",
+        "modelDescription": "Use this tool when you need to analyze an AIOServer screenshot or frame capture during visual testing. It reads the actual PNG or JPEG bytes, sends them to a vision-capable Copilot model as image input together with the question, and returns the model's analysis. Prefer this over reading screenshot files as text.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "imagePath",
+            "question"
+          ],
+          "properties": {
+            "imagePath": {
+              "type": "string",
+              "description": "Absolute path to the screenshot or frame image file."
+            },
+            "question": {
+              "type": "string",
+              "description": "What the model should determine from the screenshot."
+            },
+            "context": {
+              "type": "string",
+              "description": "Optional extra runtime context, expectations, or recent interaction history."
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -96,6 +96,7 @@ int PS1::Step() {
 
   // Fire VBlank IRQ on transition into VBlank
   if (!wasInVBlank && gpu->InVBlank()) {
+    gpu->LatchDisplayBuffer();
     interrupts->RequestIRQ(IRQ::VBLANK);
     static int vblankCount = 0;
     if (++vblankCount <= 5) {

@@ -46,7 +46,7 @@ bool IsOversizedTriangle(const TriangleRasterVertex &v0,
                          const TriangleRasterVertex &v1,
                          const TriangleRasterVertex &v2) {
   return std::max({v0.x, v1.x, v2.x}) - std::min({v0.x, v1.x, v2.x}) > 1023 ||
-         std::max({v0.y, v1.y, v2.y}) - std::min({v0.y, v1.y, v2.y}) > 511;
+         std::max({v0.y, v1.y, v2.y}) - std::min({v0.y, v1.y, v2.y}) > 1023;
 }
 
 bool NormalizeTriangleForRaster(TriangleRasterVertex &v0,
@@ -1362,8 +1362,8 @@ void PS1GPU::GP0_MonoRect(const std::vector<uint32_t> &params) {
     w = 16;
     h = 16;
   } else if (params.size() >= 3) {
-    w = params[2] & 0xFFFF;
-    h = params[2] >> 16;
+    w = params[2] & 0x3FF;
+    h = (params[2] >> 16) & 0x1FF;
   }
 
   for (int16_t dy = 0; dy < static_cast<int16_t>(h); dy++) {
@@ -1404,8 +1404,8 @@ void PS1GPU::GP0_TexturedRect(const std::vector<uint32_t> &params) {
     w = 16;
     h = 16;
   } else if (params.size() >= 4) {
-    w = params[3] & 0xFFFF;
-    h = params[3] >> 16;
+    w = params[3] & 0x3FF;
+    h = (params[3] >> 16) & 0x1FF;
   }
 
   bool rawTexture = (cmd & 1);
@@ -1926,6 +1926,28 @@ void PS1GPU::WriteVRAM(uint32_t x, uint32_t y, uint16_t value) {
       diagTriWritesCommitted++;
     else if (diagTexturedPrimitiveKind == DiagTexturedPrimitiveKind::Rectangle)
       diagRectWritesCommitted++;
+  }
+}
+
+void PS1GPU::LatchDisplayBuffer() {
+  const uint32_t width = GetDisplayWidth();
+  const uint32_t height = GetDisplayHeight();
+  if (width == 0 || height == 0) {
+    displayBuffer.clear();
+    displayBufferStride = GPU::VRAM_WIDTH;
+    return;
+  }
+
+  displayBuffer.resize(static_cast<size_t>(width) * height);
+  displayBufferStride = width;
+
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint32_t srcY = (displayVRAMStartY + y) & (GPU::VRAM_HEIGHT - 1);
+    uint16_t *dstRow = displayBuffer.data() + static_cast<size_t>(y) * width;
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint32_t srcX = (displayVRAMStartX + x) & (GPU::VRAM_WIDTH - 1);
+      dstRow[x] = vram[srcY * GPU::VRAM_WIDTH + srcX];
+    }
   }
 }
 

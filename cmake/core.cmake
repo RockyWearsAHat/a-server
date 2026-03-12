@@ -91,6 +91,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/NASAdapter.cpp
     ${PROJECT_ROOT}/src/gui/YouTubeBrowsePage.cpp
     ${PROJECT_ROOT}/src/gui/YouTubePlayerPage.cpp
+    ${PROJECT_ROOT}/src/gui/youtube/YouTubePlayerOverlay.cpp
     ${PROJECT_ROOT}/src/gui/ThumbnailCache.cpp
     ${PROJECT_ROOT}/src/gui/NavigationController.cpp
     ${PROJECT_ROOT}/src/gui/UIActionMapper.cpp
@@ -118,6 +119,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/NASAdapter.h
     ${PROJECT_ROOT}/include/gui/YouTubeBrowsePage.h
     ${PROJECT_ROOT}/include/gui/YouTubePlayerPage.h
+    ${PROJECT_ROOT}/include/gui/youtube/YouTubePlayerOverlay.h
     ${PROJECT_ROOT}/include/gui/ThumbnailCache.h
     ${PROJECT_ROOT}/include/common/Dotenv.h
     ${PROJECT_ROOT}/include/common/Logging.h
@@ -186,6 +188,12 @@ target_precompile_headers(PS1Emulator PRIVATE
 # Set autogen directory for AIOServer
 set_target_properties(AIOServer PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/AIOServer"
+)
+
+add_dependencies(AIOServer QssValidator)
+add_custom_command(TARGET AIOServer POST_BUILD
+    COMMAND "$<TARGET_FILE:QssValidator>" "${PROJECT_ROOT}/assets/qss"
+    COMMENT "Validating QSS stylesheets"
 )
 
 # Sign with get-task-allow so AMFI permits kernel core dumps on macOS Sequoia+

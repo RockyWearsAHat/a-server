@@ -11,9 +11,9 @@
 #include <QJsonParseError>
 #include <QProcess>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
-#include <QStandardPaths>
 #include <QTextStream>
 #include <QUrl>
 #include <QUrlQuery>
@@ -25,6 +25,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace AIO {
@@ -37,12 +38,50 @@ constexpr auto kSettingsApp = "GBAEmulator";
 constexpr auto kYouTubeReadonlyScope =
     "https://www.googleapis.com/auth/youtube.readonly";
 constexpr auto kDefaultYouTubeProxyUrl = "http://127.0.0.1:8916";
+constexpr qint64 kResolvedStreamCacheTtlMs = 5 * 60 * 1000;
+constexpr size_t kResolvedStreamCacheMaxEntries = 128;
+constexpr int kExtraDiscoveryRailsPerLevel = 2;
+
+struct ExtraDiscoveryRailSpec {
+  const char *key;
+  const char *title;
+  const char *subtitle;
+  const char *videoCategoryId;
+};
+
+constexpr ExtraDiscoveryRailSpec kExtraDiscoveryRails[] = {
+    {"science", "Science and tech",
+     "Popular science and technology videos beyond the default home rows.",
+     "28"},
+    {"sports", "Sports highlights",
+     "Top sports clips, commentary, and live-event coverage.", "17"},
+    {"news_more", "News and commentary",
+     "Additional public news and politics videos for deeper browsing.", "25"},
+    {"learning", "How-to and learning",
+     "Tutorials, explainers, and practical learning videos.", "27"},
+    {"film", "Film and animation",
+     "Popular trailers, animation, and film-related uploads.", "1"},
+    {"travel", "Travel and events",
+     "Travel videos, destination guides, and live event content.", "19"},
+    {"comedy", "Comedy picks",
+     "Popular comedy uploads for lighter browsing depth.", "23"},
+    {"lifestyle", "How-to and style",
+     "Lifestyle, design, and style content outside the default rails.", "26"},
+};
 
 struct HttpResponse {
   CURLcode curlCode = CURLE_OK;
   long statusCode = 0;
   std::string body;
 };
+
+struct CachedResolvedStream {
+  YouTubeResolvedStream stream;
+  qint64 expiresAtMs = 0;
+};
+
+std::mutex gResolvedStreamCacheMutex;
+std::unordered_map<std::string, CachedResolvedStream> gResolvedStreamCache;
 
 std::string UrlEncodeQuery(const std::string &text) {
   std::ostringstream enc;
@@ -119,8 +158,7 @@ std::string TrimTrailingSlash(const std::string &value) {
 }
 
 QString ResolveYtDlpExecutable() {
-  const QString configured =
-      qEnvironmentVariable("AIO_YT_DLP_PATH").trimmed();
+  const QString configured = qEnvironmentVariable("AIO_YT_DLP_PATH").trimmed();
   if (!configured.isEmpty()) {
     return QFileInfo(configured).absoluteFilePath();
   }
@@ -136,23 +174,71 @@ QString ResolveYtDlpExecutable() {
 }
 
 std::optional<YouTubeResolvedStream>
+TryGetCachedPlaybackStream(const std::string &videoId) {
+  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+  std::scoped_lock lock(gResolvedStreamCacheMutex);
+
+  const auto it = gResolvedStreamCache.find(videoId);
+  if (it == gResolvedStreamCache.end()) {
+    return std::nullopt;
+  }
+  if (it->second.expiresAtMs <= nowMs) {
+    gResolvedStreamCache.erase(it);
+    return std::nullopt;
+  }
+
+  return it->second.stream;
+}
+
+void CacheResolvedPlaybackStream(const std::string &videoId,
+                                 const YouTubeResolvedStream &stream) {
+  std::scoped_lock lock(gResolvedStreamCacheMutex);
+
+  if (gResolvedStreamCache.size() >= kResolvedStreamCacheMaxEntries) {
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = gResolvedStreamCache.begin();
+         it != gResolvedStreamCache.end();) {
+      if (it->second.expiresAtMs <= nowMs) {
+        it = gResolvedStreamCache.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    if (gResolvedStreamCache.size() >= kResolvedStreamCacheMaxEntries) {
+      gResolvedStreamCache.erase(gResolvedStreamCache.begin());
+    }
+  }
+
+  gResolvedStreamCache[videoId] = {stream, QDateTime::currentMSecsSinceEpoch() +
+                                               kResolvedStreamCacheTtlMs};
+}
+
+std::optional<YouTubeResolvedStream>
 ResolvePlaybackStreamLocally(const std::string &videoId) {
   if (videoId.empty()) {
     return std::nullopt;
   }
 
+  if (const auto cached = TryGetCachedPlaybackStream(videoId);
+      cached.has_value()) {
+    return cached;
+  }
+
   const QString executable = ResolveYtDlpExecutable();
-  const QString videoUrl =
-      QStringLiteral("https://www.youtube.com/watch?v=%1")
-          .arg(QString::fromStdString(videoId));
+  const QString videoUrl = QStringLiteral("https://www.youtube.com/watch?v=%1")
+                               .arg(QString::fromStdString(videoId));
   const QStringList args = {
       QStringLiteral("--dump-single-json"),
       QStringLiteral("--no-playlist"),
       QStringLiteral("--no-warnings"),
       QStringLiteral("--format"),
-      QStringLiteral(
-        "best[protocol=https][ext=mp4][acodec!=none][vcodec!=none]/"
-        "best[protocol=https][acodec!=none][vcodec!=none]"),
+      QStringLiteral("best[height<=720][ext=mp4][acodec!=none][vcodec!=none]/"
+                     "best[height<=720][acodec!=none][vcodec!=none]/"
+                     "best[height<=1080][ext=mp4][acodec!=none][vcodec!=none]/"
+                     "best[height<=1080][acodec!=none][vcodec!=none]/"
+                     "best[ext=mp4][acodec!=none][vcodec!=none]/"
+                     "best[acodec!=none][vcodec!=none]"),
       videoUrl,
   };
 
@@ -210,6 +296,7 @@ ResolvePlaybackStreamLocally(const std::string &videoId) {
       obj.value(QStringLiteral("thumbnail")).toString().toStdString();
   resolved.webpageUrl =
       obj.value(QStringLiteral("webpage_url")).toString(videoUrl).toStdString();
+  CacheResolvedPlaybackStream(videoId, resolved);
   return resolved;
 }
 
@@ -218,6 +305,13 @@ bool EnvFlagEnabled(const char *name) {
     return std::string(value) != "0";
   }
   return false;
+}
+
+void ClearStoredDirectYouTubeCredentials(QSettings &settings) {
+  settings.remove("youtube/oauth/accessToken");
+  settings.remove("youtube/oauth/refreshToken");
+  settings.remove("youtube/oauth/clientId");
+  settings.remove("youtube/oauth/clientSecret");
 }
 
 QString DefaultServerWorkDir() {
@@ -294,6 +388,26 @@ QString JsonString(const QJsonObject &obj, const char *key) {
   return obj.value(QString::fromUtf8(key)).toString();
 }
 
+QString JsonMessageFromResponseBody(const std::string &body) {
+  if (body.empty()) {
+    return {};
+  }
+
+  QJsonParseError error{};
+  const auto doc =
+      QJsonDocument::fromJson(QByteArray::fromStdString(body), &error);
+  if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+    return {};
+  }
+
+  return doc.object().value(QStringLiteral("message")).toString();
+}
+
+bool IsInvalidProxySessionMessage(const QString &message) {
+  return message == QStringLiteral("Unknown YouTube session.") ||
+         message == QStringLiteral("Missing YouTube session id.");
+}
+
 QString PickBestThumb(const QJsonObject &thumbs) {
   auto pick = [&](const char *key) -> QString {
     return thumbs.value(key).toObject().value("url").toString();
@@ -347,25 +461,6 @@ void YouTubeService::loadStoredStateLocked() {
   } else if (EnvFlagEnabled("AIO_YOUTUBE_SERVER_AUTOBOOT")) {
     proxyBaseUrl_ = ResolveAutobootProxyUrl();
   }
-  if (const char *apiKey = std::getenv("YOUTUBE_API_KEY"); apiKey && *apiKey) {
-    apiKey_ = apiKey;
-  }
-  if (const char *accessToken = std::getenv("YOUTUBE_ACCESS_TOKEN");
-      accessToken && *accessToken) {
-    accessToken_ = accessToken;
-  }
-  if (const char *refreshToken = std::getenv("YOUTUBE_REFRESH_TOKEN");
-      refreshToken && *refreshToken) {
-    refreshToken_ = refreshToken;
-  }
-  if (const char *clientId = std::getenv("YOUTUBE_OAUTH_CLIENT_ID");
-      clientId && *clientId) {
-    oauthClientId_ = clientId;
-  }
-  if (const char *clientSecret = std::getenv("YOUTUBE_OAUTH_CLIENT_SECRET");
-      clientSecret && *clientSecret) {
-    oauthClientSecret_ = clientSecret;
-  }
   if (const char *region = std::getenv("YOUTUBE_REGION"); region && *region) {
     regionCode_ = region;
   }
@@ -375,22 +470,13 @@ void YouTubeService::loadStoredStateLocked() {
     proxySessionId_ =
         settings.value("youtube/server/sessionId").toString().toStdString();
   }
-  if (accessToken_.empty()) {
-    accessToken_ =
-        settings.value("youtube/oauth/accessToken").toString().toStdString();
-  }
-  if (refreshToken_.empty()) {
-    refreshToken_ =
-        settings.value("youtube/oauth/refreshToken").toString().toStdString();
-  }
-  if (oauthClientId_.empty()) {
-    oauthClientId_ =
-        settings.value("youtube/oauth/clientId").toString().toStdString();
-  }
-  if (oauthClientSecret_.empty()) {
-    oauthClientSecret_ =
-        settings.value("youtube/oauth/clientSecret").toString().toStdString();
-  }
+  apiKey_.clear();
+  accessToken_.clear();
+  refreshToken_.clear();
+  oauthClientId_.clear();
+  oauthClientSecret_.clear();
+  ClearStoredDirectYouTubeCredentials(settings);
+
   if (accountDisplayName_.empty()) {
     accountDisplayName_ =
         settings.value("youtube/oauth/accountName").toString().toStdString();
@@ -405,8 +491,9 @@ void YouTubeService::loadStoredStateLocked() {
     proxyBaseUrl_ = kDefaultYouTubeProxyUrl;
   }
 
-  authenticated_ = !proxySessionId_.empty() || !apiKey_.empty() ||
-                   !accessToken_.empty() || !refreshToken_.empty();
+  const bool storedAuthenticated =
+      settings.value("youtube/server/authenticated", false).toBool();
+  authenticated_ = !proxySessionId_.empty() && storedAuthenticated;
   stateLoaded_ = true;
 }
 
@@ -414,35 +501,35 @@ void YouTubeService::saveOAuthStateLocked() const {
   QSettings settings(kSettingsOrg, kSettingsApp);
   settings.setValue("youtube/server/sessionId",
                     QString::fromStdString(proxySessionId_));
-  settings.setValue("youtube/oauth/accessToken",
-                    QString::fromStdString(accessToken_));
-  settings.setValue("youtube/oauth/refreshToken",
-                    QString::fromStdString(refreshToken_));
-  settings.setValue("youtube/oauth/clientId",
-                    QString::fromStdString(oauthClientId_));
-  settings.setValue("youtube/oauth/clientSecret",
-                    QString::fromStdString(oauthClientSecret_));
+  settings.setValue("youtube/server/authenticated", authenticated_);
+  ClearStoredDirectYouTubeCredentials(settings);
   settings.setValue("youtube/oauth/accountName",
                     QString::fromStdString(accountDisplayName_));
   settings.setValue("youtube/oauth/accountAvatarUrl",
                     QString::fromStdString(accountAvatarUrl_));
 }
 
-void YouTubeService::clearOAuthStateLocked() {
+void YouTubeService::clearInvalidProxySessionLocked() {
   proxySessionId_.clear();
-  accessToken_.clear();
-  refreshToken_.clear();
   accountDisplayName_.clear();
   accountAvatarUrl_.clear();
-  pendingDeviceAuth_ = PendingDeviceAuth{};
-  authenticated_ = !apiKey_.empty();
+  authenticated_ = false;
 
   QSettings settings(kSettingsOrg, kSettingsApp);
   settings.remove("youtube/server/sessionId");
-  settings.remove("youtube/oauth/accessToken");
-  settings.remove("youtube/oauth/refreshToken");
+  settings.remove("youtube/server/authenticated");
   settings.remove("youtube/oauth/accountName");
   settings.remove("youtube/oauth/accountAvatarUrl");
+}
+
+void YouTubeService::clearOAuthStateLocked() {
+  clearInvalidProxySessionLocked();
+  accessToken_.clear();
+  refreshToken_.clear();
+  pendingDeviceAuth_ = PendingDeviceAuth{};
+
+  QSettings settings(kSettingsOrg, kSettingsApp);
+  ClearStoredDirectYouTubeCredentials(settings);
 }
 
 bool YouTubeService::usingProxyServerLocked() const {
@@ -455,21 +542,10 @@ void YouTubeService::ensureAuthenticatedFromEnvironment() {
 }
 
 bool YouTubeService::authenticate(const StreamingCredentials &creds) {
+  (void)creds;
   std::lock_guard<std::mutex> lock(mutex_);
   loadStoredStateLocked();
-
-  if (!creds.apiKey.empty()) {
-    apiKey_ = creds.apiKey;
-  }
-  if (!creds.accessToken.empty()) {
-    accessToken_ = creds.accessToken;
-  }
-  if (!creds.refreshToken.empty()) {
-    refreshToken_ = creds.refreshToken;
-  }
-
-  authenticated_ = !proxySessionId_.empty() || !apiKey_.empty() ||
-                   !accessToken_.empty() || !refreshToken_.empty();
+  authenticated_ = !proxySessionId_.empty();
   saveOAuthStateLocked();
   return authenticated_;
 }
@@ -484,8 +560,7 @@ bool YouTubeService::hasOAuthAccess() const {
   if (!stateLoaded_) {
     const_cast<YouTubeService *>(this)->loadStoredStateLocked();
   }
-  return !proxySessionId_.empty() || !accessToken_.empty() ||
-         !refreshToken_.empty();
+  return authenticated_ && !proxySessionId_.empty();
 }
 
 bool YouTubeService::hasDeviceAuthClient() const {
@@ -493,7 +568,7 @@ bool YouTubeService::hasDeviceAuthClient() const {
   if (!stateLoaded_) {
     const_cast<YouTubeService *>(this)->loadStoredStateLocked();
   }
-  return !proxyBaseUrl_.empty() || !oauthClientId_.empty();
+  return !proxyBaseUrl_.empty();
 }
 
 void YouTubeService::logout() {
@@ -585,316 +660,142 @@ bool YouTubeService::revokeTokenBestEffort(const std::string &token) const {
 YouTubeDeviceAuthSession YouTubeService::beginDeviceAuth() {
   ensureAuthenticatedFromEnvironment();
 
+  YouTubeDeviceAuthSession session;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     loadStoredStateLocked();
-    if (usingProxyServerLocked()) {
-      YouTubeDeviceAuthSession session;
-      session.available = true;
-
-      const auto response = PerformHttpRequest(
-          proxyBaseUrl_ + "/api/youtube/device/start", "{}",
-          {"Accept: application/json", "Content-Type: application/json"}, 20L);
-      const auto doc =
-          QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
-      const auto obj = doc.object();
-      if (response.curlCode != CURLE_OK) {
-        session.statusMessage =
-            "Could not reach the YouTube auth server. Start the Node server or "
-            "enable AIO_YOUTUBE_SERVER_AUTOBOOT.";
-        return session;
-      }
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        QString statusMessage = JsonString(obj, "message");
-        const int upstreamStatus =
-            obj.value(QStringLiteral("upstreamStatus")).toInt();
-        if (statusMessage.isEmpty()) {
-          statusMessage =
-              QStringLiteral("YouTube auth server returned HTTP %1.")
-                  .arg(response.statusCode);
-        } else if (upstreamStatus > 0) {
-          statusMessage +=
-              QStringLiteral(" (Google HTTP %1)").arg(upstreamStatus);
-        }
-        session.statusMessage = statusMessage.toStdString();
-        return session;
-      }
-
-      proxySessionId_ = JsonString(obj, "sessionId").toStdString();
-      accountDisplayName_ = JsonString(obj, "accountDisplayName").toStdString();
-      accountAvatarUrl_ = JsonString(obj, "accountAvatarUrl").toStdString();
-      authenticated_ = obj.value(QStringLiteral("authenticated")).toBool();
-
-      session.active = obj.value(QStringLiteral("active")).toBool();
-      session.authenticated = authenticated_;
-      session.verificationUrl =
-          JsonString(obj, "verificationUrl").toStdString();
-      session.verificationUrlComplete =
-          JsonString(obj, "verificationUrlComplete").toStdString();
-      session.userCode = JsonString(obj, "userCode").toStdString();
-      QString statusMessage = JsonString(obj, "statusMessage");
-      if (statusMessage.isEmpty()) {
-        statusMessage = obj.value(QStringLiteral("message")).toString();
-      }
-      session.statusMessage = statusMessage.toStdString();
-      session.pollIntervalSeconds = std::max(
-          1, obj.value(QStringLiteral("pollIntervalSeconds")).toInt(5));
-      session.expiresInSeconds =
-          std::max(0, obj.value(QStringLiteral("expiresInSeconds")).toInt());
-      session.secondsRemaining =
-          std::max(0, obj.value(QStringLiteral("secondsRemaining")).toInt());
-      saveOAuthStateLocked();
+    session.available = usingProxyServerLocked();
+    session.authenticated = !proxySessionId_.empty();
+    if (!usingProxyServerLocked()) {
+      session.needsClientConfiguration = true;
+      session.statusMessage =
+          "YouTube auth server is not configured. Set "
+          "AIO_YOUTUBE_SERVER_AUTOBOOT=1 or AIO_YOUTUBE_SERVER_URL.";
       return session;
     }
-  }
 
-  std::string clientId;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    loadStoredStateLocked();
-    clientId = oauthClientId_;
-  }
+    const auto response = PerformHttpRequest(
+        proxyBaseUrl_ + "/api/youtube/device/start", "{}",
+        {"Accept: application/json", "Content-Type: application/json"}, 20L);
+    const auto doc =
+        QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
+    const auto obj = doc.object();
+    if (response.curlCode != CURLE_OK) {
+      session.statusMessage =
+          "Could not reach the YouTube auth server. Start the Node server or "
+          "enable AIO_YOUTUBE_SERVER_AUTOBOOT.";
+      return session;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      QString statusMessage = JsonString(obj, "message");
+      const int upstreamStatus =
+          obj.value(QStringLiteral("upstreamStatus")).toInt();
+      if (statusMessage.isEmpty()) {
+        statusMessage = QStringLiteral("YouTube auth server returned HTTP %1.")
+                            .arg(response.statusCode);
+      } else if (upstreamStatus > 0) {
+        statusMessage +=
+            QStringLiteral(" (Google HTTP %1)").arg(upstreamStatus);
+      }
+      session.statusMessage = statusMessage.toStdString();
+      return session;
+    }
 
-  YouTubeDeviceAuthSession session;
-  session.available = !clientId.empty();
-  session.authenticated = hasOAuthAccess();
-  if (clientId.empty()) {
-    session.needsClientConfiguration = true;
-    session.statusMessage =
-        "Set YOUTUBE_OAUTH_CLIENT_ID to enable TV code sign-in.";
-    return session;
-  }
+    proxySessionId_ = JsonString(obj, "sessionId").toStdString();
+    accountDisplayName_ = JsonString(obj, "accountDisplayName").toStdString();
+    accountAvatarUrl_ = JsonString(obj, "accountAvatarUrl").toStdString();
+    authenticated_ = obj.value(QStringLiteral("authenticated")).toBool();
 
-  const auto response =
-      PerformHttpRequest("https://oauth2.googleapis.com/device/code",
-                         "client_id=" + UrlEncodeQuery(clientId) +
-                             "&scope=" + UrlEncodeQuery(kYouTubeReadonlyScope),
-                         {"Accept: application/json",
-                          "Content-Type: application/x-www-form-urlencoded"},
-                         20L);
-  if (response.curlCode != CURLE_OK || response.statusCode < 200 ||
-      response.statusCode >= 300) {
-    session.statusMessage = "Could not start Google device sign-in.";
-    return session;
-  }
-
-  const auto doc =
-      QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
-  const auto obj = doc.object();
-  const QString deviceCode = obj.value("device_code").toString();
-  const QString userCode = obj.value("user_code").toString();
-  const QString verificationUrl =
-      obj.value("verification_url")
-          .toString(obj.value("verification_uri").toString());
-  const QString verificationUrlComplete =
-      obj.value("verification_url_complete")
-          .toString(obj.value("verification_uri_complete").toString());
-  if (deviceCode.isEmpty() || userCode.isEmpty() || verificationUrl.isEmpty()) {
-    session.statusMessage =
-        "Google sign-in returned an incomplete device code response.";
-    return session;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pendingDeviceAuth_.active = true;
-    pendingDeviceAuth_.deviceCode = deviceCode.toStdString();
-    pendingDeviceAuth_.userCode = userCode.toStdString();
-    pendingDeviceAuth_.verificationUrl = verificationUrl.toStdString();
-    pendingDeviceAuth_.verificationUrlComplete =
-        verificationUrlComplete.toStdString();
-    pendingDeviceAuth_.pollIntervalSeconds =
-        std::max(5, obj.value("interval").toInt(5));
-    pendingDeviceAuth_.expiresInSeconds =
-        std::max(60, obj.value("expires_in").toInt(1800));
-    pendingDeviceAuth_.createdAtSeconds = QDateTime::currentSecsSinceEpoch();
-    pendingDeviceAuth_.statusMessage = "Approve the code on your phone or "
-                                       "laptop to finish connecting YouTube.";
-
-    session.available = true;
-    session.active = true;
-    session.authenticated = !accessToken_.empty() || !refreshToken_.empty();
-    session.verificationUrl = pendingDeviceAuth_.verificationUrl;
+    session.active = obj.value(QStringLiteral("active")).toBool();
+    session.authenticated = authenticated_;
+    session.verificationUrl = JsonString(obj, "verificationUrl").toStdString();
     session.verificationUrlComplete =
-        pendingDeviceAuth_.verificationUrlComplete;
-    session.userCode = pendingDeviceAuth_.userCode;
-    session.pollIntervalSeconds = pendingDeviceAuth_.pollIntervalSeconds;
-    session.expiresInSeconds = pendingDeviceAuth_.expiresInSeconds;
-    session.secondsRemaining = pendingDeviceAuth_.expiresInSeconds;
-    session.statusMessage = pendingDeviceAuth_.statusMessage;
+        JsonString(obj, "verificationUrlComplete").toStdString();
+    session.userCode = JsonString(obj, "userCode").toStdString();
+    QString statusMessage = JsonString(obj, "statusMessage");
+    if (statusMessage.isEmpty()) {
+      statusMessage = obj.value(QStringLiteral("message")).toString();
+    }
+    session.statusMessage = statusMessage.toStdString();
+    session.pollIntervalSeconds =
+        std::max(1, obj.value(QStringLiteral("pollIntervalSeconds")).toInt(5));
+    session.expiresInSeconds =
+        std::max(0, obj.value(QStringLiteral("expiresInSeconds")).toInt());
+    session.secondsRemaining =
+        std::max(0, obj.value(QStringLiteral("secondsRemaining")).toInt());
+    saveOAuthStateLocked();
+    return session;
   }
-
-  return session;
 }
 
 YouTubeDeviceAuthSession YouTubeService::pollDeviceAuth() {
   ensureAuthenticatedFromEnvironment();
 
+  YouTubeDeviceAuthSession session;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     loadStoredStateLocked();
-    if (usingProxyServerLocked()) {
-      YouTubeDeviceAuthSession session;
-      session.available = true;
-      session.authenticated = !proxySessionId_.empty();
+    session.available = usingProxyServerLocked();
+    session.authenticated = !proxySessionId_.empty();
 
-      if (proxySessionId_.empty()) {
-        session.statusMessage =
-            "No YouTube device-auth session is active. Start sign-in again.";
-        return session;
-      }
-
-      QJsonObject payload;
-      payload.insert(QStringLiteral("sessionId"),
-                     QString::fromStdString(proxySessionId_));
-      const auto response = PerformHttpRequest(
-          proxyBaseUrl_ + "/api/youtube/device/poll",
-          QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString(),
-          {"Accept: application/json", "Content-Type: application/json"}, 20L);
-      if (response.curlCode != CURLE_OK || response.statusCode < 200 ||
-          response.statusCode >= 300) {
-        session.statusMessage =
-            "Could not reach the YouTube auth server while polling.";
-        return session;
-      }
-
-      const auto doc =
-          QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
-      const auto obj = doc.object();
-      accountDisplayName_ = JsonString(obj, "accountDisplayName").toStdString();
-      accountAvatarUrl_ = JsonString(obj, "accountAvatarUrl").toStdString();
-      authenticated_ = obj.value(QStringLiteral("authenticated")).toBool();
-      session.active = obj.value(QStringLiteral("active")).toBool();
-      session.authenticated = authenticated_;
-      session.verificationUrl =
-          JsonString(obj, "verificationUrl").toStdString();
-      session.verificationUrlComplete =
-          JsonString(obj, "verificationUrlComplete").toStdString();
-      session.userCode = JsonString(obj, "userCode").toStdString();
-      QString statusMessage = JsonString(obj, "statusMessage");
-      if (statusMessage.isEmpty()) {
-        statusMessage = obj.value(QStringLiteral("message")).toString();
-      }
-      session.statusMessage = statusMessage.toStdString();
-      session.pollIntervalSeconds = std::max(
-          1, obj.value(QStringLiteral("pollIntervalSeconds")).toInt(5));
-      session.expiresInSeconds =
-          std::max(0, obj.value(QStringLiteral("expiresInSeconds")).toInt());
-      session.secondsRemaining =
-          std::max(0, obj.value(QStringLiteral("secondsRemaining")).toInt());
-      saveOAuthStateLocked();
+    if (!usingProxyServerLocked()) {
+      session.needsClientConfiguration = true;
+      session.statusMessage =
+          "YouTube auth server is not configured. Set "
+          "AIO_YOUTUBE_SERVER_AUTOBOOT=1 or AIO_YOUTUBE_SERVER_URL.";
       return session;
     }
-  }
-
-  PendingDeviceAuth pending;
-  std::string clientId;
-  std::string clientSecret;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    loadStoredStateLocked();
-    pending = pendingDeviceAuth_;
-    clientId = oauthClientId_;
-    clientSecret = oauthClientSecret_;
-  }
-
-  YouTubeDeviceAuthSession session;
-  session.available = !clientId.empty();
-  session.authenticated = hasOAuthAccess();
-  session.active = pending.active;
-  session.verificationUrl = pending.verificationUrl;
-  session.verificationUrlComplete = pending.verificationUrlComplete;
-  session.userCode = pending.userCode;
-  session.pollIntervalSeconds = pending.pollIntervalSeconds;
-  session.expiresInSeconds = pending.expiresInSeconds;
-  session.secondsRemaining =
-      std::max(0, pending.expiresInSeconds -
-                      static_cast<int>(QDateTime::currentSecsSinceEpoch() -
-                                       pending.createdAtSeconds));
-  session.statusMessage = pending.statusMessage;
-
-  if (!pending.active || clientId.empty()) {
-    return session;
-  }
-  if (session.secondsRemaining <= 0) {
-    cancelDeviceAuth();
-    session.active = false;
-    session.statusMessage =
-        "This connection code expired. Start sign-in again.";
-    return session;
-  }
-
-  std::string fields =
-      "client_id=" + UrlEncodeQuery(clientId) +
-      "&device_code=" + UrlEncodeQuery(pending.deviceCode) +
-      "&grant_type=urn:ietf:params:oauth:grant-type:device_code";
-  if (!clientSecret.empty()) {
-    fields += "&client_secret=" + UrlEncodeQuery(clientSecret);
-  }
-
-  const auto response =
-      PerformHttpRequest("https://oauth2.googleapis.com/token", fields,
-                         {"Accept: application/json",
-                          "Content-Type: application/x-www-form-urlencoded"},
-                         20L);
-  if (response.curlCode != CURLE_OK) {
-    session.statusMessage =
-        "Could not reach Google while waiting for approval.";
-    return session;
-  }
-
-  const auto doc =
-      QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
-  const auto obj = doc.object();
-  const QString accessToken = obj.value("access_token").toString();
-  if (!accessToken.isEmpty()) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    accessToken_ = accessToken.toStdString();
-    if (const QString refreshToken = obj.value("refresh_token").toString();
-        !refreshToken.isEmpty()) {
-      refreshToken_ = refreshToken.toStdString();
+    if (proxySessionId_.empty()) {
+      session.statusMessage =
+          "No YouTube device-auth session is active. Start sign-in again.";
+      return session;
     }
-    pendingDeviceAuth_ = PendingDeviceAuth{};
-    authenticated_ = true;
-    accountDisplayName_.clear();
+
+    QJsonObject payload;
+    payload.insert(QStringLiteral("sessionId"),
+                   QString::fromStdString(proxySessionId_));
+    const auto response = PerformHttpRequest(
+        proxyBaseUrl_ + "/api/youtube/device/poll",
+        QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString(),
+        {"Accept: application/json", "Content-Type: application/json"}, 20L);
+    if (response.curlCode != CURLE_OK || response.statusCode < 200 ||
+        response.statusCode >= 300) {
+      session.statusMessage =
+          "Could not reach the YouTube auth server while polling.";
+      return session;
+    }
+
+    const auto doc =
+        QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
+    const auto obj = doc.object();
+    accountDisplayName_ = JsonString(obj, "accountDisplayName").toStdString();
+    accountAvatarUrl_ = JsonString(obj, "accountAvatarUrl").toStdString();
+    authenticated_ = obj.value(QStringLiteral("authenticated")).toBool();
+    session.active = obj.value(QStringLiteral("active")).toBool();
+    session.authenticated = authenticated_;
+    session.verificationUrl = JsonString(obj, "verificationUrl").toStdString();
+    session.verificationUrlComplete =
+        JsonString(obj, "verificationUrlComplete").toStdString();
+    session.userCode = JsonString(obj, "userCode").toStdString();
+    QString statusMessage = JsonString(obj, "statusMessage");
+    if (statusMessage.isEmpty()) {
+      statusMessage = obj.value(QStringLiteral("message")).toString();
+    }
+    session.statusMessage = statusMessage.toStdString();
+    session.pollIntervalSeconds =
+        std::max(1, obj.value(QStringLiteral("pollIntervalSeconds")).toInt(5));
+    session.expiresInSeconds =
+        std::max(0, obj.value(QStringLiteral("expiresInSeconds")).toInt());
+    session.secondsRemaining =
+        std::max(0, obj.value(QStringLiteral("secondsRemaining")).toInt());
     saveOAuthStateLocked();
-
-    session.active = false;
-    session.authenticated = true;
-    session.statusMessage = "YouTube account connected.";
     return session;
   }
-
-  const QString error = obj.value("error").toString();
-  if (error == QStringLiteral("authorization_pending")) {
-    session.statusMessage = "Waiting for approval from Google...";
-    return session;
-  }
-  if (error == QStringLiteral("slow_down")) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pendingDeviceAuth_.pollIntervalSeconds += 5;
-    session.pollIntervalSeconds = pendingDeviceAuth_.pollIntervalSeconds;
-    session.statusMessage =
-        "Google asked for slower polling. Still waiting for approval...";
-    return session;
-  }
-
-  cancelDeviceAuth();
-  session.active = false;
-  if (error == QStringLiteral("access_denied")) {
-    session.statusMessage = "YouTube sign-in was denied.";
-  } else {
-    session.statusMessage = "YouTube sign-in failed or expired.";
-  }
-  return session;
 }
 
 void YouTubeService::cancelDeviceAuth() {
   std::lock_guard<std::mutex> lock(mutex_);
   loadStoredStateLocked();
-  if (usingProxyServerLocked()) {
-    return;
-  }
   pendingDeviceAuth_ = PendingDeviceAuth{};
 }
 
@@ -904,83 +805,58 @@ std::string YouTubeService::getAccountDisplayName() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     loadStoredStateLocked();
+    if (!authenticated_) {
+      return {};
+    }
     if (!accountDisplayName_.empty()) {
       return accountDisplayName_;
     }
-    if (usingProxyServerLocked() && proxySessionId_.empty()) {
+    if (!usingProxyServerLocked() || proxySessionId_.empty()) {
       return {};
     }
   }
 
-  if (!hasOAuthAccess()) {
-    return {};
-  }
-
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (usingProxyServerLocked()) {
-      QUrl url(QString::fromStdString(proxyBaseUrl_ + "/api/youtube/account"));
-      std::vector<std::string> headers = {"Accept: application/json"};
-      if (!proxySessionId_.empty()) {
-        headers.push_back("X-AIO-YouTube-Session: " + proxySessionId_);
-      }
-      const auto response =
-          PerformHttpRequest(url.toString().toStdString(), {}, headers, 20L);
-      if (response.curlCode != CURLE_OK || response.statusCode < 200 ||
-          response.statusCode >= 300) {
-        return {};
-      }
-
-      const auto doc =
-          QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
-      const auto obj = doc.object();
-      const std::string name =
-          JsonString(obj, "accountDisplayName").toStdString();
-      const std::string avatarUrl =
-          JsonString(obj, "accountAvatarUrl").toStdString();
-      if (!name.empty()) {
-        accountDisplayName_ = name;
-      }
-      if (!avatarUrl.empty()) {
-        accountAvatarUrl_ = avatarUrl;
-      }
-      saveOAuthStateLocked();
-      return name;
+    QUrl url(QString::fromStdString(proxyBaseUrl_ + "/api/youtube/account"));
+    std::vector<std::string> headers = {"Accept: application/json"};
+    if (!proxySessionId_.empty()) {
+      headers.push_back("X-AIO-YouTube-Session: " + proxySessionId_);
     }
-  }
+    const auto response =
+        PerformHttpRequest(url.toString().toStdString(), {}, headers, 20L);
+    if (response.curlCode != CURLE_OK) {
+      return {};
+    }
+    if (response.statusCode == 401) {
+      const QString message = JsonMessageFromResponseBody(response.body);
+      if (IsInvalidProxySessionMessage(message)) {
+        clearInvalidProxySessionLocked();
+        saveOAuthStateLocked();
+      }
+      return {};
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return {};
+    }
 
-  const std::string response =
-      makeApiRequest("channels", "part=snippet&mine=true", true);
-  if (response.empty()) {
-    return {};
-  }
-
-  const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(response));
-  const auto items = doc.object().value("items").toArray();
-  if (items.isEmpty()) {
-    return {};
-  }
-
-  const std::string name = items.first()
-                               .toObject()
-                               .value("snippet")
-                               .toObject()
-                               .value("title")
-                               .toString()
-                               .toStdString();
-  if (!name.empty()) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    accountDisplayName_ = name;
-    const auto thumbs = items.first()
-                            .toObject()
-                            .value("snippet")
-                            .toObject()
-                            .value("thumbnails")
-                            .toObject();
-    accountAvatarUrl_ = PickBestThumb(thumbs).toStdString();
+    const auto doc =
+        QJsonDocument::fromJson(QByteArray::fromStdString(response.body));
+    const auto obj = doc.object();
+    authenticated_ = obj.value(QStringLiteral("authenticated")).toBool();
+    const std::string name =
+        JsonString(obj, "accountDisplayName").toStdString();
+    const std::string avatarUrl =
+        JsonString(obj, "accountAvatarUrl").toStdString();
+    if (!name.empty()) {
+      accountDisplayName_ = name;
+    }
+    if (!avatarUrl.empty()) {
+      accountAvatarUrl_ = avatarUrl;
+    }
     saveOAuthStateLocked();
+    return name;
   }
-  return name;
 }
 
 std::string YouTubeService::getAccountAvatarUrl() {
@@ -989,6 +865,9 @@ std::string YouTubeService::getAccountAvatarUrl() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     loadStoredStateLocked();
+    if (!authenticated_) {
+      return {};
+    }
     if (!accountAvatarUrl_.empty()) {
       return accountAvatarUrl_;
     }
@@ -1038,81 +917,24 @@ std::string YouTubeService::makeApiRequest(const std::string &endpoint,
           response.statusCode < 300) {
         return response.body;
       }
-      if (requireAuth || (apiKey_.empty() && accessToken_.empty())) {
-        if (response.statusCode >= 400) {
-          std::cerr << "[YouTube] Proxy request returned HTTP "
-                    << response.statusCode << " for endpoint " << endpoint
-                    << std::endl;
+      if (response.statusCode >= 400) {
+        const QString message = JsonMessageFromResponseBody(response.body);
+        if (response.statusCode == 401 &&
+            IsInvalidProxySessionMessage(message)) {
+          clearInvalidProxySessionLocked();
+          saveOAuthStateLocked();
         }
-        return {};
+        std::cerr << "[YouTube] Proxy request returned HTTP "
+                  << response.statusCode << " for endpoint " << endpoint
+                  << std::endl;
       }
-      std::cerr << "[YouTube] Proxy unavailable, falling back to direct API"
-                << std::endl;
-    }
-  }
-
-  std::string apiKey;
-  std::string accessToken;
-  bool canRefresh = false;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    loadStoredStateLocked();
-    if (requireAuth && accessToken_.empty() && !refreshToken_.empty()) {
-      refreshAccessTokenLocked();
-    }
-    apiKey = apiKey_;
-    accessToken = accessToken_;
-    canRefresh = !refreshToken_.empty() && !oauthClientId_.empty();
-
-    if (apiKey.empty() && accessToken.empty()) {
-      std::cerr << "[YouTube] Missing credentials. Set YOUTUBE_API_KEY in .env"
-                << std::endl;
-      return {};
-    }
-    if (requireAuth && accessToken.empty()) {
-      std::cerr << "[YouTube] OAuth access token required for endpoint: "
-                << endpoint << std::endl;
       return {};
     }
   }
-
-  auto perform = [&](const std::string &token) {
-    std::string url = "https://www.googleapis.com/youtube/v3/" + endpoint;
-    if (!params.empty()) {
-      url += "?" + params;
-    }
-    if (!apiKey.empty()) {
-      url += (params.empty() ? "?" : "&");
-      url += "key=" + apiKey;
-    }
-
-    std::vector<std::string> headers = {"Accept: application/json"};
-    if (!token.empty()) {
-      headers.push_back("Authorization: Bearer " + token);
-    }
-    return PerformHttpRequest(url, {}, headers, 30L);
-  };
-
-  auto response = perform(accessToken);
-  if (response.statusCode == 401 && requireAuth && canRefresh) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (refreshAccessTokenLocked()) {
-      accessToken = accessToken_;
-      response = perform(accessToken);
-    }
-  }
-
-  if (response.curlCode != CURLE_OK) {
-    std::cerr << "[YouTube] API request failed: "
-              << curl_easy_strerror(response.curlCode) << std::endl;
-    return {};
-  }
-  if (response.statusCode >= 400) {
-    std::cerr << "[YouTube] API request returned HTTP " << response.statusCode
-              << " for endpoint " << endpoint << std::endl;
-  }
-
-  return response.body;
+  std::cerr << "[YouTube] YouTube auth server is unavailable. Set "
+               "AIO_YOUTUBE_SERVER_AUTOBOOT=1 or AIO_YOUTUBE_SERVER_URL."
+            << std::endl;
+  return {};
 }
 
 std::vector<VideoContent>
@@ -1155,6 +977,7 @@ YouTubeService::parseVideoResults(const std::string &jsonResponse) {
     if (!snippet.isEmpty()) {
       vc.title = snippet.value("title").toString().toStdString();
       vc.description = snippet.value("description").toString().toStdString();
+      vc.category = snippet.value("channelTitle").toString().toStdString();
       const QJsonObject thumbs = snippet.value("thumbnails").toObject();
       if (!thumbs.isEmpty()) {
         vc.thumbnailUrl = PickBestThumb(thumbs).toStdString();
@@ -1250,7 +1073,29 @@ YouTubeService::fetchVideosByIds(const std::vector<std::string> &ids) {
     joined += ids[i];
   }
   return parseVideoResults(
-      makeApiRequest("videos", "part=snippet&id=" + joined, true));
+      makeApiRequest("videos", "part=snippet&id=" + joined));
+}
+
+std::vector<VideoContent>
+YouTubeService::fetchMostPopularByCategory(const std::string &videoCategoryId,
+                                           int limit) {
+  if (videoCategoryId.empty() || limit <= 0) {
+    return {};
+  }
+
+  ensureAuthenticatedFromEnvironment();
+
+  std::string region;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    region = regionCode_;
+  }
+
+  std::string params =
+      "part=snippet,contentDetails&chart=mostPopular&maxResults=" +
+      std::to_string(limit) + "&regionCode=" + region +
+      "&videoCategoryId=" + UrlEncodeQuery(videoCategoryId);
+  return parseVideoResults(makeApiRequest("videos", params));
 }
 
 std::string YouTubeService::getMinePlaylistId(const std::string &playlistKey) {
@@ -1413,10 +1258,51 @@ YouTubeService::getRelatedVideos(const std::string &videoId, int limit) {
     region = regionCode_;
   }
 
-  std::string params =
-      "part=snippet&type=video&relatedToVideoId=" + UrlEncodeQuery(videoId) +
-      "&maxResults=" + std::to_string(limit) + "&regionCode=" + region;
+  std::string metadataParams = "part=snippet&id=" + UrlEncodeQuery(videoId);
+  const std::string metadataResponse = makeApiRequest("videos", metadataParams);
+
+  QString relatedQuery;
+  if (!metadataResponse.empty()) {
+    const QByteArray bytes(metadataResponse.data(),
+                           static_cast<int>(metadataResponse.size()));
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes, &err);
+    if (err.error == QJsonParseError::NoError && doc.isObject()) {
+      const QJsonArray items = doc.object().value("items").toArray();
+      if (!items.isEmpty() && items.first().isObject()) {
+        const QJsonObject snippet =
+            items.first().toObject().value("snippet").toObject();
+        const QString title = snippet.value("title").toString().simplified();
+        const QString channel =
+            snippet.value("channelTitle").toString().simplified();
+        if (!title.isEmpty() && !channel.isEmpty()) {
+          relatedQuery = QStringLiteral("%1 %2").arg(channel, title);
+        } else if (!title.isEmpty()) {
+          relatedQuery = title;
+        } else if (!channel.isEmpty()) {
+          relatedQuery = channel;
+        }
+      }
+    }
+  }
+
+  if (relatedQuery.isEmpty()) {
+    auto fallback = getTrending(limit);
+    for (auto &item : fallback) {
+      item.category = "Trending";
+    }
+    return fallback;
+  }
+
+  std::string params = "part=snippet&type=video&q=" +
+                       UrlEncodeQuery(relatedQuery.toStdString()) +
+                       "&maxResults=" + std::to_string(limit);
   auto results = parseVideoResults(makeApiRequest("search", params));
+  results.erase(std::remove_if(results.begin(), results.end(),
+                               [&](const VideoContent &item) {
+                                 return item.id == videoId;
+                               }),
+                results.end());
   if (results.empty()) {
     auto fallback = getTrending(limit);
     for (auto &item : fallback) {
@@ -1450,25 +1336,6 @@ std::vector<VideoContent> YouTubeService::getRecommended(int limit) {
                      "Liked videos");
   AppendUniqueVideos(feed, seenIds, getSubscriptionFeed(std::min(limit, 14)),
                      limit, "Subscriptions");
-
-  std::vector<std::string> seedIds;
-  for (const auto &item : feed) {
-    if (!item.id.empty()) {
-      seedIds.push_back(item.id);
-    }
-    if ((int)seedIds.size() >= 3) {
-      break;
-    }
-  }
-
-  for (const auto &seedId : seedIds) {
-    auto related = getRelatedVideos(seedId, 8);
-    AppendUniqueVideos(feed, seenIds, std::move(related), limit,
-                       "Because you watched");
-    if ((int)feed.size() >= limit) {
-      break;
-    }
-  }
 
   if ((int)feed.size() < limit) {
     auto fallback = getTrending(limit - (int)feed.size());
@@ -1568,10 +1435,12 @@ std::vector<VideoContent> YouTubeService::getSubscriptionFeed(int limit) {
   return getLatestUploadsFromSubscriptions(limit);
 }
 
-std::vector<YouTubeContentRail> YouTubeService::getHomeRails(int itemsPerRail) {
-  const int limit = std::clamp(itemsPerRail, 4, 14);
+std::vector<YouTubeContentRail>
+YouTubeService::getHomeRails(int itemsPerRail, int discoveryDepth) {
+  const int limit = std::clamp(itemsPerRail, 12, 40);
   std::vector<YouTubeContentRail> rails;
   std::unordered_set<std::string> usedFirstIds;
+  const auto trendingPool = getTrending(limit * 2);
 
   auto trimForRail = [&](std::vector<VideoContent> items) {
     std::vector<VideoContent> trimmed;
@@ -1613,10 +1482,10 @@ std::vector<YouTubeContentRail> YouTubeService::getHomeRails(int itemsPerRail) {
     rails.push_back({key, title, subtitle, std::move(trimmed)});
   };
 
-  auto addSearchRail = [&](const std::string &key, const std::string &title,
-                           const std::string &subtitle,
-                           const std::string &query, int searchLimit) {
-    auto items = search(query, searchLimit);
+  auto addCategoryRail = [&](const std::string &key, const std::string &title,
+                             const std::string &subtitle,
+                             const std::string &videoCategoryId) {
+    auto items = fetchMostPopularByCategory(videoCategoryId, limit + 4);
     addRail(key, title, subtitle, std::move(items));
   };
 
@@ -1641,60 +1510,31 @@ std::vector<YouTubeContentRail> YouTubeService::getHomeRails(int itemsPerRail) {
     addRail("liked", "Liked videos",
             "Things you explicitly told YouTube you wanted more of.",
             getLikedVideos(limit));
-
-    std::vector<std::string> seedIds;
-    for (const auto &item : recommended) {
-      if (!item.id.empty()) {
-        seedIds.push_back(item.id);
-      }
-      if ((int)seedIds.size() >= 3) {
-        break;
-      }
-    }
-
-    std::vector<VideoContent> becauseYouWatched;
-    std::unordered_set<std::string> seenIds;
-    for (const auto &seedId : seedIds) {
-      auto related = getRelatedVideos(seedId, 5);
-      AppendUniqueVideos(becauseYouWatched, seenIds, std::move(related), limit,
-                         "Because you watched");
-      if ((int)becauseYouWatched.size() >= limit) {
-        break;
-      }
-    }
-    addRail("because_you_watched", "Because you watched",
-            "Related picks based on the videos you actually opened here.",
-            std::move(becauseYouWatched));
-
-    addSearchRail("gaming", "Gaming on YouTube",
-                  "Popular gaming videos and streams right now.", "gaming",
-                  limit + 6);
-    addSearchRail("music", "Music and live sets",
-                  "High-signal music picks to make the home feel alive.",
-                  "music live", limit + 6);
+    addCategoryRail("gaming", "Gaming on YouTube",
+                    "Most popular gaming videos in the public catalog.", "20");
+    addCategoryRail("music", "Music and live sets",
+                    "Most popular music videos and performances right now.",
+                    "10");
   } else {
     addRail("recommended", "Popular on YouTube",
             "A broad cross-section of what is active on the public catalog "
             "right now.",
-            getRecommended(limit * 2));
-    addSearchRail("gaming", "Gaming spotlight",
-                  "Console-friendly picks from the public gaming catalog.",
-                  "gaming", limit + 6);
-    addSearchRail(
-        "music", "Music and performances",
-        "A dedicated row instead of dropping you into a single trending list.",
-        "music videos", limit + 6);
-    addSearchRail(
-        "news", "News and commentary",
-        "Public uploads that make the home feel broader than a landing page.",
-        "news live", limit + 6);
-    addSearchRail(
-        "creators", "Creators and long-form",
-        "General-interest videos to make signed-out browsing feel real.",
-        "documentary interview", limit + 6);
+            sliceItems(trendingPool, 0, limit));
+    addCategoryRail("gaming", "Gaming spotlight",
+                    "Console-friendly picks from the gaming charts.", "20");
+    addCategoryRail("music", "Music and performances",
+                    "Most popular music videos and live sets.", "10");
+    addCategoryRail("news", "News and commentary",
+                    "Most popular news and politics videos right now.", "25");
+    addCategoryRail(
+        "creators", "Entertainment and creators",
+        "Popular entertainment videos without spending search quota.", "24");
   }
 
-  auto trending = getTrending(limit);
+  auto trending = sliceItems(trendingPool, limit, limit);
+  if (trending.empty()) {
+    trending = sliceItems(trendingPool, 0, limit);
+  }
   for (auto &item : trending) {
     item.category = "Trending";
   }
@@ -1704,6 +1544,18 @@ std::vector<YouTubeContentRail> YouTubeService::getHomeRails(int itemsPerRail) {
           ? "The public chart, kept as a fallback and discovery row."
           : "A dedicated trending row alongside broader signed-out discovery.",
       std::move(trending));
+
+  const int extraRailCount =
+      std::clamp(discoveryDepth, 0,
+                 static_cast<int>(std::size(kExtraDiscoveryRails))) *
+      kExtraDiscoveryRailsPerLevel;
+  const int boundedExtraRailCount = std::min(
+      extraRailCount, static_cast<int>(std::size(kExtraDiscoveryRails)));
+  for (int index = 0; index < boundedExtraRailCount; ++index) {
+    const auto &extra = kExtraDiscoveryRails[index];
+    addCategoryRail(extra.key, extra.title, extra.subtitle,
+                    extra.videoCategoryId);
+  }
 
   return rails;
 }

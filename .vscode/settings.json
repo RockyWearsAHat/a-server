@@ -16,6 +16,7 @@
   "files.associations": {
     "LICENSE": "plaintext"
   },
+  "css.validate": true,
   "coverage-gutters.coverageFileNames": [
     "lcov.info",
     "coverage.lcov",
@@ -23,6 +24,5 @@
   ],
   "coverage-gutters.showLineCoverage": true,
   "coverage-gutters.showRulerCoverage": true,
-  "python-envs.pythonProjects": [],
   "python-envs.defaultEnvManager": "ms-python.python:system"
 }

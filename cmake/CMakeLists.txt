@@ -8,11 +8,17 @@ endif()
 
 project(AIOServer VERSION 0.1.0 LANGUAGES CXX)
 
-# Since CMakeLists.txt is in cmake/, go up one level to project root
+# Since CMakeLists.txt is in cmake/, go up one level to project root.
 set(PROJECT_ROOT "${CMAKE_SOURCE_DIR}/..")
 
-# BUILD_ROOT is two levels up from CMAKE_BINARY_DIR (build/generated/cmake -> build)
-get_filename_component(BUILD_ROOT "${CMAKE_BINARY_DIR}/../.." ABSOLUTE)
+# Keep all generated binaries and autogen output under the repository-local
+# build/ directory regardless of which binary directory a tool configures.
+# Some tools configure from build/generated/cmake, others from build/ directly.
+# Deriving BUILD_ROOT from CMAKE_BINARY_DIR made the latter case escape to
+# ../Desktop, which is not acceptable for this project.
+set(AIO_BUILD_ROOT "${PROJECT_ROOT}/build" CACHE PATH
+    "Repository-local root for generated binaries, libraries, and autogen output")
+get_filename_component(BUILD_ROOT "${AIO_BUILD_ROOT}" ABSOLUTE)
 
 # Ensure all source and header directories are included
 include_directories(

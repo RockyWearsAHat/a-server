@@ -296,17 +296,40 @@ MainWindow::MainWindow(QWidget *parent)
   // Note: some OS-level shortcuts on macOS may still be handled by the OS.
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
-  // Load unified 10-foot UI theme.
+  // Load the global 10-foot theme and append YouTube-specific styling.
   QString styleSheet;
-  QFile f(AIO::Common::AssetPath("qss/tv.qss"));
-  if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+  QStringList loadedStylePaths;
+  QStringList missingStylePaths;
+  const QStringList stylePaths = {
+      AIO::Common::AssetPath("qss/tv.qss"),
+      AIO::Common::AssetPath("qss/youtube.qss"),
+  };
+  for (const QString &path : stylePaths) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+      missingStylePaths << path;
+      continue;
+    }
     QTextStream ts(&f);
-    styleSheet = ts.readAll();
+    styleSheet += ts.readAll();
+    styleSheet += QLatin1Char('\n');
+    loadedStylePaths << path;
     f.close();
   }
 
   if (!styleSheet.isEmpty()) {
-    setStyleSheet(styleSheet);
+    qApp->setStyleSheet(styleSheet);
+    std::cout << "[QSS] Loaded " << loadedStylePaths.size()
+              << " stylesheet(s) into QApplication" << std::endl;
+    for (const QString &path : loadedStylePaths) {
+      std::cout << "[QSS]   loaded: " << path.toStdString() << std::endl;
+    }
+  } else {
+    std::cout << "[QSS] No stylesheet content loaded" << std::endl;
+  }
+
+  for (const QString &path : missingStylePaths) {
+    std::cout << "[QSS]   missing: " << path.toStdString() << std::endl;
   }
 
   // NOTE: QtWebEngine + macOS has shown crashes in QApplication::notify when

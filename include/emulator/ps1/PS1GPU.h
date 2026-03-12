@@ -37,8 +37,13 @@ public:
 
   // ─── Framebuffer for display ────────────────────────────────────────
   const uint16_t *GetFramebuffer() const {
+    if (!displayBuffer.empty())
+      return displayBuffer.data();
     uint32_t offset = displayVRAMStartY * GPU::VRAM_WIDTH + displayVRAMStartX;
     return vram.data() + offset;
+  }
+  uint32_t GetFramebufferStride() const {
+    return displayBuffer.empty() ? GPU::VRAM_WIDTH : displayBufferStride;
   }
   uint32_t GetDisplayWidth() const;
   uint32_t GetDisplayHeight() const;
@@ -46,6 +51,7 @@ public:
   uint32_t GetDisplayStartY() const { return displayVRAMStartY; }
   bool IsDisplay24Bit() const { return colorDepth24; }
   uint32_t GetVRAMStride() const { return GPU::VRAM_WIDTH; }
+  void LatchDisplayBuffer();
 
   // ─── DMA Interface ──────────────────────────────────────────────────
   bool DMAReady() const;
@@ -176,6 +182,10 @@ private:
 
   // ─── GPU Read Buffer ────────────────────────────────────────────────
   uint32_t gpuReadBuffer = 0;
+
+  // ─── Latched Display Buffer ─────────────────────────────────────────
+  std::vector<uint16_t> displayBuffer;
+  uint32_t displayBufferStride = GPU::VRAM_WIDTH;
 
   // ─── GP0 Command Processing ─────────────────────────────────────────
   void ProcessGP0Command();

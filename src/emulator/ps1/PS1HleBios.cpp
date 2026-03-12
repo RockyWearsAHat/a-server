@@ -1510,7 +1510,17 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
     if (slot < MAX_EVENTS) {
       ReadEvCBFromRAM(slot);
     }
-    if (slot < MAX_EVENTS && events[slot].fired) {
+    bool ready = (slot < MAX_EVENTS && events[slot].fired);
+    if (IsPs1HleTraceEnabled() && slot < MAX_EVENTS) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      const auto &ev = events[slot];
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "WaitEvent: slot=%d class=0x%08X spec=0x%04X mode=0x%04X "
+                 "enabled=%d fired=%d -> %u",
+                 slot, ev.classId, ev.spec, ev.mode, ev.enabled ? 1 : 0,
+                 ev.fired ? 1 : 0, ready ? 1u : 0u);
+    }
+    if (ready) {
       events[slot].fired = false;
       WriteEvCBToRAM(slot);
       cpu.SetRegister(2, 1);
@@ -1527,6 +1537,15 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
       ReadEvCBFromRAM(slot);
     }
     bool ready = (slot < MAX_EVENTS && events[slot].fired);
+    if (IsPs1HleTraceEnabled() && slot < MAX_EVENTS) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      const auto &ev = events[slot];
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "TestEvent: slot=%d class=0x%08X spec=0x%04X mode=0x%04X "
+                 "enabled=%d fired=%d -> %u",
+                 slot, ev.classId, ev.spec, ev.mode, ev.enabled ? 1 : 0,
+                 ev.fired ? 1 : 0, ready ? 1u : 0u);
+    }
     if (ready) {
       events[slot].fired = false;
       WriteEvCBToRAM(slot);
@@ -1542,6 +1561,14 @@ bool PS1HleBios::DispatchB0(PS1 &ps1, uint8_t func) {
       events[slot].enabled = true;
       events[slot].fired = false;
       WriteEvCBToRAM(slot);
+
+      if (IsPs1HleTraceEnabled()) {
+        auto &log = AIO::Emulator::Common::Logger::Instance();
+        const auto &ev = events[slot];
+        log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                   "EnableEvent: slot=%d class=0x%08X spec=0x%04X mode=0x%04X",
+                   slot, ev.classId, ev.spec, ev.mode);
+      }
 
       uint32_t cls = events[slot].classId;
       if ((cls & 0xFF000000) == 0xF2000000) {

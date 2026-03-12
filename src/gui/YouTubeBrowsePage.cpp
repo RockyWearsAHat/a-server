@@ -1,15 +1,19 @@
 #include "gui/YouTubeBrowsePage.h"
 
 #include "gui/ThumbnailCache.h"
+#include "gui/ThumbnailFillLabel.h"
 #include "streaming/StreamingManager.h"
 #include "streaming/YouTubeService.h"
 
 #include <QDesktopServices>
 #include <QEvent>
 #include <QFrame>
+#include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
+#include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -43,6 +47,16 @@ constexpr auto kRailIndexProperty = "aio_rail_index";
 constexpr auto kItemIndexProperty = "aio_item_index";
 constexpr auto kGuideIndexProperty = "aio_guide_index";
 constexpr auto kAuthCardProperty = "aio_auth_card";
+constexpr auto kTileBaseRectProperty = "aio_tile_base_rect";
+constexpr auto kThumbnailUrlProperty = "aio_thumbnail_url";
+constexpr int kCollapsedSidebarWidth = 96;
+constexpr int kExpandedSidebarWidth = 312;
+constexpr int kGuideTextWidth = 212;
+constexpr int kGuideIconFrameSize = 48;
+constexpr int kGuideIconGlyphSize = 22;
+constexpr int kTileSlotPadding = 24;
+constexpr int kTileFocusGrow = 14;
+constexpr int kMaxHomeDiscoveryDepth = 4;
 
 QString elideText(const QString &text, int maxLength) {
   QString normalized = text.simplified();
@@ -67,6 +81,134 @@ QString formatDuration(int seconds) {
   }
   return QStringLiteral("%1:%2").arg(minutes).arg(secs, 2, 10,
                                                   QLatin1Char('0'));
+}
+
+int visibleTilesForWidth(int viewportWidth) {
+  if (viewportWidth >= 2600) {
+    return 5;
+  }
+  if (viewportWidth >= 1880) {
+    return 4;
+  }
+  if (viewportWidth >= 1260) {
+    return 3;
+  }
+  if (viewportWidth >= 860) {
+    return 2;
+  }
+  return 1;
+}
+
+int tileWidthForViewport(int viewportWidth) {
+  const int visibleTiles = visibleTilesForWidth(viewportWidth);
+  const int spacing = 24;
+  const int availableWidth =
+      std::max(360, viewportWidth - ((visibleTiles - 1) * spacing) - 40);
+  return std::clamp(availableWidth / std::max(1, visibleTiles), 292, 468);
+}
+
+QString scrubDescription(QString text) {
+  text.replace(QRegularExpression(QStringLiteral("https?://\\S+")), QString());
+  text.replace(QRegularExpression(QStringLiteral("(?i)download:?\\s*")),
+               QString());
+  text.replace(QRegularExpression(QStringLiteral("(?i)stream/")), QString());
+  return text.simplified();
+}
+
+QString conciseMeta(const AIO::Streaming::VideoContent &item) {
+  const QString category = QString::fromStdString(item.category).simplified();
+  if (!category.isEmpty()) {
+    return category;
+  }
+
+  QString description =
+      scrubDescription(QString::fromStdString(item.description));
+  if (!description.isEmpty()) {
+    return elideText(description, 40);
+  }
+
+  return QStringLiteral("Play on YouTube");
+}
+
+QRect expandedRectFor(const QRect &baseRect) {
+  return baseRect.adjusted(-kTileFocusGrow, -kTileFocusGrow, kTileFocusGrow,
+                           kTileFocusGrow);
+}
+
+QGraphicsDropShadowEffect *ensureShadowEffect(QWidget *widget) {
+  if (!widget) {
+    return nullptr;
+  }
+
+  auto *shadow =
+      qobject_cast<QGraphicsDropShadowEffect *>(widget->graphicsEffect());
+  if (!shadow) {
+    shadow = new QGraphicsDropShadowEffect(widget);
+    shadow->setBlurRadius(0.0);
+    shadow->setOffset(0.0, 0.0);
+    shadow->setColor(Qt::transparent);
+    widget->setGraphicsEffect(shadow);
+  }
+  return shadow;
+}
+
+void applyThumbnailIfAvailable(ThumbnailFillLabel *label, const QString &url) {
+  if (!label || url.isEmpty()) {
+    return;
+  }
+
+  QPixmap pixmap;
+  if (ThumbnailCache::instance().tryGet(url, &pixmap)) {
+    label->setSourcePixmap(pixmap);
+  }
+}
+
+void animateRect(QWidget *widget, const QRect &targetRect, int duration) {
+  if (!widget || widget->geometry() == targetRect) {
+    return;
+  }
+
+  if (auto *existing = widget->findChild<QPropertyAnimation *>(
+          QStringLiteral("aioTileGeometryAnimation"))) {
+    existing->stop();
+    existing->deleteLater();
+  }
+
+  auto *animation = new QPropertyAnimation(widget, "geometry", widget);
+  animation->setObjectName(QStringLiteral("aioTileGeometryAnimation"));
+  animation->setDuration(duration);
+  animation->setStartValue(widget->geometry());
+  animation->setEndValue(targetRect);
+  animation->setEasingCurve(QEasingCurve::OutCubic);
+  animation->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void animateShadow(QGraphicsDropShadowEffect *shadow, qreal blurRadius,
+                   const QPointF &offset, const QColor &color, int duration) {
+  if (!shadow) {
+    return;
+  }
+
+  auto restartAnimation = [&](const QString &name, const QByteArray &property,
+                              const QVariant &endValue) {
+    if (auto *existing = shadow->findChild<QPropertyAnimation *>(name)) {
+      existing->stop();
+      existing->deleteLater();
+    }
+
+    auto *animation = new QPropertyAnimation(shadow, property, shadow);
+    animation->setObjectName(name);
+    animation->setDuration(duration);
+    animation->setEndValue(endValue);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    animation->start(QAbstractAnimation::DeleteWhenStopped);
+  };
+
+  restartAnimation(QStringLiteral("aioTileShadowBlurAnimation"), "blurRadius",
+                   blurRadius);
+  restartAnimation(QStringLiteral("aioTileShadowOffsetAnimation"), "offset",
+                   offset);
+  shadow->setColor(color);
 }
 
 int railIndexForObject(QObject *object) {
@@ -254,23 +396,23 @@ void YouTubeBrowsePage::setupUi() {
 
   sidebar_ = new QFrame(this);
   sidebar_->setObjectName("aioYouTubeSidebar");
-  sidebar_->setMinimumWidth(88);
-  sidebar_->setMaximumWidth(320);
+  sidebar_->setMinimumWidth(kCollapsedSidebarWidth);
+  sidebar_->setMaximumWidth(kExpandedSidebarWidth);
   sidebar_->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Expanding);
   auto *sidebarLayout = new QVBoxLayout(sidebar_);
-  sidebarLayout->setContentsMargins(14, 18, 14, 18);
-  sidebarLayout->setSpacing(14);
+  sidebarLayout->setContentsMargins(16, 24, 16, 24);
+  sidebarLayout->setSpacing(18);
 
   sidebarTitleLabel_ = new QLabel("YT", sidebar_);
   sidebarTitleLabel_->setObjectName("aioYouTubeSidebarBrand");
   sidebarTitleLabel_->setAlignment(Qt::AlignCenter);
-  sidebarTitleLabel_->setFixedSize(56, 56);
+  sidebarTitleLabel_->setFixedSize(64, 64);
   sidebarLayout->addWidget(sidebarTitleLabel_, 0, Qt::AlignHCenter);
 
   guideList_ = new QWidget(sidebar_);
   guideLayout_ = new QVBoxLayout(guideList_);
   guideLayout_->setContentsMargins(0, 0, 0, 0);
-  guideLayout_->setSpacing(10);
+  guideLayout_->setSpacing(12);
   sidebarLayout->addWidget(guideList_);
   sidebar_->installEventFilter(this);
   guideList_->installEventFilter(this);
@@ -279,15 +421,15 @@ void YouTubeBrowsePage::setupUi() {
   auto *mainShell = new QWidget(this);
   mainShell->setObjectName("aioYouTubeMainShell");
   auto *mainLayout = new QVBoxLayout(mainShell);
-  mainLayout->setContentsMargins(0, 0, 0, 0);
-  mainLayout->setSpacing(0);
+  mainLayout->setContentsMargins(32, 24, 36, 36);
+  mainLayout->setSpacing(24);
 
   topBar_ = new QWidget(mainShell);
   topBar_->setObjectName("aioTopBar");
   topBar_->installEventFilter(this);
   auto *barLayout = new QHBoxLayout(topBar_);
-  barLayout->setContentsMargins(20, 14, 20, 14);
-  barLayout->setSpacing(12);
+  barLayout->setContentsMargins(24, 18, 24, 18);
+  barLayout->setSpacing(18);
 
   backButton_ = new QPushButton("Back", topBar_);
   backButton_->setFocusPolicy(Qt::NoFocus);
@@ -298,44 +440,146 @@ void YouTubeBrowsePage::setupUi() {
   homeButton_->setProperty("variant", "secondary");
 
   titleLabel_ = new QLabel("YouTube", topBar_);
-  titleLabel_->setVisible(false);
+  titleLabel_->setProperty("role", "ytBrowseHeaderTitle");
 
   searchEdit_ = new QLineEdit(topBar_);
   searchEdit_->setPlaceholderText("Search YouTube");
   searchEdit_->setObjectName("aioYouTubeSearch");
+  searchEdit_->setMinimumWidth(340);
+  searchEdit_->setMaximumWidth(620);
 
   searchButton_ = new QPushButton("Search", topBar_);
   searchButton_->setFocusPolicy(Qt::NoFocus);
   searchButton_->setProperty("variant", "secondary");
   searchButton_->setObjectName("aioYouTubeSearchButton");
 
+  accountButton_ = new QPushButton(topBar_);
+  accountButton_->setObjectName("aioYouTubeAccountButton");
+  accountButton_->setFocusPolicy(Qt::NoFocus);
+  accountButton_->setCursor(Qt::PointingHandCursor);
+  accountButton_->setFixedSize(48, 48);
+  accountButton_->setText("YT");
+  accountButton_->setProperty("variant", "secondary");
+
   barLayout->addWidget(backButton_);
   barLayout->addWidget(homeButton_);
-  barLayout->addSpacing(8);
-  barLayout->addWidget(searchEdit_, 1);
+  barLayout->addSpacing(10);
+  barLayout->addWidget(titleLabel_);
+  barLayout->addStretch();
+  barLayout->addWidget(searchEdit_);
   barLayout->addWidget(searchButton_);
+  barLayout->addSpacing(8);
+  barLayout->addWidget(accountButton_);
 
-  authCard_ = new QFrame(mainShell);
+  auto *heroRow = new QWidget(mainShell);
+  heroRow->setObjectName("aioYouTubeHeroRow");
+  auto *heroRowLayout = new QHBoxLayout(heroRow);
+  heroRowLayout->setContentsMargins(0, 0, 0, 0);
+  heroRowLayout->setSpacing(16);
+
+  heroCard_ = new QFrame(heroRow);
+  heroCard_->setObjectName("aioYouTubeHeroCard");
+  heroCard_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  heroCard_->setMaximumHeight(198);
+
+  auto *heroLayout = new QHBoxLayout(heroCard_);
+  heroLayout->setContentsMargins(22, 18, 22, 18);
+  heroLayout->setSpacing(16);
+
+  auto *heroCopyColumn = new QVBoxLayout();
+  heroCopyColumn->setContentsMargins(0, 0, 0, 0);
+  heroCopyColumn->setSpacing(12);
+
+  heroEyebrowLabel_ = new QLabel("DISCOVER", heroCard_);
+  heroEyebrowLabel_->setObjectName("aioYouTubeHeroEyebrow");
+
+  heroTitleLabel_ = new QLabel("Popular on YouTube", heroCard_);
+  heroTitleLabel_->setObjectName("aioYouTubeHeroTitle");
+  heroTitleLabel_->setWordWrap(true);
+
+  heroBodyLabel_ = new QLabel(heroCard_);
+  heroBodyLabel_->setObjectName("aioYouTubeHeroBody");
+  heroBodyLabel_->setWordWrap(true);
+
+  auto makeHeroChip = [&](const QString &text) {
+    auto *chip = new QLabel(text, heroCard_);
+    chip->setProperty("role", "ytHeroChip");
+    chip->setAlignment(Qt::AlignCenter);
+    return chip;
+  };
+
+  auto *heroChipRow = new QHBoxLayout();
+  heroChipRow->setContentsMargins(0, 4, 0, 0);
+  heroChipRow->setSpacing(10);
+  heroPrimaryChip_ = makeHeroChip("0 rows");
+  heroSecondaryChip_ = makeHeroChip("Signed out");
+  heroTertiaryChip_ = makeHeroChip("Controller ready");
+  heroChipRow->addWidget(heroPrimaryChip_);
+  heroChipRow->addWidget(heroSecondaryChip_);
+  heroChipRow->addWidget(heroTertiaryChip_);
+  heroChipRow->addStretch(1);
+
+  heroCopyColumn->addWidget(heroEyebrowLabel_);
+  heroCopyColumn->addWidget(heroTitleLabel_);
+  heroCopyColumn->addWidget(heroBodyLabel_);
+  heroCopyColumn->addLayout(heroChipRow);
+  heroCopyColumn->addStretch(1);
+
+  heroSpotlightCard_ = new QFrame(heroCard_);
+  heroSpotlightCard_->setObjectName("aioYouTubeHeroSpotlight");
+  heroSpotlightCard_->setMinimumWidth(220);
+  heroSpotlightCard_->setMaximumWidth(280);
+
+  auto *heroSpotlightLayout = new QVBoxLayout(heroSpotlightCard_);
+  heroSpotlightLayout->setContentsMargins(18, 18, 18, 18);
+  heroSpotlightLayout->setSpacing(8);
+
+  heroSpotlightEyebrowLabel_ = new QLabel("FOCUS", heroSpotlightCard_);
+  heroSpotlightEyebrowLabel_->setObjectName("aioYouTubeHeroSpotlightEyebrow");
+
+  heroSpotlightTitleLabel_ =
+      new QLabel("Move into a row to preview it", heroSpotlightCard_);
+  heroSpotlightTitleLabel_->setObjectName("aioYouTubeHeroSpotlightTitle");
+  heroSpotlightTitleLabel_->setWordWrap(true);
+
+  heroSpotlightMetaLabel_ =
+      new QLabel("Use Right from the guide to land on the first playable tile.",
+                 heroSpotlightCard_);
+  heroSpotlightMetaLabel_->setObjectName("aioYouTubeHeroSpotlightMeta");
+  heroSpotlightMetaLabel_->setWordWrap(true);
+
+  heroSpotlightLayout->addWidget(heroSpotlightEyebrowLabel_);
+  heroSpotlightLayout->addWidget(heroSpotlightTitleLabel_);
+  heroSpotlightLayout->addWidget(heroSpotlightMetaLabel_);
+  heroSpotlightLayout->addStretch(1);
+
+  heroLayout->addLayout(heroCopyColumn, 1);
+  heroLayout->addWidget(heroSpotlightCard_, 0, Qt::AlignTop);
+
+  authCard_ = new QFrame(heroRow);
   authCard_->setObjectName("aioYouTubeAccountStrip");
   authCard_->setProperty(kAuthCardProperty, true);
   authCard_->setFocusPolicy(Qt::NoFocus);
+  authCard_->setMinimumWidth(320);
+  authCard_->setMaximumWidth(380);
+  authCard_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   authCard_->installEventFilter(this);
 
   auto *authLayout = new QVBoxLayout(authCard_);
-  authLayout->setContentsMargins(20, 12, 20, 12);
-  authLayout->setSpacing(8);
+  authLayout->setContentsMargins(28, 22, 28, 22);
+  authLayout->setSpacing(14);
 
   auto *authTopRow = new QHBoxLayout();
-  authTopRow->setSpacing(16);
+  authTopRow->setSpacing(20);
 
   auto *authCopyColumn = new QVBoxLayout();
   authCopyColumn->setContentsMargins(0, 0, 0, 0);
-  authCopyColumn->setSpacing(3);
+  authCopyColumn->setSpacing(6);
 
   authAvatarLabel_ = new QLabel(authCard_);
   authAvatarLabel_->setObjectName("aioYouTubeAccountAvatar");
   authAvatarLabel_->setAlignment(Qt::AlignCenter);
-  authAvatarLabel_->setFixedSize(48, 48);
+  authAvatarLabel_->setFixedSize(52, 52);
   authAvatarLabel_->setText("YT");
 
   authTitleLabel_ = new QLabel(authCard_);
@@ -360,7 +604,7 @@ void YouTubeBrowsePage::setupUi() {
   authQrLabel_ = new QLabel(authCard_);
   authQrLabel_->setObjectName("aioYouTubeAuthQr");
   authQrLabel_->setAlignment(Qt::AlignCenter);
-  authQrLabel_->setFixedSize(120, 120);
+  authQrLabel_->setFixedSize(132, 132);
   authQrLabel_->setText("Scan");
 
   auto *authButtons = new QHBoxLayout();
@@ -399,10 +643,14 @@ void YouTubeBrowsePage::setupUi() {
   authLayout->addLayout(authTopRow);
   authLayout->addLayout(authButtons);
 
+  heroRowLayout->addWidget(heroCard_, 3);
+  heroRowLayout->addWidget(authCard_, 2, Qt::AlignTop);
+
   auto *contentWrapper = new QWidget(mainShell);
+  contentWrapper->setObjectName("aioYouTubeContentShell");
   auto *contentLayout = new QVBoxLayout(contentWrapper);
-  contentLayout->setContentsMargins(24, 14, 28, 20);
-  contentLayout->setSpacing(10);
+  contentLayout->setContentsMargins(0, 10, 0, 0);
+  contentLayout->setSpacing(26);
 
   scroll_ = new QScrollArea(contentWrapper);
   scroll_->setWidgetResizable(true);
@@ -414,14 +662,14 @@ void YouTubeBrowsePage::setupUi() {
 
   contentHost_ = new QWidget(scroll_);
   contentLayout_ = new QVBoxLayout(contentHost_);
-  contentLayout_->setContentsMargins(0, 0, 0, 0);
-  contentLayout_->setSpacing(18);
+  contentLayout_->setContentsMargins(0, 10, 0, 36);
+  contentLayout_->setSpacing(44);
 
   scroll_->setWidget(contentHost_);
   contentLayout->addWidget(scroll_, 1);
 
   mainLayout->addWidget(topBar_);
-  mainLayout->addWidget(authCard_);
+  mainLayout->addWidget(heroRow);
   mainLayout->addWidget(contentWrapper, 1);
 
   root->addWidget(sidebar_);
@@ -438,6 +686,8 @@ void YouTubeBrowsePage::setupUi() {
           &YouTubeBrowsePage::runSearch);
   connect(searchEdit_, &QLineEdit::returnPressed, this,
           &YouTubeBrowsePage::runSearch);
+  connect(accountButton_, &QPushButton::clicked, this,
+          &YouTubeBrowsePage::performAuthPrimaryAction);
   connect(authPrimaryButton_, &QPushButton::clicked, this,
           &YouTubeBrowsePage::performAuthPrimaryAction);
   connect(authSecondaryButton_, &QPushButton::clicked, this, [this]() {
@@ -456,9 +706,9 @@ void YouTubeBrowsePage::setupUi() {
   connect(authPollTimer_, &QTimer::timeout, this,
           &YouTubeBrowsePage::pollDeviceAuth);
   connect(&ThumbnailCache::instance(), &ThumbnailCache::thumbnailReady, this,
-          [this](const QString &) {
-            updateFocusStyle();
-            rebuildAuthCard();
+          [this](const QString &url) {
+            refreshLoadedThumbnail(url);
+            refreshAuthArtwork(url);
           });
 
   rebuildGuide();
@@ -474,6 +724,58 @@ void YouTubeBrowsePage::setStatus(const QString &text) {
   statusLabel_->setVisible(hasText);
 }
 
+void YouTubeBrowsePage::scheduleContentRebuild() {
+  if (contentRebuildScheduled_ || rails_.empty()) {
+    return;
+  }
+
+  if (scroll_ && scroll_->verticalScrollBar()) {
+    restoreVerticalScrollValue_ = scroll_->verticalScrollBar()->value();
+  }
+  restoreHorizontalScrollValues_.clear();
+  restoreHorizontalScrollValues_.reserve(railScrolls_.size());
+  for (auto *railScroll : railScrolls_) {
+    restoreHorizontalScrollValues_.push_back(
+        railScroll && railScroll->horizontalScrollBar()
+            ? railScroll->horizontalScrollBar()->value()
+            : 0);
+  }
+
+  contentRebuildScheduled_ = true;
+  QTimer::singleShot(0, this, [this]() {
+    contentRebuildScheduled_ = false;
+    rebuildContent();
+  });
+}
+
+void YouTubeBrowsePage::refreshLoadedThumbnail(const QString &url) {
+  if (!contentHost_ || url.trimmed().isEmpty()) {
+    return;
+  }
+
+  const auto thumbs = contentHost_->findChildren<QLabel *>(
+      QStringLiteral("thumb"), Qt::FindChildrenRecursively);
+  for (auto *thumb : thumbs) {
+    if (!thumb || thumb->property(kThumbnailUrlProperty).toString() != url) {
+      continue;
+    }
+    if (auto *fillThumb = dynamic_cast<ThumbnailFillLabel *>(thumb)) {
+      applyThumbnailIfAvailable(fillThumb, url);
+    }
+  }
+}
+
+void YouTubeBrowsePage::refreshAuthArtwork(const QString &url) {
+  if (url.trimmed().isEmpty()) {
+    return;
+  }
+
+  if ((!accountAvatarUrl_.isEmpty() && accountAvatarUrl_ == url) ||
+      qrImageUrlForSession() == url) {
+    rebuildAuthCard();
+  }
+}
+
 void YouTubeBrowsePage::setLoadingState(bool loading, const QString &text) {
   setStatus(text);
   searchButton_->setEnabled(!loading);
@@ -482,18 +784,7 @@ void YouTubeBrowsePage::setLoadingState(bool loading, const QString &text) {
 
 QString
 YouTubeBrowsePage::summaryFor(const AIO::Streaming::VideoContent &item) const {
-  QString description = QString::fromStdString(item.description);
-  description.replace(QRegularExpression(QStringLiteral("https?://\\S+")),
-                      QString());
-  description.replace(QRegularExpression(QStringLiteral("(?i)download:?\\s*")),
-                      QString());
-  description.replace(QRegularExpression(QStringLiteral("(?i)stream/")),
-                      QString());
-  description = description.simplified();
-  if (!description.isEmpty()) {
-    return elideText(description, 78);
-  }
-  return QStringLiteral("Ready to play");
+  return conciseMeta(item);
 }
 
 void YouTubeBrowsePage::loadTrending() { refreshHome(); }
@@ -505,14 +796,16 @@ void YouTubeBrowsePage::refreshHome() {
   }
 
   setLoadingState(true, "Loading YouTube home...");
+  loadingMoreHome_ = false;
+  homeDiscoveryDepth_ = 0;
   const uint64_t requestId = ++requestSerial_;
-  const int railSize = itemsPerRail();
+  const int railSize = std::max(itemsPerRail() * 8, 28);
   QPointer<YouTubeBrowsePage> guard(this);
   auto *service = youTube_;
 
   std::thread([guard, requestId, railSize, service]() {
     const auto rails = service
-                           ? service->getHomeRails(railSize)
+                           ? service->getHomeRails(railSize, 0)
                            : std::vector<AIO::Streaming::YouTubeContentRail>{};
     const bool signedIn = service && service->hasOAuthAccess();
     const QString accountLabel =
@@ -544,6 +837,69 @@ void YouTubeBrowsePage::refreshHome() {
   }).detach();
 }
 
+void YouTubeBrowsePage::requestAdditionalDiscoveryIfNeeded(
+    int targetRailIndex) {
+  if (loadingMoreHome_ || targetRailIndex < 0 || rails_.empty() ||
+      homeDiscoveryDepth_ >= kMaxHomeDiscoveryDepth ||
+      searchEdit_->hasFocus() || !searchEdit_->text().trimmed().isEmpty()) {
+    return;
+  }
+
+  const int triggerRail = std::max(0, static_cast<int>(rails_.size()) - 2);
+  if (targetRailIndex < triggerRail) {
+    return;
+  }
+
+  loadMoreHomeRows();
+}
+
+void YouTubeBrowsePage::loadMoreHomeRows() {
+  if (!youTube_ || loadingMoreHome_ ||
+      homeDiscoveryDepth_ >= kMaxHomeDiscoveryDepth) {
+    return;
+  }
+
+  loadingMoreHome_ = true;
+  const int nextDepth = homeDiscoveryDepth_ + 1;
+  const uint64_t requestId = ++requestSerial_;
+  const int railSize = std::max(itemsPerRail() * 8, 28);
+  QPointer<YouTubeBrowsePage> guard(this);
+  auto *service = youTube_;
+  setStatus(QStringLiteral("Loading more rows..."));
+
+  std::thread([guard, requestId, railSize, nextDepth, service]() {
+    const auto rails = service
+                           ? service->getHomeRails(railSize, nextDepth)
+                           : std::vector<AIO::Streaming::YouTubeContentRail>{};
+    const bool signedIn = service && service->hasOAuthAccess();
+    const QString accountLabel =
+        service ? QString::fromStdString(service->getAccountDisplayName())
+                : QString();
+    const QString heroBody =
+        signedIn
+            ? QStringLiteral("Pick up where you left off, jump into "
+                             "subscription uploads, or move straight into "
+                             "recommendation rails that reflect this account.")
+            : QStringLiteral(
+                  "Connect a YouTube account for continue watching, watch "
+                  "later, liked videos, and subscription rails. While signed "
+                  "out, this page falls back to public picks.");
+
+    QMetaObject::invokeMethod(
+        guard.data(),
+        [guard, requestId, nextDepth, rails, heroBody, accountLabel]() {
+          if (!guard || requestId != guard->requestSerial_) {
+            return;
+          }
+          guard->homeDiscoveryDepth_ = nextDepth;
+          guard->loadingMoreHome_ = false;
+          guard->setRails(rails, heroBody, accountLabel, true);
+          guard->setStatus(QStringLiteral("Loaded %1 rows").arg(rails.size()));
+        },
+        Qt::QueuedConnection);
+  }).detach();
+}
+
 void YouTubeBrowsePage::runSearch() {
   if (!youTube_) {
     setStatus("YouTube service not available.");
@@ -565,7 +921,7 @@ void YouTubeBrowsePage::runSearch() {
   std::thread([guard, requestId, service, searchQuery]() {
     std::vector<AIO::Streaming::YouTubeContentRail> rails;
     if (service) {
-      auto results = service->search(searchQuery, 18);
+      auto results = service->search(searchQuery, 40);
       rails.push_back({
           "search",
           "Search results",
@@ -601,7 +957,35 @@ void YouTubeBrowsePage::runSearch() {
 
 void YouTubeBrowsePage::setRails(
     const std::vector<AIO::Streaming::YouTubeContentRail> &rails,
-    const QString &heroBody, const QString &accountLabel) {
+    const QString &heroBody, const QString &accountLabel, bool preserveFocus) {
+  const QString previousGuideKey =
+      selectedGuideIndex_ >= 0 &&
+              selectedGuideIndex_ < static_cast<int>(guideItems_.size())
+          ? guideItems_[selectedGuideIndex_].key
+          : QString();
+  const QString previousRailKey =
+      !guideSelected_ && focusedRailIndex_ >= 0 &&
+              focusedRailIndex_ < static_cast<int>(rails_.size())
+          ? rails_[focusedRailIndex_].key
+          : QString();
+  const int previousItemIndex = focusedItemIndex_;
+  const bool shouldRestoreRailFocus = preserveFocus && !guideSelected_;
+
+  if (preserveFocus && scroll_ && scroll_->verticalScrollBar()) {
+    restoreVerticalScrollValue_ = scroll_->verticalScrollBar()->value();
+    restoreHorizontalScrollValues_.clear();
+    restoreHorizontalScrollValues_.reserve(railScrolls_.size());
+    for (auto *railScroll : railScrolls_) {
+      restoreHorizontalScrollValues_.push_back(
+          railScroll && railScroll->horizontalScrollBar()
+              ? railScroll->horizontalScrollBar()->value()
+              : 0);
+    }
+  } else {
+    restoreVerticalScrollValue_ = -1;
+    restoreHorizontalScrollValues_.clear();
+  }
+
   rails_.clear();
   rails_.reserve(rails.size());
   for (const auto &rail : rails) {
@@ -617,7 +1001,7 @@ void YouTubeBrowsePage::setRails(
   accountAvatarUrl_ =
       youTube_ ? QString::fromStdString(youTube_->getAccountAvatarUrl())
                : QString();
-  Q_UNUSED(heroBody);
+  heroBody_ = heroBody.trimmed();
   currentSectionTitle_ =
       rails_.empty() ? QStringLiteral("For you") : rails_.front().title;
 
@@ -626,6 +1010,27 @@ void YouTubeBrowsePage::setRails(
   focusedRailIndex_ = rails_.empty() ? -1 : 0;
   focusedItemIndex_ = 0;
   guideSelected_ = true;
+  if (shouldRestoreRailFocus && !previousRailKey.isEmpty()) {
+    for (int index = 0; index < static_cast<int>(rails_.size()); ++index) {
+      if (rails_[index].key != previousRailKey || rails_[index].items.empty()) {
+        continue;
+      }
+      focusedRailIndex_ = index;
+      focusedItemIndex_ =
+          std::clamp(previousItemIndex, 0,
+                     static_cast<int>(rails_[index].items.size()) - 1);
+      railSelections_[index] = focusedItemIndex_;
+      guideSelected_ = false;
+      break;
+    }
+  } else if (preserveFocus && !previousGuideKey.isEmpty()) {
+    for (int index = 0; index < static_cast<int>(guideItems_.size()); ++index) {
+      if (guideItems_[index].key == previousGuideKey) {
+        selectedGuideIndex_ = index;
+        break;
+      }
+    }
+  }
   authCardSelected_ = false;
   clearHover();
   rebuildAuthCard();
@@ -638,6 +1043,8 @@ void YouTubeBrowsePage::rebuildGuide() {
   if (!guideLayout_) {
     return;
   }
+
+  ++sidebarAnimationEpoch_;
 
   while (QLayoutItem *item = guideLayout_->takeAt(0)) {
     if (auto *widget = item->widget()) {
@@ -724,20 +1131,20 @@ void YouTubeBrowsePage::rebuildGuide() {
     button->installEventFilter(this);
 
     auto *buttonLayout = new QHBoxLayout(button);
-    buttonLayout->setContentsMargins(8, 7, 8, 7);
+    buttonLayout->setContentsMargins(8, 6, 8, 6);
     buttonLayout->setSpacing(10);
 
     auto *iconLabel = new QLabel(button);
     iconLabel->setObjectName("aioYouTubeGuideIconWrap");
     iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setFixedSize(42, 42);
+    iconLabel->setFixedSize(kGuideIconFrameSize, kGuideIconFrameSize);
     iconLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
     auto *textClip = new QWidget(button);
     textClip->setObjectName("guideTextClip");
-    textClip->setMaximumWidth(guideSelected_ ? 134 : 0);
+    textClip->setMaximumWidth(guideSelected_ ? kGuideTextWidth : 0);
     textClip->setMinimumWidth(0);
-    textClip->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    textClip->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     textClip->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
     auto *textClipLayout = new QHBoxLayout(textClip);
@@ -747,8 +1154,8 @@ void YouTubeBrowsePage::rebuildGuide() {
     auto *textLabel = new QLabel(guideItems_[index].title, textClip);
     textLabel->setObjectName("guideText");
     textLabel->setProperty("role", "guideText");
-    textLabel->setMinimumWidth(134);
-    textLabel->setMaximumWidth(134);
+    textLabel->setMinimumWidth(kGuideTextWidth);
+    textLabel->setMaximumWidth(kGuideTextWidth);
     textLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     auto *opacityEffect = new QGraphicsOpacityEffect(textLabel);
     opacityEffect->setOpacity(guideSelected_ ? 1.0 : 0.0);
@@ -800,15 +1207,31 @@ void YouTubeBrowsePage::rebuildAuthCard() {
   authAvatarLabel_->setText(accountLabel_.isEmpty()
                                 ? QStringLiteral("YT")
                                 : accountLabel_.left(1).toUpper());
+  if (accountButton_) {
+    accountButton_->setIcon(QIcon());
+    accountButton_->setText(accountLabel_.isEmpty()
+                                ? QStringLiteral("YT")
+                                : accountLabel_.left(1).toUpper());
+  }
 
   if (!accountAvatarUrl_.isEmpty()) {
     QPixmap avatarPixmap;
     if (ThumbnailCache::instance().tryGet(accountAvatarUrl_, &avatarPixmap)) {
       authAvatarLabel_->setPixmap(circularPixmap(avatarPixmap, 48));
       authAvatarLabel_->setText(QString());
+      if (accountButton_) {
+        accountButton_->setIcon(QIcon(circularPixmap(avatarPixmap, 40)));
+        accountButton_->setIconSize(QSize(40, 40));
+        accountButton_->setText(QString());
+      }
     } else {
       ThumbnailCache::instance().request(accountAvatarUrl_);
     }
+  }
+
+  if (accountButton_) {
+    accountButton_->setToolTip(signedIn ? QStringLiteral("YouTube account")
+                                        : QStringLiteral("Sign in to YouTube"));
   }
 
   const QString qrUrl = qrImageUrlForSession();
@@ -851,14 +1274,17 @@ void YouTubeBrowsePage::rebuildAuthCard() {
     authUrlLabel_->setVisible(true);
     authSecondaryButton_->setVisible(true);
     authQrLabel_->setVisible(!qrUrl.isEmpty());
+    authHintLabel_->setVisible(true);
+    authFooterLabel_->setVisible(true);
+    authBodyLabel_->setVisible(true);
   } else if (signedIn) {
     const QString accountName = accountLabel_.isEmpty()
                                     ? QStringLiteral("your account")
                                     : accountLabel_;
     authTitleLabel_->setText(
         QStringLiteral("Signed in as %1").arg(accountName));
-    authBodyLabel_->setText("Subscriptions, history, saved videos, and "
-                            "personalized rows are active.");
+    authBodyLabel_->setText(
+        "Personalized rows, subscriptions, and watch progress are active.");
     authHintLabel_->setText(QStringLiteral("%1 rows ready").arg(rails_.size()));
     authFooterLabel_->setText(QString());
     authPrimaryButton_->setText("Refresh");
@@ -867,34 +1293,222 @@ void YouTubeBrowsePage::rebuildAuthCard() {
     authQrLabel_->setVisible(false);
     authCodeLabel_->setVisible(false);
     authUrlLabel_->setVisible(false);
+    authHintLabel_->setVisible(true);
+    authFooterLabel_->setVisible(false);
+    authBodyLabel_->setVisible(true);
   } else if (!canStartDeviceAuth) {
     authTitleLabel_->setText("Sign-in server unavailable");
-    authBodyLabel_->setText("Start the Node auth server to enable QR sign-in "
-                            "and your personalized library.");
-    authHintLabel_->setText(
-        "Set AIO_YOUTUBE_SERVER_URL, or enable AIO_YOUTUBE_SERVER_AUTOBOOT=1. "
-        "The server owns YOUTUBE_OAUTH_CLIENT_ID, "
-        "YOUTUBE_OAUTH_CLIENT_SECRET, and YOUTUBE_API_KEY in server/.env.");
-    authFooterLabel_->setText("Public browsing still works while signed out.");
+    authBodyLabel_->setText("Start the YouTube auth server to enable QR "
+                            "sign-in and personalized rows.");
+    authHintLabel_->setText("Public browsing still works while signed out.");
+    authFooterLabel_->setText(QString());
     authPrimaryButton_->setText("Refresh");
+    authHintLabel_->setVisible(true);
+    authFooterLabel_->setVisible(false);
+    authBodyLabel_->setVisible(true);
   } else {
-    authTitleLabel_->setText("Sign in for your library");
+    authTitleLabel_->setText("Sign in for subscriptions");
     authBodyLabel_->setText(
-        "Connect a YouTube account to unlock subscriptions, watch later, "
-        "likes, and watch progress.");
+        "Unlock subscriptions, watch later, likes, and watch progress while "
+        "the public home feed stays available right now.");
     authHintLabel_->setText(
-        "Use the action here or open the icon rail and choose Sign in.");
-    authFooterLabel_->setText("The signed-out browser is public only.");
+        "Use the profile button in the top-right or select Sign in here.");
+    authFooterLabel_->setText(QString());
     authPrimaryButton_->setText("Sign in");
+    authHintLabel_->setVisible(true);
+    authFooterLabel_->setVisible(false);
+    authBodyLabel_->setVisible(true);
   }
 
   updateFocusStyle();
 }
 
 void YouTubeBrowsePage::updateHeroSpotlight() {
-  if (titleLabel_) {
-    titleLabel_->setText(QStringLiteral("YouTube"));
+  if (!heroEyebrowLabel_ || !heroTitleLabel_ || !heroBodyLabel_ ||
+      !heroPrimaryChip_ || !heroSecondaryChip_ || !heroTertiaryChip_ ||
+      !heroSpotlightEyebrowLabel_ || !heroSpotlightTitleLabel_ ||
+      !heroSpotlightMetaLabel_) {
+    return;
   }
+
+  const bool signedIn = youTube_ && youTube_->hasOAuthAccess();
+  int totalVideos = 0;
+  for (const auto &rail : rails_) {
+    totalVideos += static_cast<int>(rail.items.size());
+  }
+
+  QString eyebrow =
+      signedIn ? QStringLiteral("DISCOVER") : QStringLiteral("GUEST BROWSE");
+  QString title = currentSectionTitle_.trimmed();
+  if (title.isEmpty()) {
+    title = QStringLiteral("Popular on YouTube");
+  }
+
+  QString body = heroBody_.trimmed();
+  QString spotlightEyebrow = QStringLiteral("NOW SELECTED");
+  QString spotlightTitle =
+      rails_.empty() ? QStringLiteral("Home is warming up")
+                     : QStringLiteral("%1 rows loaded").arg(rails_.size());
+  QString spotlightMeta =
+      statusLabel_ ? statusLabel_->text().trimmed() : QString();
+
+  QStringList chipLabels;
+  chipLabels.push_back(QStringLiteral("All"));
+  for (const auto &rail : rails_) {
+    if (rail.title.trimmed().isEmpty()) {
+      continue;
+    }
+    if (!chipLabels.contains(rail.title)) {
+      chipLabels.push_back(rail.title);
+    }
+    if (chipLabels.size() >= 4) {
+      break;
+    }
+  }
+  while (chipLabels.size() < 4) {
+    chipLabels.push_back(chipLabels.size() == 1 ? QStringLiteral("Trending")
+                                                : QStringLiteral("Gaming"));
+  }
+
+  if (guideSelected_ && selectedGuideIndex_ >= 0 &&
+      selectedGuideIndex_ < static_cast<int>(guideItems_.size())) {
+    const auto &guide = guideItems_[selectedGuideIndex_];
+    if (!guide.title.trimmed().isEmpty()) {
+      title = guide.title;
+    }
+
+    if (guide.key == QStringLiteral("search")) {
+      eyebrow = QStringLiteral("SEARCH");
+      if (body.isEmpty()) {
+        body = QStringLiteral(
+            "Search across trending picks, personalized rows, and direct "
+            "results without leaving the TV shell.");
+      }
+      spotlightTitle = QStringLiteral("Search the full YouTube catalog");
+      spotlightMeta =
+          QStringLiteral("Press Right to move into the first playable tile.");
+    } else if (guide.key == QStringLiteral("connect") ||
+               guide.key == QStringLiteral("account")) {
+      eyebrow =
+          signedIn ? QStringLiteral("ACCOUNT") : QStringLiteral("SIGN IN");
+      if (authTitleLabel_ && !authTitleLabel_->text().trimmed().isEmpty()) {
+        title = authTitleLabel_->text().trimmed();
+      }
+      if (authBodyLabel_ && !authBodyLabel_->text().trimmed().isEmpty()) {
+        body = authBodyLabel_->text().trimmed();
+      }
+      spotlightEyebrow = QStringLiteral("ACCOUNT");
+      spotlightTitle = authPrimaryButton_ ? authPrimaryButton_->text().trimmed()
+                                          : QStringLiteral("Sign in");
+      spotlightMeta =
+          authHintLabel_ && !authHintLabel_->text().trimmed().isEmpty()
+              ? authHintLabel_->text().trimmed()
+              : QStringLiteral("The profile button mirrors this surface.");
+    } else {
+      spotlightTitle =
+          rails_.empty() ? QStringLiteral("Browse is ready") : guide.title;
+      if (spotlightMeta.isEmpty()) {
+        spotlightMeta = QStringLiteral(
+            "Use Right to move from the guide into the highlighted row.");
+      }
+    }
+  }
+
+  if (authCardSelected_) {
+    eyebrow = signedIn ? QStringLiteral("ACCOUNT") : QStringLiteral("SIGN IN");
+    if (authTitleLabel_ && !authTitleLabel_->text().trimmed().isEmpty()) {
+      title = authTitleLabel_->text().trimmed();
+    }
+    if (authBodyLabel_ && !authBodyLabel_->text().trimmed().isEmpty()) {
+      body = authBodyLabel_->text().trimmed();
+    }
+    spotlightEyebrow = QStringLiteral("ACCOUNT");
+    spotlightTitle =
+        authPrimaryButton_ && !authPrimaryButton_->text().trimmed().isEmpty()
+            ? authPrimaryButton_->text().trimmed()
+            : QStringLiteral("Open account actions");
+    spotlightMeta =
+        authHintLabel_ && !authHintLabel_->text().trimmed().isEmpty()
+            ? authHintLabel_->text().trimmed()
+            : QStringLiteral("This panel stays controller-friendly while "
+                             "content keeps streaming below.");
+  } else if (!guideSelected_ && focusedRailIndex_ >= 0 &&
+             focusedRailIndex_ < static_cast<int>(rails_.size()) &&
+             focusedItemIndex_ >= 0 &&
+             focusedItemIndex_ <
+                 static_cast<int>(rails_[focusedRailIndex_].items.size())) {
+    const auto &rail = rails_[focusedRailIndex_];
+    const auto &item = rail.items[focusedItemIndex_];
+    const QString itemTitle = QString::fromStdString(item.title).simplified();
+    const QString itemDescription =
+        scrubDescription(QString::fromStdString(item.description));
+    const QString itemMeta = summaryFor(item);
+    const QString durationText = formatDuration(item.durationSeconds);
+
+    eyebrow = rail.title.trimmed().isEmpty() ? QStringLiteral("SPOTLIGHT")
+                                             : rail.title.trimmed().toUpper();
+    if (!itemTitle.isEmpty()) {
+      title = itemTitle;
+    }
+    if (!itemDescription.isEmpty()) {
+      body = elideText(itemDescription, 180);
+    } else if (!itemMeta.trimmed().isEmpty()) {
+      body = itemMeta;
+    }
+
+    spotlightEyebrow = QStringLiteral("PLAY NOW");
+    spotlightTitle = rail.title.trimmed().isEmpty() ? QStringLiteral("Play now")
+                                                    : rail.title.trimmed();
+    spotlightMeta = durationText;
+    if (!itemMeta.trimmed().isEmpty()) {
+      spotlightMeta =
+          spotlightMeta.isEmpty()
+              ? itemMeta
+              : QStringLiteral("%1  %2").arg(durationText, itemMeta);
+    }
+  }
+
+  if (body.isEmpty()) {
+    body = signedIn
+               ? QStringLiteral(
+                     "Your account rails, history, and recommendations stay "
+                     "ready for fast controller-first playback.")
+               : QStringLiteral(
+                     "Browse public picks instantly, then sign in whenever "
+                     "you want subscriptions, likes, and watch progress.");
+  }
+
+  if (spotlightMeta.isEmpty()) {
+    spotlightMeta = QStringLiteral(
+        "Use Left and Right to change surfaces without losing context.");
+  }
+
+  heroEyebrowLabel_->setText(eyebrow);
+  heroTitleLabel_->setText(title);
+  heroBodyLabel_->setText(body);
+  heroBodyLabel_->setVisible(!body.trimmed().isEmpty());
+
+  auto applyChip = [&](QLabel *chip, const QString &text, bool active) {
+    if (!chip) {
+      return;
+    }
+    chip->setText(text);
+    chip->setProperty("active", active);
+    chip->style()->unpolish(chip);
+    chip->style()->polish(chip);
+    chip->update();
+  };
+
+  applyChip(heroPrimaryChip_, chipLabels.value(0, QStringLiteral("All")),
+            currentSectionTitle_.trimmed().isEmpty() || guideSelected_);
+  applyChip(heroSecondaryChip_, chipLabels.value(1, QStringLiteral("Trending")),
+            currentSectionTitle_.trimmed() == chipLabels.value(1));
+  applyChip(heroTertiaryChip_, chipLabels.value(2, QStringLiteral("Gaming")),
+            currentSectionTitle_.trimmed() == chipLabels.value(2));
+  heroSpotlightEyebrowLabel_->setText(spotlightEyebrow);
+  heroSpotlightTitleLabel_->setText(spotlightTitle);
+  heroSpotlightMetaLabel_->setText(spotlightMeta);
+  heroSpotlightCard_->setVisible(true);
 }
 
 void YouTubeBrowsePage::updateSidebarState(bool animated) {
@@ -904,6 +1518,7 @@ void YouTubeBrowsePage::updateSidebarState(bool animated) {
 
   const bool shouldExpand = guideSelected_;
   sidebarExpanded_ = shouldExpand;
+  const uint64_t animationEpoch = ++sidebarAnimationEpoch_;
 
   for (int index = 0; index < static_cast<int>(guideButtons_.size()); ++index) {
     auto *button = guideButtons_[index];
@@ -923,17 +1538,31 @@ void YouTubeBrowsePage::updateSidebarState(bool animated) {
       textLabel->setGraphicsEffect(effect);
     }
 
-    const int targetTextWidth = shouldExpand ? 134 : 0;
+    const int targetTextWidth = shouldExpand ? kGuideTextWidth : 0;
     const qreal targetOpacity = shouldExpand ? 1.0 : 0.0;
-    const int staggerDelay = index * 26;
+    const int staggerDelay = index * 18;
     if (animated) {
+      QPointer<QWidget> textClipGuard(textClip);
+      QPointer<QLabel> textLabelGuard(textLabel);
+      QPointer<QGraphicsOpacityEffect> effectGuard(effect);
       QTimer::singleShot(
           staggerDelay, this,
-          [this, textClip, textLabel, effect, targetTextWidth,
-           targetOpacity]() {
+          [this, animationEpoch, textClipGuard, textLabelGuard, effectGuard,
+           targetTextWidth, targetOpacity]() {
+            if (animationEpoch != sidebarAnimationEpoch_) {
+              return;
+            }
+
+            auto *textClip = textClipGuard.data();
+            auto *textLabel = textLabelGuard.data();
+            auto *effect = effectGuard.data();
+            if (!textClip || !textLabel || !effect) {
+              return;
+            }
+
             auto *widthAnim =
                 new QPropertyAnimation(textClip, "maximumWidth", textClip);
-            widthAnim->setDuration(190);
+            widthAnim->setDuration(210);
             widthAnim->setStartValue(textClip->maximumWidth());
             widthAnim->setEndValue(targetTextWidth);
             widthAnim->setEasingCurve(QEasingCurve::OutCubic);
@@ -948,7 +1577,7 @@ void YouTubeBrowsePage::updateSidebarState(bool animated) {
 
             auto *opacityAnim =
                 new QPropertyAnimation(effect, "opacity", effect);
-            opacityAnim->setDuration(150);
+            opacityAnim->setDuration(180);
             opacityAnim->setStartValue(effect->opacity());
             opacityAnim->setEndValue(targetOpacity);
             opacityAnim->setEasingCurve(QEasingCurve::OutCubic);
@@ -960,8 +1589,42 @@ void YouTubeBrowsePage::updateSidebarState(bool animated) {
     }
   }
 
+  const int targetSidebarWidth =
+      shouldExpand ? kExpandedSidebarWidth : kCollapsedSidebarWidth;
+  if (animated) {
+    auto animateSidebarWidth = [&](const QByteArray &propertyName, int start,
+                                   int end) {
+      auto *animation =
+          new QPropertyAnimation(sidebar_, propertyName, sidebar_);
+      animation->setDuration(240);
+      animation->setStartValue(start);
+      animation->setEndValue(end);
+      animation->setEasingCurve(QEasingCurve::OutCubic);
+      QObject::connect(animation, &QVariantAnimation::valueChanged, this,
+                       [this]() {
+                         if (sidebar_) {
+                           sidebar_->updateGeometry();
+                         }
+                         if (layout()) {
+                           layout()->activate();
+                         }
+                       });
+      animation->start(QAbstractAnimation::DeleteWhenStopped);
+    };
+
+    animateSidebarWidth("minimumWidth", sidebar_->minimumWidth(),
+                        targetSidebarWidth);
+    animateSidebarWidth("maximumWidth", sidebar_->maximumWidth(),
+                        targetSidebarWidth);
+  } else {
+    sidebar_->setMinimumWidth(targetSidebarWidth);
+    sidebar_->setMaximumWidth(targetSidebarWidth);
+  }
+
   sidebar_->updateGeometry();
-  layout()->activate();
+  if (layout()) {
+    layout()->activate();
+  }
 }
 
 void YouTubeBrowsePage::rebuildContent() {
@@ -975,23 +1638,42 @@ void YouTubeBrowsePage::rebuildContent() {
   railScrolls_.clear();
   railTiles_.clear();
 
+  const int viewportWidth =
+      scroll_ && scroll_->viewport() ? scroll_->viewport()->width() : width();
+  const int tileWidth = tileWidthForViewport(viewportWidth);
+  const int thumbHeight = (tileWidth * 9) / 16;
+  const int tileHeight = thumbHeight + 112;
+  contentViewportWidth_ = viewportWidth;
+  contentTileWidth_ = tileWidth;
+
   for (int railIndex = 0; railIndex < static_cast<int>(rails_.size());
        ++railIndex) {
     const auto &rail = rails_[railIndex];
 
     auto *railBlock = new QWidget(contentHost_);
+    railBlock->setObjectName("aioRailBlock");
     auto *railLayout = new QVBoxLayout(railBlock);
-    railLayout->setContentsMargins(0, 0, 0, 0);
-    railLayout->setSpacing(6);
+    railLayout->setContentsMargins(24, 22, 24, 24);
+    railLayout->setSpacing(18);
 
-    auto *title = new QLabel(rail.title, railBlock);
+    auto *header = new QWidget(railBlock);
+    header->setObjectName("aioRailHeader");
+    auto *headerLayout = new QVBoxLayout(header);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(6);
+
+    auto *title = new QLabel(rail.title, header);
     title->setProperty("role", "ytSectionTitle");
-    auto *subtitle = new QLabel(rail.subtitle, railBlock);
+    auto *subtitle = new QLabel(rail.subtitle, header);
     subtitle->setProperty("role", "ytSectionMeta");
     subtitle->setWordWrap(true);
     subtitle->setVisible(!rail.subtitle.trimmed().isEmpty());
 
+    headerLayout->addWidget(title);
+    headerLayout->addWidget(subtitle);
+
     auto *railScroll = new QScrollArea(railBlock);
+    railScroll->setObjectName("aioRailScroller");
     railScroll->setWidgetResizable(true);
     railScroll->setFrameShape(QFrame::NoFrame);
     railScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -999,9 +1681,10 @@ void YouTubeBrowsePage::rebuildContent() {
     railScroll->setFocusPolicy(Qt::NoFocus);
 
     auto *railHost = new QWidget(railScroll);
+    railHost->setObjectName("aioRailHost");
     auto *itemsLayout = new QHBoxLayout(railHost);
-    itemsLayout->setContentsMargins(0, 0, 0, 0);
-    itemsLayout->setSpacing(12);
+    itemsLayout->setContentsMargins(6, 4, 28, 4);
+    itemsLayout->setSpacing(28);
 
     std::vector<QFrame *> tiles;
     tiles.reserve(rail.items.size());
@@ -1009,98 +1692,108 @@ void YouTubeBrowsePage::rebuildContent() {
     for (int itemIndex = 0; itemIndex < static_cast<int>(rail.items.size());
          ++itemIndex) {
       const auto &item = rail.items[itemIndex];
-      auto *tile = new QFrame(railHost);
+      auto *tileSlot = new QWidget(railHost);
+      tileSlot->setObjectName("aioTileSlot");
+      tileSlot->setFixedSize(tileWidth + (kTileSlotPadding * 2),
+                             tileHeight + (kTileSlotPadding * 2));
+
+      auto *tile = new QFrame(tileSlot);
       tile->setObjectName("aioTile");
-      tile->setFixedSize(304, 224);
       tile->setProperty(kRailIndexProperty, railIndex);
       tile->setProperty(kItemIndexProperty, itemIndex);
       tile->setProperty(kTileSelectedProperty, false);
       tile->setProperty(kTileHoveredProperty, false);
+      tile->setProperty(
+          kTileBaseRectProperty,
+          QRect(kTileSlotPadding, kTileSlotPadding, tileWidth, tileHeight));
+      tile->setGeometry(tile->property(kTileBaseRectProperty).toRect());
       tile->setFocusPolicy(Qt::NoFocus);
       tile->installEventFilter(this);
 
       auto *tileLayout = new QVBoxLayout(tile);
       tileLayout->setContentsMargins(0, 0, 0, 0);
-      tileLayout->setSpacing(8);
+      tileLayout->setSpacing(12);
 
-      auto *thumb = new QLabel(tile);
+      auto *thumbFrame = new QFrame(tile);
+      thumbFrame->setObjectName("aioTileThumbFrame");
+      thumbFrame->setFixedHeight(thumbHeight);
+      thumbFrame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+      auto *thumbFrameLayout = new QGridLayout(thumbFrame);
+      thumbFrameLayout->setContentsMargins(0, 0, 0, 0);
+      thumbFrameLayout->setSpacing(0);
+
+      auto *thumb = new ThumbnailFillLabel(thumbFrame);
       thumb->setObjectName("thumb");
       thumb->setProperty("role", "thumb");
-      thumb->setAlignment(Qt::AlignCenter);
-      thumb->setFixedSize(304, 172);
+      thumb->setMinimumHeight(thumbHeight);
+      thumb->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
       thumb->setText("Loading");
       thumb->setProperty(kRailIndexProperty, railIndex);
       thumb->setProperty(kItemIndexProperty, itemIndex);
       thumb->installEventFilter(this);
 
-      auto *copyWrap = new QWidget(tile);
-      auto *copyLayout = new QVBoxLayout(copyWrap);
-      copyLayout->setContentsMargins(10, 0, 10, 10);
-      copyLayout->setSpacing(6);
+      const QString durationText = formatDuration(item.durationSeconds);
 
-      auto *itemTitle = new QLabel(QString::fromStdString(item.title), tile);
+      auto *thumbOverlay = new QWidget(thumbFrame);
+      thumbOverlay->setObjectName("aioTileThumbOverlay");
+      auto *thumbOverlayLayout = new QHBoxLayout(thumbOverlay);
+      thumbOverlayLayout->setContentsMargins(10, 0, 10, 10);
+      thumbOverlayLayout->setSpacing(8);
+
+      auto *durationChip = new QLabel(thumbOverlay);
+      durationChip->setProperty("role", "tileDurationBadge");
+      durationChip->setText(durationText);
+      durationChip->setVisible(!durationText.isEmpty());
+
+      thumbOverlayLayout->addStretch();
+      thumbOverlayLayout->addWidget(durationChip);
+
+      thumbFrameLayout->addWidget(thumb, 0, 0);
+      thumbFrameLayout->addWidget(thumbOverlay, 0, 0,
+                                  Qt::AlignLeft | Qt::AlignBottom);
+
+      auto *copyWrap = new QWidget(tile);
+      copyWrap->setObjectName("aioTileCopy");
+      auto *copyLayout = new QVBoxLayout(copyWrap);
+      copyLayout->setContentsMargins(16, 14, 16, 16);
+      copyLayout->setSpacing(8);
+
+      auto *itemTitle =
+          new QLabel(elideText(QString::fromStdString(item.title), 68), tile);
       itemTitle->setProperty("role", "tileTitle");
       itemTitle->setWordWrap(true);
+      itemTitle->setMaximumHeight(58);
       itemTitle->setProperty(kRailIndexProperty, railIndex);
       itemTitle->setProperty(kItemIndexProperty, itemIndex);
       itemTitle->installEventFilter(this);
 
-      const QString categoryText =
-          QString::fromStdString(item.category).trimmed();
-      const QString durationText = formatDuration(item.durationSeconds);
-
-      auto *chipRow = new QWidget(tile);
-      auto *chipLayout = new QHBoxLayout(chipRow);
-      chipLayout->setContentsMargins(0, 0, 0, 0);
-      chipLayout->setSpacing(6);
-
-      auto *categoryChip = new QLabel(chipRow);
-      categoryChip->setProperty("role", "tileBadge");
-      categoryChip->setText(categoryText);
-      categoryChip->setVisible(!categoryText.isEmpty());
-
-      auto *durationChip = new QLabel(chipRow);
-      durationChip->setProperty("role", "tileBadge");
-      durationChip->setText(durationText);
-      durationChip->setVisible(!durationText.isEmpty());
-
-      chipLayout->addWidget(categoryChip);
-      chipLayout->addWidget(durationChip);
-      chipLayout->addStretch();
-
-      const bool hasBadges = !categoryText.isEmpty() || !durationText.isEmpty();
-
-      auto *meta = new QLabel(summaryFor(item), tile);
+      auto *meta = new QLabel(elideText(summaryFor(item), 60), tile);
       meta->setProperty("role", "tileMeta");
       meta->setWordWrap(true);
+      meta->setMaximumHeight(42);
       meta->setVisible(!meta->text().trimmed().isEmpty());
       meta->setProperty(kRailIndexProperty, railIndex);
       meta->setProperty(kItemIndexProperty, itemIndex);
       meta->installEventFilter(this);
 
       const QString thumbUrl = QString::fromStdString(item.thumbnailUrl);
+      thumb->setProperty(kThumbnailUrlProperty, thumbUrl);
       if (!thumbUrl.isEmpty()) {
-        QPixmap pixmap;
-        if (ThumbnailCache::instance().tryGet(thumbUrl, &pixmap)) {
-          thumb->setPixmap(pixmap.scaled(thumb->size(),
-                                         Qt::KeepAspectRatioByExpanding,
-                                         Qt::SmoothTransformation));
-          thumb->setText(QString());
+        if (ThumbnailCache::instance().tryGet(thumbUrl, nullptr)) {
+          applyThumbnailIfAvailable(thumb, thumbUrl);
         } else {
           ThumbnailCache::instance().request(thumbUrl);
         }
       }
 
-      tileLayout->addWidget(thumb);
+      tileLayout->addWidget(thumbFrame);
       copyLayout->addWidget(itemTitle);
-      if (hasBadges) {
-        copyLayout->addWidget(chipRow);
-      }
       copyLayout->addWidget(meta);
       copyLayout->addStretch();
       tileLayout->addWidget(copyWrap);
 
-      itemsLayout->addWidget(tile);
+      itemsLayout->addWidget(tileSlot, 0, Qt::AlignTop);
       tiles.push_back(tile);
     }
 
@@ -1108,8 +1801,7 @@ void YouTubeBrowsePage::rebuildContent() {
     railHost->setLayout(itemsLayout);
     railScroll->setWidget(railHost);
 
-    railLayout->addWidget(title);
-    railLayout->addWidget(subtitle);
+    railLayout->addWidget(header);
     railLayout->addWidget(railScroll);
 
     contentLayout_->addWidget(railBlock);
@@ -1118,9 +1810,23 @@ void YouTubeBrowsePage::rebuildContent() {
   }
 
   contentLayout_->addStretch();
-  if (scroll_) {
-    scroll_->verticalScrollBar()->setValue(0);
+  if (scroll_ && scroll_->verticalScrollBar()) {
+    scroll_->verticalScrollBar()->setValue(
+        std::max(restoreVerticalScrollValue_, 0));
   }
+  for (int railIndex = 0;
+       railIndex < static_cast<int>(railScrolls_.size()) &&
+       railIndex < static_cast<int>(restoreHorizontalScrollValues_.size());
+       ++railIndex) {
+    auto *railScroll = railScrolls_[railIndex];
+    if (!railScroll || !railScroll->horizontalScrollBar()) {
+      continue;
+    }
+    railScroll->horizontalScrollBar()->setValue(
+        std::max(restoreHorizontalScrollValues_[railIndex], 0));
+  }
+  restoreVerticalScrollValue_ = -1;
+  restoreHorizontalScrollValues_.clear();
   updateSectionHeader();
   updateFocusStyle();
   updateHeroSpotlight();
@@ -1174,14 +1880,15 @@ void YouTubeBrowsePage::setFocusedItem(int railIndex, int itemIndex,
   if (ensureVisible) {
     ensureFocusedVisible();
   }
+  requestAdditionalDiscoveryIfNeeded(focusedRailIndex_);
 }
 
 void YouTubeBrowsePage::setFocusToAuthCard(bool ensureVisible) {
   if (guideItems_.empty()) {
     return;
   }
-  guideSelected_ = true;
-  authCardSelected_ = false;
+  guideSelected_ = !hasInteractiveAuthCard();
+  authCardSelected_ = hasInteractiveAuthCard();
   for (int index = 0; index < static_cast<int>(guideItems_.size()); ++index) {
     if (guideItems_[index].key == QStringLiteral("account") ||
         guideItems_[index].key == QStringLiteral("connect")) {
@@ -1189,6 +1896,8 @@ void YouTubeBrowsePage::setFocusToAuthCard(bool ensureVisible) {
       break;
     }
   }
+  currentSectionTitle_ =
+      accountLabel_.isEmpty() ? QStringLiteral("Account") : accountLabel_;
   updateSidebarState(true);
   updateSectionHeader();
   updateFocusStyle();
@@ -1246,22 +1955,18 @@ int YouTubeBrowsePage::itemsPerRail() const {
   const int viewportWidth = scroll_ && scroll_->viewport()
                                 ? scroll_->viewport()->width()
                                 : this->width();
-  if (viewportWidth >= 2000) {
-    return 7;
-  }
-  if (viewportWidth >= 1700) {
-    return 6;
-  }
-  if (viewportWidth >= 1400) {
-    return 5;
-  }
-  return 4;
+  return visibleTilesForWidth(viewportWidth);
 }
 
-bool YouTubeBrowsePage::hasInteractiveAuthCard() const { return false; }
+bool YouTubeBrowsePage::hasInteractiveAuthCard() const {
+  return authCard_ && authCard_->isVisible();
+}
 
 void YouTubeBrowsePage::updateSectionHeader() {
-  setWindowTitle(QStringLiteral("YouTube"));
+  if (titleLabel_) {
+    titleLabel_->setText(QStringLiteral("YouTube"));
+  }
+  setWindowTitle(titleLabel_ ? titleLabel_->text() : QStringLiteral("YouTube"));
 }
 
 QString YouTubeBrowsePage::qrImageUrlForSession() const {
@@ -1318,7 +2023,9 @@ void YouTubeBrowsePage::updateFocusStyle() {
           guideIndex >= 0 && guideIndex < static_cast<int>(guideItems_.size())
               ? guideItems_[guideIndex].key
               : QString();
-      iconLabel->setPixmap(guideIconPixmap(guideKey, QSize(18, 18), iconColor));
+      iconLabel->setPixmap(guideIconPixmap(
+          guideKey, QSize(kGuideIconGlyphSize, kGuideIconGlyphSize),
+          iconColor));
       iconLabel->setProperty("aio_selected", selected);
       iconLabel->setProperty("aio_hovered", hovered);
       iconLabel->style()->unpolish(iconLabel);
@@ -1328,11 +2035,37 @@ void YouTubeBrowsePage::updateFocusStyle() {
   }
 
   if (authCard_) {
-    authCard_->setProperty(kTileSelectedProperty, false);
-    authCard_->setProperty(kTileHoveredProperty, false);
+    const bool selected = authCardSelected_;
+    const bool hovered = inputMode_ == InputMode::Mouse && authCardHovered_;
+    authCard_->setProperty(kTileSelectedProperty, selected);
+    authCard_->setProperty(kTileHoveredProperty, hovered);
     authCard_->style()->unpolish(authCard_);
     authCard_->style()->polish(authCard_);
     authCard_->update();
+
+    auto *shadow = ensureShadowEffect(authCard_);
+    if (selected) {
+      animateShadow(shadow, 28.0, QPointF(0.0, 10.0), QColor(255, 98, 90, 92),
+                    170);
+    } else if (hovered) {
+      animateShadow(shadow, 18.0, QPointF(0.0, 8.0), QColor(255, 255, 255, 42),
+                    140);
+    } else {
+      animateShadow(shadow, 0.0, QPointF(0.0, 0.0), Qt::transparent, 120);
+    }
+  }
+
+  if (accountButton_) {
+    const bool accountGuideActive =
+        guideSelected_ && selectedGuideIndex_ >= 0 &&
+        selectedGuideIndex_ < static_cast<int>(guideItems_.size()) &&
+        (guideItems_[selectedGuideIndex_].key == QStringLiteral("account") ||
+         guideItems_[selectedGuideIndex_].key == QStringLiteral("connect"));
+    accountButton_->setProperty("aio_selected",
+                                authCardSelected_ || accountGuideActive);
+    accountButton_->style()->unpolish(accountButton_);
+    accountButton_->style()->polish(accountButton_);
+    accountButton_->update();
   }
 
   for (int railIndex = 0; railIndex < static_cast<int>(railTiles_.size());
@@ -1350,27 +2083,26 @@ void YouTubeBrowsePage::updateFocusStyle() {
       const bool hovered = inputMode_ == InputMode::Mouse &&
                            railIndex == hoveredRailIndex_ &&
                            itemIndex == hoveredItemIndex_;
+      const QRect baseRect = tile->property(kTileBaseRectProperty).toRect();
+      const QRect targetRect = selected ? expandedRectFor(baseRect) : baseRect;
       tile->setProperty(kTileSelectedProperty, selected);
       tile->setProperty(kTileHoveredProperty, hovered);
       tile->style()->unpolish(tile);
       tile->style()->polish(tile);
       tile->update();
+      tile->raise();
 
-      const QString thumbUrl =
-          rails_[railIndex].items[itemIndex].thumbnailUrl.empty()
-              ? QString()
-              : QString::fromStdString(
-                    rails_[railIndex].items[itemIndex].thumbnailUrl);
-      if (!thumbUrl.isEmpty()) {
-        QPixmap pixmap;
-        if (ThumbnailCache::instance().tryGet(thumbUrl, &pixmap)) {
-          if (auto *thumb = tile->findChild<QLabel *>("thumb")) {
-            thumb->setPixmap(pixmap.scaled(thumb->size(),
-                                           Qt::KeepAspectRatioByExpanding,
-                                           Qt::SmoothTransformation));
-            thumb->setText(QString());
-          }
-        }
+      animateRect(tile, targetRect, selected ? 170 : 140);
+
+      auto *shadow = ensureShadowEffect(tile);
+      if (selected) {
+        animateShadow(shadow, 34.0, QPointF(0.0, 12.0),
+                      QColor(255, 255, 255, 68), 170);
+      } else if (hovered) {
+        animateShadow(shadow, 20.0, QPointF(0.0, 8.0),
+                      QColor(255, 255, 255, 36), 150);
+      } else {
+        animateShadow(shadow, 0.0, QPointF(0.0, 0.0), Qt::transparent, 120);
       }
     }
   }
@@ -1379,6 +2111,10 @@ void YouTubeBrowsePage::updateFocusStyle() {
 void YouTubeBrowsePage::activateFocused() {
   if (guideSelected_) {
     activateGuideItem();
+    return;
+  }
+  if (authCardSelected_) {
+    performAuthPrimaryAction();
     return;
   }
   if (focusedRailIndex_ < 0 ||
@@ -1413,7 +2149,11 @@ void YouTubeBrowsePage::activateGuideItem() {
     return;
   }
   if (key == QStringLiteral("connect") || key == QStringLiteral("account")) {
-    performAuthPrimaryAction();
+    if (hasInteractiveAuthCard()) {
+      setFocusToAuthCard(true);
+    } else {
+      performAuthPrimaryAction();
+    }
     return;
   }
 
@@ -1425,6 +2165,9 @@ void YouTubeBrowsePage::activateGuideItem() {
 }
 
 void YouTubeBrowsePage::ensureFocusedVisible() {
+  if (authCardSelected_) {
+    return;
+  }
   if (guideSelected_) {
     return;
   }
@@ -1457,6 +2200,15 @@ void YouTubeBrowsePage::moveFocus(int dx, int dy) {
       return;
     }
     if (dx > 0) {
+      if (hasInteractiveAuthCard() && selectedGuideIndex_ >= 0 &&
+          selectedGuideIndex_ < static_cast<int>(guideItems_.size())) {
+        const QString guideKey = guideItems_[selectedGuideIndex_].key;
+        if (guideKey == QStringLiteral("account") ||
+            guideKey == QStringLiteral("connect")) {
+          setFocusToAuthCard(true);
+          return;
+        }
+      }
       const int railIndex = railIndexForGuideSelection();
       if (railIndex >= 0 && railIndex < static_cast<int>(rails_.size()) &&
           !rails_[railIndex].items.empty()) {
@@ -1465,6 +2217,23 @@ void YouTubeBrowsePage::moveFocus(int dx, int dy) {
       return;
     }
     if (dx == 0 && dy == 0 && !rails_.empty() &&
+        !rails_.front().items.empty()) {
+      setFocusedItem(0, effectiveItemIndexForRail(0), true);
+    }
+    return;
+  }
+
+  if (authCardSelected_) {
+    if (dx < 0 || dy < 0) {
+      guideSelected_ = true;
+      authCardSelected_ = false;
+      updateSidebarState(true);
+      updateSectionHeader();
+      updateFocusStyle();
+      updateHeroSpotlight();
+      return;
+    }
+    if ((dx > 0 || dy > 0) && !rails_.empty() &&
         !rails_.front().items.empty()) {
       setFocusedItem(0, effectiveItemIndexForRail(0), true);
     }
@@ -1609,7 +2378,11 @@ void YouTubeBrowsePage::keyPressEvent(QKeyEvent *event) {
 
   if (searchEdit_ && searchEdit_->hasFocus()) {
     if (event->key() == Qt::Key_Escape) {
-      setSearchFocused(false);
+      if (!searchEdit_->text().trimmed().isEmpty()) {
+        searchEdit_->clear();
+      } else {
+        setSearchFocused(false);
+      }
       event->accept();
       return;
     }
@@ -1623,9 +2396,29 @@ void YouTubeBrowsePage::keyPressEvent(QKeyEvent *event) {
     return;
   }
 
-  if ((event->modifiers() & Qt::ControlModifier && event->key() == Qt::Key_F) ||
-      event->key() == Qt::Key_Slash) {
+  const bool focusSearchShortcut =
+      (((event->modifiers() & Qt::ControlModifier) ||
+        (event->modifiers() & Qt::MetaModifier)) &&
+       (event->key() == Qt::Key_F || event->key() == Qt::Key_L ||
+        event->key() == Qt::Key_K)) ||
+      event->key() == Qt::Key_Slash;
+  if (focusSearchShortcut) {
     setSearchFocused(true);
+    event->accept();
+    return;
+  }
+
+  const QString typedText = event->text();
+  const bool plainTextInput =
+      typedText.size() == 1 && typedText.front().isPrint() &&
+      !typedText.front().isSpace() &&
+      !(event->modifiers() &
+        (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier));
+  if (plainTextInput) {
+    setSearchFocused(true);
+    if (searchEdit_) {
+      searchEdit_->insert(typedText);
+    }
     event->accept();
     return;
   }
@@ -1662,6 +2455,13 @@ void YouTubeBrowsePage::keyPressEvent(QKeyEvent *event) {
 
 void YouTubeBrowsePage::resizeEvent(QResizeEvent *event) {
   QWidget::resizeEvent(event);
+  const int viewportWidth =
+      scroll_ && scroll_->viewport() ? scroll_->viewport()->width() : width();
+  if (viewportWidth > 0 &&
+      tileWidthForViewport(viewportWidth) != contentTileWidth_) {
+    scheduleContentRebuild();
+    return;
+  }
   ensureFocusedVisible();
 }
 
@@ -1698,6 +2498,32 @@ bool YouTubeBrowsePage::eventFilter(QObject *watched, QEvent *event) {
       auto *mouseEvent = static_cast<QMouseEvent *>(event);
       if (mouseEvent->button() == Qt::LeftButton) {
         toggleLibrarySection();
+        return true;
+      }
+    }
+  }
+
+  if (isAuthObject(watched)) {
+    if (event->type() == QEvent::Enter) {
+      setInputMode(InputMode::Mouse);
+      authCardHovered_ = true;
+      authCardSelected_ = true;
+      guideSelected_ = false;
+      updateSidebarState(true);
+      updateFocusStyle();
+    } else if (event->type() == QEvent::Leave) {
+      authCardHovered_ = false;
+      updateFocusStyle();
+    } else if (event->type() == QEvent::MouseButtonPress) {
+      auto *mouseEvent = static_cast<QMouseEvent *>(event);
+      if (mouseEvent->button() == Qt::LeftButton) {
+        setInputMode(InputMode::Mouse);
+        authCardHovered_ = true;
+        authCardSelected_ = true;
+        guideSelected_ = false;
+        updateSidebarState(true);
+        updateFocusStyle();
+        performAuthPrimaryAction();
         return true;
       }
     }

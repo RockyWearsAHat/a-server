@@ -60,7 +60,8 @@ public:
   std::vector<VideoContent> getWatchLater(int limit = 20);
   std::vector<VideoContent> getLikedVideos(int limit = 20);
   std::vector<VideoContent> getSubscriptionFeed(int limit = 20);
-  std::vector<YouTubeContentRail> getHomeRails(int itemsPerRail = 10);
+  std::vector<YouTubeContentRail> getHomeRails(int itemsPerRail = 10,
+                                               int discoveryDepth = 0);
   bool hasOAuthAccess() const;
   bool hasDeviceAuthClient() const;
   YouTubeDeviceAuthSession beginDeviceAuth();
@@ -86,6 +87,7 @@ private:
   void loadStoredStateLocked();
   void saveOAuthStateLocked() const;
   void clearOAuthStateLocked();
+  void clearInvalidProxySessionLocked();
   bool refreshAccessTokenLocked();
   bool revokeTokenBestEffort(const std::string &token) const;
   bool usingProxyServerLocked() const;
@@ -99,6 +101,8 @@ private:
                                                int limit);
   std::vector<VideoContent>
   fetchVideosByIds(const std::vector<std::string> &ids);
+  std::vector<VideoContent>
+  fetchMostPopularByCategory(const std::string &videoCategoryId, int limit);
   std::string getMinePlaylistId(const std::string &playlistKey);
   std::vector<std::string> getSubscribedChannelIds(int limit);
   std::vector<VideoContent> getLatestUploadsFromSubscriptions(int limit);

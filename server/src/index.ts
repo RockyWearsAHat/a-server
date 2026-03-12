@@ -4,8 +4,13 @@ import express, { type Request, type Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
-dotenv.config();
+const serverModuleDir = path.dirname(fileURLToPath(import.meta.url));
+const serverRootDir = path.resolve(serverModuleDir, "..");
+const serverEnvFile = path.resolve(serverRootDir, ".env");
+
+dotenv.config({ path: serverEnvFile });
 
 const port = Number.parseInt(process.env.PORT ?? "8916", 10);
 const youtubeApiKey = process.env.YOUTUBE_API_KEY ?? "";
@@ -13,12 +18,16 @@ const youtubeClientId = process.env.YOUTUBE_OAUTH_CLIENT_ID ?? "";
 const youtubeClientSecret = process.env.YOUTUBE_OAUTH_CLIENT_SECRET ?? "";
 const youtubeRegion = process.env.YOUTUBE_REGION ?? "US";
 const serverLogFile = path.resolve(
-  process.cwd(),
+  serverRootDir,
   process.env.SERVER_LOG_FILE ?? "./debug.log",
 );
 const sessionStoreFile = path.resolve(
-  process.cwd(),
+  serverRootDir,
   process.env.SESSION_STORE_FILE ?? "./data/youtube-sessions.json",
+);
+const publicProxyCacheFile = path.resolve(
+  serverRootDir,
+  process.env.YOUTUBE_PUBLIC_CACHE_FILE ?? "./data/youtube-public-cache.json",
 );
 const youtubeReadonlyScope = "https://www.googleapis.com/auth/youtube.readonly";
 const allowedProxyEndpoints = new Set([
@@ -28,6 +37,18 @@ const allowedProxyEndpoints = new Set([
   "subscriptions",
   "videos",
 ]);
+const publicProxyCacheTtlMs = Number.parseInt(
+  process.env.YOUTUBE_PROXY_CACHE_TTL_MS ?? "21600000",
+  10,
+);
+const quotaErrorCacheTtlMs = Number.parseInt(
+  process.env.YOUTUBE_PROXY_QUOTA_ERROR_TTL_MS ?? "60000",
+  10,
+);
+const publicProxyStaleTtlMs = Number.parseInt(
+  process.env.YOUTUBE_PROXY_STALE_TTL_MS ?? "604800000",
+  10,
+);
 
 type StoredSession = {
   sessionId: string;
@@ -47,7 +68,31 @@ type StoredSession = {
   accountAvatarUrl?: string;
 };
 
+type ProxyResponse = {
+  status: number;
+  body: string;
+};
+
+type ProxyCacheEntry = ProxyResponse & {
+  expiresAtMs: number;
+  staleAtMs: number;
+};
+
+type YouTubeErrorPayload = {
+  error?: {
+    code?: number;
+    message?: string;
+    errors?: Array<{
+      domain?: string;
+      reason?: string;
+      message?: string;
+    }>;
+  };
+};
+
 const app = express();
+const inflightPublicProxyRequests = new Map<string, Promise<ProxyResponse>>();
+
 app.use(cors());
 app.use(express.json({ limit: "64kb" }));
 app.use((req, res, next) => {
@@ -66,6 +111,8 @@ app.use((req, res, next) => {
 });
 
 const sessions = loadSessions();
+
+const publicProxyCache = loadPublicProxyCache();
 
 function ensureFileDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -96,6 +143,10 @@ function ensureStoreDir(): void {
   fs.mkdirSync(path.dirname(sessionStoreFile), { recursive: true });
 }
 
+function ensurePublicProxyCacheDir(): void {
+  fs.mkdirSync(path.dirname(publicProxyCacheFile), { recursive: true });
+}
+
 function loadSessions(): Map<string, StoredSession> {
   ensureStoreDir();
   if (!fs.existsSync(sessionStoreFile)) {
@@ -116,6 +167,71 @@ function saveSessions(): void {
   fs.writeFileSync(
     sessionStoreFile,
     JSON.stringify([...sessions.values()], null, 2),
+    "utf8",
+  );
+}
+
+function prunePublicProxyCacheEntries(
+  cache: Map<string, ProxyCacheEntry>,
+): void {
+  const now = Date.now();
+  for (const [cacheKey, entry] of cache.entries()) {
+    if (entry.staleAtMs <= now) {
+      cache.delete(cacheKey);
+    }
+  }
+}
+
+function loadPublicProxyCache(): Map<string, ProxyCacheEntry> {
+  ensurePublicProxyCacheDir();
+  if (!fs.existsSync(publicProxyCacheFile)) {
+    return new Map<string, ProxyCacheEntry>();
+  }
+
+  try {
+    const raw = fs.readFileSync(publicProxyCacheFile, "utf8");
+    const parsed = JSON.parse(raw) as Array<{
+      cacheKey: string;
+      status: number;
+      body: string;
+      expiresAtMs: number;
+      staleAtMs?: number;
+    }>;
+    const cache = new Map<string, ProxyCacheEntry>();
+    for (const entry of parsed) {
+      if (!entry || typeof entry.cacheKey !== "string") {
+        continue;
+      }
+      cache.set(entry.cacheKey, {
+        status: entry.status,
+        body: entry.body,
+        expiresAtMs: entry.expiresAtMs,
+        staleAtMs: entry.staleAtMs ?? entry.expiresAtMs,
+      });
+    }
+    prunePublicProxyCacheEntries(cache);
+    return cache;
+  } catch {
+    return new Map<string, ProxyCacheEntry>();
+  }
+}
+
+function savePublicProxyCache(): void {
+  ensurePublicProxyCacheDir();
+  prunePublicProxyCacheEntries(publicProxyCache);
+  fs.writeFileSync(
+    publicProxyCacheFile,
+    JSON.stringify(
+      [...publicProxyCache.entries()].map(([cacheKey, entry]) => ({
+        cacheKey,
+        status: entry.status,
+        body: entry.body,
+        expiresAtMs: entry.expiresAtMs,
+        staleAtMs: entry.staleAtMs,
+      })),
+      null,
+      2,
+    ),
     "utf8",
   );
 }
@@ -173,7 +289,7 @@ async function fetchYouTubeJson(
   endpoint: string,
   params: string,
   session?: StoredSession,
-): Promise<{ status: number; body: string }> {
+): Promise<ProxyResponse> {
   const url = new URL(`https://www.googleapis.com/youtube/v3/${endpoint}`);
   const search = new URLSearchParams(params);
   search.forEach((value, key) => url.searchParams.set(key, value));
@@ -193,6 +309,86 @@ async function fetchYouTubeJson(
     status: response.status,
     body: await response.text(),
   };
+}
+
+function parseYouTubeErrorBody(body: string): {
+  code?: number;
+  reason?: string;
+  message?: string;
+} | null {
+  try {
+    const parsed = JSON.parse(body) as YouTubeErrorPayload;
+    return {
+      code: parsed.error?.code,
+      reason: parsed.error?.errors?.[0]?.reason,
+      message: parsed.error?.errors?.[0]?.message ?? parsed.error?.message,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function publicProxyCacheKey(endpoint: string, params: string): string {
+  return `${endpoint}?${params}`;
+}
+
+function readPublicProxyCache(
+  cacheKey: string,
+  allowStale = false,
+): ProxyResponse | null {
+  const cached = publicProxyCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (!allowStale && cached.expiresAtMs <= now) {
+    return null;
+  }
+  if (cached.staleAtMs <= now) {
+    publicProxyCache.delete(cacheKey);
+    savePublicProxyCache();
+    return null;
+  }
+
+  return {
+    status: cached.status,
+    body: cached.body,
+  };
+}
+
+function getProxyCacheTtlMs(response: ProxyResponse): number {
+  if (response.status >= 200 && response.status < 300) {
+    return Math.max(0, publicProxyCacheTtlMs);
+  }
+
+  const error = parseYouTubeErrorBody(response.body);
+  if (response.status === 403 && error?.reason === "quotaExceeded") {
+    return Math.max(0, quotaErrorCacheTtlMs);
+  }
+
+  return 0;
+}
+
+function writePublicProxyCache(
+  cacheKey: string,
+  response: ProxyResponse,
+): void {
+  const ttlMs = getProxyCacheTtlMs(response);
+  if (ttlMs <= 0) {
+    publicProxyCache.delete(cacheKey);
+    savePublicProxyCache();
+    return;
+  }
+
+  const now = Date.now();
+  publicProxyCache.set(cacheKey, {
+    status: response.status,
+    body: response.body,
+    expiresAtMs: now + ttlMs,
+    staleAtMs: now + Math.max(ttlMs, publicProxyStaleTtlMs),
+  });
+  savePublicProxyCache();
 }
 
 async function refreshSessionAccessToken(
@@ -528,13 +724,80 @@ app.get("/api/youtube/proxy", async (req, res) => {
     return;
   }
 
-  let response = await fetchYouTubeJson(endpoint, params, session);
-  if (
-    response.status === 401 &&
-    session &&
-    (await refreshSessionAccessToken(session))
-  ) {
-    response = await fetchYouTubeJson(endpoint, params, session);
+  const usePublicCache = !requireAuth && !session?.accessToken;
+  const cacheKey = usePublicCache ? publicProxyCacheKey(endpoint, params) : "";
+
+  if (usePublicCache) {
+    const cached = readPublicProxyCache(cacheKey);
+    if (cached) {
+      res.status(cached.status).type("application/json").send(cached.body);
+      return;
+    }
+  }
+
+  const executeProxyFetch = async (): Promise<ProxyResponse> => {
+    let response = await fetchYouTubeJson(endpoint, params, session);
+    if (
+      response.status === 401 &&
+      session &&
+      (await refreshSessionAccessToken(session))
+    ) {
+      response = await fetchYouTubeJson(endpoint, params, session);
+    }
+    return response;
+  };
+
+  let response: ProxyResponse;
+  if (usePublicCache) {
+    const inFlight = inflightPublicProxyRequests.get(cacheKey);
+    if (inFlight) {
+      response = await inFlight;
+    } else {
+      const request = executeProxyFetch().finally(() => {
+        inflightPublicProxyRequests.delete(cacheKey);
+      });
+      inflightPublicProxyRequests.set(cacheKey, request);
+      response = await request;
+      writePublicProxyCache(cacheKey, response);
+    }
+  } else {
+    response = await executeProxyFetch();
+  }
+
+  if (response.status >= 400) {
+    const upstreamError = parseYouTubeErrorBody(response.body);
+    const shouldServeStaleCache =
+      usePublicCache &&
+      (response.status >= 500 || upstreamError?.reason === "quotaExceeded");
+    if (shouldServeStaleCache) {
+      const staleCached = readPublicProxyCache(cacheKey, true);
+      if (staleCached) {
+        logServer(
+          "WARN",
+          "Serving stale YouTube public cache after upstream failure",
+          {
+            endpoint,
+            statusCode: response.status,
+            reason: upstreamError?.reason,
+          },
+        );
+        res
+          .status(staleCached.status)
+          .type("application/json")
+          .send(staleCached.body);
+        return;
+      }
+    }
+
+    logServer("WARN", "YouTube upstream request failed", {
+      endpoint,
+      requireAuth,
+      statusCode: response.status,
+      reason: upstreamError?.reason,
+      message: upstreamError?.message,
+      usingApiKey: !session?.accessToken,
+      hasSession: Boolean(session?.accessToken),
+    });
   }
 
   res.status(response.status).type("application/json").send(response.body);
@@ -583,7 +846,9 @@ process.on("unhandledRejection", (reason) => {
 app.listen(port, () => {
   logServer("INFO", "YouTube server listening", {
     url: `http://127.0.0.1:${port}`,
+    envFile: serverEnvFile,
     logFile: serverLogFile,
+    publicCacheFile: publicProxyCacheFile,
     hasApiKey: Boolean(youtubeApiKey),
     hasOAuthClientId: Boolean(youtubeClientId),
   });

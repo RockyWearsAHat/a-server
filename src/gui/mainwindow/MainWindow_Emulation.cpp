@@ -1010,7 +1010,6 @@ void MainWindow::UpdateDisplay() {
     const auto &ps1Gpu = ps1Emulator->GetGPU();
     const uint32_t w = ps1Emulator->GetDisplayWidth();
     const uint32_t h = ps1Emulator->GetDisplayHeight();
-    const uint32_t stride = ps1Emulator->GetVRAMStride();
     if (ps1Fb && w > 0 && h > 0) {
       // Resize display image if GPU resolution changed
       if (static_cast<uint32_t>(displayImage.width()) != w ||
@@ -1019,6 +1018,7 @@ void MainWindow::UpdateDisplay() {
       }
       auto *dst = reinterpret_cast<uint32_t *>(displayImage.bits());
       if (ps1Gpu.IsDisplay24Bit()) {
+        const uint32_t stride = ps1Emulator->GetVRAMStride();
         const auto *vramBytes =
             reinterpret_cast<const uint8_t *>(ps1Gpu.GetVRAMPointer());
         const uint32_t strideBytes = stride * sizeof(uint16_t);
@@ -1040,6 +1040,7 @@ void MainWindow::UpdateDisplay() {
           }
         }
       } else {
+        const uint32_t stride = ps1Gpu.GetFramebufferStride();
         for (uint32_t y = 0; y < h; ++y) {
           const uint16_t *srcRow = ps1Fb + y * stride;
           uint32_t *dstRow = dst + y * w;

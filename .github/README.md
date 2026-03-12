@@ -1,56 +1,53 @@
-# GitHub Copilot Configuration
+# GitHub Copilot Workspace Customization
 
-This directory contains GitHub Copilot instructions, agents, and prompts to guide AI assistance for this project.
+This directory contains the repository-local Copilot customization for AIO Server. Keep files here factual, concise, and limited to workflows that actually exist in this repository.
 
-## Structure
+## Current Layout
 
 ```
 .github/
-├── instructions/     # Coding standards and best practices
-├── agents/          # Specialized AI assistants
-├── prompts/         # Reusable prompt templates
-└── copilot/         # Project-specific Copilot context (optional)
+├── agents/                  # Repo-local custom agents for AIO Server workflows
+├── instructions/            # Path-specific instructions for this codebase
+├── skills/                  # Repo-local workflow skills loaded by agents
+├── prompts/                 # Thin repo-local prompt entry points for human-invoked workflows
+├── README.md
+└── copilot-instructions.md
 ```
 
-## Instructions
+## Active Customization Surfaces
 
-Instructions define coding standards, best practices, and guidelines that GitHub Copilot should follow when generating code.
+- `.github/copilot-instructions.md` is the always-on workspace guidance.
+- `.github/instructions/*.instructions.md` contains path-specific rules.
+- `.github/agents/*.agent.md` contains repo-local custom agents.
+- `.github/skills/*/SKILL.md` contains reusable repo-local workflows that agents load when needed.
+- `.github/prompts/*.prompt.md` contains thin human-invoked entry points that route to repo-local agents.
 
-### Installed Instructions
+## Active Agents
 
-- **cmake-vcpkg.instructions.md** - C++ build system and dependency management
-- **self-explanatory-code-commenting.instructions.md** - Code documentation philosophy
-- **performance-optimization.instructions.md** - Performance best practices
-- **object-calisthenics.instructions.md** - Clean code principles
-- **security-and-owasp.instructions.md** - Security guidelines
+- `expert-cpp-software-engineer.agent.md` for C++, Qt, emulator, and test work.
+- `visual-dev-tester.agent.md` for automated evidence capture, `debug.log` inspection, media artifacts, and user-facing verification workflows.
+- `visual-dev-loop.agent.md` for host-driven boot, navigation, screenshot capture, multimodal image inspection, and definitive automated screen-state judgments.
 
-## Agents
+## Active Prompts
 
-Agents are specialized AI assistants that provide expert-level guidance in specific domains.
+- `visual-dev-tester.prompt.md` routes capture-oriented verification requests to `Visual Development Tester`.
+- `visual-dev-loop.prompt.md` routes definitive screen-state judgment requests to `Visual Development Loop`.
 
-### Installed Agents
+## Visual Loop Runtime Tooling
 
-- **expert-cpp-software-engineer.agent.md** - Expert C++ development guidance
+- `tools/aioserver-vision-tool` is a workspace-local VS Code extension that contributes `aioserver-inspect-screenshot`.
+- `tools/aioserver-vision-tool` also contributes the `@aioserver-vision` chat participant for direct screenshot inspection in normal Copilot Chat.
+- `aioserver-inspect-screenshot` reads a captured `.png` or `.jpg`, attaches the real image bytes to a vision-capable Copilot model, and returns the model's analysis to the Visual Development Loop agent.
+- This extension exists because `.agent.md` and skill files alone cannot force binary screenshots to be attached as image context during execution.
+- The active VS Code window must have that extension loaded before a custom agent can invoke the tool without unknown-tool diagnostics.
+- Install or refresh the tool from the repository root with `make install-vision-tool` or `make reinstall-vision-tool`.
 
-## How It Works
+Use `Visual Development Tester` when the task is to collect artifacts, inspect logs, or sanity-check UI, video, or audio output without claiming direct sight or hearing.
 
-1. **Automatic Application**: GitHub Copilot automatically reads these files and applies their guidance
-2. **File Patterns**: Each instruction has `applyTo` patterns defining which files it applies to
-3. **Priority**: More specific patterns take precedence over general ones
-4. **Agents**: Invoke agents explicitly using `@expert-cpp-software-engineer` or similar commands
+Use `Visual Development Loop` when the build is current and the task needs automated host interaction plus a yes/no judgment about a specific rendered screen state from a captured screenshot or frame.
 
-## Customization
+## Maintenance
 
-You can customize or add your own:
-
-1. Create new `.instructions.md` files in the `instructions/` directory
-2. Create new `.agent.md` files in the `agents/` directory
-3. Add `applyTo` patterns to scope when guidelines apply
-
-## Documentation
-
-See [AWESOME_COPILOT_INSTALLED.md](AWESOME_COPILOT_INSTALLED.md) for details on what was installed and why.
-
-## Sources
-
-These files are from the [awesome-copilot](https://github.com/jlorich/awesome-copilot) community repository, providing battle-tested patterns and practices.
+- Keep repo-local customization aligned with the files and workflows that are actually checked in.
+- Do not add root `AGENTS.md` files or copies of user-profile customization unless the repository workflow explicitly needs them.
+- When build, test, logging, agent-routing, or Qt/QSS workflow details change, update this file and `.github/copilot-instructions.md` together.

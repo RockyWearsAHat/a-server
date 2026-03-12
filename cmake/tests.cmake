@@ -22,6 +22,18 @@ set_target_properties(gtest gtest_main gmock gmock_main PROPERTIES
 
 enable_testing()
 
+add_executable(QssValidator ${PROJECT_ROOT}/tests/QssValidator.cpp)
+set_target_properties(QssValidator PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/QssValidator"
+)
+target_link_libraries(QssValidator PRIVATE Qt6::Widgets)
+add_test(
+  NAME QssValidation
+  COMMAND ${BUILD_ROOT}/bin/QssValidator ${PROJECT_ROOT}/assets/qss
+)
+set_tests_properties(QssValidation PROPERTIES TIMEOUT 20)
+
 # ─── PS1 Emulator Tests ────────────────────────────────────────────────
 
 add_executable(PS1CPUTests ${PROJECT_ROOT}/tests/PS1CPUTests.cpp)

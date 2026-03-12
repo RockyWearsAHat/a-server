@@ -1,7 +1,7 @@
 # Root Makefile wrapper - delegates to cmake/Makefile
 # Run this from the project root directory
 
-.PHONY: all clean configure build test help
+.PHONY: all clean configure build test help install-vision-tool reinstall-vision-tool
 
 %:
 	@$(MAKE) -C cmake $@
@@ -20,6 +20,13 @@ build:
 
 test:
 	@$(MAKE) -C cmake test
+
+install-vision-tool:
+	@cd tools/aioserver-vision-tool && npm run install:local
+
+reinstall-vision-tool:
+	@code --uninstall-extension local.aioserver-vision-tool >/dev/null 2>&1 || true
+	@cd tools/aioserver-vision-tool && npm run install:local
 
 coverage:
 	@$(MAKE) -C cmake coverage

@@ -3,6 +3,7 @@
 #include "emulator/common/Logger.h"
 #include "emulator/gba/ARM7TDMI.h"
 #include "gui/MainWindow.h"
+#include "gui/StreamingHubWidget.h"
 #include "input/InputManager.h"
 #include "nas/NASServer.h"
 #include <QApplication>
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <signal.h>
 
 // Async-signal-safe flag for graceful shutdown
@@ -39,6 +41,25 @@ static void HeadlessCrashQuit(const char *logPath) {
   }
   QMetaObject::invokeMethod(
       app, []() { QCoreApplication::exit(1); }, Qt::QueuedConnection);
+}
+
+static std::optional<int> ResolveStartupStreamingApp(const QString &value) {
+  const QString normalized = value.trimmed().toLower();
+  if (normalized == QStringLiteral("youtube")) {
+    return static_cast<int>(AIO::GUI::StreamingApp::YouTube);
+  }
+  if (normalized == QStringLiteral("netflix")) {
+    return static_cast<int>(AIO::GUI::StreamingApp::Netflix);
+  }
+  if (normalized == QStringLiteral("disney+") ||
+      normalized == QStringLiteral("disneyplus") ||
+      normalized == QStringLiteral("disney-plus")) {
+    return static_cast<int>(AIO::GUI::StreamingApp::DisneyPlus);
+  }
+  if (normalized == QStringLiteral("hulu")) {
+    return static_cast<int>(AIO::GUI::StreamingApp::Hulu);
+  }
+  return std::nullopt;
 }
 
 int main(int argc, char *argv[]) {
@@ -133,6 +154,13 @@ int main(int argc, char *argv[]) {
       "path");
   parser.addOption(inputScriptOption);
 
+  QCommandLineOption launchAppOption(
+      QStringList() << "launch-app",
+      "Launch a streaming app directly on startup (youtube, netflix, "
+      "disneyplus, hulu)",
+      "app");
+  parser.addOption(launchAppOption);
+
   QCommandLineOption nasRootOption(
       QStringList() << "nas-root",
       "Root directory to serve via NAS (default: ~/AIO_NAS)", "path");
@@ -176,6 +204,27 @@ int main(int argc, char *argv[]) {
       headlessMaxMs = maxMs;
     }
   }
+
+  if (parser.isSet(romOption) && parser.isSet(launchAppOption)) {
+    std::cerr << "--rom and --launch-app cannot be used together" << std::endl;
+    return 2;
+  }
+
+  std::optional<int> startupStreamingApp;
+  if (parser.isSet(launchAppOption)) {
+    startupStreamingApp =
+        ResolveStartupStreamingApp(parser.value(launchAppOption));
+    if (!startupStreamingApp.has_value()) {
+      std::cerr << "Unsupported --launch-app value: "
+                << parser.value(launchAppOption).toStdString() << std::endl;
+      return 2;
+    }
+    if (headless) {
+      std::cerr << "--launch-app requires GUI mode" << std::endl;
+      return 2;
+    }
+  }
+
   const bool nasEnabled = true;
 
   // Determinism: input scripts should run against emulated time in headless
@@ -408,8 +457,18 @@ int main(int argc, char *argv[]) {
             "Headless dump scheduled at %d ms: %s", clampedDumpMs,
             dumpPath.toStdString().c_str());
 
-        QTimer::singleShot(
-            clampedDumpMs, [&window, dumpPath, assertNonBlack]() {
+        auto *headlessDumpTimer = new QTimer(&window);
+        headlessDumpTimer->setInterval(50);
+        QObject::connect(
+            headlessDumpTimer, &QTimer::timeout,
+            [&window, dumpPath, assertNonBlack, clampedDumpMs,
+             headlessDumpTimer]() {
+              const uint64_t emuMs = window.GetEmulatedMilliseconds();
+              if (emuMs < static_cast<uint64_t>(clampedDumpMs)) {
+                return;
+              }
+
+              headlessDumpTimer->stop();
               double nonBlackRatio = 0.0;
               const bool ok = window.DumpCurrentFramePPM(dumpPath.toStdString(),
                                                          &nonBlackRatio);
@@ -430,6 +489,7 @@ int main(int argc, char *argv[]) {
                 QCoreApplication::exit(2);
               }
             });
+        headlessDumpTimer->start();
       }
 
       // Configure debugger on GBA emulator via window API
@@ -476,6 +536,17 @@ int main(int argc, char *argv[]) {
       }
       if (!headless) {
         window.show();
+      }
+      if (startupStreamingApp.has_value()) {
+        AIO::Emulator::Common::Logger::Instance().LogFmt(
+            AIO::Emulator::Common::LogLevel::Info, "main",
+            "Launching streaming app on startup: %s",
+            parser.value(launchAppOption).toStdString().c_str());
+        QTimer::singleShot(0, &window, [&window, startupStreamingApp]() {
+          QMetaObject::invokeMethod(&window, "launchStreamingApp",
+                                    Qt::QueuedConnection,
+                                    Q_ARG(int, *startupStreamingApp));
+        });
       }
     }
 

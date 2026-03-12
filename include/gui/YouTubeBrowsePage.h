@@ -67,12 +67,15 @@ private:
   void setupUi();
   void runSearch();
   void refreshHome();
+  void requestAdditionalDiscoveryIfNeeded(int targetRailIndex);
+  void loadMoreHomeRows();
   void setStatus(const QString &text);
   void setLoadingState(bool loading, const QString &text);
   void updateSectionHeader();
   QString summaryFor(const AIO::Streaming::VideoContent &item) const;
   void setRails(const std::vector<AIO::Streaming::YouTubeContentRail> &rails,
-                const QString &heroBody, const QString &accountLabel);
+                const QString &heroBody, const QString &accountLabel,
+                bool preserveFocus = false);
 
   void setInputMode(InputMode mode);
   void setFocusedItem(int railIndex, int itemIndex, bool ensureVisible);
@@ -84,6 +87,9 @@ private:
   void rebuildAuthCard();
   void updateHeroSpotlight();
   void updateSidebarState(bool animated);
+  void scheduleContentRebuild();
+  void refreshLoadedThumbnail(const QString &url);
+  void refreshAuthArtwork(const QString &url);
   void toggleLibrarySection();
   void updateFocusStyle();
   void activateFocused();
@@ -111,6 +117,7 @@ private:
   int hoveredGuideIndex_ = -1;
   int hoveredRailIndex_ = -1;
   int hoveredItemIndex_ = -1;
+  uint64_t sidebarAnimationEpoch_ = 0;
 
   QFrame *sidebar_{};
   QLabel *sidebarTitleLabel_{};
@@ -121,6 +128,19 @@ private:
   QPushButton *backButton_{};
   QPushButton *homeButton_{};
   QLabel *titleLabel_{};
+  QPushButton *accountButton_{};
+
+  QFrame *heroCard_{};
+  QLabel *heroEyebrowLabel_{};
+  QLabel *heroTitleLabel_{};
+  QLabel *heroBodyLabel_{};
+  QLabel *heroPrimaryChip_{};
+  QLabel *heroSecondaryChip_{};
+  QLabel *heroTertiaryChip_{};
+  QFrame *heroSpotlightCard_{};
+  QLabel *heroSpotlightEyebrowLabel_{};
+  QLabel *heroSpotlightTitleLabel_{};
+  QLabel *heroSpotlightMetaLabel_{};
 
   QLineEdit *searchEdit_{};
   QPushButton *searchButton_{};
@@ -152,8 +172,16 @@ private:
   int selectedGuideIndex_ = 0;
   int focusedRailIndex_ = -1;
   int focusedItemIndex_ = 0;
+  int contentViewportWidth_ = -1;
+  int contentTileWidth_ = -1;
+  bool contentRebuildScheduled_ = false;
+  int restoreVerticalScrollValue_ = -1;
+  std::vector<int> restoreHorizontalScrollValues_;
+  bool loadingMoreHome_ = false;
+  int homeDiscoveryDepth_ = 0;
   uint64_t requestSerial_ = 0;
   QString currentSectionTitle_ = QStringLiteral("For you");
+  QString heroBody_;
   QString accountLabel_;
   QString accountAvatarUrl_;
   AIO::Streaming::YouTubeDeviceAuthSession *authSession_{};
