@@ -22,6 +22,7 @@ public:
   explicit YouTubePlayerOverlay(QWidget *parent = nullptr);
 
   void setPlayerTitle(const QString &title);
+  void setChannelName(const QString &name);
   void setPlaybackState(bool playing, bool ready);
   void setTitleVisible(bool visible);
   void setHintText(const QString &hint);
@@ -35,6 +36,7 @@ public:
   void setRecommendationsVisible(bool showLabel, bool showRail);
   void ensureRecommendationVisible(int index);
   bool hasRecommendations() const;
+  void flashSeekDelta(int deltaSeconds);
 
 private:
   void rebuildRecommendations();
@@ -42,6 +44,7 @@ private:
   void refreshTransportChips();
 
   QLabel *titleLabel_ = nullptr;
+  QLabel *channelLabel_ = nullptr;
   QLabel *hintLabel_ = nullptr;
   QFrame *transportBar_ = nullptr;
   QLabel *playPauseChip_ = nullptr;

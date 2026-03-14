@@ -69,6 +69,7 @@ set_target_properties(SwitchEmulator PROPERTIES
 
 add_executable(AIOServer 
     ${PROJECT_ROOT}/src/main.cpp
+    ${PROJECT_ROOT}/assets/fonts.qrc
     ${PROJECT_ROOT}/src/common/Dotenv.cpp
     ${PROJECT_ROOT}/src/common/Logging.cpp
     ${PROJECT_ROOT}/src/common/CssVars.cpp
@@ -86,6 +87,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Pages.cpp
     ${PROJECT_ROOT}/src/gui/LogViewerDialog.cpp
     ${PROJECT_ROOT}/src/gui/StreamingHubWidget.cpp
+    ${PROJECT_ROOT}/src/gui/HomeScreen.cpp
     ${PROJECT_ROOT}/src/gui/StreamingWebViewPage.cpp
     ${PROJECT_ROOT}/src/gui/NASPage.cpp
     ${PROJECT_ROOT}/src/gui/NASAdapter.cpp
@@ -101,6 +103,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/GameSelectAdapter.cpp
     ${PROJECT_ROOT}/src/gui/EmulatorSettingsAdapter.cpp
     ${PROJECT_ROOT}/src/gui/SettingsMenuAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/RemoteControlServer.cpp
     ${PROJECT_ROOT}/src/input/InputManager.cpp
     ${PROJECT_ROOT}/src/input/manager/InputManager_SDL.cpp
     ${PROJECT_ROOT}/src/input/InputBindings_Default.cpp
@@ -114,6 +117,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/nas/NASServer.h
     ${PROJECT_ROOT}/include/gui/LogViewerDialog.h
     ${PROJECT_ROOT}/include/gui/StreamingHubWidget.h
+    ${PROJECT_ROOT}/include/gui/HomeScreen.h
     ${PROJECT_ROOT}/include/gui/StreamingWebViewPage.h
     ${PROJECT_ROOT}/include/gui/NASPage.h
     ${PROJECT_ROOT}/include/gui/NASAdapter.h
@@ -125,6 +129,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/common/Logging.h
     ${PROJECT_ROOT}/include/common/CssVars.h
     ${PROJECT_ROOT}/include/common/AssetPaths.h
+    ${PROJECT_ROOT}/include/gui/RemoteControlServer.h
     ${PROJECT_ROOT}/include/input/InputManager.h
     ${PROJECT_ROOT}/include/streaming/StreamingManager.h
     ${PROJECT_ROOT}/include/streaming/StreamingService.h

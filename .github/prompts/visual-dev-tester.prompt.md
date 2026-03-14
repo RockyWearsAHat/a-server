@@ -1,14 +1,14 @@
 ---
-description: "Route UI, video, audio, and debug-log capture requests to Visual Development Tester."
-agent: Visual Development Tester
-argument-hint: "Describe what to capture, how to reproduce it, what evidence you expect, and whether you need sanity checking only or likely follow-up definitive judgment."
+description: "Route visual verification, analysis, and resolution planning requests to Visual Engineer."
+agent: Visual Engineer
+argument-hint: "Describe the behavior to verify, the expected state, any existing artifacts, and whether you need a plan or just a pass/fail result."
 ---
 
-Use this prompt when you want automated evidence collection without claiming direct visual inspection.
+Use this prompt for visual verification, problem analysis, and implementation planning.
 
 Include:
 
-- the behavior to capture
-- the reproduction path
-- the expected evidence or artifacts
-- whether you need sanity checking only or likely follow-up definitive screen-state judgment
+- the behavior or screen state to verify
+- the expected correct state
+- any existing screenshot, frame dump, replay, or log paths
+- whether you need a verification result only or a full problem analysis with implementation plan

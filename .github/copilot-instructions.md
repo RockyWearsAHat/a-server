@@ -1,36 +1,53 @@
-When patching multiple locations in files, always plan well then start the patching from the bottom of the file up. Thus, content shifts don't happen causing subsequent patches to fail. This is annoying and a waste of turns and tokens, often causing confusion because of an easily avoidable badly explained behavior [it's literally not coded in copilot {atleast not consistently that I've noticed}, I am defining it here for clarity if it has already been mentioned earlier, this is simple reenforcement].
+Native C++ emulator (GBA, PS1) with Qt 6 UI, a CMake build configured through the top-level Makefile, and a server/backend layer.
 
-Please ensure that you understand what system the user is on. This should be found and placed in the #file:[./github/SYSTEM.md](./SYSTEM.md), if this file is not created please create it. In the case it is missing, assume system information must still be found for this local machine AND MAKE THIS AN IMMEDIATE PRIORITY. If the file can be found or has been filled out/registered then use it. Ensure this system.md outlines what platform the user is developing on, default terminal configuration and environment the user is running on. Etc. If anything necessary or helpful is missing from the created version, add it. If the file must still be created, make it. Anything that will be helpful in clarifying commands and development ON THE LOCAL MACHINE should live there, it should not be instructions but rather a reference for what is valid for the envioronment.
+Build: `make build`
+Test: `cd build/generated/cmake && ctest --output-on-failure`
 
-This repository is a native C++ emulator application built with Qt, CMake, and a top-level `Makefile` wrapper. Most product work lands in `src/`, `include/`, `assets/qss/`, `tests/`, and `server/`.
+Architecture:
 
-Before broad changes, read the relevant files under `.github/instructions/` instead of guessing conventions.
+- Emulator cores: `src/emulator/` + `include/emulator/` (`gba/`, `ps1/`)
+- GUI shell: `src/gui/` + `include/gui/`
+- Styling: `assets/qss/` (`youtube.qss`, `tv.qss`)
+- Server: `server/`
+- Tests: `tests/` (GoogleTest, one binary per subsystem)
 
-Build and validation:
+Core constraints:
 
-- Use `make build` from the repository root or the workspace Build task.
-- Run tests from `build/generated/cmake` with `ctest --output-on-failure`, or use the workspace test tasks.
-- If you edit `assets/qss/*.qss`, treat a successful build as required validation because `QssValidator` runs during the build.
+- Fix root causes. Never mask failures or broaden tolerances.
+- Keep widget object names, dynamic properties, and QSS selectors synchronized.
+- `QssValidator` runs at build time; a successful build validates QSS.
+- Keep changes aligned with the checked-in Makefile to CMake to Ninja flow.
 
-Runtime and verification:
+Routing policy:
 
-- Check `debug.log` after Qt runs or headless emulator flows unless the command overrides the log path.
-- Prefer tests, debugger inspection, logs, and deterministic headless runs when they answer the question.
-- Once the build is current, route rendered-output bugs, GUI regressions, and runtime screen-state validation promptly to `Visual Development Tester` or `Visual Development Loop`.
-- Outside `Visual Development Loop`, never claim direct visual verification from screenshots, PPMs, or video captures; report automated checks and ask the user to confirm appearance.
+- Prefer the direct path. If one worker can finish the task safely, do not add extra coordinators.
+- Delegate only for specialization: `Code Engineer` for implementation, `Test Engineer` for tests and verification, `Visual Engineer` for rendered-output checks, `R&D Lead` for optional research, `Quality Auditor` for stalls or churn.
+- `Senior Engineer` is optional for unusually broad parallel work, not the default implementation hop.
+- Gather read-only context once, in parallel when possible, then act. Do not bounce the same file reads through multiple agents.
+- Use compact handoffs: goal, files, constraints, expected output. Do not forward long transcript dumps.
+- Stop once the requested change is implemented and verified. Do not keep delegating after a definitive answer.
 
-Qt and styling workflow:
+Model policy:
 
-- Keep widget code, object names, dynamic properties, and matching QSS selectors synchronized.
-- Keep YouTube-specific styling in `assets/qss/youtube.qss` and shared TV-shell styling in `assets/qss/tv.qss`.
+- Use the workspace default or a low-cost model for routine reads, code edits, and targeted verification.
+- Escalate to a stronger model only for ambiguous architecture choices, repeated failed attempts, conflicting evidence, or high-risk multi-file refactors.
+- Do not pin premium models by default when the task is narrow and evidence is local.
 
-Agent routing:
+Agent mode:
 
-- Use `Expert C++ Software Engineer` for C++, Qt, emulator, architecture, and refactor work.
-- Use `Visual Development Tester` for automated evidence capture, `debug.log` inspection, media artifacts, and user-facing visual or audio verification workflows.
-- Use `Visual Development Loop` for host-driven boot → navigate → capture → multimodal inspect → support with analysis → judge cycles that make definitive automated screen-state checks.
+- For small tasks, work directly.
+- For multi-step work, load the shared orchestration skill and choose the fewest agents needed.
+- If research is not required, skip it.
+- If the task is code plus nearby tests, prefer one implementation pass over serial code-then-test delegation unless independent verification is needed.
 
-Execution expectations:
+Iteration discipline:
 
-- Prefer existing workspace tasks and repository commands over inventing new ones.
-- Keep repository-specific customization factual, concise, and limited to this codebase.
+- Work like a developer: batch related fixes, build once, check once. Do not micro-iterate one change at a time.
+- Implement changes in parallel across all affected areas at once — that is the AI advantage over a human coder. Use it.
+- The visual development loop is: **audit → identify all issues → implement every fix in one batch → build → audit**. Repeat.
+- Vision audit calls are expensive. One per milestone (5-10 changes), never per tweak.
+- The vision audit is the designer/playtester reviewing your build. Give it comprehensive context and let it judge freely — then act on every item it raises.
+- Skip visual audits for mechanical changes (color values, spacing). Only audit when visual output meaningfully changed.
+- Prefer launching the app for the user to preview live when the changes are small or exploratory.
+
+If new directives come up that affect general project quality, keep the copilot documentation for yourself updated in accordance with the project standards. We should prioritize short concise instructions that are easy to follow and check against, rather than long detailed ones that are hard to parse, but these should also be consistently and constantly kept accurate to the project expectations and guidelines given directly by the user.

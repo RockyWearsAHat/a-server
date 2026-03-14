@@ -239,6 +239,12 @@ void MainWindow::maybeAutostartYouTubeServer() {
     return;
   }
 
+  if (WaitForYouTubeServerReady(config->port, 1000)) {
+    std::cout << "[YouTube] Server already running on port " << config->port
+              << std::endl;
+    return;
+  }
+
   youtubeServerProcess_ = new QProcess(this);
   youtubeServerProcess_->setProgram(config->nodeExecutable);
   youtubeServerProcess_->setArguments({config->entryPath});
@@ -342,6 +348,7 @@ MainWindow::MainWindow(QWidget *parent)
   stackedWidget->setFocusPolicy(Qt::StrongFocus);
   setFocusProxy(stackedWidget);
   setupMainMenu();
+  setupHomeScreen();
   setupEmulatorSelect();
   setupGameSelect();
   setupEmulatorView();
@@ -373,6 +380,7 @@ MainWindow::MainWindow(QWidget *parent)
     streamingWebPage = new QWidget(this);
   }
   stackedWidget->addWidget(mainMenuPage);
+  stackedWidget->addWidget(homeScreenPage);
   stackedWidget->addWidget(emulatorSelectPage);
   stackedWidget->addWidget(gameSelectPage);
   stackedWidget->addWidget(emulatorPage);
@@ -383,7 +391,7 @@ MainWindow::MainWindow(QWidget *parent)
   stackedWidget->addWidget(youTubePlayerPage);
   stackedWidget->addWidget(streamingWebPage);
   stackedWidget->addWidget(nasPage);
-  stackedWidget->setCurrentWidget(mainMenuPage);
+  stackedWidget->setCurrentWidget(homeScreenPage);
 
   // Keep focus on the currently visible page by default.
   QObject::connect(
@@ -401,11 +409,9 @@ MainWindow::MainWindow(QWidget *parent)
 
   // Ensure initial focus is on the first actionable item.
   QTimer::singleShot(0, this, [this]() {
-    if (!mainMenuPage)
-      return;
-    if (auto *btn = mainMenuPage->findChild<QPushButton *>()) {
-      btn->setFocus();
-    } else {
+    if (homeScreenPage) {
+      homeScreenPage->setFocus();
+    } else if (mainMenuPage) {
       mainMenuPage->setFocus();
     }
   });

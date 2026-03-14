@@ -14,7 +14,9 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSlider>
+#include <QStringList>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -55,17 +57,28 @@ QString formatTime(int totalSeconds) {
 }
 
 QString compactSummary(const AIO::Streaming::VideoContent &item) {
-  QString description = QString::fromStdString(item.description);
-  description.replace(QRegularExpression(QStringLiteral("https?://\\S+")),
-                      QString());
-  description = description.simplified();
-  if (!description.isEmpty()) {
-    if (description.size() > 44) {
-      return description.left(43) + QChar(0x2026);
-    }
-    return description;
+  QStringList parts;
+
+  const QString channel = QString::fromStdString(item.channelName).trimmed();
+  if (!channel.isEmpty()) {
+    parts << channel;
   }
 
+  const QString views = QString::fromStdString(item.viewCount).trimmed();
+  if (!views.isEmpty()) {
+    parts << views;
+  }
+
+  const QString published = QString::fromStdString(item.publishedAt).trimmed();
+  if (!published.isEmpty()) {
+    parts << published;
+  }
+
+  if (!parts.isEmpty()) {
+    return parts.join(QStringLiteral(" \u00B7 "));
+  }
+
+  // Fallback
   const QString category = QString::fromStdString(item.category).trimmed();
   if (!category.isEmpty()) {
     return QStringLiteral("%1 pick").arg(category);
@@ -83,21 +96,41 @@ YouTubePlayerOverlay::YouTubePlayerOverlay(QWidget *parent) : QFrame(parent) {
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
 
   auto *overlayLayout = new QVBoxLayout(this);
-  overlayLayout->setContentsMargins(28, 24, 28, 26);
-  overlayLayout->setSpacing(16);
+  overlayLayout->setContentsMargins(20, 16, 20, 18);
+  overlayLayout->setSpacing(12);
 
-  titleLabel_ = new QLabel("Now playing", this);
+  auto *headerCard = new QFrame(this);
+  headerCard->setObjectName("aioYouTubeOverlayHeaderCard");
+  auto *headerLayout = new QVBoxLayout(headerCard);
+  headerLayout->setContentsMargins(16, 14, 16, 14);
+  headerLayout->setSpacing(4);
+
+  auto *eyebrowLabel = new QLabel("NOW PLAYING", headerCard);
+  eyebrowLabel->setObjectName("aioYouTubeOverlayEyebrow");
+
+  titleLabel_ = new QLabel("Now playing", headerCard);
   titleLabel_->setProperty("role", "ytSectionTitle");
 
-  hintLabel_ = new QLabel(this);
+  channelLabel_ = new QLabel(headerCard);
+  channelLabel_->setObjectName("aioYouTubeOverlayChannelName");
+  channelLabel_->setProperty("role", "ytSectionMeta");
+  channelLabel_->setWordWrap(false);
+  channelLabel_->setVisible(false);
+
+  hintLabel_ = new QLabel(headerCard);
   hintLabel_->setProperty("role", "ytSectionMeta");
   hintLabel_->setWordWrap(true);
+
+  headerLayout->addWidget(eyebrowLabel);
+  headerLayout->addWidget(titleLabel_);
+  headerLayout->addWidget(channelLabel_);
+  headerLayout->addWidget(hintLabel_);
 
   transportBar_ = new QFrame(this);
   transportBar_->setObjectName("aioYouTubeTransportBar");
   auto *transportLayout = new QHBoxLayout(transportBar_);
-  transportLayout->setContentsMargins(14, 12, 14, 12);
-  transportLayout->setSpacing(10);
+  transportLayout->setContentsMargins(10, 8, 10, 8);
+  transportLayout->setSpacing(8);
 
   auto makeChip = [&](const QString &text, const QString &name) {
     auto *chip = new QLabel(text, transportBar_);
@@ -105,7 +138,7 @@ YouTubePlayerOverlay::YouTubePlayerOverlay(QWidget *parent) : QFrame(parent) {
     chip->setProperty("role", "ytTransportChip");
     chip->setAlignment(Qt::AlignCenter);
     chip->setMinimumHeight(42);
-    chip->setMinimumWidth(104);
+    chip->setMinimumWidth(90);
     return chip;
   };
 
@@ -134,8 +167,8 @@ YouTubePlayerOverlay::YouTubePlayerOverlay(QWidget *parent) : QFrame(parent) {
   auto *timelineCard = new QFrame(this);
   timelineCard->setObjectName("aioYouTubeTimelineCard");
   auto *timelineCardLayout = new QHBoxLayout(timelineCard);
-  timelineCardLayout->setContentsMargins(18, 12, 18, 12);
-  timelineCardLayout->setSpacing(14);
+  timelineCardLayout->setContentsMargins(14, 10, 14, 10);
+  timelineCardLayout->setSpacing(10);
   timelineCardLayout->addWidget(currentTimeLabel_);
   timelineCardLayout->addWidget(timelineSlider_, 1);
   timelineCardLayout->addWidget(durationLabel_);
@@ -159,11 +192,10 @@ YouTubePlayerOverlay::YouTubePlayerOverlay(QWidget *parent) : QFrame(parent) {
   recommendationsHost_ = new QWidget(recommendationsScroll_);
   recommendationsLayout_ = new QHBoxLayout(recommendationsHost_);
   recommendationsLayout_->setContentsMargins(0, 0, 0, 0);
-  recommendationsLayout_->setSpacing(16);
+  recommendationsLayout_->setSpacing(12);
   recommendationsScroll_->setWidget(recommendationsHost_);
 
-  overlayLayout->addWidget(titleLabel_);
-  overlayLayout->addWidget(hintLabel_);
+  overlayLayout->addWidget(headerCard);
   overlayLayout->addWidget(transportBar_);
   overlayLayout->addWidget(timelineCard);
   overlayLayout->addWidget(recommendationsLabel_);
@@ -177,6 +209,13 @@ YouTubePlayerOverlay::YouTubePlayerOverlay(QWidget *parent) : QFrame(parent) {
 
 void YouTubePlayerOverlay::setPlayerTitle(const QString &title) {
   titleLabel_->setText(title);
+}
+
+void YouTubePlayerOverlay::setChannelName(const QString &name) {
+  if (channelLabel_) {
+    channelLabel_->setText(name);
+    channelLabel_->setVisible(!name.trimmed().isEmpty());
+  }
 }
 
 void YouTubePlayerOverlay::setPlaybackState(bool playing, bool ready) {
@@ -377,11 +416,11 @@ void YouTubePlayerOverlay::rebuildRecommendations() {
     tile->setObjectName("aioYouTubeRecommendationTile");
     tile->setProperty("selected", recommendationsFocused_ &&
                                       i == selectedRecommendationIndex_);
-    tile->setFixedSize(336, 236);
+    tile->setFixedSize(300, 220);
 
     auto *layout = new QVBoxLayout(tile);
-    layout->setContentsMargins(14, 14, 14, 14);
-    layout->setSpacing(10);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
 
     auto *thumbFrame = new QFrame(tile);
     thumbFrame->setObjectName("aioYouTubeRecommendationThumbFrame");
@@ -393,19 +432,19 @@ void YouTubePlayerOverlay::rebuildRecommendations() {
     auto *thumb = new ThumbnailFillLabel(thumbFrame);
     thumb->setObjectName("thumb");
     thumb->setProperty("role", "thumb");
-    thumb->setFixedSize(308, 172);
+    thumb->setFixedSize(280, 158);
     thumb->setText("Loading");
 
     const QString categoryText =
-        QString::fromStdString(recommendedVideos_[i].category).trimmed();
+        QString::fromStdString(recommendedVideos_[i].channelName).trimmed();
     const QString durationText =
         formatDurationLabel(recommendedVideos_[i].durationSeconds);
 
     auto *thumbOverlay = new QWidget(thumbFrame);
     thumbOverlay->setObjectName("aioTileThumbOverlay");
     auto *thumbOverlayLayout = new QHBoxLayout(thumbOverlay);
-    thumbOverlayLayout->setContentsMargins(12, 0, 12, 12);
-    thumbOverlayLayout->setSpacing(8);
+    thumbOverlayLayout->setContentsMargins(8, 0, 8, 8);
+    thumbOverlayLayout->setSpacing(6);
 
     auto *categoryChip = new QLabel(thumbOverlay);
     categoryChip->setProperty("role", "tileBadge");
@@ -472,6 +511,23 @@ void YouTubePlayerOverlay::rebuildRecommendations() {
   recommendationsLayout_->addStretch();
   setSelectedRecommendationIndex(selectedRecommendationIndex_,
                                  recommendationsFocused_);
+}
+
+void YouTubePlayerOverlay::flashSeekDelta(int deltaSeconds) {
+  auto *chip = deltaSeconds > 0 ? forwardChip_ : rewindChip_;
+  if (!chip) {
+    return;
+  }
+  chip->setProperty("active", true);
+  chip->style()->unpolish(chip);
+  chip->style()->polish(chip);
+  chip->update();
+  QTimer::singleShot(350, chip, [chip]() {
+    chip->setProperty("active", false);
+    chip->style()->unpolish(chip);
+    chip->style()->polish(chip);
+    chip->update();
+  });
 }
 
 } // namespace GUI

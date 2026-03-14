@@ -239,7 +239,12 @@ private:
   void PutPixel(int16_t x, int16_t y, uint16_t color);
   bool IsInDrawingArea(int16_t x, int16_t y) const;
   static uint16_t ColorToVRAM(uint8_t r, uint8_t g, uint8_t b);
+  uint16_t ColorToVRAMDithered(int16_t x, int16_t y, uint8_t r, uint8_t g,
+                               uint8_t b) const;
   uint16_t BlendPixels(uint16_t src, uint16_t dst) const;
+
+  static constexpr int8_t kDitherMatrix[4][4] = {
+      {-4, +0, -3, +1}, {+2, -2, +3, -1}, {-3, +1, -4, +0}, {+3, -1, +2, -2}};
 
   // Triangle rasterization via edge function (half-space) method
   void RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,

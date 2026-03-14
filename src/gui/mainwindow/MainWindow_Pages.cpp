@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include <QCheckBox>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileDialog>
@@ -10,14 +11,17 @@
 #include <QLabel>
 #include <QListWidgetItem>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSlider>
 #include <QVBoxLayout>
 
 #include "gui/EmulatorSelectAdapter.h"
 #include "gui/EmulatorSettingsAdapter.h"
 #include "gui/GameSelectAdapter.h"
+#include "gui/HomeScreen.h"
 #include "gui/MainMenuAdapter.h"
 #include "gui/NASAdapter.h"
 #include "gui/NASPage.h"
@@ -34,6 +38,7 @@ namespace GUI {
 
 void MainWindow::setupMainMenu() {
   mainMenuPage = new QWidget(this);
+  mainMenuPage->setObjectName("aioMainMenuPage");
   QVBoxLayout *layout = new QVBoxLayout(mainMenuPage);
   layout->setContentsMargins(50, 50, 50, 50);
   layout->setSpacing(20);
@@ -42,6 +47,7 @@ void MainWindow::setupMainMenu() {
     auto *b = new QPushButton(text, mainMenuPage);
     b->setCursor(Qt::PointingHandCursor);
     b->setFocusPolicy(Qt::StrongFocus);
+    b->setProperty("nav_kind", "main");
     connect(b, &QPushButton::clicked, this, slot);
     layout->addWidget(b);
     return b;
@@ -51,6 +57,15 @@ void MainWindow::setupMainMenu() {
   title->setAlignment(Qt::AlignCenter);
   title->setProperty("role", "title");
   layout->addWidget(title);
+
+  QLabel *subtitle = new QLabel(
+      "Console-first media and emulation, designed for the living room.",
+      mainMenuPage);
+  subtitle->setAlignment(Qt::AlignCenter);
+  subtitle->setProperty("role", "subtitle");
+  layout->addWidget(subtitle);
+
+  layout->addSpacing(12);
 
   QPushButton *emuBtn =
       makeMenuButton("EMULATORS", &MainWindow::goToEmulatorSelect);
@@ -62,15 +77,43 @@ void MainWindow::setupMainMenu() {
 
   layout->addStretch();
 
-  QLabel *footer = new QLabel("v1.0.0 | System Ready", mainMenuPage);
+  QLabel *footer = new QLabel("v1.0.0", mainMenuPage);
   footer->setAlignment(Qt::AlignCenter);
   footer->setProperty("role", "subtitle");
+  footer->setStyleSheet(
+      "font-size: 12px; color: rgba(147, 164, 187, 0.50); font-weight: 500;");
   layout->addWidget(footer);
 
   // State-driven navigation adapter (single unified outline).
   mainMenuAdapter = std::make_unique<AIO::GUI::MainMenuAdapter>(
       this, mainMenuPage,
       std::vector<QPushButton *>{emuBtn, streamBtn, nasBtn, settingsBtn});
+}
+
+void MainWindow::setupHomeScreen() {
+  auto *home = new HomeScreen(this);
+  homeScreenPage = home;
+  homeScreen_ = home;
+
+  connect(home, &HomeScreen::gbaRequested, this, [this]() {
+    currentEmulator = EmulatorType::GBA;
+    goToGameSelect();
+  });
+  connect(home, &HomeScreen::ps1Requested, this, [this]() {
+    currentEmulator = EmulatorType::PS1;
+    goToGameSelect();
+  });
+  connect(home, &HomeScreen::switchRequested, this, [this]() {
+    currentEmulator = EmulatorType::Switch;
+    goToGameSelect();
+  });
+  connect(home, &HomeScreen::nasRequested, this, &MainWindow::goToNAS);
+  connect(home, &HomeScreen::settingsRequested, this,
+          &MainWindow::goToSettings);
+  connect(home, &HomeScreen::streamingAppRequested, this,
+          [this](AIO::GUI::StreamingApp app) {
+            launchStreamingApp(static_cast<int>(app));
+          });
 }
 
 void MainWindow::goToNAS() {
@@ -121,15 +164,11 @@ void MainWindow::setupStreamingPages() {
           [this](AIO::GUI::StreamingApp app) {
             launchStreamingApp(static_cast<int>(app));
           });
-  connect(web, &StreamingWebViewPage::homeRequested, this, [this]() {
-    stackedWidget->setCurrentWidget(streamingHubPage);
-    streamingHubPage->setFocus();
-  });
+  connect(web, &StreamingWebViewPage::homeRequested, this,
+          [this]() { goToMainMenu(); });
 
-  connect(yt, &YouTubeBrowsePage::homeRequested, this, [this]() {
-    stackedWidget->setCurrentWidget(streamingHubPage);
-    streamingHubPage->setFocus();
-  });
+  connect(yt, &YouTubeBrowsePage::homeRequested, this,
+          [this]() { goToMainMenu(); });
 
   connect(yt, &YouTubeBrowsePage::videoRequested, this,
           [this](const QString &url) {
@@ -141,10 +180,8 @@ void MainWindow::setupStreamingPages() {
             youTubePlayerPage->setFocus();
           });
 
-  connect(ytPlayer, &YouTubePlayerPage::homeRequested, this, [this]() {
-    stackedWidget->setCurrentWidget(streamingHubPage);
-    streamingHubPage->setFocus();
-  });
+  connect(ytPlayer, &YouTubePlayerPage::homeRequested, this,
+          [this]() { goToMainMenu(); });
   connect(ytPlayer, &YouTubePlayerPage::backRequested, this, [this]() {
     stackedWidget->setCurrentWidget(youTubeBrowsePage);
     youTubeBrowsePage->setFocus();
@@ -173,13 +210,22 @@ void MainWindow::launchStreamingApp(int app) {
 
 void MainWindow::setupSettingsPage() {
   settingsPage = new QWidget(this);
+  settingsPage->setObjectName("aioSettingsPage");
   QVBoxLayout *layout = new QVBoxLayout(settingsPage);
   layout->setContentsMargins(50, 50, 50, 50);
+  layout->setSpacing(18);
 
   QLabel *title = new QLabel("SYSTEM SETTINGS", settingsPage);
   title->setAlignment(Qt::AlignCenter);
   title->setProperty("role", "title");
   layout->addWidget(title);
+
+  QLabel *subtitle =
+      new QLabel("Library paths and platform behavior for the whole system.",
+                 settingsPage);
+  subtitle->setAlignment(Qt::AlignCenter);
+  subtitle->setProperty("role", "subtitle");
+  layout->addWidget(subtitle);
 
   // ROM Directory Setting
   QGroupBox *romGroup = new QGroupBox("ROM Library Path", settingsPage);
@@ -215,6 +261,7 @@ void MainWindow::setupSettingsPage() {
 
 void MainWindow::setupEmulatorSettingsPage() {
   emulatorSettingsPage = new QWidget(this);
+  emulatorSettingsPage->setObjectName("aioEmulatorSettingsPage");
   QVBoxLayout *pageLayout = new QVBoxLayout(emulatorSettingsPage);
   pageLayout->setContentsMargins(0, 0, 0, 0);
   pageLayout->setSpacing(0);
@@ -238,6 +285,12 @@ void MainWindow::setupEmulatorSettingsPage() {
   title->setAlignment(Qt::AlignCenter);
   title->setProperty("role", "title");
   layout->addWidget(title);
+
+  QLabel *subtitle = new QLabel(
+      "Video scaling, controller tuning, and runtime behavior.", content);
+  subtitle->setAlignment(Qt::AlignCenter);
+  subtitle->setProperty("role", "subtitle");
+  layout->addWidget(subtitle);
 
   std::vector<QPushButton *> navButtons;
 
@@ -398,9 +451,19 @@ void MainWindow::setupEmulatorSettingsPage() {
   {
     QGroupBox *grp = new QGroupBox("Sound", content);
     QVBoxLayout *l = new QVBoxLayout(grp);
-    QLabel *msg = new QLabel("No sound settings yet.", grp);
-    msg->setWordWrap(true);
-    l->addWidget(msg);
+
+    QLabel *volLabel = new QLabel("Master Volume", grp);
+    l->addWidget(volLabel);
+
+    QSlider *volSlider = new QSlider(Qt::Horizontal, grp);
+    volSlider->setObjectName("aioVolumeSlider");
+    volSlider->setRange(0, 100);
+    volSlider->setValue(80);
+    l->addWidget(volSlider);
+
+    QCheckBox *muteBox = new QCheckBox("Mute audio", grp);
+    l->addWidget(muteBox);
+
     layout->addWidget(grp);
   }
 
@@ -421,6 +484,7 @@ void MainWindow::setupEmulatorSettingsPage() {
 
 void MainWindow::setupEmulatorSelect() {
   emulatorSelectPage = new QWidget(this);
+  emulatorSelectPage->setObjectName("aioEmulatorSelectPage");
   QVBoxLayout *layout = new QVBoxLayout(emulatorSelectPage);
   layout->setContentsMargins(50, 50, 50, 50);
   layout->setSpacing(20);
@@ -430,11 +494,16 @@ void MainWindow::setupEmulatorSelect() {
   title->setProperty("role", "title");
   layout->addWidget(title);
 
+  QLabel *subtitle = new QLabel(
+      "Choose a platform and continue into its library.", emulatorSelectPage);
+  subtitle->setAlignment(Qt::AlignCenter);
+  subtitle->setProperty("role", "subtitle");
+  layout->addWidget(subtitle);
+
   QPushButton *gbaBtn = new QPushButton("GAME BOY ADVANCE", emulatorSelectPage);
   gbaBtn->setCursor(Qt::PointingHandCursor);
   gbaBtn->setFocusPolicy(Qt::StrongFocus);
-  gbaBtn->setStyleSheet(
-      "text-align: left; padding-left: 24px; border-left: 6px solid #8b5cf6;");
+  gbaBtn->setProperty("system", "gba");
   connect(gbaBtn, &QPushButton::clicked, this, [this]() {
     currentEmulator = EmulatorType::GBA;
     goToGameSelect();
@@ -444,8 +513,7 @@ void MainWindow::setupEmulatorSelect() {
   QPushButton *ps1Btn = new QPushButton("PLAYSTATION", emulatorSelectPage);
   ps1Btn->setCursor(Qt::PointingHandCursor);
   ps1Btn->setFocusPolicy(Qt::StrongFocus);
-  ps1Btn->setStyleSheet(
-      "text-align: left; padding-left: 24px; border-left: 6px solid #00bfff;");
+  ps1Btn->setProperty("system", "ps1");
   connect(ps1Btn, &QPushButton::clicked, this, [this]() {
     currentEmulator = EmulatorType::PS1;
     goToGameSelect();
@@ -456,8 +524,7 @@ void MainWindow::setupEmulatorSelect() {
       new QPushButton("NINTENDO SWITCH", emulatorSelectPage);
   switchBtn->setCursor(Qt::PointingHandCursor);
   switchBtn->setFocusPolicy(Qt::StrongFocus);
-  switchBtn->setStyleSheet(
-      "text-align: left; padding-left: 24px; border-left: 6px solid #ff4d4d;");
+  switchBtn->setProperty("system", "switch");
   connect(switchBtn, &QPushButton::clicked, this, [this]() {
     currentEmulator = EmulatorType::Switch;
     goToGameSelect();
@@ -510,27 +577,79 @@ void MainWindow::refreshGameList() {
     item->setText(fileInfo.completeBaseName());
     item->setData(Qt::UserRole, fileInfo.absoluteFilePath());
 
-    // Generate Placeholder Icon
+    // Generate themed game tile icon
     QPixmap pixmap(180, 120);
-    pixmap.fill(QColor("#444"));
+    pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
-    painter.setPen(Qt::white);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // System-specific brand colors
+    QColor brandPrimary, brandDark;
+    QString sysName;
+    if (currentEmulator == EmulatorType::GBA) {
+      brandPrimary = QColor(124, 140, 255);
+      brandDark = QColor(44, 52, 120);
+      sysName = "GBA";
+    } else if (currentEmulator == EmulatorType::PS1) {
+      brandPrimary = QColor(77, 196, 255);
+      brandDark = QColor(20, 68, 110);
+      sysName = "PS1";
+    } else {
+      brandPrimary = QColor(255, 118, 112);
+      brandDark = QColor(120, 38, 35);
+      sysName = "NSW";
+    }
+
+    // Rounded rect background with gradient
+    QPainterPath tilePath;
+    tilePath.addRoundedRect(QRectF(0, 0, 180, 120), 12, 12);
+    QLinearGradient bg(0, 0, 0, 120);
+    bg.setColorAt(0.0, brandDark);
+    bg.setColorAt(1.0, brandDark.darker(180));
+    painter.fillPath(tilePath, bg);
+
+    // Subtle radial highlight
+    QRadialGradient rg(90, 50, 100);
+    rg.setColorAt(0.0, QColor(255, 255, 255, 10));
+    rg.setColorAt(1.0, QColor(0, 0, 0, 0));
+    painter.fillPath(tilePath, rg);
+
+    // System badge — small colored pill at top
     QFont font = painter.font();
-    font.setPixelSize(20);
-    font.setBold(true);
+    font.setPixelSize(11);
+    font.setWeight(QFont::DemiBold);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, 0.8);
     painter.setFont(font);
+    QRectF badgeRect(10, 8, 42, 18);
+    QPainterPath badgePath;
+    badgePath.addRoundedRect(badgeRect, 6, 6);
+    painter.fillPath(badgePath, QColor(brandPrimary.red(), brandPrimary.green(),
+                                       brandPrimary.blue(), 50));
+    painter.setPen(brandPrimary);
+    painter.drawText(badgeRect, Qt::AlignCenter, sysName);
 
-    QString sysName = (currentEmulator == EmulatorType::GBA)   ? "GBA"
-                      : (currentEmulator == EmulatorType::PS1) ? "PS1"
-                                                               : "NSW";
-    painter.drawText(pixmap.rect().adjusted(0, -20, 0, 0), Qt::AlignCenter,
-                     sysName);
-
-    font.setPixelSize(40);
+    // Game initial — large centered character
+    font.setPixelSize(44);
+    font.setWeight(QFont::Bold);
     painter.setFont(font);
     QString initial = fileInfo.completeBaseName().left(1).toUpper();
-    painter.drawText(pixmap.rect().adjusted(0, 20, 0, 0), Qt::AlignCenter,
-                     initial);
+    // Shadow
+    painter.setPen(QColor(0, 0, 0, 50));
+    painter.drawText(QRect(0, 18, 180, 90), Qt::AlignCenter, initial);
+    // Main text
+    painter.setPen(QColor(255, 255, 255, 210));
+    painter.drawText(QRect(0, 16, 180, 90), Qt::AlignCenter, initial);
+
+    // Bottom edge: truncated game name
+    font.setPixelSize(10);
+    font.setWeight(QFont::Normal);
+    painter.setFont(font);
+    QFontMetrics fm(font);
+    QString displayName =
+        fm.elidedText(fileInfo.completeBaseName(), Qt::ElideRight, 160);
+    painter.setPen(QColor(255, 255, 255, 100));
+    painter.drawText(QRect(10, 98, 160, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                     displayName);
 
     painter.end();
 
@@ -562,12 +681,17 @@ void MainWindow::stopGameToHome() {
 }
 
 void MainWindow::goToMainMenu() {
-  stackedWidget->setCurrentWidget(mainMenuPage);
-  if (mainMenuPage) {
-    if (auto *btn = mainMenuPage->findChild<QPushButton *>())
-      btn->setFocus();
-    else
-      mainMenuPage->setFocus();
+  if (homeScreenPage) {
+    stackedWidget->setCurrentWidget(homeScreenPage);
+    homeScreenPage->setFocus();
+  } else {
+    stackedWidget->setCurrentWidget(mainMenuPage);
+    if (mainMenuPage) {
+      if (auto *btn = mainMenuPage->findChild<QPushButton *>())
+        btn->setFocus();
+      else
+        mainMenuPage->setFocus();
+    }
   }
 }
 
@@ -625,15 +749,24 @@ void MainWindow::goToGameSelect() {
 
 void MainWindow::setupGameSelect() {
   gameSelectPage = new QWidget(this);
+  gameSelectPage->setObjectName("aioGameSelectPage");
   QVBoxLayout *layout = new QVBoxLayout(gameSelectPage);
   layout->setContentsMargins(50, 50, 50, 50);
+  layout->setSpacing(18);
 
   QLabel *title = new QLabel("SELECT GAME", gameSelectPage);
   title->setAlignment(Qt::AlignCenter);
   title->setProperty("role", "title");
   layout->addWidget(title);
 
+  QLabel *subtitle = new QLabel(
+      "Browse your library and launch directly into play.", gameSelectPage);
+  subtitle->setAlignment(Qt::AlignCenter);
+  subtitle->setProperty("role", "subtitle");
+  layout->addWidget(subtitle);
+
   gameListWidget = new QListWidget(gameSelectPage);
+  gameListWidget->setObjectName("aioGameGrid");
   gameListWidget->setFocusPolicy(Qt::StrongFocus);
   gameListWidget->setIconSize(QSize(180, 120));
   gameListWidget->setViewMode(QListWidget::IconMode);
@@ -666,6 +799,7 @@ void MainWindow::setupGameSelect() {
 
 void MainWindow::setupEmulatorView() {
   emulatorPage = new QWidget(this);
+  emulatorPage->setObjectName("aioEmulatorPage");
   QVBoxLayout *layout = new QVBoxLayout(emulatorPage);
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(0);

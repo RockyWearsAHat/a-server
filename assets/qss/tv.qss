@@ -1,241 +1,317 @@
-/* AIO Entertainment System - 10-foot UI theme
-   Goal: cohesive, controller-friendly, high-contrast TV UI.
-*/
+/* AIO Entertainment System - shared native shell */
 
-/* Palette (Qt style sheets do NOT support variables; keep as comments) */
-/* bg0: #0b0c0f */
-/* bg1: #111318 */
-/* panel: #141822 */
-/* card: #151a23 */
-/* cardHover: #1a2130 */
-/* border: #2a3140 */
-/* text: #eef2ff */
-/* muted: #aab3c5 */
-/* accent: #3ea6ff */
-/* accent2: #8b5cf6 */
-/* danger: #ff4d4d */
-
-/* Global */
 QMainWindow {
-  background-color: #0b0c0f;
-  color: #eef2ff;
+  background-color: #08111b;
+  color: #edf3ff;
 }
 
 QWidget {
   background-color: transparent;
-  color: #eef2ff;
-  font-family: "SF Pro Display", "Helvetica Neue", "Arial";
+  color: #edf3ff;
+  font-family: "Noto Sans", "SF Pro Display", ".AppleSystemUIFont", "Helvetica Neue", sans-serif;
   font-size: 16px;
+}
+
+QWidget#aioHomeScreen,
+QWidget#aioMainMenuPage,
+QWidget#aioEmulatorSelectPage,
+QWidget#aioGameSelectPage,
+QWidget#aioSettingsPage,
+QWidget#aioEmulatorSettingsPage,
+QWidget#aioStreamingHub,
+QWidget#aioStreamingWebPage,
+QWidget#nasPageRoot,
+QWidget#aioEmulatorPage {
+  background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 #060e1a,
+    stop:0.35 #0a1520,
+    stop:0.65 #0d1928,
+    stop:1 #111e2e);
 }
 
 QLabel {
-  color: #eef2ff;
+  color: #edf3ff;
+  background-color: transparent;
 }
 
 QLabel[role="title"] {
-  font-size: 30px;
-  font-weight: 900;
-  letter-spacing: 2px;
-  color: #eef2ff;
+  font-size: 34px;
+  font-weight: 800;
+  color: #f7fbff;
 }
 
 QLabel[role="subtitle"] {
-  font-size: 16px;
-  color: #aab3c5;
+  font-size: 15px;
+  color: #93a4bb;
 }
 
-/* Top bars (web/player + emulator overlay) */
+QLabel[role="sectionEyebrow"] {
+  font-size: 13px;
+  font-weight: 700;
+  color: #67c1ff;
+}
+
 #aioTopBar {
-  background-color: rgba(16, 18, 24, 0.92);
-  border-bottom: 1px solid #2a3140;
+  background-color: rgba(7, 11, 18, 0.78);
+  border-bottom: 1px solid rgba(129, 155, 186, 0.18);
+}
+
+QToolButton,
+QPushButton {
+  background-color: rgba(21, 31, 44, 0.94);
+  color: #f5f9ff;
+  border: 1px solid rgba(125, 149, 177, 0.24);
+  border-radius: 16px;
+  padding: 14px 18px;
+  font-size: 18px;
+  font-weight: 700;
+  min-height: 52px;
+  transition: background-color 150ms ease, border 150ms ease;
 }
 
 QToolButton {
-  background-color: rgba(36, 42, 56, 0.85);
-  border: 1px solid rgba(70, 80, 105, 0.9);
-  border-radius: 14px;
-  padding: 10px 14px;
-  color: #eef2ff;
-  font-weight: 800;
+  min-height: 34px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 12px;
 }
 
+QPushButton:hover,
 QToolButton:hover {
-  background-color: rgba(54, 63, 84, 0.92);
+  background-color: rgba(32, 47, 66, 0.98);
+  border: 1px solid rgba(160, 183, 209, 0.34);
 }
 
-QToolButton:focus {
-  outline: none;
-  border: 3px solid #3ea6ff;
+QPushButton:pressed,
+QToolButton:pressed {
+  background-color: rgba(16, 24, 35, 1.0);
 }
 
-/* Buttons (tiles + actions) */
-QPushButton {
-  background-color: #151a23;
-  color: #eef2ff;
-  border: 1px solid #2a3140;
-  border-radius: 16px;
-  padding: 18px 18px;
-  font-size: 20px;
-  font-weight: 800;
-  min-height: 56px;
-}
-
-/* Secondary buttons
-   Visual styling intentionally neutralized: all buttons share the same look.
-   (We keep the property in code for semantics, but don't style it.) */
 QPushButton[variant="secondary"],
-QPushButton[variant="secondary"]:hover {
-  background-color: #151a23;
-  border: 1px solid #2a3140;
-  color: #eef2ff;
+QToolButton[variant="secondary"] {
+  background-color: rgba(14, 22, 31, 0.92);
+  color: #dbe6f3;
 }
 
 QPushButton[variant="danger"] {
-  background-color: rgba(80, 20, 28, 0.75);
-  border: 1px solid rgba(180, 60, 75, 0.7);
+  background-color: rgba(83, 28, 33, 0.92);
+  border: 1px solid rgba(215, 96, 102, 0.48);
 }
 
-QPushButton[variant="danger"]:hover {
-  border: 1px solid rgba(255, 86, 110, 0.9);
-}
-
-/* Unified selection outline (mouse/keyboard/controller all drive this single property)
-  Keep this AFTER variant rules so it always wins visually. */
 QPushButton[aio_selected="true"],
 QPushButton[aio_selected="true"]:hover,
 QPushButton[variant][aio_selected="true"],
-QPushButton[variant][aio_selected="true"]:hover {
-  /* Unified selection/hover look (match the original subtle theme) */
-  border: 3px solid rgba(170, 179, 197, 0.95);
-  background-color: rgba(255, 255, 255, 0.06);
+QPushButton[variant][aio_selected="true"]:hover,
+QToolButton[aio_selected="true"],
+QToolButton[aio_selected="true"]:hover {
+  background-color: rgba(64, 118, 170, 0.28);
+  border: 2px solid rgba(210, 230, 255, 0.85);
+  color: #ffffff;
 }
 
-/* Generic "selected" state for tile-style buttons */
-QPushButton[selected="true"] {
-  border: 3px solid #3ea6ff;
-  background-color: rgba(36, 66, 92, 0.75);
+QPushButton[nav_kind="main"] {
+  min-height: 72px;
+  padding: 18px 28px;
+  font-size: 22px;
+  text-align: left;
+  background-color: rgba(15, 24, 35, 0.9);
+  border-left: 5px solid rgba(103, 193, 255, 0.45);
 }
 
-/* Qt's built-in hover (when aio_selected is NOT set) */
-QPushButton:hover {
-  background-color: #151a23;
-  border: 1px solid #2a3140;
+QPushButton[nav_kind="main"]:hover {
+  border-left: 5px solid rgba(103, 193, 255, 0.75);
 }
 
-QPushButton:pressed {
-  background-color: #202942;
+QPushButton[nav_kind="main"][aio_selected="true"] {
+  border-left: 5px solid rgba(103, 193, 255, 1.0);
 }
 
-/* Focus ring: make controller focus obvious */
-QPushButton:focus {
-  outline: none;
-  border: 1px solid #2a3140;
+QPushButton[system="gba"],
+QPushButton[system="ps1"],
+QPushButton[system="switch"] {
+  text-align: left;
+  padding-left: 24px;
 }
 
-QListWidget:focus {
-  outline: none;
-  border: 3px solid #3ea6ff;
+QPushButton[system="gba"] {
+  border-left: 6px solid #7c8cff;
 }
 
-QLineEdit:focus {
-  border: 2px solid rgba(62, 166, 255, 0.9);
+QPushButton[system="ps1"] {
+  border-left: 6px solid #4dc4ff;
 }
 
-QToolButton:focus {
-  outline: none;
-  border: 3px solid #3ea6ff;
+QPushButton[system="switch"] {
+  border-left: 6px solid #ff7670;
 }
 
-/* Lists / grids */
+QPushButton[system="gba"][aio_selected="true"] {
+  border-left: 6px solid #9ea9ff;
+}
+
+QPushButton[system="ps1"][aio_selected="true"] {
+  border-left: 6px solid #86d9ff;
+}
+
+QPushButton[system="switch"][aio_selected="true"] {
+  border-left: 6px solid #ff9d97;
+}
+
 QListWidget {
-  background-color: rgba(20, 24, 34, 0.7);
-  border: 1px solid #2a3140;
+  background-color: rgba(13, 21, 30, 0.82);
+  border: 1px solid rgba(125, 149, 177, 0.24);
   border-radius: 18px;
-  padding: 12px;
+  padding: 14px;
   font-size: 18px;
 }
 
 QListWidget::item {
   padding: 10px;
   border-radius: 12px;
+  margin: 4px 0;
 }
 
 QListWidget::item:selected {
-  background-color: rgba(62, 166, 255, 0.20);
-  border: 2px solid rgba(62, 166, 255, 0.75);
+  background-color: rgba(64, 118, 170, 0.26);
+  border: 1.5px solid rgba(206, 226, 248, 0.72);
 }
 
 QListWidget::item:hover {
-  background-color: rgba(255, 255, 255, 0.06);
-  border: 2px solid rgba(170, 179, 197, 0.55);
+  background-color: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(160, 183, 209, 0.14);
 }
 
-QListWidget::item:focus {
-  background-color: rgba(62, 166, 255, 0.14);
-  border: 2px solid rgba(62, 166, 255, 0.85);
+QListWidget#nasList,
+QListWidget#aioGameGrid {
+  padding: 18px;
+  border-radius: 22px;
 }
 
-/* Inputs */
-QLineEdit {
-  background-color: rgba(20, 24, 34, 0.9);
-  border: 1px solid #2a3140;
-  border-radius: 999px;
+QListWidget#aioGameGrid {
+  background-color: rgba(10, 16, 24, 0.60);
+}
+
+QListWidget#aioGameGrid::item {
+  padding: 12px;
+  margin: 6px;
+  border-radius: 14px;
+}
+
+QListWidget#aioGameGrid::item:selected {
+  background-color: rgba(64, 118, 170, 0.22);
+  border: 1.5px solid rgba(206, 226, 248, 0.60);
+}
+
+QLineEdit,
+QPlainTextEdit {
+  background-color: rgba(12, 19, 28, 0.88);
+  border: 1px solid rgba(125, 149, 177, 0.24);
+  border-radius: 16px;
   padding: 12px 16px;
-  font-size: 18px;
-  color: #eef2ff;
+  font-size: 17px;
+  color: #edf3ff;
 }
 
-QLineEdit:focus {
-  border: 2px solid rgba(62, 166, 255, 0.9);
+QLineEdit:focus,
+QPlainTextEdit:focus,
+QListWidget:focus {
+  border: 2px solid rgba(103, 193, 255, 0.9);
 }
 
 QCheckBox {
-  color: #eef2ff;
+  color: #edf3ff;
 }
 
 QGroupBox {
-  border: 1px solid #2a3140;
-  border-radius: 18px;
+  background-color: rgba(9, 16, 24, 0.65);
+  border: 1px solid rgba(125, 149, 177, 0.16);
+  border-radius: 22px;
   margin-top: 18px;
-  padding: 12px;
-  background-color: rgba(20, 24, 34, 0.55);
+  padding: 22px 20px 20px 20px;
 }
 
 QGroupBox::title {
   subcontrol-origin: margin;
-  left: 12px;
-  padding: 0 6px;
-  color: #aab3c5;
-  font-weight: 800;
+  left: 18px;
+  padding: 0 10px;
+  color: #9fbedc;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
 }
 
-/* Path label (settings) */
-#aioPathLabel {
-  padding: 12px;
+#aioPathLabel,
+#nasPath {
+  background-color: rgba(10, 17, 25, 0.82);
+  border: 1px solid rgba(125, 149, 177, 0.22);
   border-radius: 14px;
-  background-color: rgba(20, 24, 34, 0.65);
-  border: 1px solid #2a3140;
-  color: #eef2ff;
+  padding: 12px 14px;
+  color: #d8e4f1;
   font-family: "SF Mono", "Menlo", monospace;
   font-size: 13px;
 }
 
-/* YouTube-specific styling lives in qss/youtube.qss. */
+#nasStatus,
+#aioStreamingWebStatus,
+#aioStreamingWebErrorLabel {
+  color: #93a4bb;
+  font-size: 14px;
+}
 
-/* Emulator display surface + dev overlay */
+#aioStreamingWebErrorStrip {
+  background-color: rgba(58, 22, 28, 0.72);
+  border-top: 1px solid rgba(215, 96, 102, 0.22);
+  border-bottom: 1px solid rgba(215, 96, 102, 0.22);
+}
+
+#nasPreviewInfo,
+#nasImage,
+#nasText {
+  background-color: rgba(10, 17, 25, 0.72);
+  border: 1px solid rgba(125, 149, 177, 0.18);
+  border-radius: 18px;
+}
+
+#nasPreviewInfo {
+  padding: 14px;
+  color: #d6e3f0;
+}
+
+#nasImage {
+  padding: 10px;
+}
+
+#aioStreamingHubTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: #9fbedc;
+  padding-left: 4px;
+}
+
+#aioStreamingTile {
+  border: 1.5px solid rgba(255, 255, 255, 0.06);
+  border-radius: 20px;
+  min-width: 200px;
+  min-height: 260px;
+}
+
+#aioStreamingTile[aio_selected="true"] {
+  border: 1.5px solid rgba(255, 255, 255, 0.18);
+}
+
 #aioDisplaySurface {
-  background-color: #000;
+  background-color: #02070d;
 }
 
 #aioDevPanel {
-  background-color: rgba(0, 0, 0, 0.78);
-  color: #7CFF7C;
+  background-color: rgba(4, 8, 13, 0.92);
+  color: #8cf3c7;
   font-family: "SF Mono", "Menlo", monospace;
-  padding: 10px;
-  border-left: 1px solid rgba(42, 49, 64, 1);
+  padding: 14px;
+  border-left: 1px solid rgba(125, 149, 177, 0.20);
 }
 
-/* Scrollbars */
 QScrollBar:vertical {
   background: transparent;
   width: 10px;
@@ -243,13 +319,13 @@ QScrollBar:vertical {
 }
 
 QScrollBar::handle:vertical {
-  background: rgba(255,255,255,0.18);
+  background: rgba(255, 255, 255, 0.18);
   border-radius: 5px;
   min-height: 40px;
 }
 
 QScrollBar::handle:vertical:hover {
-  background: rgba(255,255,255,0.28);
+  background: rgba(255, 255, 255, 0.28);
 }
 
 QScrollBar::add-line:vertical,
@@ -258,4 +334,11 @@ QScrollBar::add-page:vertical,
 QScrollBar::sub-page:vertical {
   background: transparent;
   height: 0px;
+}
+
+/* ──────────────────── HomeScreen ──────────────────── */
+
+#aioHomeTile {
+  background: transparent;
+  border: none;
 }

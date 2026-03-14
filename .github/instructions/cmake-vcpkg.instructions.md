@@ -1,6 +1,6 @@
 ---
 description: "C++ project configuration and package management"
-applyTo: "**/*.cmake, **/CMakeLists.txt, **/*.cpp, **/*.h, **/*.hpp"
+applyTo: "Makefile, cmake/**, **/*.cmake, **/CMakeLists.txt"
 ---
 
 This repository builds through the top-level `Makefile`, which delegates to `cmake/Makefile` and then configures `build/generated/cmake` with CMake and Ninja.

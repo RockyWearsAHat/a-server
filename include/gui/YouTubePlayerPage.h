@@ -107,12 +107,18 @@ private:
   int currentDurationSeconds_ = 0;
   int lastPersistedProgressSeconds_ = -1;
   QString currentVideoId_;
+  QString currentChannelName_;
   QString currentPlaybackUrl_;
   bool playerReady_ = false;
   bool loadFailed_ = false;
   uint64_t playbackRequestSerial_ = 0;
   uint64_t relatedRequestSerial_ = 0;
   AIO::Streaming::YouTubeService *youTube_ = nullptr;
+
+  QTimer *autoplayTimer_ = nullptr;
+  QTimer *chromeHideTimer_ = nullptr;
+  int autoplayCountdown_ = 5;
+  QLabel *autoplayChipLabel_ = nullptr;
 };
 
 } // namespace GUI

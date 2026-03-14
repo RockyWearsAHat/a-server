@@ -12,10 +12,11 @@ Usage:
     visual_dev_loop.py focus
     visual_dev_loop.py screenshot [--output PATH] [--window]
     visual_dev_loop.py snapshot [--rom ROM | --app APP] [--wait-ms MS] [--input-script PATH] [--output PATH] [--full-screen] [--window-only]
+    visual_dev_loop.py user-test-create [--rom ROM | --app APP] [--wait-ms MS] [--input-script PATH] [--snap-key F9] [--abort-key F10]
     visual_dev_loop.py click   --x X --y Y [--window-relative]
     visual_dev_loop.py click-percent --percent-x X --percent-y Y [--image PATH]
     visual_dev_loop.py key-sequence --keys "Down Down Enter"
-    visual_dev_loop.py key     --name KEYNAME [--modifiers MOD]
+    visual_dev_loop.py key     --name KEYNAME [--event press|down|up] [--modifiers MOD]
     visual_dev_loop.py type    --text TEXT
     visual_dev_loop.py wait    --ms MS
     visual_dev_loop.py analyze --image PATH [--ocr] [--colors] [--nonblack] [--region X,Y,W,H]
@@ -38,6 +39,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -80,10 +83,114 @@ def _metadata_dir() -> Path:
     return metadata_dir
 
 
-_MAX_SCREENSHOTS = 1
+_MAX_SCREENSHOTS = 10
 _SCREENSHOT_PREFIX = "visual_"
 _LEGACY_SCREENSHOT_PREFIXES = ("visual_", "screenshot_")
 _OCR_WORD_CACHE: dict[tuple[str, int, int, int], list[dict[str, Any]]] = {}
+
+# ---------------------------------------------------------------------------
+# Remote Control (HTTP-based input injection — no window focus needed)
+# ---------------------------------------------------------------------------
+
+_REMOTE_PORT_FILE = None  # set lazily
+_remote_port_cache: Optional[int] = None
+
+
+def _remote_port_file() -> Path:
+    return output_dir() / "remote_port"
+
+
+def _remote_control_port() -> Optional[int]:
+    """Read the remote control port written by AIOServer, with caching."""
+    global _remote_port_cache
+    if _remote_port_cache is not None:
+        return _remote_port_cache
+
+    port_file = _remote_port_file()
+    if not port_file.exists():
+        return None
+    try:
+        port = int(port_file.read_text().strip())
+        if 1 <= port <= 65535:
+            _remote_port_cache = port
+            return port
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _remote_url() -> Optional[str]:
+    """Return base URL for the remote control server, or None if unavailable."""
+    port = _remote_control_port()
+    if port is None:
+        return None
+    return f"http://127.0.0.1:{port}"
+
+
+def _remote_available() -> bool:
+    """Quick health check on the remote control server."""
+    base = _remote_url()
+    if not base:
+        return False
+    try:
+        req = urllib.request.Request(f"{base}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+            return data.get("ok", False)
+    except Exception:
+        return False
+
+
+def _remote_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST JSON to the remote control server. Raises on failure."""
+    base = _remote_url()
+    if not base:
+        raise ConnectionError("Remote control server not available")
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}{path}",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _remote_get(path: str) -> dict[str, Any]:
+    """GET from the remote control server. Raises on failure."""
+    base = _remote_url()
+    if not base:
+        raise ConnectionError("Remote control server not available")
+    req = urllib.request.Request(f"{base}{path}", method="GET")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _remote_send_key(key_name: str, event_type: str = "press") -> dict[str, Any]:
+    """Send a key event via the remote control server."""
+    return _remote_post("/input/key", {"key": key_name, "event": event_type})
+
+
+def _remote_send_key_sequence(keys: list[str], delay_ms: int = 50) -> dict[str, Any]:
+    """Send a key sequence via the remote control server."""
+    return _remote_post("/input/key-sequence", {"keys": keys, "delay_ms": delay_ms})
+
+
+def _remote_send_type(text: str) -> dict[str, Any]:
+    """Type text via the remote control server."""
+    return _remote_post("/input/type", {"text": text})
+
+
+def _remote_send_click(x: int, y: int) -> dict[str, Any]:
+    """Send a click at window-relative coordinates via the remote control server."""
+    return _remote_post("/input/click", {"x": x, "y": y})
+
+
+def _invalidate_remote_cache() -> None:
+    """Clear the cached remote port (e.g. after killing the app)."""
+    global _remote_port_cache
+    _remote_port_cache = None
 
 
 def _screenshot_metadata_path(image_path: Path) -> Path:
@@ -130,10 +237,13 @@ def _managed_workspace_screenshots() -> list[Path]:
 
 def _cleanup_orphaned_metadata() -> list[str]:
     deleted: list[str] = []
+    # Only remove workspace-root .png.json sidecars whose image no longer exists.
     for prefix in _LEGACY_SCREENSHOT_PREFIXES:
         for metadata_path in screenshot_dir().glob(f"{prefix}*.png.json"):
-            metadata_path.unlink(missing_ok=True)
-            deleted.append(str(metadata_path))
+            image_path = metadata_path.with_suffix("")  # strip .json → .png
+            if not image_path.exists():
+                metadata_path.unlink(missing_ok=True)
+                deleted.append(str(metadata_path))
 
     for metadata_path in _metadata_dir().glob("*.json"):
         try:
@@ -158,18 +268,26 @@ def _cleanup_orphaned_metadata() -> list[str]:
 
 
 def _write_screenshot_metadata(image_path: Path, metadata: dict[str, Any]) -> None:
-    metadata_path = _screenshot_metadata_path(image_path)
-    metadata_path.write_text(json.dumps(metadata, indent=2))
+    # Write to internal metadata directory (for coordinate transforms).
+    internal_path = _screenshot_metadata_path(image_path)
+    payload = json.dumps(metadata, indent=2)
+    internal_path.write_text(payload)
+    # Also write sidecar next to the image so the vision extension finds it.
+    sidecar_path = _legacy_workspace_metadata_path(image_path)
+    try:
+        sidecar_path.write_text(payload)
+    except Exception:
+        pass  # Non-critical — internal copy is the authoritative one.
 
 
 def _read_screenshot_metadata(image_path: Path) -> Optional[dict[str, Any]]:
-    metadata_path = _screenshot_metadata_path(image_path)
-    if not metadata_path.exists():
-        return None
-    try:
-        return json.loads(metadata_path.read_text())
-    except Exception:
-        return None
+    for candidate in (_screenshot_metadata_path(image_path), _legacy_workspace_metadata_path(image_path)):
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text())
+            except Exception:
+                continue
+    return None
 
 
 def _ocr_cache_key(image_path: Path, psm: int) -> tuple[str, int, int, int]:
@@ -178,6 +296,13 @@ def _ocr_cache_key(image_path: Path, psm: int) -> tuple[str, int, int, int]:
 
 
 def _display_metrics() -> Optional[dict[str, float]]:
+    """Return display dimensions in points and the true backing-store scale.
+
+    On Retina/HiDPI Macs, CGDisplayPixelsWide returns the *logical* pixel
+    count (equal to the point count), not the physical backing-store pixels.
+    screencapture always writes at the backing-store resolution, so we must
+    use CGDisplayModeGetPixelWidth to get the true physical width.
+    """
     try:
         import Quartz
 
@@ -185,13 +310,26 @@ def _display_metrics() -> Optional[dict[str, float]]:
         bounds = Quartz.CGDisplayBounds(display_id)
         point_width = float(bounds.size.width)
         point_height = float(bounds.size.height)
-        pixel_width = float(Quartz.CGDisplayPixelsWide(display_id))
-        pixel_height = float(Quartz.CGDisplayPixelsHigh(display_id))
+
+        # True backing-store pixels via the current display mode.
+        backing_width = point_width
+        backing_height = point_height
+        try:
+            mode = Quartz.CGDisplayCopyDisplayMode(display_id)
+            if mode:
+                pw = float(Quartz.CGDisplayModeGetPixelWidth(mode))
+                ph = float(Quartz.CGDisplayModeGetPixelHeight(mode))
+                if pw > 0 and ph > 0:
+                    backing_width = pw
+                    backing_height = ph
+        except Exception:
+            pass
+
         return {
             "display_width": point_width,
             "display_height": point_height,
-            "display_scale_x": round(pixel_width / max(point_width, 1.0), 4),
-            "display_scale_y": round(pixel_height / max(point_height, 1.0), 4),
+            "display_scale_x": round(backing_width / max(point_width, 1.0), 4),
+            "display_scale_y": round(backing_height / max(point_height, 1.0), 4),
         }
     except Exception:
         return None
@@ -331,6 +469,7 @@ def _launch_aioserver(
     input_script_path: Optional[Path],
     wait_ms: int,
     app_name: Optional[str] = None,
+    no_activate: bool = False,
 ) -> dict[str, Any]:
     if not aioserver_path().exists():
         _err("AIOServer not built. Run 'make build' first.")
@@ -339,6 +478,7 @@ def _launch_aioserver(
         _err("Choose either a ROM or an app launch target, not both")
 
     _stop_existing_aioserver()
+    _invalidate_remote_cache()
 
     cmd = [str(aioserver_path())]
     if rom_path:
@@ -347,6 +487,8 @@ def _launch_aioserver(
         cmd += ["--launch-app", app_name]
     if input_script_path:
         cmd += ["--input-script", str(input_script_path)]
+    if no_activate:
+        cmd += ["--no-activate"]
 
     log_path = output_dir() / f"session_{ts()}.log"
     cmd += ["--log-file", str(log_path)]
@@ -388,6 +530,74 @@ def _kill_aioserver() -> None:
     subprocess.run(["pkill", "-f", "AIOServer"], capture_output=True)
     if PID_FILE.exists():
         PID_FILE.unlink()
+    _invalidate_remote_cache()
+
+
+def _build_screenshot_info(
+    image_path: Path,
+    capture_mode: str,
+    window_info: Optional[dict[str, Any]],
+    *,
+    display_metrics: Optional[dict[str, float]] = None,
+    cleaned: Optional[list[str]] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build the metadata dict for a captured screenshot.
+
+    Computes pixel stats, correct Retina scale factors, and blank detection.
+    """
+    info: dict[str, Any] = {
+        "path": str(image_path),
+        "size_bytes": image_path.stat().st_size,
+        "capture_mode": capture_mode,
+    }
+    if extra:
+        info.update(extra)
+    if window_info:
+        info["window"] = _window_bounds(window_info)
+        info["window_id"] = window_info.get("id")
+    dm = display_metrics or _display_metrics()
+    if dm:
+        info.update(dm)
+    if cleaned:
+        info["cleaned"] = cleaned
+    try:
+        from PIL import Image
+
+        img = Image.open(image_path)
+        info["width"] = img.width
+        info["height"] = img.height
+
+        # Compute correct scale factors from actual image dimensions.
+        if window_info:
+            info["window_scale_x"] = round(img.width / max(window_info["w"], 1), 4)
+            info["window_scale_y"] = round(img.height / max(window_info["h"], 1), 4)
+        if dm and capture_mode.startswith("full_screen"):
+            dw = float(dm.get("display_width", 0))
+            dh = float(dm.get("display_height", 0))
+            if dw > 0 and dh > 0:
+                info["display_scale_x"] = round(img.width / dw, 4)
+                info["display_scale_y"] = round(img.height / dh, 4)
+
+        # Pixel stats for blank detection.
+        rgba = img.convert("RGBA")
+        _getdata = getattr(rgba, "get_flattened_data", None) or rgba.getdata
+        pixels = list(_getdata())
+        total = len(pixels)
+        if total > 0:
+            transparent = sum(1 for _, _, _, alpha in pixels if alpha < 8)
+            non_black = sum(
+                1 for red, green, blue, alpha in pixels
+                if alpha >= 8 and red + green + blue > 30
+            )
+            info["transparent_ratio"] = round(transparent / total, 4)
+            info["nonblack_ratio"] = round(non_black / total, 4)
+            info["looks_blank"] = (
+                info["transparent_ratio"] > 0.95 or info["nonblack_ratio"] < 0.01
+            )
+    except Exception:
+        pass
+    return info
 
 
 def _capture_screenshot(
@@ -434,74 +644,19 @@ def _capture_screenshot(
     if not out.exists() or out.stat().st_size == 0:
         _err("Screenshot capture failed")
 
-    info: dict[str, Any] = {
-        "path": str(out),
-        "size_bytes": out.stat().st_size,
-        "capture_mode": mode,
-    }
-    if window_info:
-        info["window"] = _window_bounds(window_info)
-        info["window_id"] = window_info.get("id")
-    display_metrics = _display_metrics()
-    if display_metrics:
-        info.update(display_metrics)
-    if cleaned:
-        info["cleaned"] = cleaned
-    try:
-        from PIL import Image
-        img = Image.open(out)
-        info["width"] = img.width
-        info["height"] = img.height
-        rgba = img.convert("RGBA")
-        pixels = list(rgba.getdata())
-        total = len(pixels)
-        if total > 0:
-            transparent = sum(1 for _, _, _, alpha in pixels if alpha < 8)
-            non_black = sum(1 for red, green, blue, alpha in pixels if alpha >= 8 and red + green + blue > 30)
-            info["transparent_ratio"] = round(transparent / total, 4)
-            info["nonblack_ratio"] = round(non_black / total, 4)
-            info["looks_blank"] = info["transparent_ratio"] > 0.95 or info["nonblack_ratio"] < 0.01
-        if window_info:
-            info["window_scale_x"] = round(img.width / max(window_info["w"], 1), 4)
-            info["window_scale_y"] = round(img.height / max(window_info["h"], 1), 4)
-    except Exception:
-        pass
+    info = _build_screenshot_info(out, mode, window_info, display_metrics=None, cleaned=cleaned)
 
     if info.get("looks_blank") and mode != "full_screen" and allow_fullscreen_fallback:
         subprocess.run(["screencapture", "-x", str(out)],
                        capture_output=True, timeout=10)
         if not out.exists() or out.stat().st_size == 0:
             _err("Screenshot capture failed")
-        info = {
-            "path": str(out),
-            "size_bytes": out.stat().st_size,
-            "capture_mode": "full_screen_fallback_after_blank_window",
-            "window_capture_failed": True,
-        }
-        if window_info:
-            info["window"] = _window_bounds(window_info)
-            info["window_id"] = window_info.get("id")
-        if cleaned:
-            info["cleaned"] = cleaned
-        display_metrics = _display_metrics()
-        if display_metrics:
-            info.update(display_metrics)
-        try:
-            from PIL import Image
-            img = Image.open(out)
-            info["width"] = img.width
-            info["height"] = img.height
-            rgba = img.convert("RGBA")
-            pixels = list(rgba.getdata())
-            total = len(pixels)
-            if total > 0:
-                transparent = sum(1 for _, _, _, alpha in pixels if alpha < 8)
-                non_black = sum(1 for red, green, blue, alpha in pixels if alpha >= 8 and red + green + blue > 30)
-                info["transparent_ratio"] = round(transparent / total, 4)
-                info["nonblack_ratio"] = round(non_black / total, 4)
-                info["looks_blank"] = info["transparent_ratio"] > 0.95 or info["nonblack_ratio"] < 0.01
-        except Exception:
-            pass
+        info = _build_screenshot_info(
+            out, "full_screen_fallback_after_blank_window", window_info,
+            display_metrics=None, cleaned=cleaned, extra={"window_capture_failed": True},
+        )
+
+    _write_screenshot_metadata(out, info)
     return info
 
 
@@ -946,7 +1101,8 @@ def cmd_boot(args: argparse.Namespace) -> None:
     rom = _resolve_optional_path(args.rom, "ROM")
     script_path = _resolve_optional_path(args.input_script, "Input script")
     app_name = _normalize_launch_app(getattr(args, "app", None))
-    launch = _launch_aioserver(rom, script_path, int(args.wait_ms), app_name=app_name)
+    no_focus = getattr(args, "no_focus", False)
+    launch = _launch_aioserver(rom, script_path, int(args.wait_ms), app_name=app_name, no_activate=no_focus)
     _ok(
         pid=launch["pid"],
         log=launch["log"],
@@ -1008,8 +1164,10 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
 
 
 def cmd_click(args: argparse.Namespace) -> None:
+    use_remote = _remote_available()
+
     bounds: Optional[dict[str, int]] = None
-    if not args.no_focus:
+    if not use_remote and not args.no_focus:
         focused = _ensure_window_focus()
         if not focused:
             _err("AIOServer window not found or could not be focused for click")
@@ -1025,6 +1183,35 @@ def cmd_click(args: argparse.Namespace) -> None:
         if not image_path:
             _err("--image is required when using --image-x/--image-y")
             return
+
+        if use_remote:
+            # For remote clicks, we need window-relative coordinates.
+            # If the screenshot was window-only, image coords == window-relative.
+            metadata = _read_screenshot_metadata(image_path) or {}
+            capture_mode = str(metadata.get("capture_mode", ""))
+            if capture_mode == "window":
+                # Image coordinates are already window-relative (possibly scaled).
+                from PIL import Image
+                img = Image.open(image_path)
+                win_bounds = _find_window_bounds()
+                if win_bounds and img.width > 0 and img.height > 0:
+                    scale_x = win_bounds["w"] / img.width
+                    scale_y = win_bounds["h"] / img.height
+                    wx = round(int(args.image_x) * scale_x)
+                    wy = round(int(args.image_y) * scale_y)
+                else:
+                    wx, wy = int(args.image_x), int(args.image_y)
+                result = _remote_send_click(wx, wy)
+                _ok(method="remote", clicked_x=wx, clicked_y=wy, **{k: v for k, v in result.items() if k != "ok"})
+                return
+            else:
+                # Full-screen capture or unknown — fall through to coordinate transform + cliclick
+                use_remote = False
+                if not bounds:
+                    focused = _ensure_window_focus()
+                    if focused:
+                        bounds = _window_bounds(focused)
+
         metadata = _read_screenshot_metadata(image_path) or {}
         capture_mode = str(metadata.get("capture_mode", ""))
         if not bounds and not capture_mode.startswith("full_screen"):
@@ -1043,6 +1230,13 @@ def cmd_click(args: argparse.Namespace) -> None:
             _err("--x and --y are required unless using --image-x/--image-y")
             return
         x, y = int(args.x), int(args.y)
+
+        if use_remote and args.window_relative:
+            # Already window-relative — send directly
+            result = _remote_send_click(x, y)
+            _ok(method="remote", clicked_x=x, clicked_y=y, **{k: v for k, v in result.items() if k != "ok"})
+            return
+
         if args.window_relative:
             if not bounds:
                 bounds = _find_window_bounds()
@@ -1053,7 +1247,7 @@ def cmd_click(args: argparse.Namespace) -> None:
             y += bounds["y"]
 
     subprocess.run(["cliclick", f"c:{x},{y}"], capture_output=True, timeout=5)
-    _ok(clicked_x=x, clicked_y=y, **click_meta)
+    _ok(method="cliclick", clicked_x=x, clicked_y=y, **click_meta)
 
 
 def cmd_click_percent(args: argparse.Namespace) -> None:
@@ -1147,48 +1341,109 @@ _KEY_MAP = {
     "up": "arrow-up", "down": "arrow-down",
     "left": "arrow-left", "right": "arrow-right",
     "enter": "return", "esc": "escape",
+    "space": "space", "tab": "tab", "shift": "shift",
+    "home": "home",
     "start": "return",
+    "select": "space",
     "a": "x", "b": "z",
     "l": "a", "r": "s",
-    "select": "space",
+    "z": "z", "x": "x", "c": "c", "v": "v",
+}
+
+_DEFAULT_USER_TEST_SNAP_KEY = "f9"
+_DEFAULT_USER_TEST_ABORT_KEY = "f10"
+_MAC_KEYCODE_MAP = {
+    0: "a",
+    1: "s",
+    6: "z",
+    7: "x",
+    8: "c",
+    9: "v",
+    36: "enter",
+    48: "tab",
+    49: "space",
+    53: "esc",
+    56: "shift",
+    60: "shift",
+    101: "f9",
+    109: "f10",
+    115: "home",
+    123: "left",
+    124: "right",
+    125: "down",
+    126: "up",
+}
+_REPLAYABLE_USER_TEST_KEYS = {
+    "a",
+    "s",
+    "z",
+    "x",
+    "c",
+    "v",
+    "enter",
+    "tab",
+    "space",
+    "esc",
+    "shift",
+    "home",
+    "left",
+    "right",
+    "down",
+    "up",
+}
+_HOST_KEY_TO_GBA_SCRIPT_KEY = {
+    "up": "UP",
+    "down": "DOWN",
+    "left": "LEFT",
+    "right": "RIGHT",
+    "z": "A",
+    "x": "B",
+    "shift": "SELECT",
+    "enter": "START",
+    "space": "START",
+    "tab": "START",
+    "a": "L",
+    "s": "R",
 }
 
 
 def cmd_key(args: argparse.Namespace) -> None:
-    """Send a key press via cliclick."""
+    """Send a key press — via remote control server (no focus needed) or cliclick fallback."""
+    event_type = getattr(args, "event", "press")
+    if _remote_available():
+        result = _remote_send_key(args.name, event_type)
+        _ok(method="remote", **result)
+        return
     if not _ensure_window_focus():
         _err("AIOServer window not found or could not be focused for key input")
-    key_name = args.name
-    mods = args.modifiers or ""
-    mapped = _KEY_MAP.get(key_name.lower(), key_name.lower())
-
-    if mods:
-        subprocess.run(["cliclick", f"kd:{mods}", f"kp:{mapped}", f"ku:{mods}"],
-                       capture_output=True, timeout=5)
-    else:
-        subprocess.run(["cliclick", f"kp:{mapped}"],
-                       capture_output=True, timeout=5)
-
-    _ok(key=key_name, mapped_to=mapped, modifiers=mods)
+    key_result = _send_key_event(args.name, event_type, args.modifiers or "")
+    _ok(method="cliclick", **key_result)
 
 
 def cmd_key_sequence(args: argparse.Namespace) -> None:
+    sequence = [item for item in args.keys.split() if item]
+    if _remote_available():
+        result = _remote_send_key_sequence(sequence)
+        _ok(method="remote", **result)
+        return
     if not _ensure_window_focus():
         _err("AIOServer window not found or could not be focused for key input")
-    sequence = [item for item in args.keys.split() if item]
     sent: list[str] = []
     for item in sequence:
-        mapped_name = str(_KEY_MAP.get(item.lower(), item.lower()))
-        subprocess.run(["cliclick", f"kp:{mapped_name}"], capture_output=True, timeout=5)
-        sent.append(mapped_name)
-    _ok(mapped_to=sent)
+        sent_event = _send_key_event(item, "press")
+        sent.append(str(sent_event["mapped_to"]))
+    _ok(method="cliclick", mapped_to=sent)
 
 
 def cmd_type(args: argparse.Namespace) -> None:
+    if _remote_available():
+        result = _remote_send_type(args.text)
+        _ok(method="remote", **result)
+        return
     if not _ensure_window_focus():
         _err("AIOServer window not found or could not be focused for text input")
     subprocess.run(["cliclick", f"t:{args.text}"], capture_output=True, timeout=10)
-    _ok(typed=args.text)
+    _ok(method="cliclick", typed=args.text)
 
 
 def cmd_wait(args: argparse.Namespace) -> None:
@@ -1216,8 +1471,13 @@ def _analyze_image(img_path: Path, do_ocr: bool, do_colors: bool,
     results["width"] = img.width
     results["height"] = img.height
 
+    def _pixels_rgb(image: "Image.Image") -> list[tuple[int, ...]]:
+        rgb = image.convert("RGB")
+        _gd = getattr(rgb, "get_flattened_data", None) or rgb.getdata
+        return list(_gd())
+
     if do_nonblack:
-        pixels = list(img.convert("RGB").getdata())
+        pixels = _pixels_rgb(img)
         total = len(pixels)
         non_black = sum(1 for r, g, b in pixels if r + g + b > 30)
         ratio = non_black / total if total > 0 else 0
@@ -1225,7 +1485,7 @@ def _analyze_image(img_path: Path, do_ocr: bool, do_colors: bool,
         results["is_black_screen"] = ratio < 0.01
 
     if do_colors:
-        pixels = list(img.convert("RGB").getdata())
+        pixels = _pixels_rgb(img)
         total = len(pixels)
         r_avg = sum(p[0] for p in pixels) / total
         g_avg = sum(p[1] for p in pixels) / total
@@ -1285,17 +1545,400 @@ def cmd_status(args: argparse.Namespace) -> None:
     pid = _read_pid()
     running = pid is not None and _is_running(pid)
     window_info = _find_window_info(pid) if running else None
+    remote_port = _remote_control_port()
+    remote_ok = _remote_available() if remote_port else False
     _ok(
         pid=pid,
         running=running,
         window=_window_bounds(window_info),
         window_id=window_info.get("id") if window_info else None,
+        remote_control_port=remote_port,
+        remote_control_available=remote_ok,
     )
 
 
 def cmd_kill(args: argparse.Namespace) -> None:
     _kill_aioserver()
     _ok(killed=True)
+
+
+def cmd_poll_state(args: argparse.Namespace) -> None:
+    """Poll application state from the remote control server."""
+    endpoint = getattr(args, "endpoint", "state")
+    path_map = {
+        "state": "/state",
+        "navigation": "/state/navigation",
+        "input": "/state/input",
+        "emulator": "/state/emulator",
+    }
+    path = path_map.get(endpoint, "/state")
+    try:
+        data = _remote_get(path)
+        _ok(**data)
+    except Exception as e:
+        _err(f"Failed to poll state: {e}")
+
+
+def cmd_clean(args: argparse.Namespace) -> None:
+    """Remove all managed workspace screenshots, probes, and metadata."""
+    deleted = _cleanup_workspace_screenshots(keep_path=None)
+    deleted.extend(_cleanup_probe_capture())
+    deleted.extend(_cleanup_internal_metadata())
+    _ok(deleted=deleted, count=len(deleted))
+
+
+def _normalize_user_test_key_name(name: Optional[str], default: str) -> str:
+    normalized = (name or default).strip().lower()
+    aliases = {
+        "return": "enter",
+        "escape": "esc",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _user_test_root_dir(custom_root: Optional[str]) -> Path:
+    if custom_root:
+        root = Path(custom_root).expanduser().resolve()
+    else:
+        root = output_dir() / "user_tests"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _user_test_artifact_dir(label: Optional[str], custom_root: Optional[str]) -> Path:
+    root = _user_test_root_dir(custom_root)
+    artifact_dir = root / f"{_sanitize_artifact_label(label or 'user-test')}_{ts()}"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir
+
+
+def _send_key_event(key_name: str, event_type: str, modifiers: str = "") -> dict[str, Any]:
+    normalized_name = key_name.strip().lower()
+    mapped = _KEY_MAP.get(normalized_name, normalized_name)
+    normalized_event = event_type.strip().lower()
+
+    if normalized_event == "press":
+        if modifiers:
+            subprocess.run(
+                ["cliclick", f"kd:{modifiers}", f"kp:{mapped}", f"ku:{modifiers}"],
+                capture_output=True,
+                timeout=5,
+            )
+        else:
+            subprocess.run(["cliclick", f"kp:{mapped}"], capture_output=True, timeout=5)
+    elif normalized_event == "down":
+        subprocess.run(["cliclick", f"kd:{mapped}"], capture_output=True, timeout=5)
+    elif normalized_event == "up":
+        subprocess.run(["cliclick", f"ku:{mapped}"], capture_output=True, timeout=5)
+    else:
+        raise ValueError(f"Unsupported key event: {event_type}")
+
+    return {
+        "key": normalized_name,
+        "mapped_to": mapped,
+        "event": normalized_event,
+        "modifiers": modifiers,
+    }
+
+
+def _build_user_test_replay_plan(
+    *,
+    rom_path: Optional[Path],
+    app_name: Optional[str],
+    input_script_path: Optional[Path],
+    wait_ms: int,
+    events: list[dict[str, Any]],
+    replay_capture_path: Path,
+    capture_window_only: bool,
+    label: str,
+) -> list[dict[str, Any]]:
+    plan: list[dict[str, Any]] = [
+        {
+            "action": "boot",
+            "rom": str(rom_path) if rom_path else None,
+            "app": app_name,
+            "wait_ms": wait_ms,
+            "input_script": str(input_script_path) if input_script_path else None,
+        },
+        {"action": "focus"},
+    ]
+
+    previous_ms = 0
+    for event in events:
+        current_ms = int(event["ms"])
+        delay_ms = current_ms - previous_ms
+        if delay_ms > 0:
+            plan.append({"action": "wait", "ms": delay_ms})
+
+        plan.append(
+            {
+                "action": "key",
+                "name": str(event["name"]),
+                "event": str(event["event"]),
+                "focus": False,
+            }
+        )
+        previous_ms = current_ms
+
+    plan.append(
+        {
+            "action": "screenshot",
+            "output": str(replay_capture_path),
+            "window": capture_window_only,
+            "full_screen": not capture_window_only,
+            "label": f"{label}-replay",
+        }
+    )
+    plan.append({"action": "kill"})
+    return plan
+
+
+def _build_gba_input_script(events: list[dict[str, Any]]) -> tuple[Optional[str], list[str]]:
+    compatible_lines: list[str] = [
+        "# Generated by scripts/visual_dev_loop.py user-test-create",
+        "# Replay target: GBA-compatible emulator input only",
+    ]
+    unsupported_keys: set[str] = set()
+    pressed_keys: set[str] = set()
+    latest_ms = 0
+
+    for event in events:
+        name = str(event["name"])
+        script_key = _HOST_KEY_TO_GBA_SCRIPT_KEY.get(name)
+        if not script_key:
+            unsupported_keys.add(name)
+            continue
+
+        event_ms = int(event["ms"])
+        latest_ms = max(latest_ms, event_ms)
+        action = "DOWN" if str(event["event"]) == "down" else "UP"
+        compatible_lines.append(f"{event_ms} {script_key} {action}")
+        if action == "DOWN":
+            pressed_keys.add(script_key)
+        else:
+            pressed_keys.discard(script_key)
+
+    if len(compatible_lines) == 2:
+        return None, sorted(unsupported_keys)
+
+    if pressed_keys:
+        release_ms = latest_ms + 1
+        for script_key in sorted(pressed_keys):
+            compatible_lines.append(f"{release_ms} {script_key} UP")
+
+    return "\n".join(compatible_lines) + "\n", sorted(unsupported_keys)
+
+
+def _record_user_test_events(expected_pid: Optional[int], snap_key: str, abort_key: str) -> dict[str, Any]:
+    try:
+        import Quartz
+    except Exception as exc:
+        raise RuntimeError(f"Quartz bindings unavailable for user-test-create: {exc}") from exc
+
+    state: dict[str, Any] = {
+        "started_at": time.monotonic(),
+        "events": [],
+        "ignored_keys": set(),
+        "snap_pressed": False,
+        "aborted": False,
+        "error": None,
+    }
+
+    event_mask = (1 << Quartz.kCGEventKeyDown) | (1 << Quartz.kCGEventKeyUp)
+
+    def callback(_proxy: Any, event_type: Any, event: Any, _refcon: Any) -> Any:
+        if event_type not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
+            return event
+
+        keycode = int(
+            Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+        )
+        key_name = _MAC_KEYCODE_MAP.get(keycode)
+        if not key_name:
+            return event
+
+        if event_type == Quartz.kCGEventKeyDown:
+            is_repeat = bool(
+                Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat)
+            )
+            if is_repeat:
+                return event
+
+        if key_name == snap_key and event_type == Quartz.kCGEventKeyDown:
+            state["snap_pressed"] = True
+            return event
+
+        if key_name == abort_key and event_type == Quartz.kCGEventKeyDown:
+            state["aborted"] = True
+            return event
+
+        if key_name not in _REPLAYABLE_USER_TEST_KEYS:
+            cast(set[str], state["ignored_keys"]).add(key_name)
+            return event
+
+        event_ms = max(0, round((time.monotonic() - float(state["started_at"])) * 1000))
+        cast(list[dict[str, Any]], state["events"]).append(
+            {
+                "ms": int(event_ms),
+                "name": key_name,
+                "event": "down" if event_type == Quartz.kCGEventKeyDown else "up",
+            }
+        )
+        return event
+
+    tap = Quartz.CGEventTapCreate(
+        Quartz.kCGSessionEventTap,
+        Quartz.kCGHeadInsertEventTap,
+        Quartz.kCGEventTapOptionListenOnly,
+        event_mask,
+        callback,
+        None,
+    )
+    if tap is None:
+        raise RuntimeError(
+            "Failed to create keyboard event tap. Grant Accessibility and Input Monitoring permissions, then retry."
+        )
+
+    run_loop_source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+    run_loop = Quartz.CFRunLoopGetCurrent()
+    Quartz.CFRunLoopAddSource(run_loop, run_loop_source, Quartz.kCFRunLoopCommonModes)
+    Quartz.CGEventTapEnable(tap, True)
+
+    try:
+        while not bool(state["snap_pressed"]) and not bool(state["aborted"]):
+            Quartz.CFRunLoopRunInMode(Quartz.kCFRunLoopDefaultMode, 0.2, False)
+            if expected_pid and not _is_running(expected_pid):
+                state["error"] = "AIOServer exited unexpectedly during user-assisted capture"
+                break
+    finally:
+        Quartz.CGEventTapEnable(tap, False)
+        Quartz.CFRunLoopRemoveSource(run_loop, run_loop_source, Quartz.kCFRunLoopCommonModes)
+
+    state["ignored_keys"] = sorted(cast(set[str], state["ignored_keys"]))
+    return state
+
+
+def cmd_user_test_create(args: argparse.Namespace) -> None:
+    rom = _resolve_optional_path(args.rom, "ROM")
+    input_script_path = _resolve_optional_path(args.input_script, "Input script")
+    app_name = _normalize_launch_app(getattr(args, "app", None))
+    wait_ms = int(args.wait_ms)
+    snap_key = _normalize_user_test_key_name(args.snap_key, _DEFAULT_USER_TEST_SNAP_KEY)
+    abort_key = _normalize_user_test_key_name(args.abort_key, _DEFAULT_USER_TEST_ABORT_KEY)
+    label = getattr(args, "label", None) or app_name or (rom.stem if rom else "user-test")
+    capture_window_only = not bool(args.full_screen)
+
+    if snap_key == abort_key:
+        _err("snap-key and abort-key must be different")
+
+    artifact_dir = _user_test_artifact_dir(label, getattr(args, "out_dir", None))
+    capture_path = artifact_dir / "captured_state.png"
+    replay_capture_path = artifact_dir / "replay_capture.png"
+    replay_plan_path = artifact_dir / "replay_session.json"
+    metadata_path = artifact_dir / "metadata.json"
+    gba_input_script_path = artifact_dir / "replay.input"
+
+    launch: Optional[dict[str, Any]] = None
+    recording: Optional[dict[str, Any]] = None
+    screenshot: Optional[dict[str, Any]] = None
+
+    try:
+        launch = _launch_aioserver(rom, input_script_path, wait_ms, app_name=app_name)
+        if not _ensure_window_focus():
+            _err("AIOServer window not found or could not be focused for user-assisted capture")
+
+        print(
+            (
+                f"[user-test-create] Control AIOServer now. Press {snap_key.upper()} to capture and finish, "
+                f"or {abort_key.upper()} to abort. Only supported keyboard inputs are recorded."
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+        recording = _record_user_test_events(launch["pid"], snap_key, abort_key)
+        if recording.get("error"):
+            _err(str(recording["error"]))
+
+        if recording.get("aborted"):
+            metadata = {
+                "aborted": True,
+                "rom": str(rom) if rom else None,
+                "app": app_name,
+                "snap_key": snap_key,
+                "abort_key": abort_key,
+                "recorded_events": recording.get("events", []),
+                "ignored_keys": recording.get("ignored_keys", []),
+            }
+            metadata_path.write_text(json.dumps(metadata, indent=2))
+            _ok(
+                aborted=True,
+                artifact_dir=str(artifact_dir),
+                metadata=str(metadata_path),
+                event_count=len(cast(list[dict[str, Any]], recording.get("events", []))),
+                ignored_keys=recording.get("ignored_keys", []),
+            )
+            return
+
+        screenshot = _capture_screenshot(
+            str(capture_path),
+            window_only=capture_window_only,
+            allow_fullscreen_fallback=True,
+            label=f"{label}-capture",
+        )
+
+        recorded_events = cast(list[dict[str, Any]], recording.get("events", []))
+        replay_plan = _build_user_test_replay_plan(
+            rom_path=rom,
+            app_name=app_name,
+            input_script_path=input_script_path,
+            wait_ms=wait_ms,
+            events=recorded_events,
+            replay_capture_path=replay_capture_path,
+            capture_window_only=capture_window_only,
+            label=_sanitize_artifact_label(label),
+        )
+        replay_plan_path.write_text(json.dumps(replay_plan, indent=2))
+
+        gba_input_script_text, unsupported_gba_keys = _build_gba_input_script(recorded_events)
+        exported_gba_script = None
+        if rom and gba_input_script_text:
+            gba_input_script_path.write_text(gba_input_script_text)
+            exported_gba_script = str(gba_input_script_path)
+
+        metadata = {
+            "aborted": False,
+            "rom": str(rom) if rom else None,
+            "app": app_name,
+            "launch_log": launch["log"] if launch else None,
+            "artifact_dir": str(artifact_dir),
+            "snap_key": snap_key,
+            "abort_key": abort_key,
+            "recorded_events": recorded_events,
+            "ignored_keys": recording.get("ignored_keys", []),
+            "replay_plan": str(replay_plan_path),
+            "replay_capture": str(replay_capture_path),
+            "captured_state": screenshot["path"] if screenshot else None,
+            "gba_input_script": exported_gba_script,
+            "unsupported_gba_keys": unsupported_gba_keys,
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+
+        _ok(
+            aborted=False,
+            artifact_dir=str(artifact_dir),
+            capture=screenshot,
+            replay_plan=str(replay_plan_path),
+            replay_capture=str(replay_capture_path),
+            metadata=str(metadata_path),
+            gba_input_script=exported_gba_script,
+            unsupported_gba_keys=unsupported_gba_keys,
+            event_count=len(recorded_events),
+            ignored_keys=recording.get("ignored_keys", []),
+            log=launch["log"] if launch else None,
+        )
+    finally:
+        _kill_aioserver()
 
 
 def cmd_session(args: argparse.Namespace) -> None:
@@ -1373,109 +2016,174 @@ def cmd_session(args: argparse.Namespace) -> None:
                 time.sleep(ms / 1000.0)
                 step_result["waited_ms"] = ms
 
-            elif action == "key":
+            elif action in ("key", "key_down", "key_up"):
                 key_name = step.get("name", "")
                 key_sequence = step.get("keys", "")
-                if step.get("focus", True) and not _ensure_window_focus():
+                use_remote = _remote_available()
+                if not use_remote and step.get("focus", True) and not _ensure_window_focus():
                     step_result["error"] = "AIOServer window not found or could not be focused for key input"
                     results.append(step_result)
                     continue
                 if key_sequence:
                     sequence = [item for item in key_sequence.split() if item]
-                    sent: list[str] = []
-                    for item in sequence:
-                        mapped_name = str(_KEY_MAP.get(item.lower(), item.lower()))
-                        subprocess.run(["cliclick", f"kp:{mapped_name}"],
-                                       capture_output=True, timeout=5)
-                        sent.append(mapped_name)
-                    step_result["mapped_to"] = sent
+                    if use_remote:
+                        result = _remote_send_key_sequence(sequence)
+                        step_result["method"] = "remote"
+                        step_result["mapped_to"] = sequence
+                    else:
+                        sent: list[str] = []
+                        for item in sequence:
+                            sent_event = _send_key_event(str(item), "press")
+                            sent.append(str(sent_event["mapped_to"]))
+                        step_result["method"] = "cliclick"
+                        step_result["mapped_to"] = sent
                 elif not key_name:
                     step_result["error"] = "Missing 'name'"
                 else:
-                    mapped = _KEY_MAP.get(key_name.lower(), key_name.lower())
-                    mods = step.get("modifiers", "")
-                    if mods:
-                        subprocess.run(["cliclick", f"kd:{mods}", f"kp:{mapped}", f"ku:{mods}"],
-                                       capture_output=True, timeout=5)
+                    default_event = "press"
+                    if action == "key_down":
+                        default_event = "down"
+                    elif action == "key_up":
+                        default_event = "up"
+                    event_type = str(step.get("event", default_event))
+                    if use_remote:
+                        result = _remote_send_key(str(key_name), event_type)
+                        step_result["method"] = "remote"
+                        step_result.update({k: v for k, v in result.items() if k != "ok"})
                     else:
-                        subprocess.run(["cliclick", f"kp:{mapped}"],
-                                       capture_output=True, timeout=5)
-                    step_result["mapped_to"] = mapped
+                        key_result = _send_key_event(
+                            str(key_name),
+                            event_type,
+                            str(step.get("modifiers", "")),
+                        )
+                        step_result["method"] = "cliclick"
+                        step_result.update(key_result)
 
             elif action == "key_sequence":
-                if step.get("focus", True) and not _ensure_window_focus():
-                    step_result["error"] = "AIOServer window not found or could not be focused for key input"
-                    results.append(step_result)
-                    continue
                 sequence = [item for item in str(step.get("keys", "")).split() if item]
-                sent: list[str] = []
-                for item in sequence:
-                    mapped_name = str(_KEY_MAP.get(item.lower(), item.lower()))
-                    subprocess.run(["cliclick", f"kp:{mapped_name}"], capture_output=True, timeout=5)
-                    sent.append(mapped_name)
-                step_result["mapped_to"] = sent
+                use_remote = _remote_available()
+                if use_remote:
+                    result = _remote_send_key_sequence(sequence)
+                    step_result["method"] = "remote"
+                    step_result["mapped_to"] = sequence
+                else:
+                    if step.get("focus", True) and not _ensure_window_focus():
+                        step_result["error"] = "AIOServer window not found or could not be focused for key input"
+                        results.append(step_result)
+                        continue
+                    sent: list[str] = []
+                    for item in sequence:
+                        mapped_name = str(_KEY_MAP.get(item.lower(), item.lower()))
+                        subprocess.run(["cliclick", f"kp:{mapped_name}"], capture_output=True, timeout=5)
+                        sent.append(mapped_name)
+                    step_result["method"] = "cliclick"
+                    step_result["mapped_to"] = sent
 
             elif action == "click":
-                bounds = None
-                if step.get("focus", True):
-                    focused = _ensure_window_focus()
-                    if not focused:
-                        step_result["error"] = "AIOServer window not found or could not be focused for click"
-                        results.append(step_result)
-                        continue
-                    bounds = _window_bounds(focused)
+                use_remote = _remote_available()
                 image_x = step.get("image_x")
                 image_y = step.get("image_y")
-                if image_x is not None or image_y is not None:
-                    if image_x is None or image_y is None:
-                        step_result["error"] = "Both image_x and image_y are required together"
-                        results.append(step_result)
-                        continue
-                    if not bounds:
-                        bounds = _find_window_bounds()
-                    if not bounds:
-                        step_result["error"] = "AIOServer window not found for image-based click"
-                        results.append(step_result)
-                        continue
-                    image_path = _resolve_image_target(step.get("image"), last_screenshot)
-                    if not image_path:
-                        step_result["error"] = "No screenshot available for image-based click"
-                        results.append(step_result)
-                        continue
-                    metadata = _read_screenshot_metadata(image_path) or {}
-                    capture_mode = str(metadata.get("capture_mode", ""))
-                    if not bounds and not capture_mode.startswith("full_screen"):
-                        bounds = _find_window_bounds()
-                    if not bounds and not capture_mode.startswith("full_screen"):
-                        step_result["error"] = "AIOServer window not found for image-based click"
-                        results.append(step_result)
-                        continue
-                    cx, cy, click_meta = _image_to_screen_coordinates(
-                        image_path,
-                        int(image_x),
-                        int(image_y),
-                        bounds,
-                    )
-                    step_result.update(click_meta)
-                else:
-                    cx, cy = int(step.get("x", 0)), int(step.get("y", 0))
-                    if step.get("window_relative"):
+
+                if use_remote:
+                    # Remote: try to compute window-relative coordinates
+                    if image_x is not None and image_y is not None:
+                        image_path = _resolve_image_target(step.get("image"), last_screenshot)
+                        if not image_path:
+                            step_result["error"] = "No screenshot available for image-based click"
+                            results.append(step_result)
+                            continue
+                        metadata = _read_screenshot_metadata(image_path) or {}
+                        capture_mode = str(metadata.get("capture_mode", ""))
+                        if capture_mode == "window":
+                            from PIL import Image
+                            img = Image.open(image_path)
+                            win_bounds = _find_window_bounds()
+                            if win_bounds and img.width > 0 and img.height > 0:
+                                scale_x = win_bounds["w"] / img.width
+                                scale_y = win_bounds["h"] / img.height
+                                cx = round(int(image_x) * scale_x)
+                                cy = round(int(image_y) * scale_y)
+                            else:
+                                cx, cy = int(image_x), int(image_y)
+                            result = _remote_send_click(cx, cy)
+                            step_result["method"] = "remote"
+                            step_result["clicked"] = [cx, cy]
+                        else:
+                            # Full-screen capture — fall through to cliclick path
+                            use_remote = False
+                    else:
+                        cx, cy = int(step.get("x", 0)), int(step.get("y", 0))
+                        # For remote, x/y should be window-relative by default
+                        result = _remote_send_click(cx, cy)
+                        step_result["method"] = "remote"
+                        step_result["clicked"] = [cx, cy]
+
+                if not use_remote:
+                    bounds = None
+                    if step.get("focus", True):
+                        focused = _ensure_window_focus()
+                        if not focused:
+                            step_result["error"] = "AIOServer window not found or could not be focused for click"
+                            results.append(step_result)
+                            continue
+                        bounds = _window_bounds(focused)
+                    if image_x is not None or image_y is not None:
+                        if image_x is None or image_y is None:
+                            step_result["error"] = "Both image_x and image_y are required together"
+                            results.append(step_result)
+                            continue
                         if not bounds:
                             bounds = _find_window_bounds()
-                        if bounds:
-                            cx += bounds["x"]
-                            cy += bounds["y"]
-                subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True, timeout=5)
-                step_result["clicked"] = [cx, cy]
+                        if not bounds:
+                            step_result["error"] = "AIOServer window not found for image-based click"
+                            results.append(step_result)
+                            continue
+                        image_path = _resolve_image_target(step.get("image"), last_screenshot)
+                        if not image_path:
+                            step_result["error"] = "No screenshot available for image-based click"
+                            results.append(step_result)
+                            continue
+                        metadata = _read_screenshot_metadata(image_path) or {}
+                        capture_mode = str(metadata.get("capture_mode", ""))
+                        if not bounds and not capture_mode.startswith("full_screen"):
+                            bounds = _find_window_bounds()
+                        if not bounds and not capture_mode.startswith("full_screen"):
+                            step_result["error"] = "AIOServer window not found for image-based click"
+                            results.append(step_result)
+                            continue
+                        cx, cy, click_meta = _image_to_screen_coordinates(
+                            image_path,
+                            int(image_x),
+                            int(image_y),
+                            bounds,
+                        )
+                        step_result.update(click_meta)
+                    else:
+                        cx, cy = int(step.get("x", 0)), int(step.get("y", 0))
+                        if step.get("window_relative"):
+                            if not bounds:
+                                bounds = _find_window_bounds()
+                            if bounds:
+                                cx += bounds["x"]
+                                cy += bounds["y"]
+                    subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True, timeout=5)
+                    step_result["method"] = "cliclick"
+                    step_result["clicked"] = [cx, cy]
 
             elif action == "type":
-                if step.get("focus", True) and not _ensure_window_focus():
-                    step_result["error"] = "AIOServer window not found or could not be focused for text input"
-                    results.append(step_result)
-                    continue
                 text = step.get("text", "")
-                subprocess.run(["cliclick", f"t:{text}"], capture_output=True, timeout=10)
-                step_result["typed"] = text
+                if _remote_available():
+                    result = _remote_send_type(text)
+                    step_result["method"] = "remote"
+                    step_result["typed"] = text
+                else:
+                    if step.get("focus", True) and not _ensure_window_focus():
+                        step_result["error"] = "AIOServer window not found or could not be focused for text input"
+                        results.append(step_result)
+                        continue
+                    subprocess.run(["cliclick", f"t:{text}"], capture_output=True, timeout=10)
+                    step_result["method"] = "cliclick"
+                    step_result["typed"] = text
 
             elif action == "click_percent":
                 image_path = _resolve_image_target(step.get("image"), last_screenshot)
@@ -1488,27 +2196,49 @@ def cmd_session(args: argparse.Namespace) -> None:
                 img = Image.open(image_path)
                 image_x = round((float(step.get("percent_x", 50.0)) / 100.0) * img.width)
                 image_y = round((float(step.get("percent_y", 50.0)) / 100.0) * img.height)
-                bounds = None
-                if step.get("focus", True):
-                    focused = _ensure_window_focus()
-                    if not focused:
-                        step_result["error"] = "AIOServer window not found or could not be focused for click"
-                        results.append(step_result)
-                        continue
-                    bounds = _window_bounds(focused)
-                metadata = _read_screenshot_metadata(image_path) or {}
-                capture_mode = str(metadata.get("capture_mode", ""))
-                if not bounds and not capture_mode.startswith("full_screen"):
-                    bounds = _find_window_bounds()
-                cx, cy, click_meta = _image_to_screen_coordinates(
-                    image_path,
-                    image_x,
-                    image_y,
-                    bounds,
-                )
-                step_result.update(click_meta)
-                subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True, timeout=5)
-                step_result["clicked"] = [cx, cy]
+
+                use_remote = _remote_available()
+                if use_remote:
+                    metadata = _read_screenshot_metadata(image_path) or {}
+                    capture_mode = str(metadata.get("capture_mode", ""))
+                    if capture_mode == "window":
+                        win_bounds = _find_window_bounds()
+                        if win_bounds and img.width > 0 and img.height > 0:
+                            scale_x = win_bounds["w"] / img.width
+                            scale_y = win_bounds["h"] / img.height
+                            cx = round(image_x * scale_x)
+                            cy = round(image_y * scale_y)
+                        else:
+                            cx, cy = image_x, image_y
+                        result = _remote_send_click(cx, cy)
+                        step_result["method"] = "remote"
+                        step_result["clicked"] = [cx, cy]
+                    else:
+                        use_remote = False
+
+                if not use_remote:
+                    bounds = None
+                    if step.get("focus", True):
+                        focused = _ensure_window_focus()
+                        if not focused:
+                            step_result["error"] = "AIOServer window not found or could not be focused for click"
+                            results.append(step_result)
+                            continue
+                        bounds = _window_bounds(focused)
+                    metadata = _read_screenshot_metadata(image_path) or {}
+                    capture_mode = str(metadata.get("capture_mode", ""))
+                    if not bounds and not capture_mode.startswith("full_screen"):
+                        bounds = _find_window_bounds()
+                    cx, cy, click_meta = _image_to_screen_coordinates(
+                        image_path,
+                        image_x,
+                        image_y,
+                        bounds,
+                    )
+                    step_result.update(click_meta)
+                    subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True, timeout=5)
+                    step_result["method"] = "cliclick"
+                    step_result["clicked"] = [cx, cy]
 
             elif action == "find_text":
                 image_path = _resolve_image_target(step.get("image"), last_screenshot)
@@ -1656,9 +2386,12 @@ def cmd_session(args: argparse.Namespace) -> None:
         if "error" in step_result and action in ("boot",):
             break
 
+    # Clean up only probe captures.
+    # Do NOT purge managed workspace screenshots or their metadata — multi-step
+    # sessions need intermediate captures for comparison and evidence, and
+    # metadata sidecars are needed for coordinate transforms on saved images.
     cleanup_deleted = _cleanup_probe_capture()
-    cleanup_deleted.extend(_cleanup_internal_metadata())
-    cleanup_deleted.extend(_cleanup_workspace_screenshots(retained_screenshot))
+    cleanup_deleted.extend(_cleanup_orphaned_metadata())
     if retained_screenshot and not retained_screenshot.exists():
         retained_screenshot = None
         last_screenshot = None
@@ -1683,6 +2416,7 @@ def main() -> None:
     p.add_argument("--app", default=None, help="Streaming app to launch directly (youtube, netflix, disneyplus, hulu)")
     p.add_argument("--wait-ms", default="3000")
     p.add_argument("--input-script")
+    p.add_argument("--no-focus", action="store_true", help="Launch without stealing focus from current window")
 
     sub.add_parser("focus", help="Focus the AIOServer window")
 
@@ -1739,6 +2473,7 @@ def main() -> None:
 
     p = sub.add_parser("key", help="Send a key press")
     p.add_argument("--name", required=True)
+    p.add_argument("--event", default="press", help="press, down, or up")
     p.add_argument("--modifiers")
 
     p = sub.add_parser("type", help="Type text")
@@ -1756,10 +2491,31 @@ def main() -> None:
 
     sub.add_parser("status", help="Check AIOServer status")
 
+    p = sub.add_parser("poll-state", help="Poll full application state from remote control server")
+    p.add_argument("--endpoint", default="state",
+                   choices=["state", "navigation", "input", "emulator"],
+                   help="Which state endpoint to query")
+
     sub.add_parser("kill", help="Kill AIOServer")
+
+    sub.add_parser("clean", help="Remove all managed screenshots, probes, and metadata")
 
     p = sub.add_parser("session", help="Execute a structured plan")
     p.add_argument("--plan", required=True, help="JSON array, '-' for stdin, or a path to a JSON plan file")
+
+    p = sub.add_parser(
+        "user-test-create",
+        help="Launch AIOServer, record user keyboard input, snap a capture point, and write replay artifacts",
+    )
+    p.add_argument("--rom", default=None, help="ROM to load; omit for direct app launch")
+    p.add_argument("--app", default=None, help="Streaming app to launch directly (youtube, netflix, disneyplus, hulu)")
+    p.add_argument("--wait-ms", default="3000")
+    p.add_argument("--input-script", help="Optional existing emulator input script to preload before manual takeover")
+    p.add_argument("--label", help="Human-readable label for the artifact directory")
+    p.add_argument("--snap-key", default=_DEFAULT_USER_TEST_SNAP_KEY, help="Key that captures the current state and finishes recording")
+    p.add_argument("--abort-key", default=_DEFAULT_USER_TEST_ABORT_KEY, help="Key that aborts the capture session")
+    p.add_argument("--full-screen", action="store_true", help="Capture the final snapshot from the full screen instead of the app window")
+    p.add_argument("--out-dir", help="Optional root directory for generated user-test artifacts")
 
     args = parser.parse_args()
     if not args.command:
@@ -1777,8 +2533,11 @@ def main() -> None:
         "wait-for-text": cmd_wait_for_text,
         "key": cmd_key, "key-sequence": cmd_key_sequence,
         "type": cmd_type, "wait": cmd_wait,
-        "analyze": cmd_analyze, "status": cmd_status, "kill": cmd_kill,
+        "analyze": cmd_analyze, "status": cmd_status, "poll-state": cmd_poll_state,
+        "kill": cmd_kill,
+        "clean": cmd_clean,
         "session": cmd_session,
+        "user-test-create": cmd_user_test_create,
     }
     dispatch[args.command](args)
 

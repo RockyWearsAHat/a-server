@@ -1,43 +1,68 @@
 #pragma once
 
+#include <QFrame>
 #include <QWidget>
-#include <QPointer>
 
+class QGraphicsDropShadowEffect;
+class QHBoxLayout;
 class QLabel;
-class QPushButton;
-class QGridLayout;
+class QPropertyAnimation;
 
 namespace AIO {
 namespace GUI {
 
-enum class StreamingApp {
-    YouTube,
-    Netflix,
-    DisneyPlus,
-    Hulu
+enum class StreamingApp { YouTube, Netflix, DisneyPlus, Hulu };
+
+// Custom painted tile showing a brand gradient + logo glyph + service name.
+class StreamingTile final : public QFrame {
+  Q_OBJECT
+
+public:
+  StreamingTile(StreamingApp app, const QString &name,
+                QWidget *parent = nullptr);
+
+  StreamingApp app() const { return app_; }
+
+protected:
+  void paintEvent(QPaintEvent *event) override;
+  void mousePressEvent(QMouseEvent *event) override;
+
+signals:
+  void clicked();
+
+private:
+  void paintYouTube(QPainter &p, const QRectF &logoBox);
+  void paintNetflix(QPainter &p, const QRectF &logoBox);
+  void paintDisneyPlus(QPainter &p, const QRectF &logoBox);
+  void paintHulu(QPainter &p, const QRectF &logoBox);
+
+  StreamingApp app_;
+  QString name_;
 };
 
 class StreamingHubWidget final : public QWidget {
-    Q_OBJECT
+  Q_OBJECT
 
 public:
-    explicit StreamingHubWidget(QWidget* parent = nullptr);
+  explicit StreamingHubWidget(QWidget *parent = nullptr);
 
 signals:
-    void launchRequested(AIO::GUI::StreamingApp app);
+  void launchRequested(AIO::GUI::StreamingApp app);
 
 protected:
-    void keyPressEvent(QKeyEvent* event) override;
+  void keyPressEvent(QKeyEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
 
 private:
-    void setupUi();
-    void updateFocusStyle();
+  void setupUi();
+  void updateFocus();
+  void animateTile(StreamingTile *tile, bool selected);
 
-    QGridLayout* grid_ = nullptr;
-    QLabel* title_ = nullptr;
-
-    QPushButton* tiles_[4]{};
-    int focusedIndex_ = 0;
+  QLabel *title_ = nullptr;
+  QHBoxLayout *tileRow_ = nullptr;
+  StreamingTile *tiles_[4]{};
+  QGraphicsDropShadowEffect *shadows_[4]{};
+  int focusedIndex_ = 0;
 };
 
 } // namespace GUI

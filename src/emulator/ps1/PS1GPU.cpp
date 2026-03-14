@@ -1040,7 +1040,7 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
         tr = static_cast<uint8_t>(std::min(255, (tr * r0) >> 7));
         tg = static_cast<uint8_t>(std::min(255, (tg * g0) >> 7));
         tb = static_cast<uint8_t>(std::min(255, (tb * b0) >> 7));
-        finalColor = ColorToVRAM(tr, tg, tb);
+        finalColor = ColorToVRAMDithered(px, py, tr, tg, tb);
       }
       if (blendThisPixel) {
         uint16_t dst =
@@ -1299,7 +1299,7 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
         tr = static_cast<uint8_t>(std::min(255, (tr * cr) >> 7));
         tg = static_cast<uint8_t>(std::min(255, (tg * cg) >> 7));
         tb = static_cast<uint8_t>(std::min(255, (tb * cb) >> 7));
-        finalColor = ColorToVRAM(tr, tg, tb);
+        finalColor = ColorToVRAMDithered(px, py, tr, tg, tb);
       }
       if (blendThisPixel) {
         uint16_t dst =
@@ -2025,6 +2025,18 @@ uint16_t PS1GPU::ColorToVRAM(uint8_t r, uint8_t g, uint8_t b) {
   return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
 }
 
+uint16_t PS1GPU::ColorToVRAMDithered(int16_t x, int16_t y, uint8_t r, uint8_t g,
+                                     uint8_t b) const {
+  if (!dither)
+    return ColorToVRAM(r, g, b);
+  int8_t d = kDitherMatrix[y & 3][x & 3];
+  int32_t dr = std::clamp(static_cast<int32_t>(r) + d, 0, 255);
+  int32_t dg = std::clamp(static_cast<int32_t>(g) + d, 0, 255);
+  int32_t db = std::clamp(static_cast<int32_t>(b) + d, 0, 255);
+  return ColorToVRAM(static_cast<uint8_t>(dr), static_cast<uint8_t>(dg),
+                     static_cast<uint8_t>(db));
+}
+
 // Blend src (foreground) into dst (background) using the current
 // semi-transparency mode. All arithmetic is in 5-bit channel space (PS1 15-bit
 // color).
@@ -2119,7 +2131,7 @@ void PS1GPU::RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,
       uint8_t b = static_cast<uint8_t>(
           (bw0 * vtx0.b + bw1 * vtx1.b + bw2 * vtx2.b) / absArea);
 
-      PutPixel(px, py, ColorToVRAM(r, g, b));
+      PutPixel(px, py, ColorToVRAMDithered(px, py, r, g, b));
     }
   }
 }

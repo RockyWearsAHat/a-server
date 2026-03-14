@@ -9,6 +9,8 @@
 
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QListWidgetItem;
 class QPushButton;
 class QScrollArea;
 class QVBoxLayout;
@@ -25,6 +27,8 @@ struct YouTubeDeviceAuthSession;
 } // namespace Streaming
 
 namespace GUI {
+
+class ThumbnailFillLabel;
 
 class YouTubeBrowsePage : public QWidget {
   Q_OBJECT
@@ -71,6 +75,7 @@ private:
   void loadMoreHomeRows();
   void setStatus(const QString &text);
   void setLoadingState(bool loading, const QString &text);
+  void showSkeletonRails();
   void updateSectionHeader();
   QString summaryFor(const AIO::Streaming::VideoContent &item) const;
   void setRails(const std::vector<AIO::Streaming::YouTubeContentRail> &rails,
@@ -99,8 +104,13 @@ private:
   void setSearchFocused(bool focused);
   void startDeviceAuth();
   void pollDeviceAuth();
+  void advanceHeroCarousel();
+  void startHoverTimers();
+  void cancelHoverTimers();
+  void prefetchFocusedStream();
   void performAuthPrimaryAction();
   void signOutYouTube();
+  void positionSuggestionDropdown();
   int effectiveItemIndexForRail(int railIndex) const;
   int railIndexForGuideSelection() const;
   int itemsPerRail() const;
@@ -109,8 +119,8 @@ private:
 
   InputMode inputMode_ = InputMode::Mouse;
   bool cursorHidden_ = false;
-  bool guideSelected_ = true;
-  bool sidebarExpanded_ = true;
+  bool guideSelected_ = false;
+  bool sidebarExpanded_ = false;
   bool librarySectionExpanded_ = true;
   bool authCardSelected_ = false;
   bool authCardHovered_ = false;
@@ -131,6 +141,7 @@ private:
   QPushButton *accountButton_{};
 
   QFrame *heroCard_{};
+  ThumbnailFillLabel *heroArtworkLabel_{};
   QLabel *heroEyebrowLabel_{};
   QLabel *heroTitleLabel_{};
   QLabel *heroBodyLabel_{};
@@ -186,6 +197,17 @@ private:
   QString accountAvatarUrl_;
   AIO::Streaming::YouTubeDeviceAuthSession *authSession_{};
   QTimer *authPollTimer_{};
+  int heroCarouselIndex_ = 0;
+  QTimer *hoverPreviewTimer_{};
+  QTimer *streamPrefetchTimer_{};
+
+  QFrame *suggestionDropdown_{};
+  QListWidget *suggestionList_{};
+  QTimer *suggestionDebounceTimer_{};
+
+  QWidget *categoryStrip_{};
+  QScrollArea *categoryScrollArea_{};
+  QString activeCategory_;
 
   AIO::Streaming::YouTubeService *youTube_{};
 };

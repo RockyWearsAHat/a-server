@@ -77,6 +77,10 @@ public:
   void updateWatchProgress(const std::string &contentId,
                            int positionSeconds) override;
 
+  void fetchSearchSuggestionsAsync(
+      const std::string &query,
+      std::function<void(std::vector<std::string>)> callback);
+
   std::string getServiceName() const override { return "YouTube"; }
   StreamingServiceType getServiceType() const override {
     return StreamingServiceType::YouTube;

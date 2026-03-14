@@ -137,8 +137,8 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
   chromeOverlay_ = new QWidget(videoStage_);
   chromeOverlay_->setObjectName("aioYouTubeChromeOverlay");
   auto *chromeLayout = new QVBoxLayout(chromeOverlay_);
-  chromeLayout->setContentsMargins(22, 18, 22, 18);
-  chromeLayout->setSpacing(10);
+  chromeLayout->setContentsMargins(16, 12, 16, 12);
+  chromeLayout->setSpacing(8);
 
   centerStageCard_ = new QFrame(videoStage_);
   centerStageCard_->setObjectName("aioYouTubeCenterStageCard");
@@ -147,8 +147,8 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
   centerStageCard_->setMaximumWidth(640);
 
   auto *centerCardLayout = new QVBoxLayout(centerStageCard_);
-  centerCardLayout->setContentsMargins(28, 24, 28, 24);
-  centerCardLayout->setSpacing(10);
+  centerCardLayout->setContentsMargins(20, 18, 20, 18);
+  centerCardLayout->setSpacing(8);
 
   centerStageEyebrowLabel_ = new QLabel("YOUTUBE", centerStageCard_);
   centerStageEyebrowLabel_->setObjectName("aioYouTubeCenterStageEyebrow");
@@ -172,13 +172,18 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
   centerCardLayout->addWidget(centerStageBodyLabel_);
   centerCardLayout->addWidget(centerStageActionLabel_);
 
+  autoplayChipLabel_ = new QLabel(chromeOverlay_);
+  autoplayChipLabel_->setObjectName("aioYouTubeAutoplayChip");
+  autoplayChipLabel_->setAlignment(Qt::AlignCenter);
+  autoplayChipLabel_->hide();
+
   topBar_ = new QWidget(chromeOverlay_);
   topBar_->setObjectName("aioTopBar");
   topBar_->setProperty("player_chrome", true);
 
   auto *barLayout = new QHBoxLayout(topBar_);
-  barLayout->setContentsMargins(14, 10, 14, 10);
-  barLayout->setSpacing(10);
+  barLayout->setContentsMargins(12, 8, 12, 8);
+  barLayout->setSpacing(8);
 
   backButton_ = new QToolButton(topBar_);
   backButton_->setText("Back");
@@ -230,6 +235,38 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
                                  QSizePolicy::MinimumExpanding);
   }
 
+  autoplayTimer_ = new QTimer(this);
+  autoplayTimer_->setInterval(1000);
+  connect(autoplayTimer_, &QTimer::timeout, this, [this]() {
+    --autoplayCountdown_;
+    if (autoplayCountdown_ <= 0) {
+      autoplayTimer_->stop();
+      if (autoplayChipLabel_)
+        autoplayChipLabel_->hide();
+      activateRecommendation();
+    } else {
+      if (autoplayChipLabel_) {
+        autoplayChipLabel_->setText(
+            QStringLiteral("Up next in %1\u2026").arg(autoplayCountdown_));
+      }
+    }
+  });
+
+  chromeHideTimer_ = new QTimer(this);
+  chromeHideTimer_->setSingleShot(true);
+  chromeHideTimer_->setInterval(3500);
+  connect(chromeHideTimer_, &QTimer::timeout, this, [this]() {
+    if (focusZone_ == FocusZone::Recommendations) {
+      chromeHideTimer_->start();
+      return;
+    }
+    const bool playing = mediaPlayer_ && mediaPlayer_->playbackState() ==
+                                             QMediaPlayer::PlayingState;
+    if (playing && !loadFailed_ && focusZone_ != FocusZone::Web) {
+      setFocusZone(FocusZone::Web);
+    }
+  });
+
   chromeLayout->addWidget(topBar_);
   chromeLayout->addWidget(statusLabel_, 0, Qt::AlignLeft);
   chromeLayout->addStretch(1);
@@ -247,36 +284,50 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
   connect(reloadButton_, &QToolButton::clicked, this,
           [this]() { reloadCurrentVideo(); });
 
-  connect(mediaPlayer_, &QMediaPlayer::mediaStatusChanged, this,
-          [this](QMediaPlayer::MediaStatus status) {
-            switch (status) {
-            case QMediaPlayer::LoadingMedia:
-            case QMediaPlayer::BufferingMedia:
-            case QMediaPlayer::BufferedMedia:
-              if (!playerReady_ && !loadFailed_) {
-                updateStatusText(QStringLiteral("Preparing playback..."));
-              }
-              break;
-            case QMediaPlayer::InvalidMedia:
-              playerReady_ = false;
-              loadFailed_ = true;
-              updateStatusText(
-                  QStringLiteral("Video stream could not be loaded"));
-              updatePlaybackChrome();
-              break;
-            case QMediaPlayer::EndOfMedia:
-              updateStatusText(QStringLiteral("Playback finished"));
-              updatePlaybackChrome();
-              break;
-            default:
-              break;
-            }
-          });
+  connect(
+      mediaPlayer_, &QMediaPlayer::mediaStatusChanged, this,
+      [this](QMediaPlayer::MediaStatus status) {
+        switch (status) {
+        case QMediaPlayer::LoadingMedia:
+        case QMediaPlayer::BufferingMedia:
+          if (!playerReady_ && !loadFailed_) {
+            updateStatusText(QStringLiteral("Preparing playback..."));
+          }
+          break;
+        case QMediaPlayer::LoadedMedia:
+        case QMediaPlayer::BufferedMedia:
+          if (!loadFailed_) {
+            playerReady_ = true;
+            updatePlaybackChrome();
+          }
+          break;
+        case QMediaPlayer::InvalidMedia:
+          playerReady_ = false;
+          loadFailed_ = true;
+          updateStatusText(QStringLiteral("Video stream could not be loaded"));
+          updatePlaybackChrome();
+          break;
+        case QMediaPlayer::EndOfMedia:
+          updateStatusText(QStringLiteral("Playback finished"));
+          updatePlaybackChrome();
+          if (!recommendedVideos_.empty() && autoplayChipLabel_ &&
+              autoplayTimer_) {
+            autoplayCountdown_ = 5;
+            autoplayChipLabel_->setText(QStringLiteral("Up next in 5\u2026"));
+            autoplayChipLabel_->show();
+            autoplayChipLabel_->raise();
+            autoplayTimer_->start();
+          }
+          break;
+        default:
+          break;
+        }
+      });
   connect(mediaPlayer_, &QMediaPlayer::playbackStateChanged, this,
           [this](QMediaPlayer::PlaybackState state) {
-            if (state == QMediaPlayer::PlayingState && playerReady_ &&
-                !loadFailed_) {
-              updateStatusText(QStringLiteral("Playback ready"));
+            if (state == QMediaPlayer::PlayingState && !loadFailed_) {
+              playerReady_ = true;
+              updateStatusText(QStringLiteral("Playing"));
             }
             updatePlaybackChrome();
           });
@@ -452,6 +503,7 @@ void YouTubePlayerPage::playVideoUrl(const QString &url) {
             if (guard->overlayPanel_) {
               guard->overlayPanel_->setPlayerTitle(
                   title.isEmpty() ? QStringLiteral("Now playing") : title);
+              guard->overlayPanel_->setChannelName(guard->currentChannelName_);
             }
             guard->currentPlaybackUrl_ =
                 QString::fromStdString(stream->webpageUrl);
@@ -533,6 +585,8 @@ void YouTubePlayerPage::activateRecommendation() {
           static_cast<int>(recommendedVideos_.size())) {
     return;
   }
+  currentChannelName_ = QString::fromStdString(
+      recommendedVideos_[selectedRecommendationIndex_].channelName);
   playVideoUrl(QString::fromStdString(
       recommendedVideos_[selectedRecommendationIndex_].videoUrl));
 }
@@ -540,6 +594,9 @@ void YouTubePlayerPage::activateRecommendation() {
 void YouTubePlayerPage::setFocusZone(FocusZone zone) {
   focusZone_ = zone;
   if (focusZone_ == FocusZone::Web) {
+    if (chromeHideTimer_) {
+      chromeHideTimer_->stop();
+    }
     if (videoWidget_) {
       videoWidget_->setFocus(Qt::OtherFocusReason);
     }
@@ -593,9 +650,9 @@ void YouTubePlayerPage::updatePlaybackChrome() {
   const bool showTopChrome = !compactChrome || loadFailed_;
   const bool showOverlay = !compactChrome || loadFailed_ || timelineFocused ||
                            recommendationsFocused;
-  const bool showStatus =
-      loadFailed_ || !playerReady_ || !playing ||
-      !statusLabel_->text().trimmed().isEmpty() && focusZone_ != FocusZone::Web;
+  const bool showStatus = loadFailed_ || !playerReady_ || !playing ||
+                          (!statusLabel_->text().trimmed().isEmpty() &&
+                           focusZone_ != FocusZone::Web);
   const bool hasRecommendations = !recommendedVideos_.empty();
   const bool showRecommendationsLabel =
       hasRecommendations &&
@@ -625,6 +682,20 @@ void YouTubePlayerPage::updatePlaybackChrome() {
   updateStateChips();
   refreshChromeStateProperties(recommendationsActive, compactChrome);
   updateCenterStageCard();
+
+  // Start auto-hide timer when overlay becomes visible during active playback
+  if (chromeHideTimer_) {
+    const bool playingNow = mediaPlayer_ && mediaPlayer_->playbackState() ==
+                                                QMediaPlayer::PlayingState;
+    if (showOverlay && playingNow && !loadFailed_ &&
+        focusZone_ != FocusZone::Web) {
+      if (!chromeHideTimer_->isActive()) {
+        chromeHideTimer_->start();
+      }
+    } else if (!showOverlay || !playingNow) {
+      chromeHideTimer_->stop();
+    }
+  }
 }
 
 void YouTubePlayerPage::updateStateChips() {
@@ -737,6 +808,21 @@ bool YouTubePlayerPage::handleKeyPress(QKeyEvent *event) {
     return false;
   }
 
+  if (autoplayTimer_ && autoplayTimer_->isActive()) {
+    autoplayTimer_->stop();
+    if (autoplayChipLabel_)
+      autoplayChipLabel_->hide();
+  }
+
+  // Restart auto-hide timer on any key interaction when chrome is visible
+  if (chromeHideTimer_ && focusZone_ != FocusZone::Web) {
+    const bool nowPlaying = mediaPlayer_ && mediaPlayer_->playbackState() ==
+                                                QMediaPlayer::PlayingState;
+    if (nowPlaying && !loadFailed_) {
+      chromeHideTimer_->start();
+    }
+  }
+
   auto cycleFocusZone = [this](int direction) {
     if (direction > 0) {
       if (focusZone_ == FocusZone::Web) {
@@ -807,7 +893,8 @@ bool YouTubePlayerPage::handleKeyPress(QKeyEvent *event) {
     return true;
   }
 
-  if (event->key() == Qt::Key_Backspace && focusZone_ != FocusZone::Web) {
+  if ((event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Escape) &&
+      focusZone_ != FocusZone::Web) {
     setFocusZone(FocusZone::Web);
     event->accept();
     return true;
@@ -827,10 +914,14 @@ bool YouTubePlayerPage::handleKeyPress(QKeyEvent *event) {
     return true;
   }
 
-  if (focusZone_ == FocusZone::Web &&
-      (event->key() == Qt::Key_Down || event->key() == Qt::Key_Up ||
-       event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
-    setFocusZone(FocusZone::Timeline);
+  if (focusZone_ == FocusZone::Web && event->key() == Qt::Key_Left) {
+    seekRelativeSeconds(-10);
+    event->accept();
+    return true;
+  }
+
+  if (focusZone_ == FocusZone::Web && event->key() == Qt::Key_Right) {
+    seekRelativeSeconds(10);
     event->accept();
     return true;
   }
@@ -849,6 +940,11 @@ bool YouTubePlayerPage::handleKeyPress(QKeyEvent *event) {
   }
 
   if (event->key() == Qt::Key_Up) {
+    if (focusZone_ == FocusZone::Web && !recommendedVideos_.empty()) {
+      setFocusZone(FocusZone::Recommendations);
+      event->accept();
+      return true;
+    }
     if (focusZone_ == FocusZone::Recommendations) {
       setFocusZone(FocusZone::Timeline);
       event->accept();
@@ -941,6 +1037,9 @@ void YouTubePlayerPage::seekRelativeSeconds(int deltaSeconds) {
   const qint64 next = std::clamp<qint64>(
       current + static_cast<qint64>(deltaSeconds) * 1000, 0, duration);
   mediaPlayer_->setPosition(next);
+  if (overlayPanel_) {
+    overlayPanel_->flashSeekDelta(deltaSeconds);
+  }
 }
 
 void YouTubePlayerPage::togglePlayback() {
@@ -1007,26 +1106,31 @@ void YouTubePlayerPage::updatePlaybackSurfaceGeometry() {
   }
 
   surfaceFrame_->setFixedSize(stageSize);
+
+  if (autoplayChipLabel_ && chromeOverlay_ && chromeOverlay_->width() > 0) {
+    autoplayChipLabel_->adjustSize();
+    const int chipW = qMax(280, autoplayChipLabel_->sizeHint().width());
+    const int chipH = autoplayChipLabel_->sizeHint().height();
+    autoplayChipLabel_->setFixedSize(chipW, chipH);
+    autoplayChipLabel_->move((chromeOverlay_->width() - chipW) / 2,
+                             static_cast<int>(chromeOverlay_->height() * 0.72));
+  }
 }
 
 void YouTubePlayerPage::applyVideoBlur(bool enabled) {
   if (!videoWidget_) {
     return;
   }
-
   if (enabled) {
-    if (!videoBlurEffect_ ||
-        videoWidget_->graphicsEffect() != videoBlurEffect_) {
+    if (!videoBlurEffect_) {
       videoBlurEffect_ = new QGraphicsBlurEffect();
       videoBlurEffect_->setBlurHints(QGraphicsBlurEffect::PerformanceHint);
+      videoWidget_->setGraphicsEffect(videoBlurEffect_);
     }
     videoBlurEffect_->setBlurRadius(16.0);
-    videoWidget_->setGraphicsEffect(videoBlurEffect_);
   } else {
-    if (videoWidget_->graphicsEffect() == videoBlurEffect_) {
-      videoBlurEffect_ = nullptr;
-    }
     videoWidget_->setGraphicsEffect(nullptr);
+    videoBlurEffect_ = nullptr;
   }
 }
 

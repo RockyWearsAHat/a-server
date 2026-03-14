@@ -5,6 +5,7 @@ applyTo: ".github/**"
 
 # Repository Memory
 
-- Treat `.github/README.md` and `.github/copilot-instructions.md` as the durable snapshot for repository-local Copilot workflow facts.
-- When repository-local Copilot build, test, logging, agent-routing, or Qt/QSS guidance changes, update those two files together.
+- `.github/copilot-instructions.md` is the always-on runtime file. Keep it short, operational, and focused on routing, build/test, and repo facts that help every task.
+- `.github/README.md` is durable human-facing documentation. Use it for layout and discoverability, not for long runtime workflow scripts.
+- Do not force README and runtime instructions to duplicate the same detailed process text.
 - Keep `.github/` customization factual and limited to workflows and files that actually exist in this repository.

@@ -42,6 +42,7 @@ QString streamingStorageRoot() {
 } // namespace
 
 StreamingWebViewPage::StreamingWebViewPage(QWidget *parent) : QWidget(parent) {
+  setObjectName("aioStreamingWebPage");
   setFocusPolicy(Qt::StrongFocus);
 
   auto *root = new QVBoxLayout(this);
@@ -91,14 +92,17 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget *parent) : QWidget(parent) {
   barLayout->addStretch();
 
   statusLabel_ = new QLabel(this);
+  statusLabel_->setObjectName("aioStreamingWebStatus");
   statusLabel_->setProperty("role", "subtitle");
   statusLabel_->setContentsMargins(18, 8, 18, 8);
 
   errorStrip_ = new QWidget(this);
+  errorStrip_->setObjectName("aioStreamingWebErrorStrip");
   auto *errorLayout = new QHBoxLayout(errorStrip_);
   errorLayout->setContentsMargins(18, 0, 18, 10);
   errorLayout->setSpacing(10);
   errorLabel_ = new QLabel(errorStrip_);
+  errorLabel_->setObjectName("aioStreamingWebErrorLabel");
   errorLabel_->setProperty("role", "subtitle");
   retryButton_ = new QPushButton("Retry", errorStrip_);
   retryButton_->setFocusPolicy(Qt::NoFocus);

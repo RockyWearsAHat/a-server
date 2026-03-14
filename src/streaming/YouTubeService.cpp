@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QString>
@@ -25,6 +26,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -937,6 +939,38 @@ std::string YouTubeService::makeApiRequest(const std::string &endpoint,
   return {};
 }
 
+namespace {
+QString relativeTimeFromISO(const QString &isoDate) {
+  QDateTime published = QDateTime::fromString(isoDate, Qt::ISODate);
+  if (!published.isValid())
+    return QString();
+  QDateTime now = QDateTime::currentDateTimeUtc();
+  qint64 secs = published.secsTo(now);
+  if (secs < 60)
+    return QStringLiteral("just now");
+  if (secs < 3600)
+    return QStringLiteral("%1 minutes ago").arg(secs / 60);
+  if (secs < 86400)
+    return QStringLiteral("%1 hours ago").arg(secs / 3600);
+  if (secs < 2592000)
+    return QStringLiteral("%1 days ago").arg(secs / 86400);
+  if (secs < 31536000)
+    return QStringLiteral("%1 months ago").arg(secs / 2592000);
+  return QStringLiteral("%1 years ago").arg(secs / 31536000);
+}
+
+int parseDurationISO8601(const QString &duration) {
+  QRegularExpression re(R"(PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)");
+  auto match = re.match(duration);
+  if (!match.hasMatch())
+    return 0;
+  int hours = match.captured(1).toInt();
+  int minutes = match.captured(2).toInt();
+  int seconds = match.captured(3).toInt();
+  return hours * 3600 + minutes * 60 + seconds;
+}
+} // namespace
+
 std::vector<VideoContent>
 YouTubeService::parseVideoResults(const std::string &jsonResponse) {
   std::vector<VideoContent> results;
@@ -956,6 +990,7 @@ YouTubeService::parseVideoResults(const std::string &jsonResponse) {
   const QJsonObject root = doc.object();
   const QJsonArray items = root.value("items").toArray();
   results.reserve((size_t)items.size());
+  QSettings progressSettings(kSettingsOrg, kSettingsApp);
 
   for (const auto &value : items) {
     if (!value.isObject()) {
@@ -978,14 +1013,35 @@ YouTubeService::parseVideoResults(const std::string &jsonResponse) {
       vc.title = snippet.value("title").toString().toStdString();
       vc.description = snippet.value("description").toString().toStdString();
       vc.category = snippet.value("channelTitle").toString().toStdString();
+      vc.channelName = snippet.value("channelTitle").toString().toStdString();
+      const QString publishedISO = snippet.value("publishedAt").toString();
+      if (!publishedISO.isEmpty()) {
+        vc.publishedAt = relativeTimeFromISO(publishedISO).toStdString();
+      }
+      if (snippet.value("liveBroadcastContent").toString() ==
+          QStringLiteral("live")) {
+        vc.isLive = true;
+      }
       const QJsonObject thumbs = snippet.value("thumbnails").toObject();
       if (!thumbs.isEmpty()) {
         vc.thumbnailUrl = PickBestThumb(thumbs).toStdString();
       }
     }
 
+    const QJsonObject contentDetails = item.value("contentDetails").toObject();
+    if (!contentDetails.isEmpty()) {
+      vc.durationSeconds =
+          parseDurationISO8601(contentDetails.value("duration").toString());
+    }
+
     if (!vc.id.empty()) {
       vc.videoUrl = "https://www.youtube.com/watch?v=" + vc.id;
+      vc.watchProgressSeconds =
+          progressSettings
+              .value(QStringLiteral("youtube/progress_flat/%1")
+                         .arg(QString::fromStdString(vc.id)),
+                     0)
+              .toInt();
       results.push_back(std::move(vc));
     }
   }
@@ -1011,6 +1067,7 @@ YouTubeService::parsePlaylistItemResults(const std::string &jsonResponse) {
 
   const QJsonArray items = doc.object().value("items").toArray();
   results.reserve((size_t)items.size());
+  QSettings progressSettings(kSettingsOrg, kSettingsApp);
 
   for (const auto &entry : items) {
     if (!entry.isObject()) {
@@ -1034,12 +1091,23 @@ YouTubeService::parsePlaylistItemResults(const std::string &jsonResponse) {
     vc.description = snippet.value("description").toString().toStdString();
     vc.videoUrl = "https://www.youtube.com/watch?v=" + vc.id;
     vc.durationSeconds = 0;
+    vc.channelName = snippet.value("channelTitle").toString().toStdString();
+    const QString publishedISO = snippet.value("publishedAt").toString();
+    if (!publishedISO.isEmpty()) {
+      vc.publishedAt = relativeTimeFromISO(publishedISO).toStdString();
+    }
 
     const QJsonObject thumbnails = snippet.value("thumbnails").toObject();
     if (!thumbnails.isEmpty()) {
       vc.thumbnailUrl = PickBestThumb(thumbnails).toStdString();
     }
 
+    vc.watchProgressSeconds =
+        progressSettings
+            .value(QStringLiteral("youtube/progress_flat/%1")
+                       .arg(QString::fromStdString(vc.id)),
+                   0)
+            .toInt();
     results.push_back(std::move(vc));
   }
 
@@ -1482,10 +1550,20 @@ YouTubeService::getHomeRails(int itemsPerRail, int discoveryDepth) {
     rails.push_back({key, title, subtitle, std::move(trimmed)});
   };
 
+  bool firstCategory = true;
   auto addCategoryRail = [&](const std::string &key, const std::string &title,
                              const std::string &subtitle,
-                             const std::string &videoCategoryId) {
-    auto items = fetchMostPopularByCategory(videoCategoryId, limit + 4);
+                             const std::string &categoryQuery) {
+    if (!firstCategory) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    firstCategory = false;
+    auto items = search(categoryQuery, limit + 4);
+    if (items.empty()) {
+      std::cout << "[YouTube] Category rail '" << key
+                << "' returned no results, skipping" << std::endl;
+      return;
+    }
     addRail(key, title, subtitle, std::move(items));
   };
 
@@ -1511,24 +1589,26 @@ YouTubeService::getHomeRails(int itemsPerRail, int discoveryDepth) {
             "Things you explicitly told YouTube you wanted more of.",
             getLikedVideos(limit));
     addCategoryRail("gaming", "Gaming on YouTube",
-                    "Most popular gaming videos in the public catalog.", "20");
+                    "Most popular gaming videos in the public catalog.",
+                    "gaming");
     addCategoryRail("music", "Music and live sets",
                     "Most popular music videos and performances right now.",
-                    "10");
+                    "music");
   } else {
     addRail("recommended", "Popular on YouTube",
             "A broad cross-section of what is active on the public catalog "
             "right now.",
             sliceItems(trendingPool, 0, limit));
     addCategoryRail("gaming", "Gaming spotlight",
-                    "Console-friendly picks from the gaming charts.", "20");
+                    "Console-friendly picks from the gaming charts.", "gaming");
     addCategoryRail("music", "Music and performances",
-                    "Most popular music videos and live sets.", "10");
+                    "Most popular music videos and live sets.", "music");
     addCategoryRail("news", "News and commentary",
-                    "Most popular news and politics videos right now.", "25");
+                    "Most popular news and politics videos right now.", "news");
     addCategoryRail(
         "creators", "Entertainment and creators",
-        "Popular entertainment videos without spending search quota.", "24");
+        "Popular entertainment videos without spending search quota.",
+        "entertainment");
   }
 
   auto trending = sliceItems(trendingPool, limit, limit);
@@ -1553,8 +1633,7 @@ YouTubeService::getHomeRails(int itemsPerRail, int discoveryDepth) {
       extraRailCount, static_cast<int>(std::size(kExtraDiscoveryRails)));
   for (int index = 0; index < boundedExtraRailCount; ++index) {
     const auto &extra = kExtraDiscoveryRails[index];
-    addCategoryRail(extra.key, extra.title, extra.subtitle,
-                    extra.videoCategoryId);
+    addCategoryRail(extra.key, extra.title, extra.subtitle, extra.key);
   }
 
   return rails;
@@ -1577,6 +1656,14 @@ void YouTubeService::updateWatchProgress(const std::string &contentId,
 
   if (contentId.empty() || positionSeconds <= 0) {
     return;
+  }
+
+  // Persist flat key for fast per-video thumbnail progress lookup.
+  if (positionSeconds > 5) {
+    QSettings flatSettings(kSettingsOrg, kSettingsApp);
+    flatSettings.setValue(QStringLiteral("youtube/progress_flat/%1")
+                              .arg(QString::fromStdString(contentId)),
+                          positionSeconds);
   }
 
   QSettings settings(kSettingsOrg, kSettingsApp);
@@ -1633,6 +1720,22 @@ void YouTubeService::updateWatchProgress(const std::string &contentId,
     settings.setValue("updatedAt", entries[i].updatedAt);
   }
   settings.endArray();
+}
+
+void YouTubeService::fetchSearchSuggestionsAsync(
+    const std::string &query,
+    std::function<void(std::vector<std::string>)> callback) {
+  if (query.empty()) {
+    callback({});
+    return;
+  }
+  const QString q = QString::fromStdString(query);
+  std::vector<std::string> suggestions;
+  suggestions.push_back(query);
+  suggestions.push_back((q + " official").toStdString());
+  suggestions.push_back((q + " live").toStdString());
+  suggestions.push_back((q + " full video").toStdString());
+  callback(std::move(suggestions));
 }
 
 } // namespace Streaming

@@ -1,5 +1,7 @@
 const vscode = require("vscode");
-const http = require("http");
+const fs = require("fs");
+const net = require("net");
+const os = require("os");
 const path = require("path");
 
 function mimeTypeForFile(filePath) {
@@ -29,7 +31,7 @@ function scoreModel(model) {
   if (model.capabilities?.imageInput) {
     score += 1000;
   }
-  if (haystack.includes("claude") && haystack.includes("haiku")) {
+  if (haystack.includes("claude") && haystack.includes("sonnet")) {
     score += 200;
   }
   if (haystack.includes("gpt-4o")) {
@@ -50,8 +52,7 @@ function normalizedModelFields(model) {
 }
 
 function parsePreferredModelIds() {
-  const raw =
-    process.env.AIOSERVER_VISION_MODEL_IDS || "claude-haiku-4.5,claude-haiku-4";
+  const raw = process.env.AIOSERVER_VISION_MODEL_IDS || "claude-sonnet-4.6";
   return raw
     .split(",")
     .map((item) => item.trim().toLowerCase())
@@ -71,7 +72,14 @@ function modelMatchesPreference(model, preferredIds) {
 
 function allowsUndeclaredImageModel() {
   const raw = process.env.AIOSERVER_VISION_ALLOW_UNDECLARED_IMAGE_MODEL || "";
-  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+  if (!raw) {
+    return true;
+  }
+  const normalized = raw.toLowerCase();
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return ["1", "true", "yes", "on"].includes(normalized);
 }
 
 async function selectVisionModel() {
@@ -138,40 +146,71 @@ async function readOptionalSidecar(imageUri) {
   }
 }
 
-async function inspectScreenshot(input, token) {
-  if (!input?.imagePath || !input?.question) {
-    throw new Error("inspectScreenshot requires imagePath and question.");
+async function analyzeImages(input, token) {
+  const paths = input.imagePaths || input.image_paths || [];
+  const goal = input.goal || input.question || "";
+
+  if (!paths.length || !goal) {
+    throw new Error("analyzeImages requires image_paths (1–10) and goal.");
+  }
+  if (paths.length > 10) {
+    throw new Error("Maximum 10 images per analysis call.");
   }
 
-  const imageUri = vscode.Uri.file(input.imagePath);
-  const imageBytes = await vscode.workspace.fs.readFile(imageUri);
-  const mime = mimeTypeForFile(input.imagePath);
-  const sidecar = await readOptionalSidecar(imageUri);
   const model = await selectVisionModel();
 
+  // Build message parts: text prompt first, then all images in order
+  const parts = [];
+
   const promptLines = [
-    "You are analyzing a screenshot captured from AIOServer during automated visual testing.",
-    "Use the image itself as the primary evidence.",
-    "If sidecar metadata is present, use it only as supporting context.",
-    "Answer the question directly and concisely. If the screenshot does not contain enough evidence, say so plainly.",
+    "You are analyzing screenshots captured from AIOServer during visual development and testing.",
+    "Use the images themselves as the primary evidence. Answer directly and concisely.",
+    `Number of images: ${paths.length}`,
     "",
-    `Question: ${input.question}`,
+    `Goal: ${goal}`,
   ];
 
   if (input.context) {
     promptLines.push("", `Additional context: ${input.context}`);
   }
 
-  if (sidecar) {
-    promptLines.push("", "Supporting screenshot metadata:", sidecar);
+  if (input.styleContext || input.style_context) {
+    const qss = input.styleContext || input.style_context;
+    promptLines.push(
+      "",
+      "## Active QSS/CSS Stylesheet",
+      "The following stylesheet is applied to the page being viewed.",
+      "When suggesting fixes, reference specific selectors and properties from this stylesheet.",
+      "",
+      "```css",
+      qss,
+      "```",
+    );
   }
 
-  const messages = [
-    vscode.LanguageModelChatMessage.User([
-      new vscode.LanguageModelTextPart(promptLines.join("\n")),
-      vscode.LanguageModelDataPart.image(imageBytes, mime),
-    ]),
-  ];
+  // Load all images and their sidecars
+  for (let i = 0; i < paths.length; i++) {
+    const imageUri = vscode.Uri.file(paths[i]);
+    const sidecar = await readOptionalSidecar(imageUri);
+    if (sidecar) {
+      promptLines.push(
+        "",
+        `Image ${i + 1} (${path.basename(paths[i])}) metadata:`,
+        sidecar,
+      );
+    }
+  }
+
+  parts.push(new vscode.LanguageModelTextPart(promptLines.join("\n")));
+
+  for (const imagePath of paths) {
+    const imageUri = vscode.Uri.file(imagePath);
+    const imageBytes = await vscode.workspace.fs.readFile(imageUri);
+    const mime = mimeTypeForFile(imagePath);
+    parts.push(vscode.LanguageModelDataPart.image(imageBytes, mime));
+  }
+
+  const messages = [vscode.LanguageModelChatMessage.User(parts)];
 
   const response = await model.sendRequest(messages, {}, token);
   let text = "";
@@ -185,8 +224,54 @@ async function inspectScreenshot(input, token) {
 
   return {
     model: model.name || model.id || model.family || "unknown",
+    imageCount: paths.length,
     response: text.trim(),
   };
+}
+
+async function handleVisionRequest(method, args, token) {
+  if (method === "analyze_images") {
+    return analyzeImages(
+      {
+        imagePaths: args.imagePaths || args.image_paths,
+        goal: args.goal || args.question,
+        context: args.context,
+        styleContext: args.styleContext || args.style_context,
+      },
+      token,
+    );
+  }
+
+  // Legacy compat: map old tool names to the unified function
+  if (method === "inspect_screenshot") {
+    const imagePath = args.imagePath || args.image_path;
+    return analyzeImages(
+      {
+        imagePaths: imagePath ? [imagePath] : [],
+        goal: args.question,
+        context: args.context,
+      },
+      token,
+    );
+  }
+
+  if (method === "compare_screenshots") {
+    const paths = [];
+    const ref = args.referenceImagePath || args.reference_image_path;
+    const test = args.testImagePath || args.test_image_path;
+    if (ref) paths.push(ref);
+    if (test) paths.push(test);
+    return analyzeImages(
+      {
+        imagePaths: paths,
+        goal: args.question,
+        context: args.context,
+      },
+      token,
+    );
+  }
+
+  throw new Error(`Unsupported IPC method: ${method}`);
 }
 
 function makeToolResult(value) {
@@ -195,38 +280,45 @@ function makeToolResult(value) {
   ]);
 }
 
-function parseInspectionPrompt(prompt) {
+function parseAnalyzePrompt(prompt) {
   const trimmed = (prompt || "").trim();
   if (!trimmed) {
     return undefined;
   }
 
-  const separatorIndex = trimmed.indexOf("::");
-  if (separatorIndex === -1) {
+  // Format: /analyze path1 :: path2 :: ... :: goal
+  // At minimum: one path :: goal
+  const parts = trimmed.split("::").map((part) => part.trim());
+  if (parts.length < 2) {
     return undefined;
   }
 
-  const imagePath = trimmed
-    .slice(0, separatorIndex)
-    .trim()
-    .replace(/^['"]|['"]$/g, "");
-  const question = trimmed.slice(separatorIndex + 2).trim();
-  if (!imagePath || !question) {
+  const goal = parts[parts.length - 1];
+  const imagePaths = parts
+    .slice(0, -1)
+    .map((p) => p.replace(/^['"]|['"]$/g, ""))
+    .filter(Boolean);
+
+  if (!imagePaths.length || !goal) {
     return undefined;
   }
 
-  return { imagePath, question };
+  return { imagePaths, goal };
 }
 
 function usageMarkdown() {
   return [
-    "Use `@aioserver-vision /inspect` with this format:",
+    "Use `@aioserver-vision /analyze` with this format:",
     "",
-    "`/inspect /absolute/path/to/screenshot.png :: What should be verified?`",
+    "`/analyze /path/to/image.png :: What should be evaluated?`",
+    "",
+    "Multiple images (up to 10):",
+    "",
+    "`/analyze /path/to/img1.png :: /path/to/img2.png :: /path/to/img3.png :: Compare these and identify differences`",
     "",
     "Example:",
     "",
-    "`/inspect /Users/alexwaldmann/Desktop/AIO Server/tmp/final.png :: Is the YouTube landing screen visible and are there obvious UI problems?`",
+    "`/analyze /Users/alexwaldmann/Desktop/AIO Server/tmp/before.png :: /Users/alexwaldmann/Desktop/AIO Server/tmp/after.png :: How has the homescreen design changed between these two versions?`",
   ].join("\n");
 }
 
@@ -234,19 +326,30 @@ function registerChatParticipant(context) {
   const participant = vscode.chat.createChatParticipant(
     "local.aioserver-vision",
     async (request, _chatContext, stream, token) => {
-      const parsed = parseInspectionPrompt(request.prompt);
-      if (request.command !== "inspect" || !parsed) {
-        stream.markdown(usageMarkdown());
-        return;
-      }
-
       try {
-        stream.progress(`Inspecting ${path.basename(parsed.imagePath)}`);
-        const result = await inspectScreenshot(parsed, token);
-        stream.markdown(`Model: ${result.model}\n\n${result.response}`);
+        if (request.command === "analyze") {
+          const parsed = parseAnalyzePrompt(request.prompt);
+          if (!parsed) {
+            stream.markdown(usageMarkdown());
+            return;
+          }
+
+          const names = parsed.imagePaths.map((p) => path.basename(p));
+          stream.progress(`Analyzing ${names.join(", ")}`);
+          const result = await analyzeImages(
+            { imagePaths: parsed.imagePaths, goal: parsed.goal },
+            token,
+          );
+          stream.markdown(
+            `Model: ${result.model} | Images: ${result.imageCount}\n\n${result.response}`,
+          );
+          return;
+        }
+
+        stream.markdown(usageMarkdown());
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        stream.markdown(`Screenshot inspection failed: ${message}`);
+        stream.markdown(`Image analysis failed: ${message}`);
       }
     },
   );
@@ -255,25 +358,26 @@ function registerChatParticipant(context) {
 }
 
 function registerTool(context) {
-  const toolNames = [
-    "aioserver-inspect-screenshot",
-    "aioserver_inspect_screenshot",
-  ];
+  const toolNames = ["aioserver-analyze-images", "aioserver_analyze_images"];
 
-  const tool = {
+  const analyzeTool = {
     async invoke(options, token) {
-      const result = await inspectScreenshot(options.input, token);
-      return makeToolResult(`Model: ${result.model}\n\n${result.response}`);
+      const result = await analyzeImages(options.input, token);
+      return makeToolResult(
+        `Model: ${result.model} | Images: ${result.imageCount}\n\n${result.response}`,
+      );
     },
     async prepareInvocation(options) {
+      const paths = options.input.imagePaths || options.input.image_paths || [];
+      const names = paths.map((p) => path.basename(p));
       return {
-        invocationMessage: `Inspecting screenshot ${path.basename(options.input.imagePath || "image")}`,
+        invocationMessage: `Analyzing ${names.join(", ") || "images"}`,
       };
     },
   };
 
   for (const toolName of toolNames) {
-    context.subscriptions.push(vscode.lm.registerTool(toolName, tool));
+    context.subscriptions.push(vscode.lm.registerTool(toolName, analyzeTool));
   }
 }
 
@@ -283,8 +387,8 @@ function registerCommand(context) {
       "aioserver.inspectScreenshotManual",
       async () => {
         const imageUris = await vscode.window.showOpenDialog({
-          canSelectMany: false,
-          openLabel: "Inspect Screenshot",
+          canSelectMany: true,
+          openLabel: "Analyze Images",
           filters: {
             Images: ["png", "jpg", "jpeg", "webp", "bmp", "gif"],
           },
@@ -293,30 +397,32 @@ function registerCommand(context) {
           return;
         }
 
-        const question = await vscode.window.showInputBox({
-          prompt: "What should Copilot determine from this screenshot?",
+        const goal = await vscode.window.showInputBox({
+          prompt: "What should Copilot determine from these images?",
           placeHolder:
-            "Example: Is the YouTube landing screen visible and are there obvious UI issues?",
+            "Example: Evaluate the visual quality and identify any UI issues.",
         });
-        if (!question) {
+        if (!goal) {
           return;
         }
 
         try {
-          const result = await inspectScreenshot(
-            { imagePath: imageUris[0].fsPath, question },
+          const imagePaths = imageUris.map((uri) => uri.fsPath);
+          const result = await analyzeImages(
+            { imagePaths, goal },
             new vscode.CancellationTokenSource().token,
           );
+          const pathList = imagePaths.map((p) => `- ${p}`).join("\n");
           const document = await vscode.workspace.openTextDocument({
             language: "markdown",
-            content: `# Screenshot Analysis\n\n- Image: ${imageUris[0].fsPath}\n- Model: ${result.model}\n\n${result.response}\n`,
+            content: `# Image Analysis\n\nImages (${result.imageCount}):\n${pathList}\n\nModel: ${result.model}\n\n${result.response}\n`,
           });
           await vscode.window.showTextDocument(document, { preview: false });
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
           void vscode.window.showErrorMessage(
-            `AIOServer screenshot inspection failed: ${message}`,
+            `AIOServer image analysis failed: ${message}`,
           );
         }
       },
@@ -324,99 +430,113 @@ function registerCommand(context) {
   );
 }
 
-function parseBridgePort() {
-  const fallbackPort = 39377;
-  const raw = process.env.AIOSERVER_VISION_BRIDGE_PORT;
-  if (!raw) {
-    return fallbackPort;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    return fallbackPort;
-  }
-  return parsed;
+function getWorkspaceRoot() {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-function writeJson(res, statusCode, payload) {
-  const body = JSON.stringify(payload);
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body),
-    "Cache-Control": "no-store",
-  });
-  res.end(body);
+function getIpcState(workspaceRoot) {
+  const workspaceName =
+    path
+      .basename(workspaceRoot)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "workspace";
+
+  return {
+    socketPath: path.join(
+      os.tmpdir(),
+      `aioserver-vision-${workspaceName}.sock`,
+    ),
+    infoPath: path.join(workspaceRoot, ".vscode", "aioserver-vision-ipc.json"),
+  };
 }
 
-function startBridgeServer(context) {
-  const host = "127.0.0.1";
-  const port = parseBridgePort();
-  const output = vscode.window.createOutputChannel("AIOServer Vision Tool");
-  context.subscriptions.push(output);
-
-  const server = http.createServer((req, res) => {
-    const urlPath = req.url || "/";
-
-    if (req.method === "GET" && urlPath === "/health") {
-      writeJson(res, 200, {
-        ok: true,
-        service: "aioserver-vision-bridge",
-        port,
-      });
-      return;
+function safeUnlink(socketPath) {
+  try {
+    if (fs.existsSync(socketPath)) {
+      fs.unlinkSync(socketPath);
     }
+  } catch {
+    // Ignore cleanup failures.
+  }
+}
 
-    if (req.method !== "POST" || urlPath !== "/inspect") {
-      writeJson(res, 404, { ok: false, error: "Not found" });
-      return;
-    }
+function writeIpcInfo(infoPath, socketPath) {
+  fs.mkdirSync(path.dirname(infoPath), { recursive: true });
+  fs.writeFileSync(
+    infoPath,
+    JSON.stringify(
+      {
+        socketPath,
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
 
-    let body = "";
-    req.setEncoding("utf8");
+function startIpcServer(context) {
+  const workspaceRoot = getWorkspaceRoot();
+  if (!workspaceRoot) {
+    return;
+  }
 
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 1024 * 1024) {
-        writeJson(res, 413, { ok: false, error: "Request body too large" });
-        req.destroy();
+  const { socketPath, infoPath } = getIpcState(workspaceRoot);
+  safeUnlink(socketPath);
+  writeIpcInfo(infoPath, socketPath);
+
+  const server = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+
+    socket.on("data", async (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue;
+        }
+
+        let request;
+        try {
+          request = JSON.parse(line);
+        } catch {
+          socket.write(
+            JSON.stringify({ ok: false, error: "Invalid JSON payload" }) + "\n",
+          );
+          continue;
+        }
+
+        const tokenSource = new vscode.CancellationTokenSource();
+        try {
+          const result = await handleVisionRequest(
+            request.method,
+            request.arguments || {},
+            tokenSource.token,
+          );
+          socket.write(
+            JSON.stringify({
+              ok: true,
+              model: result.model,
+              result: result.response,
+            }) + "\n",
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          socket.write(JSON.stringify({ ok: false, error: message }) + "\n");
+        } finally {
+          tokenSource.dispose();
+        }
       }
     });
-
-    req.on("end", async () => {
-      let input;
-      try {
-        input = JSON.parse(body || "{}");
-      } catch {
-        writeJson(res, 400, { ok: false, error: "Invalid JSON payload" });
-        return;
-      }
-
-      const tokenSource = new vscode.CancellationTokenSource();
-      try {
-        const result = await inspectScreenshot(input, tokenSource.token);
-        writeJson(res, 200, {
-          ok: true,
-          model: result.model,
-          response: result.response,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        writeJson(res, 500, { ok: false, error: message });
-      } finally {
-        tokenSource.dispose();
-      }
-    });
   });
 
-  server.on("error", (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    output.appendLine(
-      `[bridge] failed to listen on ${host}:${port} (${message})`,
-    );
-  });
-
-  server.listen(port, host, () => {
-    output.appendLine(`[bridge] listening on http://${host}:${port}`);
-  });
+  server.listen(socketPath);
 
   context.subscriptions.push({
     dispose() {
@@ -425,15 +545,21 @@ function startBridgeServer(context) {
       } catch {
         // Ignore close failures during shutdown.
       }
+      safeUnlink(socketPath);
+      try {
+        fs.unlinkSync(infoPath);
+      } catch {
+        // Ignore cleanup failures.
+      }
     },
   });
 }
 
 function activate(context) {
+  startIpcServer(context);
   registerTool(context);
   registerCommand(context);
   registerChatParticipant(context);
-  startBridgeServer(context);
 }
 
 function deactivate() {}

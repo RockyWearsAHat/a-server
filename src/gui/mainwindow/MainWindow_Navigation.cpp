@@ -262,6 +262,12 @@ void MainWindow::onPageChanged() {
           : 0x03FF;
   pendingEmuKeyinput.store(desiredKeyinput, std::memory_order_relaxed);
 
+  // HomeScreen handles its own 2D navigation internally.
+  if (current == homeScreenPage) {
+    nav.setAdapter(nullptr);
+    return;
+  }
+
   if (current == mainMenuPage) {
     nav.setAdapter(mainMenuAdapter.get());
     if (mainMenuAdapter) {
@@ -442,8 +448,9 @@ void MainWindow::onUIAction(const AIO::GUI::UIActionFrame &frame) {
   }
 
   const bool forwardToStreamingPage =
-      (current == streamingHubPage) || (current == streamingWebPage) ||
-      (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+      (current == homeScreenPage) || (current == streamingHubPage) ||
+      (current == streamingWebPage) || (current == youTubeBrowsePage) ||
+      (current == youTubePlayerPage);
   if (!forwardToStreamingPage) {
     return;
   }

@@ -3,6 +3,7 @@
 #include "emulator/common/Logger.h"
 #include "emulator/gba/ARM7TDMI.h"
 #include "gui/MainWindow.h"
+#include "gui/RemoteControlServer.h"
 #include "gui/StreamingHubWidget.h"
 #include "input/InputManager.h"
 #include "nas/NASServer.h"
@@ -10,6 +11,8 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QFont>
+#include <QFontDatabase>
 #include <QMetaObject>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -70,6 +73,20 @@ int main(int argc, char *argv[]) {
   QApplication app(argc, argv);
   app.setApplicationName("AIOServer");
   app.setApplicationVersion("1.0");
+
+  // Load bundled Noto Sans and set as application-wide default
+  int fontId = QFontDatabase::addApplicationFont(
+      QStringLiteral(":/fonts/NotoSans-Regular.ttf"));
+  QFontDatabase::addApplicationFont(
+      QStringLiteral(":/fonts/NotoSans-Medium.ttf"));
+  QFontDatabase::addApplicationFont(
+      QStringLiteral(":/fonts/NotoSans-SemiBold.ttf"));
+  QFontDatabase::addApplicationFont(
+      QStringLiteral(":/fonts/NotoSans-ExtraBold.ttf"));
+  (void)fontId;
+  QFont defaultFont(QStringLiteral("Noto Sans"), 14);
+  defaultFont.setHintingPreference(QFont::PreferNoHinting);
+  app.setFont(defaultFont);
 
   // Ensure SDL input subsystems shut down while Qt is still alive.
   QObject::connect(&app, &QCoreApplication::aboutToQuit,
@@ -175,6 +192,11 @@ int main(int argc, char *argv[]) {
       QStringList() << "nas-token",
       "Optional bearer token to require for all NAS requests", "token");
   parser.addOption(nasTokenOption);
+
+  QCommandLineOption noActivateOption(
+      QStringList() << "no-activate",
+      "Show window without stealing focus (useful for automated tooling)");
+  parser.addOption(noActivateOption);
 
   // Debugger options
   QCommandLineOption debugOption(
@@ -321,6 +343,19 @@ int main(int argc, char *argv[]) {
     }
 
     AIO::GUI::MainWindow window;
+
+    // Prevent window from stealing focus when launched by automated tools.
+    if (parser.isSet(noActivateOption)) {
+      window.setAttribute(Qt::WA_ShowWithoutActivating, true);
+    }
+
+    // Start remote-control HTTP server for programmatic input injection.
+    AIO::GUI::RemoteControlServer remoteControl(&window);
+    if (!remoteControl.Start()) {
+      AIO::Emulator::Common::Logger::Instance().Log(
+          AIO::Emulator::Common::LogLevel::Warning, "main",
+          "Failed to start remote control server (continuing without it)");
+    }
 
     // In headless mode, override crash handler to avoid GUI dialogs.
     if (headless) {

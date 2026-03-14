@@ -32,10 +32,15 @@ class GameSelectAdapter;
 class EmulatorSettingsAdapter;
 class SettingsMenuAdapter;
 class NASAdapter;
+class HomeScreen;
 } // namespace AIO::GUI
 
 class QKeyEvent;
 class QProcess;
+
+namespace AIO::GUI {
+class RemoteControlServer;
+}
 
 // Forward declarations break the emulator→GUI include chain.
 // Full headers are only needed in the .cpp files that call emulator methods.
@@ -177,6 +182,7 @@ private:
 
   // UI Setup
   void setupMainMenu();
+  void setupHomeScreen();
   void setupEmulatorSelect();
   void setupGameSelect();
   void setupEmulatorView();
@@ -197,6 +203,7 @@ private:
   void onUIAction(const AIO::GUI::UIActionFrame &frame);
 
   std::unique_ptr<AIO::GUI::MainMenuAdapter> mainMenuAdapter;
+  AIO::GUI::HomeScreen *homeScreen_ = nullptr;
   std::unique_ptr<AIO::GUI::EmulatorSelectAdapter> emulatorSelectAdapter;
   std::unique_ptr<AIO::GUI::GameSelectAdapter> gameSelectAdapter;
   std::unique_ptr<AIO::GUI::EmulatorSettingsAdapter> emulatorSettingsAdapter;
@@ -209,6 +216,7 @@ private:
   // Widgets
   QStackedWidget *stackedWidget;
   QWidget *mainMenuPage;
+  QWidget *homeScreenPage = nullptr;
   QWidget *emulatorSelectPage;
   QWidget *gameSelectPage;
   QWidget *emulatorPage;
@@ -346,6 +354,9 @@ private:
   // 0x03FF = all released (GBA KEYINPUT is active-low).
   std::atomic<uint16_t> pendingEmuKeyinput{0x03FF};
   QProcess *youtubeServerProcess_ = nullptr;
+
+  // Localhost HTTP server for programmatic input injection (visual dev loop)
+  friend class RemoteControlServer;
 };
 
 } // namespace GUI
