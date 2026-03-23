@@ -273,6 +273,12 @@ uint32_t PS1Memory::ReadIO32(uint32_t addr) {
     return timers->Read32(addr);
   }
 
+  // SPU (16-bit registers; 32-bit read combines two adjacent 16-bit reads)
+  if (addr >= IO::SPU_START && addr <= IO::SPU_END - 2u && spu) {
+    return spu->ReadRegister(addr) |
+           (uint32_t(spu->ReadRegister(addr + 2)) << 16);
+  }
+
   // GPU
   if (addr == IO::GPU_GPUREAD && gpu)
     return gpu->ReadGPUREAD();
@@ -333,6 +339,19 @@ uint16_t PS1Memory::ReadIO16(uint32_t addr) {
   if (addr == IO::I_MASK && interrupts)
     return static_cast<uint16_t>(interrupts->ReadMask());
 
+  // DMA (16-bit aligned access — read half of the aligned 32-bit register)
+  if (addr >= IO::DMA_BASE && addr <= IO::DMA_DICR + 2u && dma) {
+    uint32_t aligned = addr & ~0x2u;
+    uint32_t word = dma->Read32(aligned);
+    return static_cast<uint16_t>((addr & 2) ? (word >> 16) : word);
+  }
+
+  // GPU
+  if (addr == IO::GPU_GPUREAD && gpu)
+    return static_cast<uint16_t>(gpu->ReadGPUREAD());
+  if (addr == IO::GPU_GPUSTAT && gpu)
+    return static_cast<uint16_t>(gpu->ReadGPUSTAT());
+
   if constexpr (Trace::MEMORY) {
     LogWarn("Unhandled IO Read16 addr=%08X", addr);
   }
@@ -388,6 +407,13 @@ void PS1Memory::WriteIO32(uint32_t addr, uint32_t value) {
       addr < IO::TIMER_BASE + Timer::NUM_TIMERS * IO::TIMER_CHANNEL_SIZE &&
       timers) {
     timers->Write32(addr, value);
+    return;
+  }
+
+  // SPU (16-bit registers; decompose 32-bit write into two 16-bit writes)
+  if (addr >= IO::SPU_START && addr <= IO::SPU_END - 2u && spu) {
+    spu->WriteRegister(addr, static_cast<uint16_t>(value));
+    spu->WriteRegister(addr + 2, static_cast<uint16_t>(value >> 16));
     return;
   }
 
@@ -478,6 +504,27 @@ void PS1Memory::WriteIO16(uint32_t addr, uint16_t value) {
   }
   if (addr == IO::SIO0_BAUD && controller) {
     controller->WriteBaud(value);
+    return;
+  }
+
+  // DMA (16-bit aligned write — read-modify-write the aligned 32-bit register)
+  if (addr >= IO::DMA_BASE && addr <= IO::DMA_DICR + 2u && dma) {
+    uint32_t aligned = addr & ~0x2u;
+    uint32_t old = dma->Read32(aligned);
+    uint32_t updated = (addr & 2)
+                           ? ((old & 0x0000FFFFu) | (uint32_t(value) << 16))
+                           : ((old & 0xFFFF0000u) | value);
+    dma->Write32(aligned, updated);
+    return;
+  }
+
+  // GPU (16-bit command zero-extended to 32-bit)
+  if (addr == IO::GPU_GP0 && gpu) {
+    gpu->WriteGP0(static_cast<uint32_t>(value));
+    return;
+  }
+  if (addr == IO::GPU_GP1 && gpu) {
+    gpu->WriteGP1(static_cast<uint32_t>(value));
     return;
   }
 

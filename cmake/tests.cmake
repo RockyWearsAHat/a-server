@@ -410,3 +410,42 @@ gtest_discover_tests(PS1IntegrationTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ─── Screen Mirror Tests ───────────────────────────────────────────────
+
+add_executable(ScreenMirrorTests
+  ${PROJECT_ROOT}/tests/ScreenMirrorTests.cpp
+  ${PROJECT_ROOT}/src/screenmirror/AirPlayReceiver.cpp
+  ${PROJECT_ROOT}/src/screenmirror/AirPlayPairing.cpp
+  ${PROJECT_ROOT}/src/screenmirror/MirrorSessionManager.cpp
+  ${PROJECT_ROOT}/include/screenmirror/AirPlayReceiver.h
+  ${PROJECT_ROOT}/include/screenmirror/AirPlayPairing.h
+  ${PROJECT_ROOT}/include/screenmirror/AirPlayTlv.h
+  ${PROJECT_ROOT}/include/screenmirror/MirrorSessionManager.h
+)
+set_target_properties(ScreenMirrorTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/ScreenMirrorTests"
+)
+target_include_directories(ScreenMirrorTests PRIVATE
+  ${PROJECT_ROOT}/include
+  ${OPENSSL_INCLUDE_DIR}
+)
+target_link_libraries(ScreenMirrorTests PRIVATE
+  GTest::gtest_main
+  Qt6::Network
+  Qt6::Widgets
+  Qt6::Test
+  Qt6::Multimedia
+  OpenSSL::SSL
+  OpenSSL::Crypto
+  $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
+  $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>
+  $<$<BOOL:${APPLE}>:${COREMEDIA_FRAMEWORK}>
+)
+
+gtest_discover_tests(ScreenMirrorTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

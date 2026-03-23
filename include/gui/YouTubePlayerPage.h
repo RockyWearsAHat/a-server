@@ -12,12 +12,11 @@ class QFrame;
 class QHBoxLayout;
 class QToolButton;
 class QLabel;
-class QAudioOutput;
-class QMediaPlayer;
-class QVideoWidget;
 class QVBoxLayout;
 class QWidget;
 class QGraphicsBlurEffect;
+class QWebEngineView;
+class QWebEngineProfile;
 
 namespace AIO::Streaming {
 class YouTubeService;
@@ -78,12 +77,13 @@ private:
                                     bool compactChrome);
   void updateStateChips();
   void updateCenterStageCard();
+  void injectPlayerBridge();
+  void handlePlayerStateChange(int ytState);
 
   QWidget *videoStage_ = nullptr;
   QFrame *surfaceFrame_ = nullptr;
-  QVideoWidget *videoWidget_ = nullptr;
-  QMediaPlayer *mediaPlayer_ = nullptr;
-  QAudioOutput *audioOutput_ = nullptr;
+  QWebEngineView *webView_ = nullptr;
+  QWebEngineProfile *webProfile_ = nullptr;
   QWidget *chromeOverlay_ = nullptr;
   QFrame *centerStageCard_ = nullptr;
   QLabel *centerStageEyebrowLabel_ = nullptr;
@@ -111,12 +111,14 @@ private:
   QString currentPlaybackUrl_;
   bool playerReady_ = false;
   bool loadFailed_ = false;
+  bool webPlayerPlaying_ = false;
   uint64_t playbackRequestSerial_ = 0;
   uint64_t relatedRequestSerial_ = 0;
   AIO::Streaming::YouTubeService *youTube_ = nullptr;
 
   QTimer *autoplayTimer_ = nullptr;
   QTimer *chromeHideTimer_ = nullptr;
+  QTimer *progressPollTimer_ = nullptr;
   int autoplayCountdown_ = 5;
   QLabel *autoplayChipLabel_ = nullptr;
 };

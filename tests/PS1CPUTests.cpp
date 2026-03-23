@@ -440,3 +440,39 @@ TEST_F(PS1CPUTest, DumpState_WritesOutput) {
   cpu->DumpState(os);
   EXPECT_FALSE(os.str().empty());
 }
+
+// ─── Instruction Timing (NOCASH PSX) ────────────────────────────────────
+
+TEST_F(PS1CPUTest, MULT_StallsCPU12Cycles) {
+  // MULT encodes as SPECIAL opcode (0x00), funct 0x18
+  uint32_t pc = CPU::RESET_VECTOR & 0x1FFFFF;
+  WriteBIOSInstruction(pc, EncodeRType(1, 2, 0, 0, 0x18)); // MULT $1,$2
+  int cycles = cpu->Step();
+  EXPECT_EQ(cycles, 12) << "MULT should stall CPU for 12 cycles (NOCASH PSX)";
+}
+
+TEST_F(PS1CPUTest, MULTU_StallsCPU12Cycles) {
+  uint32_t pc = CPU::RESET_VECTOR & 0x1FFFFF;
+  WriteBIOSInstruction(pc, EncodeRType(1, 2, 0, 0, 0x19)); // MULTU $1,$2
+  int cycles = cpu->Step();
+  EXPECT_EQ(cycles, 12) << "MULTU should stall CPU for 12 cycles (NOCASH PSX)";
+}
+
+TEST_F(PS1CPUTest, DIV_StallsCPU36Cycles) {
+  // Prevent divide-by-zero: put 1 in $2 first
+  uint32_t pc = CPU::RESET_VECTOR & 0x1FFFFF;
+  WriteBIOSInstruction(pc, ADDIU(2, 0, 1));                    // $2 = 1
+  WriteBIOSInstruction(pc + 4, EncodeRType(1, 2, 0, 0, 0x1A)); // DIV $1,$2
+  cpu->Step();                                                 // ADDIU
+  int cycles = cpu->Step();                                    // DIV
+  EXPECT_EQ(cycles, 36) << "DIV should stall CPU for 36 cycles (NOCASH PSX)";
+}
+
+TEST_F(PS1CPUTest, DIVU_StallsCPU36Cycles) {
+  uint32_t pc = CPU::RESET_VECTOR & 0x1FFFFF;
+  WriteBIOSInstruction(pc, ADDIU(2, 0, 1));                    // $2 = 1
+  WriteBIOSInstruction(pc + 4, EncodeRType(1, 2, 0, 0, 0x1B)); // DIVU $1,$2
+  cpu->Step();                                                 // ADDIU
+  int cycles = cpu->Step();                                    // DIVU
+  EXPECT_EQ(cycles, 36) << "DIVU should stall CPU for 36 cycles (NOCASH PSX)";
+}

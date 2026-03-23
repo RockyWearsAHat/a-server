@@ -285,11 +285,14 @@ void YouTubePlayerOverlay::setSelectedRecommendationIndex(int index,
     if (!tile) {
       continue;
     }
-    tile->setProperty("selected", recommendationsFocused_ &&
-                                      i == selectedRecommendationIndex_);
-    tile->style()->unpolish(tile);
-    tile->style()->polish(tile);
-    tile->update();
+    const bool sel =
+        recommendationsFocused_ && i == selectedRecommendationIndex_;
+    if (tile->property("selected").toBool() != sel) {
+      tile->setProperty("selected", sel);
+      tile->style()->unpolish(tile);
+      tile->style()->polish(tile);
+      tile->update();
+    }
   }
 }
 

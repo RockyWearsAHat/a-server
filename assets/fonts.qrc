@@ -4,5 +4,6 @@
     <file alias="NotoSans-Medium.ttf">fonts/Noto_Sans/static/NotoSans-Medium.ttf</file>
     <file alias="NotoSans-SemiBold.ttf">fonts/Noto_Sans/static/NotoSans-SemiBold.ttf</file>
     <file alias="NotoSans-ExtraBold.ttf">fonts/Noto_Sans/static/NotoSans-ExtraBold.ttf</file>
+    <file alias="Walter.ttf">fonts/Walter/Walter.ttf</file>
   </qresource>
 </RCC>

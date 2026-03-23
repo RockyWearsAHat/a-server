@@ -118,6 +118,10 @@ function ensureFileDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+// Truncate server log at startup so it doesn't accumulate across runs.
+ensureFileDir(serverLogFile);
+fs.writeFileSync(serverLogFile, "", "utf8");
+
 function logServer(
   level: "INFO" | "WARN" | "ERROR",
   message: string,
@@ -801,6 +805,163 @@ app.get("/api/youtube/proxy", async (req, res) => {
   }
 
   res.status(response.status).type("application/json").send(response.body);
+});
+
+// ---------------------------------------------------------------------------
+// Steam API proxy
+// ---------------------------------------------------------------------------
+// Uses store.steampowered.com/api/featuredcategories — the old
+// ISteamApps/GetAppList/v2 endpoint was removed by Valve.
+// Response is transformed to {applist:{apps:[{appid,name,category}]}} so the
+// Qt SteamService parser needs no changes.
+const steamFeaturedUrl =
+  "https://store.steampowered.com/api/featuredcategories/?cc=US&l=en";
+const steamCacheTtlMs = 24 * 60 * 60 * 1000; // 24 hours
+const steamCacheFile = path.resolve(serverRootDir, "./data/steam-cache.json");
+
+type SteamCacheEntry = {
+  fetchedAtMs: number;
+  body: string;
+};
+
+function loadSteamCache(): SteamCacheEntry | null {
+  try {
+    if (!fs.existsSync(steamCacheFile)) return null;
+    const raw = fs.readFileSync(steamCacheFile, "utf8");
+    const parsed = JSON.parse(raw) as SteamCacheEntry;
+    if (!parsed.fetchedAtMs || !parsed.body) return null;
+    if (Date.now() - parsed.fetchedAtMs > steamCacheTtlMs) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveSteamCache(body: string): void {
+  try {
+    fs.mkdirSync(path.dirname(steamCacheFile), { recursive: true });
+    fs.writeFileSync(
+      steamCacheFile,
+      JSON.stringify(
+        { fetchedAtMs: Date.now(), body } satisfies SteamCacheEntry,
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (e) {
+    logServer("WARN", "Failed to save Steam cache", { error: String(e) });
+  }
+}
+
+type SteamRawItem = {
+  id?: number;
+  appid?: number;
+  name?: string;
+  final_price?: number;
+  original_price?: number;
+  discount_percent?: number;
+  discounted?: boolean;
+};
+
+function transformFeaturedToAppList(raw: unknown): string {
+  const data = raw as Record<string, { items?: SteamRawItem[] }>;
+  const categoryOrder = [
+    "top_sellers",
+    "new_releases",
+    "specials",
+    "coming_soon",
+  ];
+  const seen = new Set<number>();
+  const apps: Array<{
+    appid: number;
+    name: string;
+    category: string;
+    final_price: number;
+    original_price: number;
+    discount_percent: number;
+    discounted: boolean;
+  }> = [];
+
+  for (const cat of categoryOrder) {
+    const items = data[cat]?.items ?? [];
+    for (const item of items) {
+      const appid = item.id ?? item.appid ?? 0;
+      const name = item.name ?? "";
+      if (appid > 0 && name && !seen.has(appid)) {
+        seen.add(appid);
+        apps.push({
+          appid,
+          name,
+          category: cat,
+          final_price: item.final_price ?? 0,
+          original_price: item.original_price ?? 0,
+          discount_percent: item.discount_percent ?? 0,
+          discounted: item.discounted ?? false,
+        });
+      }
+    }
+  }
+
+  return JSON.stringify({ applist: { apps } });
+}
+
+app.get("/api/steam/apps", async (_req, res) => {
+  // Serve from cache if fresh
+  const cached = loadSteamCache();
+  if (cached) {
+    logServer("INFO", "Serving Steam app list from cache");
+    res.status(200).type("application/json").send(cached.body);
+    return;
+  }
+
+  logServer("INFO", "Fetching Steam featured categories from upstream", {
+    url: steamFeaturedUrl,
+  });
+
+  try {
+    const response = await fetch(steamFeaturedUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; AIOServer/1.0)",
+        Accept: "application/json",
+      },
+      redirect: "follow",
+    });
+
+    const body = await response.text();
+
+    if (response.status < 200 || response.status >= 300) {
+      logServer("WARN", "Steam API upstream error", {
+        status: response.status,
+        body: body.slice(0, 200),
+      });
+      res
+        .status(502)
+        .json({ error: `Steam API returned HTTP ${response.status}` });
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      logServer("WARN", "Steam API returned invalid JSON", {
+        body: body.slice(0, 200),
+      });
+      res.status(502).json({ error: "Steam API returned invalid JSON" });
+      return;
+    }
+
+    const transformed = transformFeaturedToAppList(parsed);
+    saveSteamCache(transformed);
+    logServer("INFO", "Steam app list fetched and cached", {
+      bytes: transformed.length,
+    });
+    res.status(200).type("application/json").send(transformed);
+  } catch (e) {
+    logServer("ERROR", "Steam API fetch failed", { error: String(e) });
+    res.status(502).json({ error: `Steam API fetch failed: ${String(e)}` });
+  }
 });
 
 app.use((req, res) => {

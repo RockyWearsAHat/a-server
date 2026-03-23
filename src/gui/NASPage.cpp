@@ -59,11 +59,11 @@ NASPage::NASPage(QWidget *parent) : QWidget(parent) {
   token_ = qEnvironmentVariable("AIO_NAS_TOKEN");
 
   auto *root = new QVBoxLayout(this);
-  root->setContentsMargins(20, 20, 20, 20);
-  root->setSpacing(12);
+  root->setContentsMargins(48, 32, 48, 32);
+  root->setSpacing(16);
 
-  title_ = new QLabel("NAS", this);
-  title_->setAlignment(Qt::AlignCenter);
+  title_ = new QLabel("Media Server", this);
+  title_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
   title_->setProperty("role", "title");
   root->addWidget(title_);
 
@@ -112,35 +112,38 @@ NASPage::NASPage(QWidget *parent) : QWidget(parent) {
   mid->addLayout(previewCol, 1);
   root->addLayout(mid, 1);
 
-  auto *buttons = new QHBoxLayout();
+  auto *toolbarWrap = new QWidget(this);
+  toolbarWrap->setObjectName(QStringLiteral("nasToolbar"));
+  auto *buttons = new QHBoxLayout(toolbarWrap);
+  buttons->setContentsMargins(0, 0, 0, 0);
   buttons->setSpacing(10);
 
-  upBtn_ = new QPushButton("UP", this);
+  upBtn_ = new QPushButton("\u2191  Up", toolbarWrap);
   upBtn_->setCursor(Qt::PointingHandCursor);
   upBtn_->setFocusPolicy(Qt::StrongFocus);
 
-  refreshBtn_ = new QPushButton("REFRESH", this);
+  refreshBtn_ = new QPushButton("\u27F3  Refresh", toolbarWrap);
   refreshBtn_->setCursor(Qt::PointingHandCursor);
   refreshBtn_->setFocusPolicy(Qt::StrongFocus);
 
-  mkdirBtn_ = new QPushButton("NEW FOLDER", this);
+  mkdirBtn_ = new QPushButton("\u2795  New Folder", toolbarWrap);
   mkdirBtn_->setCursor(Qt::PointingHandCursor);
   mkdirBtn_->setFocusPolicy(Qt::StrongFocus);
 
-  renameBtn_ = new QPushButton("RENAME", this);
+  renameBtn_ = new QPushButton("\u270E  Rename", toolbarWrap);
   renameBtn_->setCursor(Qt::PointingHandCursor);
   renameBtn_->setFocusPolicy(Qt::StrongFocus);
 
-  deleteBtn_ = new QPushButton("DELETE", this);
+  deleteBtn_ = new QPushButton("\u2715  Delete", toolbarWrap);
   deleteBtn_->setCursor(Qt::PointingHandCursor);
   deleteBtn_->setFocusPolicy(Qt::StrongFocus);
   deleteBtn_->setProperty("variant", "danger");
 
-  uploadBtn_ = new QPushButton("UPLOAD", this);
+  uploadBtn_ = new QPushButton("\u2601  Upload", toolbarWrap);
   uploadBtn_->setCursor(Qt::PointingHandCursor);
   uploadBtn_->setFocusPolicy(Qt::StrongFocus);
 
-  backBtn_ = new QPushButton("BACK", this);
+  backBtn_ = new QPushButton("\u2190  Back", toolbarWrap);
   backBtn_->setCursor(Qt::PointingHandCursor);
   backBtn_->setFocusPolicy(Qt::StrongFocus);
   backBtn_->setProperty("variant", "secondary");
@@ -160,7 +163,7 @@ NASPage::NASPage(QWidget *parent) : QWidget(parent) {
   buttons->addWidget(uploadBtn_);
   buttons->addWidget(backBtn_);
 
-  root->addLayout(buttons);
+  root->addWidget(toolbarWrap);
 
   connect(backBtn_, &QPushButton::clicked, this,
           [this]() { emit homeRequested(); });
@@ -190,7 +193,8 @@ void NASPage::setCurrentPath(const QString &path) {
   if (!currentPath_.startsWith('/'))
     currentPath_.prepend('/');
   // Normalize multiple slashes.
-  currentPath_.replace(QRegularExpression(R"(/+)"), "/");
+  static const QRegularExpression reMultiSlash(QStringLiteral("/+"));
+  currentPath_.replace(reMultiSlash, QStringLiteral("/"));
   pathLabel_->setText(QString("Path: %1").arg(currentPath_));
 }
 

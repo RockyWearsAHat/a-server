@@ -53,6 +53,12 @@ public:
   bool IsThumbModeFlag() const { return thumbMode; }
   void
   FlushPipeline(); // Invalidate prefetch (for tests with dynamic code writes)
+  // Test helper: perform a banked-register mode switch and update CPSR mode
+  // bits so that subsequent GetRegister() calls read the new bank.
+  void SwitchModeForTest(uint32_t newMode) {
+    SwitchMode(newMode);
+    SetCPUMode(cpsr, newMode);
+  }
   struct CpuSnapshot {
     uint32_t registers[16];
     uint32_t cpsr;
@@ -148,10 +154,14 @@ private:
   // Banked Registers storage
   uint32_t r13_svc, r14_svc, spsr_svc;
   uint32_t r13_irq, r14_irq, spsr_irq;
-  uint32_t r13_und, r14_und, spsr_und;
-  uint32_t r13_usr, r14_usr; // User/System share these
-  // We can ignore FIQ/Abort/Undef for now as they are rarely used in standard
-  // GBA games
+  uint32_t r13_und, r14_und, spsr_und; // Undefined mode bank
+  uint32_t r13_abt, r14_abt, spsr_abt; // Abort mode bank
+  // FIQ banks R8–R14 and SPSR (ARM7TDMI TRM §2.9)
+  uint32_t r8_fiq, r9_fiq, r10_fiq, r11_fiq, r12_fiq, r13_fiq, r14_fiq,
+      spsr_fiq;
+  uint32_t r13_usr, r14_usr; // User/System share SP and LR
+  // Shadow storage for user-mode R8–R12 while FIQ mode is active
+  uint32_t r8_usr, r9_usr, r10_usr, r11_usr, r12_usr;
 
   struct IrqContext {
     uint32_t r0, r1, r2, r3, r12, lr, pc, cpsr;

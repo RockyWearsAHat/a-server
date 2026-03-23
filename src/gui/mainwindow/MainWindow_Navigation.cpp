@@ -4,6 +4,8 @@
 #include "gui/EmulatorSelectAdapter.h"
 #include "gui/EmulatorSettingsAdapter.h"
 #include "gui/GameSelectAdapter.h"
+#include "gui/GameStorePage.h"
+#include "gui/GamesLibraryPage.h"
 #include "gui/MainMenuAdapter.h"
 #include "gui/NASAdapter.h"
 #include "gui/SettingsMenuAdapter.h"
@@ -324,6 +326,15 @@ void MainWindow::onPageChanged() {
     return;
   }
 
+  // Pages with self-contained key handling — clear the adapter so
+  // ButtonListAdapter from the previous page never steals their input.
+  if (current == static_cast<QWidget *>(gamesLibraryPage_) ||
+      current == static_cast<QWidget *>(gameStorePage_) ||
+      current == screenMirrorPage_) {
+    nav.setAdapter(nullptr);
+    return;
+  }
+
   nav.setAdapter(nullptr);
 }
 
@@ -425,6 +436,25 @@ void MainWindow::onUIAction(const AIO::GUI::UIActionFrame &frame) {
       }
       return;
     }
+    if (current == homeScreenPage) {
+      QWidget *target = QApplication::focusWidget();
+      if (!target || !target->isVisible()) {
+        target = current;
+      }
+      if (target && target->focusProxy()) {
+        target = target->focusProxy();
+      }
+      if (target) {
+        QKeyEvent event(QEvent::KeyPress, Qt::Key_Home, Qt::NoModifier);
+        QApplication::sendEvent(target, &event);
+      }
+      return;
+    }
+    if (current == static_cast<QWidget *>(gamesLibraryPage_) ||
+        current == static_cast<QWidget *>(gameStorePage_)) {
+      goToMainMenu();
+      return;
+    }
     // Default: go to main menu.
     goToMainMenu();
     return;
@@ -450,7 +480,9 @@ void MainWindow::onUIAction(const AIO::GUI::UIActionFrame &frame) {
   const bool forwardToStreamingPage =
       (current == homeScreenPage) || (current == streamingHubPage) ||
       (current == streamingWebPage) || (current == youTubeBrowsePage) ||
-      (current == youTubePlayerPage);
+      (current == youTubePlayerPage) ||
+      (current == static_cast<QWidget *>(gamesLibraryPage_)) ||
+      (current == static_cast<QWidget *>(gameStorePage_));
   if (!forwardToStreamingPage) {
     return;
   }

@@ -24,6 +24,9 @@ PS1::PS1() {
   dma->SetCDROM(cdrom.get());
   dma->SetMDEC(mdec.get());
 
+  // Wire SPU to CDROM for XA-ADPCM audio decode
+  cdrom->SetSPU(spu.get());
+
   // Wire PS1Memory to all subsystems it dispatches I/O to
   memory->SetCPU(cpu.get());
   memory->SetGPU(gpu.get());
@@ -89,10 +92,15 @@ void PS1::Reset() {
 
 int PS1::Step() {
   int cpuCycles = cpu->Step();
+  // Account for DMA transfers that stalled the CPU during this step
+  cpuCycles += static_cast<int>(dma->GetAndClearPendingCycles());
 
   bool wasInVBlank = gpu->InVBlank();
   uint32_t prevScanline = gpu->GetScanline();
   gpu->Tick(cpuCycles);
+
+  // Propagate VBlank state to timer sync logic each step
+  timers->SetVBlankState(gpu->InVBlank());
 
   // Fire VBlank IRQ on transition into VBlank
   if (!wasInVBlank && gpu->InVBlank()) {

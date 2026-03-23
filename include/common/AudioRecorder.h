@@ -103,6 +103,43 @@ public:
    */
   const std::string &GetOutputPath() const;
 
+  /**
+   * Snapshot of the last completed 1-second analysis window.
+   * Thread-safe to read from any thread via GetMetrics().
+   */
+  struct AudioMetrics {
+    float rmsLeft = 0.0f;  ///< Linear RMS [0..1], left channel
+    float rmsRight = 0.0f; ///< Linear RMS [0..1], right channel
+    float rmsDb = -96.0f;  ///< 20*log10(max(rmsLeft,rmsRight)); -96 = silence
+    float silenceRatio =
+        1.0f; ///< Fraction of stereo pairs below silence threshold
+    float clippingRatio =
+        0.0f;          ///< Fraction of stereo pairs with a channel at ±32760+
+    int peakLeft = 0;  ///< Max absolute value, left channel, in window
+    int peakRight = 0; ///< Max absolute value, right channel, in window
+    int windowSamples = 0; ///< Stereo sample pairs in last completed window
+    int sampleRate = 0;    ///< Current sample rate (Hz)
+    bool active = false;   ///< True if samples have been fed recently
+  };
+
+  /**
+   * Get metrics from the last completed 1-second analysis window.
+   * Thread-safe — safe to call from any thread (e.g. HTTP handler).
+   */
+  AudioMetrics GetMetrics() const;
+
+  /**
+   * Feed samples for live audio analysis. Updates rolling window metrics
+   * regardless of whether recording is active. Should be called from the
+   * SDL audio callback for every buffer delivered to the output device.
+   *
+   * This is a separate code path from RecordSamples() so that metrics work
+   * even when no WAV recording is in progress.
+   *
+   * Thread-safe: designed to be called from the SDL audio callback thread.
+   */
+  void FeedSamples(const int16_t *samples, int numStereoSamples);
+
 private:
   void WriteWAVHeader(std::ofstream &file, uint32_t dataSize);
   void FinalizeWAV();
@@ -113,6 +150,23 @@ private:
   mutable std::mutex mutex_;
   std::atomic<bool> recording_{false};
   std::atomic<uint64_t> totalSamples_{0};
+
+  // ── Audio analysis rolling window ────────────────────────────────────
+  // Written exclusively from the SDL audio callback thread (no lock needed
+  // for writes). Snapshot is published to metrics_snapshot_ under
+  // metrics_mutex_ at each window boundary so the HTTP handler can read it
+  // without stalling the audio callback.
+  mutable std::mutex metrics_mutex_;
+  AudioMetrics metrics_snapshot_;
+
+  double windSumSqLeft_ = 0.0;
+  double windSumSqRight_ = 0.0;
+  int windPeakLeft_ = 0;
+  int windPeakRight_ = 0;
+  int windSilentCount_ = 0;
+  int windClipCount_ = 0;
+  int windSampleCount_ = 0;
+  bool metricsActive_ = false;
 };
 
 /**

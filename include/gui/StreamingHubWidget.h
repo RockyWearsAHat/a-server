@@ -4,14 +4,16 @@
 #include <QWidget>
 
 class QGraphicsDropShadowEffect;
-class QHBoxLayout;
+class QGridLayout;
 class QLabel;
 class QPropertyAnimation;
 
 namespace AIO {
 namespace GUI {
 
-enum class StreamingApp { YouTube, Netflix, DisneyPlus, Hulu };
+class RemoteControlServer;
+
+enum class StreamingApp { YouTube, Netflix, DisneyPlus, Hulu, Store };
 
 // Custom painted tile showing a brand gradient + logo glyph + service name.
 class StreamingTile final : public QFrame {
@@ -46,23 +48,36 @@ class StreamingHubWidget final : public QWidget {
 public:
   explicit StreamingHubWidget(QWidget *parent = nullptr);
 
+  void noteAppLaunched(AIO::GUI::StreamingApp app);
+  void refreshState();
+
 signals:
   void launchRequested(AIO::GUI::StreamingApp app);
+  void homeRequested();
 
 protected:
   void keyPressEvent(QKeyEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
 
 private:
+  void loadRememberedState();
+  void updateDetails();
   void setupUi();
   void updateFocus();
   void animateTile(StreamingTile *tile, bool selected);
 
   QLabel *title_ = nullptr;
-  QHBoxLayout *tileRow_ = nullptr;
+  QLabel *headline_ = nullptr;
+  QLabel *description_ = nullptr;
+  QLabel *resumeLabel_ = nullptr;
+  QLabel *hintLabel_ = nullptr;
+  QGridLayout *tileGrid_ = nullptr;
   StreamingTile *tiles_[4]{};
   QGraphicsDropShadowEffect *shadows_[4]{};
   int focusedIndex_ = 0;
+  int lastLaunchedIndex_ = -1;
+
+  friend class AIO::GUI::RemoteControlServer;
 };
 
 } // namespace GUI

@@ -16,6 +16,11 @@ struct ControllerState {
   uint16_t buttons = 0xFFFF; // Active LOW
   uint8_t padId = Controller::DIGITAL_PAD_ID;
   bool connected = true;
+  // DualShock analog sticks (0x80 = centre)
+  uint8_t analogRX = 0x80; // Right stick X
+  uint8_t analogRY = 0x80; // Right stick Y
+  uint8_t analogLX = 0x80; // Left  stick X
+  uint8_t analogLY = 0x80; // Left  stick Y
 };
 
 class PS1Controller : public Common::Loggable {
@@ -41,8 +46,13 @@ public:
   // ─── Input State ────────────────────────────────────────────────────
   void SetButtonState(uint16_t buttons);
   void SetControllerConnected(bool connected);
-  uint16_t GetButtonState() const { return pad.buttons; }
-
+  uint16_t GetButtonState() const {
+    return pad.buttons;
+  } // DualShock: set analog stick axes (0x00=full left/up, 0x80=centre,
+    // 0xFF=full right/down)
+  void SetAnalogStickState(uint8_t rx, uint8_t ry, uint8_t lx, uint8_t ly);
+  // DualShock: switch between digital pad (0x41) and analog pad (0x73)
+  void SetPadType(bool analog);
   // ─── Timing ─────────────────────────────────────────────────────────
   void Tick(uint32_t cpuCycles);
 
@@ -74,6 +84,11 @@ private:
     SendingReady,
     SendingButtons_Lo,
     SendingButtons_Hi,
+    // DualShock analog extension (additional bytes after digital buttons)
+    SendingAnalogRX,
+    SendingAnalogRY,
+    SendingAnalogLX,
+    SendingAnalogLY,
     Done
   };
   CommState commState = CommState::Idle;

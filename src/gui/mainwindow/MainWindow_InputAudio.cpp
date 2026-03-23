@@ -93,6 +93,18 @@ bool MainWindow::IsAudioRecording() const {
   return audioRecorder_.IsRecording();
 }
 
+std::string MainWindow::GetAudioRecordingPath() const {
+  return audioRecorder_.GetOutputPath();
+}
+
+double MainWindow::GetAudioRecordingDuration() const {
+  return audioRecorder_.GetRecordingDuration();
+}
+
+AIO::Common::AudioRecorder::AudioMetrics MainWindow::GetAudioMetrics() const {
+  return audioRecorder_.GetMetrics();
+}
+
 bool MainWindow::StartAVRecording(const std::string &path) {
   // Configure based on current emulator
   AIO::Common::AVRecorder::Config cfg;
@@ -144,6 +156,15 @@ void MainWindow::audioCallback(void *userdata, Uint8 *stream, int len) {
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {
+  // Dismiss Now Playing overlay on Esc/Backspace
+  if (nowPlayingOverlay_ && nowPlayingOverlay_->isVisible()) {
+    if (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Backspace) {
+      nowPlayingOverlay_->hide();
+      event->accept();
+      return;
+    }
+  }
+
   const bool inEmu =
       (stackedWidget && stackedWidget->currentWidget() == emulatorPage &&
        emulatorRunning);

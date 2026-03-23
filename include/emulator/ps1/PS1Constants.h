@@ -153,6 +153,11 @@ inline constexpr uint32_t SPU_TRANSFER_CTRL = 0x1F801DAC;
 inline constexpr uint32_t SPU_STATUS = 0x1F801DAE;
 inline constexpr uint32_t SPU_CD_VOL_L = 0x1F801DB0;
 inline constexpr uint32_t SPU_CD_VOL_R = 0x1F801DB2;
+inline constexpr uint32_t SPU_EXT_VOL_L = 0x1F801DB4;
+inline constexpr uint32_t SPU_EXT_VOL_R = 0x1F801DB6;
+// Reverb configuration registers rev00..rev1F (NOCASH PSX §SPU Reverb)
+inline constexpr uint32_t SPU_REVERB_CONFIG_BASE = 0x1F801DC0;
+inline constexpr uint32_t SPU_REVERB_CONFIG_END = 0x1F801DFF;
 
 } // namespace IO
 

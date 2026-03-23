@@ -1570,6 +1570,9 @@ def cmd_poll_state(args: argparse.Namespace) -> None:
         "navigation": "/state/navigation",
         "input": "/state/input",
         "emulator": "/state/emulator",
+        "audio": "/state/audio",
+        "page": "/state/page",
+        "widgets": "/state/widgets",
     }
     path = path_map.get(endpoint, "/state")
     try:
@@ -1577,6 +1580,23 @@ def cmd_poll_state(args: argparse.Namespace) -> None:
         _ok(**data)
     except Exception as e:
         _err(f"Failed to poll state: {e}")
+
+
+def cmd_poll_events(args: argparse.Namespace) -> None:
+    """Poll the real-time event log from the remote control server."""
+    params: list[str] = []
+    since = getattr(args, "since", None)
+    limit = getattr(args, "limit", None)
+    if since is not None:
+        params.append(f"since={since}")
+    if limit is not None:
+        params.append(f"limit={limit}")
+    path = "/events" + ("?" + "&".join(params) if params else "")
+    try:
+        data = _remote_get(path)
+        _ok(**data)
+    except Exception as e:
+        _err(f"Failed to poll events: {e}")
 
 
 def cmd_clean(args: argparse.Namespace) -> None:
@@ -2493,8 +2513,14 @@ def main() -> None:
 
     p = sub.add_parser("poll-state", help="Poll full application state from remote control server")
     p.add_argument("--endpoint", default="state",
-                   choices=["state", "navigation", "input", "emulator"],
+                   choices=["state", "navigation", "input", "emulator", "audio", "page", "widgets"],
                    help="Which state endpoint to query")
+
+    p = sub.add_parser("poll-events", help="Poll real-time event log from remote control server")
+    p.add_argument("--since", type=int, default=None,
+                   help="Return only events newer than this epoch-ms timestamp")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Maximum number of events to return (default 100, server max 500)")
 
     sub.add_parser("kill", help="Kill AIOServer")
 
@@ -2533,7 +2559,7 @@ def main() -> None:
         "wait-for-text": cmd_wait_for_text,
         "key": cmd_key, "key-sequence": cmd_key_sequence,
         "type": cmd_type, "wait": cmd_wait,
-        "analyze": cmd_analyze, "status": cmd_status, "poll-state": cmd_poll_state,
+        "analyze": cmd_analyze, "status": cmd_status, "poll-state": cmd_poll_state, "poll-events": cmd_poll_events,
         "kill": cmd_kill,
         "clean": cmd_clean,
         "session": cmd_session,

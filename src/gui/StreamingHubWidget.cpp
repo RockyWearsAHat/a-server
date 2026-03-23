@@ -1,7 +1,7 @@
 #include "gui/StreamingHubWidget.h"
 
 #include <QGraphicsDropShadowEffect>
-#include <QHBoxLayout>
+#include <QGridLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLinearGradient>
@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPropertyAnimation>
+#include <QSettings>
 #include <QStyle>
 #include <QVBoxLayout>
 
@@ -36,8 +37,58 @@ BrandColors brandColorsFor(StreamingApp app) {
     return {QColor(16, 55, 185), QColor(4, 18, 78), QColor(30, 80, 240, 160)};
   case StreamingApp::Hulu:
     return {QColor(24, 68, 42), QColor(12, 36, 22), QColor(28, 231, 131, 160)};
+  case StreamingApp::Store:
+    return {QColor(90, 62, 6), QColor(45, 30, 3), QColor(212, 168, 32, 160)};
   }
   return {};
+}
+
+QString appNameFor(StreamingApp app) {
+  switch (app) {
+  case StreamingApp::YouTube:
+    return QStringLiteral("YouTube");
+  case StreamingApp::Netflix:
+    return QStringLiteral("Netflix");
+  case StreamingApp::DisneyPlus:
+    return QStringLiteral("Disney+");
+  case StreamingApp::Hulu:
+    return QStringLiteral("Hulu");
+  case StreamingApp::Store:
+    return QStringLiteral("Steam Store");
+  }
+  return QStringLiteral("Streaming");
+}
+
+QString appDescriptionFor(StreamingApp app) {
+  switch (app) {
+  case StreamingApp::YouTube:
+    return QStringLiteral(
+        "Creator video, subscriptions, and search with native shell entry and "
+        "fast return to the streaming launcher.");
+  case StreamingApp::Netflix:
+    return QStringLiteral(
+        "Profile-driven browsing and playback with persistent session storage "
+        "and browser-grade compatibility.");
+  case StreamingApp::DisneyPlus:
+    return QStringLiteral(
+        "Premium catalog browsing with shared living-room navigation and a "
+        "calmer platform wrapper around web playback.");
+  case StreamingApp::Hulu:
+    return QStringLiteral(
+        "Lean-back streaming with shared profile storage, stronger focus "
+        "behavior, and consistent app-home recovery.");
+  case StreamingApp::Store:
+    return QStringLiteral(
+        "Browse, discover, and purchase games from the Steam store.");
+  }
+  return QStringLiteral("Shared streaming platform.");
+}
+
+int storedStreamingIndex() {
+  QSettings settings("AIOServer", "GBAEmulator");
+  const int stored =
+      settings.value(QStringLiteral("streaming/lastApp"), 0).toInt();
+  return qBound(0, stored, 3);
 }
 
 QRect expandedRectFor(const QRect &baseRect) {
@@ -98,6 +149,22 @@ StreamingTile::StreamingTile(StreamingApp app, const QString &name,
                              QWidget *parent)
     : QFrame(parent), app_(app), name_(name) {
   setObjectName(QStringLiteral("aioStreamingTile"));
+  switch (app_) {
+  case StreamingApp::YouTube:
+    setProperty("brand", "youtube");
+    break;
+  case StreamingApp::Netflix:
+    setProperty("brand", "netflix");
+    break;
+  case StreamingApp::DisneyPlus:
+    setProperty("brand", "disneyplus");
+    break;
+  case StreamingApp::Hulu:
+    setProperty("brand", "hulu");
+    break;
+  default:
+    break;
+  }
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   setCursor(Qt::PointingHandCursor);
 }
@@ -164,6 +231,8 @@ void StreamingTile::paintEvent(QPaintEvent * /*event*/) {
   case StreamingApp::Hulu:
     paintHulu(p, logoBox);
     break;
+  default:
+    break;
   }
 
   // --- Service name text with shadow ---
@@ -180,6 +249,19 @@ void StreamingTile::paintEvent(QPaintEvent * /*event*/) {
              name_);
   p.setPen(Qt::white);
   p.drawText(textBox, Qt::AlignHCenter | Qt::AlignTop, name_);
+
+  if (property("aio_selected").toBool()) {
+    const auto brand = brandColorsFor(app_);
+    QColor borderColor = brand.glow;
+    borderColor.setAlpha(220);
+    QPen focusPen(borderColor);
+    focusPen.setWidthF(3.0);
+    p.setPen(focusPen);
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(r.adjusted(2.5, 2.5, -2.5, -2.5), radius - 1.0,
+                      radius - 1.0);
+    p.setPen(Qt::NoPen);
+  }
 }
 
 void StreamingTile::paintYouTube(QPainter &p, const QRectF &box) {
@@ -334,27 +416,66 @@ StreamingHubWidget::StreamingHubWidget(QWidget *parent) : QWidget(parent) {
   setObjectName(QStringLiteral("aioStreamingHub"));
   setFocusPolicy(Qt::StrongFocus);
   setupUi();
+  loadRememberedState();
   updateFocus();
+}
+
+void StreamingHubWidget::noteAppLaunched(AIO::GUI::StreamingApp app) {
+  lastLaunchedIndex_ = static_cast<int>(app);
+  focusedIndex_ = lastLaunchedIndex_;
+
+  QSettings settings("AIOServer", "GBAEmulator");
+  settings.setValue(QStringLiteral("streaming/lastApp"), lastLaunchedIndex_);
+
+  updateFocus();
+}
+
+void StreamingHubWidget::refreshState() {
+  loadRememberedState();
+  updateFocus();
+}
+
+void StreamingHubWidget::loadRememberedState() {
+  lastLaunchedIndex_ = storedStreamingIndex();
+  focusedIndex_ = lastLaunchedIndex_;
 }
 
 void StreamingHubWidget::setupUi() {
   auto *root = new QVBoxLayout(this);
-  root->setContentsMargins(60, 50, 60, 50);
-  root->setSpacing(12);
+  root->setContentsMargins(64, 48, 64, 48);
+  root->setSpacing(14);
 
-  // Eyebrow title
-  title_ = new QLabel(QStringLiteral("Apps"), this);
+  title_ = new QLabel(QStringLiteral("Streaming"), this);
   title_->setObjectName(QStringLiteral("aioStreamingHubTitle"));
   title_->setAlignment(Qt::AlignLeft | Qt::AlignBottom);
+  title_->setProperty("role", "sectionEyebrow");
   root->addWidget(title_);
 
-  // Spacer to push tiles into vertical center
-  root->addStretch(1);
+  headline_ = new QLabel(this);
+  headline_->setObjectName(QStringLiteral("aioStreamingHubHeadline"));
+  headline_->setWordWrap(true);
+  root->addWidget(headline_);
 
-  // Horizontal row of 4 tiles
-  tileRow_ = new QHBoxLayout();
-  tileRow_->setSpacing(16);
-  tileRow_->setContentsMargins(0, 0, 0, 0);
+  description_ = new QLabel(this);
+  description_->setObjectName(QStringLiteral("aioStreamingHubDescription"));
+  description_->setWordWrap(true);
+  root->addWidget(description_);
+
+  resumeLabel_ = new QLabel(this);
+  resumeLabel_->setObjectName(QStringLiteral("aioStreamingHubResume"));
+  root->addWidget(resumeLabel_);
+
+  hintLabel_ = new QLabel(this);
+  hintLabel_->setObjectName(QStringLiteral("aioStreamingHubHint"));
+  hintLabel_->setWordWrap(true);
+  root->addWidget(hintLabel_);
+
+  root->addSpacing(8);
+  root->addStretch(2);
+
+  tileGrid_ = new QGridLayout();
+  tileGrid_->setSpacing(16);
+  tileGrid_->setContentsMargins(0, 0, 0, 0);
 
   const struct {
     const char *label;
@@ -380,12 +501,16 @@ void StreamingHubWidget::setupUi() {
     shadows_[i] = shadow;
 
     connect(tile, &StreamingTile::clicked, this,
-            [this, app = entries[i].app]() { emit launchRequested(app); });
+            [this, app = entries[i].app]() {
+              noteAppLaunched(app);
+              emit launchRequested(app);
+            });
 
-    tileRow_->addWidget(tile);
+    tileGrid_->addWidget(tile, i / 2, i % 2);
   }
 
-  root->addLayout(tileRow_);
+  root->addLayout(tileGrid_);
+  root->addSpacing(8);
   root->addStretch(1);
 }
 
@@ -399,16 +524,48 @@ void StreamingHubWidget::resizeEvent(QResizeEvent *event) {
 void StreamingHubWidget::updateFocus() {
   for (int i = 0; i < 4; ++i) {
     const bool selected = (i == focusedIndex_);
-    tiles_[i]->setProperty("aio_selected", selected);
-    tiles_[i]->style()->unpolish(tiles_[i]);
-    tiles_[i]->style()->polish(tiles_[i]);
-    animateTile(tiles_[i], selected);
+    if (tiles_[i]->property("aio_selected").toBool() != selected) {
+      tiles_[i]->setProperty("aio_selected", selected);
+      tiles_[i]->style()->unpolish(tiles_[i]);
+      tiles_[i]->style()->polish(tiles_[i]);
+      animateTile(tiles_[i], selected);
 
-    const auto brand = brandColorsFor(tiles_[i]->app());
-    animateShadow(shadows_[i], selected ? 28.0 : 0.0,
-                  selected ? brand.glow : Qt::transparent, kAnimDuration);
+      const auto brand = brandColorsFor(tiles_[i]->app());
+      animateShadow(shadows_[i], selected ? 28.0 : 0.0,
+                    selected ? brand.glow : Qt::transparent, kAnimDuration);
 
-    tiles_[i]->update();
+      tiles_[i]->update();
+    }
+  }
+
+  updateDetails();
+}
+
+void StreamingHubWidget::updateDetails() {
+  const StreamingApp app = tiles_[focusedIndex_] ? tiles_[focusedIndex_]->app()
+                                                 : StreamingApp::YouTube;
+  const QString appName = appNameFor(app);
+
+  if (headline_) {
+    headline_->setText(QStringLiteral("Watch %1").arg(appName));
+  }
+  if (description_) {
+    description_->setText(appDescriptionFor(app));
+  }
+  if (resumeLabel_) {
+    if (lastLaunchedIndex_ >= 0 && lastLaunchedIndex_ < 4) {
+      const QString lastAppName = appNameFor(tiles_[lastLaunchedIndex_]->app());
+      resumeLabel_->setText(QStringLiteral("Last used: %1").arg(lastAppName));
+      resumeLabel_->show();
+    } else {
+      resumeLabel_->hide();
+    }
+  }
+  if (hintLabel_) {
+    hintLabel_->setText(
+        QStringLiteral(
+            "Press Enter to launch %1. Press Back to leave streaming.")
+            .arg(appName));
   }
 }
 
@@ -438,28 +595,57 @@ void StreamingHubWidget::animateTile(StreamingTile *tile, bool selected) {
 
 void StreamingHubWidget::keyPressEvent(QKeyEvent *event) {
   switch (event->key()) {
-  case Qt::Key_Left:
-    if (focusedIndex_ > 0) {
+  case Qt::Key_Left: {
+    const int col = focusedIndex_ % 2;
+    if (col > 0) {
       --focusedIndex_;
       updateFocus();
     }
     event->accept();
     return;
-  case Qt::Key_Right:
-    if (focusedIndex_ < 3) {
+  }
+  case Qt::Key_Right: {
+    const int col = focusedIndex_ % 2;
+    if (col < 1) {
       ++focusedIndex_;
       updateFocus();
     }
     event->accept();
     return;
+  }
+  case Qt::Key_Up: {
+    const int row = focusedIndex_ / 2;
+    if (row > 0) {
+      focusedIndex_ -= 2;
+      updateFocus();
+    }
+    event->accept();
+    return;
+  }
+  case Qt::Key_Down: {
+    const int row = focusedIndex_ / 2;
+    if (row < 1) {
+      focusedIndex_ += 2;
+      updateFocus();
+    }
+    event->accept();
+    return;
+  }
   case Qt::Key_Return:
   case Qt::Key_Enter:
   case Qt::Key_Space: {
     StreamingApp app = tiles_[focusedIndex_]->app();
+    noteAppLaunched(app);
     emit launchRequested(app);
     event->accept();
     return;
   }
+  case Qt::Key_Escape:
+  case Qt::Key_Backspace:
+  case Qt::Key_Home:
+    emit homeRequested();
+    event->accept();
+    return;
   default:
     break;
   }

@@ -603,7 +603,8 @@ void APU::OnSoundRegisterWrite(uint32_t offset, uint16_t value) {
       // Overflow check on trigger
       if (hwCh1.sweepShift > 0) {
         int delta = hwCh1.sweepShadow >> hwCh1.sweepShift;
-        int newFreq = hwCh1.sweepNegate ? (hwCh1.sweepShadow - delta)
+        // 1's complement negate — consistent with ClockSweep().
+        int newFreq = hwCh1.sweepNegate ? (hwCh1.sweepShadow + (~delta))
                                         : (hwCh1.sweepShadow + delta);
         if (newFreq > 2047)
           hwCh1.enabled = false;
@@ -774,7 +775,10 @@ void APU::ClockSweep() {
 
     if (hwCh1.sweepShift > 0) {
       int delta = hwCh1.sweepShadow >> hwCh1.sweepShift;
-      int newFreq = hwCh1.sweepNegate ? (hwCh1.sweepShadow - delta)
+      // GBATEK APU: negate mode uses 1's complement (shadow + ~delta), not
+      // 2's complement subtraction.  This produces shadow - delta - 1 which
+      // matches GBA hardware behaviour and differs by 1 in negate edge cases.
+      int newFreq = hwCh1.sweepNegate ? (hwCh1.sweepShadow + (~delta))
                                       : (hwCh1.sweepShadow + delta);
 
       if (newFreq > 2047) {

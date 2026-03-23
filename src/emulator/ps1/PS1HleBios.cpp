@@ -54,6 +54,11 @@ bool PS1HleBios::InitHLE(PS1 &ps1) {
   auto &dma = ps1.GetDMA();
   dma.Write32(IO::DMA_DICR, 0x00FF0000);
 
+  // Real BIOS enables VBlank IRQ in I_MASK during SysInit before transferring
+  // control to the game. Without this, HasPendingIRQ() is always false and the
+  // CPU never takes the VBlank exception, causing VSync() to timeout forever.
+  ps1.GetInterrupts().WriteMask(IRQ::VBLANK);
+
   if (!FindAndLoadExe(memory, cdrom, cpu, gpu)) {
     return false;
   }
@@ -174,11 +179,13 @@ void PS1HleBios::HandleException(PS1 &ps1) {
       DeliverEvent(0xF0000001, 0x1000);
       DeliverEvent(0xF2000003, 0x0002);
 
-      // libgpu's VBlank handler fires this event so VSync() can detect it.
-      // On real hardware, libgpu registers a priority-0 SysEnqIntRP handler
-      // that runs on VBlank and delivers DeliverEvent(0xF0000009, 0x0020).
-      // Since our HLE doesn't execute libgpu's native handler chain, we
-      // deliver it directly here.
+      // Fire all SDK VBlank events (class 0xF0000011 = libgpu GPU/VSync events).
+      // On real hardware, libgpu registers a SysEnqIntRP VBlank handler that
+      // fires each registered F0000011h slot on every VBlank. Since our HLE
+      // does not run the native handler chain, we deliver all enabled F0000011h
+      // events directly. Games using libgpu VSync() depend on this delivery.
+      DeliverEventClass(0xF0000011);
+      // Also fire F0000009/0x0020 events polled as secondary VBlank signal.
       DeliverEvent(0xF0000009, 0x0020);
 
       // HLE pad polling: write controller state to game's pad buffers.
@@ -292,6 +299,16 @@ void PS1HleBios::HandleException(PS1 &ps1) {
     if (deliveredIrqs != 0) {
       irqs.ClearIRQ(deliveredIrqs);
       pending = irqs.ReadStat() & imask;
+    }
+
+    // TEMP DIAG
+    if (IsPs1HleTraceEnabled()) {
+      auto &log = AIO::Emulator::Common::Logger::Instance();
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Warning, "PS1.HLE",
+                 "POST-ACK: deliveredIrqs=0x%04X istat=0x%04X imask=0x%04X "
+                 "pending=0x%04X callbacks=%zu cdromReg=%d",
+                 deliveredIrqs, irqs.ReadStat(), irqs.ReadMask(), pending,
+                 pendingCallbacks.size(), cdromHandlersRegistered ? 1 : 0);
     }
 
     // ── Dispatch mode=0x1000 callbacks ────────────────────────────────
@@ -450,7 +467,9 @@ void PS1HleBios::HandleException(PS1 &ps1) {
                    irqs.ReadStat() & irqs.ReadMask());
       }
 
-      inExceptionHandler = true;
+      // longjmp transfers control back to game code — exception handling is
+      // complete. Clear the guard so future exceptions are handled normally.
+      inExceptionHandler = false;
       cpu.SetRegister(29, sp);
       cpu.SetRegister(30, mem.Read32(sjBuf + 0x08)); // FP
       for (int i = 0; i < 8; i++) {
@@ -1336,6 +1355,200 @@ void PS1HleBios::DispatchA0(PS1 &ps1, uint8_t func) {
   case 0xA3:
     break;
 
+  // A0:16h strncat(dst, src, n)
+  case 0x16: {
+    uint32_t dst = cpu.GetRegister(4);
+    uint32_t src = cpu.GetRegister(5);
+    uint32_t n = cpu.GetRegister(6);
+    uint32_t d = dst;
+    while (mem.Read8(d) != 0 && d < dst + 0x100000) d++;
+    uint32_t i = 0;
+    uint8_t ch;
+    while (i < n && (ch = mem.Read8(src + i)) != 0 && i < 0x100000) {
+      mem.Write8(d + i, ch); i++;
+    }
+    mem.Write8(d + i, 0);
+    cpu.SetRegister(2, dst);
+    break;
+  }
+
+  // A0:1Ch index(s, c) = strchr — first occurrence
+  case 0x1C:
+  // A0:1Eh strchr(s, c) — duplicate entry
+  case 0x1E: {
+    uint32_t s = cpu.GetRegister(4);
+    uint8_t c = static_cast<uint8_t>(cpu.GetRegister(5));
+    bool found = false;
+    for (uint32_t i = 0; i < 0x100000; i++) {
+      uint8_t ch = mem.Read8(s + i);
+      if (ch == c) { 
+        cpu.SetRegister(2, s + i);
+        found = true;
+        break;
+      }
+      if (ch == 0) break;
+    }
+    if (!found) cpu.SetRegister(2, 0);
+    break;
+  }
+
+  // A0:1Dh rindex(s, c) = strrchr — last occurrence
+  case 0x1D:
+  // A0:1Fh strrchr(s, c) — duplicate entry
+  case 0x1F: {
+    uint32_t s = cpu.GetRegister(4);
+    uint8_t c = static_cast<uint8_t>(cpu.GetRegister(5));
+    uint32_t last = 0;
+    bool found = false;
+    for (uint32_t i = 0; i < 0x100000; i++) {
+      uint8_t ch = mem.Read8(s + i);
+      if (ch == c) { last = s + i; found = true; }
+      if (ch == 0) break;
+    }
+    cpu.SetRegister(2, found ? last : 0u);
+    break;
+  }
+
+  // A0:20h strpbrk(s, accept) — first char in s that is in accept
+  case 0x20: {
+    uint32_t s = cpu.GetRegister(4);
+    uint32_t accept = cpu.GetRegister(5);
+    bool found = false;
+    for (uint32_t i = 0; i < 0x100000; i++) {
+      uint8_t ch = mem.Read8(s + i);
+      if (ch == 0) { cpu.SetRegister(2, 0); found = true; break; }
+      for (uint32_t j = 0; j < 0x100000; j++) {
+        uint8_t ac = mem.Read8(accept + j);
+        if (ac == 0) break;
+        if (ch == ac) { cpu.SetRegister(2, s + i); found = true; break; }
+      }
+      if (found) break;
+    }
+    if (!found) cpu.SetRegister(2, 0);
+    break;
+  }
+
+  // A0:21h strspn(s, accept) — length of prefix of s made of accept-chars
+  case 0x21: {
+    uint32_t s = cpu.GetRegister(4);
+    uint32_t accept = cpu.GetRegister(5);
+    uint32_t len = 0;
+    for (; len < 0x100000; len++) {
+      uint8_t ch = mem.Read8(s + len);
+      if (ch == 0) break;
+      bool inAccept = false;
+      for (uint32_t j = 0; j < 0x100000; j++) {
+        uint8_t ac = mem.Read8(accept + j);
+        if (ac == 0) break;
+        if (ch == ac) { inAccept = true; break; }
+      }
+      if (!inAccept) break;
+    }
+    cpu.SetRegister(2, len);
+    break;
+  }
+
+  // A0:22h strcspn(s, reject) — length of prefix of s with no reject-chars
+  case 0x22: {
+    uint32_t s = cpu.GetRegister(4);
+    uint32_t reject = cpu.GetRegister(5);
+    uint32_t len = 0;
+    for (; len < 0x100000; len++) {
+      uint8_t ch = mem.Read8(s + len);
+      if (ch == 0) break;
+      bool inReject = false;
+      for (uint32_t j = 0; j < 0x100000; j++) {
+        uint8_t rj = mem.Read8(reject + j);
+        if (rj == 0) break;
+        if (ch == rj) { inReject = true; break; }
+      }
+      if (inReject) break;
+    }
+    cpu.SetRegister(2, len);
+    break;
+  }
+
+  // A0:23h strtok(s, delim) — tokenize string; static next-pointer state
+  case 0x23: {
+    static uint32_t strtokNext = 0;
+    uint32_t s = cpu.GetRegister(4);
+    uint32_t delim = cpu.GetRegister(5);
+    if (s != 0) strtokNext = s;
+    if (strtokNext == 0) { cpu.SetRegister(2, 0); break; }
+    // Skip leading delimiters
+    bool skipping = true;
+    while (skipping && strtokNext < 0x001FFFFF) {
+      uint8_t ch = mem.Read8(strtokNext);
+      if (ch == 0) { strtokNext = 0; cpu.SetRegister(2, 0); break; }
+      bool isDelim = false;
+      for (uint32_t j = 0; j < 256; j++) {
+        uint8_t dc = mem.Read8(delim + j);
+        if (dc == 0) break;
+        if (ch == dc) { isDelim = true; break; }
+      }
+      if (!isDelim) { skipping = false; } else { strtokNext++; }
+    }
+    if (!skipping && strtokNext < 0x001FFFFF) {
+      uint32_t tokenStart = strtokNext;
+      bool finding = true;
+      while (finding && strtokNext < 0x001FFFFF) {
+        uint8_t ch = mem.Read8(strtokNext);
+        if (ch == 0) { strtokNext = 0; finding = false; break; }
+        bool isDelim = false;
+        for (uint32_t j = 0; j < 256; j++) {
+          uint8_t dc = mem.Read8(delim + j);
+          if (dc == 0) break;
+          if (ch == dc) { isDelim = true; break; }
+        }
+        if (isDelim) { mem.Write8(strtokNext, 0); strtokNext++; finding = false; break; }
+        strtokNext++;
+      }
+      cpu.SetRegister(2, tokenStart);
+    }
+    break;
+  }
+
+  // A0:24h strstr(s, sub) — first occurrence of sub in s
+  case 0x24: {
+    uint32_t s = cpu.GetRegister(4);
+    uint32_t sub = cpu.GetRegister(5);
+    // Empty sub matches s
+    if (mem.Read8(sub) == 0) { cpu.SetRegister(2, s); break; }
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < 0x100000; i++) {
+      if (mem.Read8(s + i) == 0) break;
+      bool match = true;
+      for (uint32_t j = 0; j < 0x100000; j++) {
+        uint8_t sc = mem.Read8(sub + j);
+        if (sc == 0) break;
+        if (mem.Read8(s + i + j) != sc) { match = false; break; }
+      }
+      if (match) { result = s + i; break; }
+    }
+    cpu.SetRegister(2, result);
+    break;
+  }
+
+  // A0:29h memchr(s, c, n) — first occurrence of c in s[0..n-1]
+  case 0x29: {
+    uint32_t s = cpu.GetRegister(4);
+    uint8_t c = static_cast<uint8_t>(cpu.GetRegister(5));
+    uint32_t n = cpu.GetRegister(6);
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < n && i < 0x100000; i++) {
+      if (mem.Read8(s + i) == c) { result = s + i; break; }
+    }
+    cpu.SetRegister(2, result);
+    break;
+  }
+
+  // A0:31h qsort(base, n, size, compare) — safe no-op (compare fn is PS1 code)
+  case 0x31:
+    // Cannot call PS1 code from C++ dispatch without re-entering the CPU.
+    // Return without error — games that need sorted data will see unsorted;
+    // this is better than a crash from mishandled function pointer execution.
+    break;
+
   default:
     cpu.SetRegister(2, 0);
     break;
@@ -1912,7 +2125,9 @@ void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
 
   // C0:00h EnqueueTimerAndVblankIrqs
   // Real BIOS: clears IMASK timer/VBlank bits, resets all 3 timers,
-  // and initializes auto-ack flags to 1 (ack + ReturnFromException)
+  // installs timer/VBlank handlers in the priority chain, then re-enables
+  // those IRQ bits. HLE skips the handler-chain plumbing and re-enables
+  // the IRQ bits directly so VBlank and timer interrupts remain functional.
   case 0x00: {
     auto &irqs = ps1.GetInterrupts();
     irqs.WriteMask(irqs.ReadMask() &
@@ -1925,6 +2140,10 @@ void PS1HleBios::DispatchC0(PS1 &ps1, uint8_t func) {
       timers.Write32(base + 0x00, 0); // counter = 0
     }
     changeClearRCntFlags = {1, 1, 1, 1};
+    // Re-enable timer/VBlank IRQs: on real hardware the installed handlers
+    // re-enable these bits when they execute; in HLE we do it here directly.
+    irqs.WriteMask(irqs.ReadMask() | IRQ::VBLANK | IRQ::TIMER0 | IRQ::TIMER1 |
+                   IRQ::TIMER2);
     break;
   }
 
@@ -2167,6 +2386,36 @@ void PS1HleBios::DeliverEvent(uint32_t classId, uint32_t spec) {
 }
 
 // ─── BIOS Region ────────────────────────────────────────────────────────
+
+void PS1HleBios::DeliverEventClass(uint32_t classId) {
+  // Fire all enabled events with matching classId, regardless of spec.
+  // Called on VBlank for library-defined event classes (e.g. 0xF0000011)
+  // whose spec values are library-internal -- every registered slot fires
+  // on the same hardware condition (VBlank).
+  auto &log = AIO::Emulator::Common::Logger::Instance();
+  bool traceEnabled = IsPs1HleTraceEnabled();
+  for (int i = 0; i < MAX_EVENTS; i++) {
+    auto &ev = events[i];
+    if (ev.used && ev.enabled && ev.classId == classId) {
+      if (ev.mode == 0x1000 && ev.func != 0) {
+        pendingCallbacks.push_back(ev.func);
+        if (traceEnabled) {
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "DeliverEventClass: classId=0x%08X -> slot %d callback=0x%08X",
+                     classId, i, ev.func);
+        }
+      } else {
+        ev.fired = true;
+        WriteEvCBToRAM(i);
+        if (traceEnabled) {
+          log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                     "DeliverEventClass: classId=0x%08X -> slot %d FIRED (mode=0x%04X)",
+                     classId, i, ev.mode);
+        }
+      }
+    }
+  }
+}
 
 void PS1HleBios::PopulateBiosRegion(PS1Memory &memory) {
   // Fill the BIOS region with JR $ra + NOP (harmless return stubs)
@@ -2937,6 +3186,32 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
     }
   }
 
+  // If nothing is pending after priority-table pass, fast-return to savedEpc.
+  // This handles the case where VBlank was pre-cleared in HandleException (via
+  // deliveredIrqs) before the callbacks ran: pending=0, ackedBits=0, but we
+  // must NOT longjmp — that would abandon VSync()'s polling-loop stack frame.
+  // Instead, restore game registers and return so the game can see the updated
+  // counter.
+  if (pending == 0) {
+    for (int i = 1; i < 32; i++) {
+      if (i == 26)
+        continue;
+      cpu.SetRegister(i, savedRegs[i]);
+    }
+    uint32_t sr = (savedSR & ~0xF) | ((savedSR >> 2) & 0xF);
+    cpu.SetHI(savedHI);
+    cpu.SetLO(savedLO);
+    cpu.SetCOP0(CPU::COP0::SR, sr);
+    cpu.SetPC(savedEpc);
+    inExceptionHandler = false;
+    if (traceEnabled) {
+      log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
+                 "DispatchNextCB: all handled, fast return to EPC=0x%08X",
+                 savedEpc);
+    }
+    return;
+  }
+
   // Still pending IRQs — dispatch to handler chain or longjmp
   if (traceEnabled) {
     log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",
@@ -2978,6 +3253,9 @@ void PS1HleBios::DispatchNextCallbackOrResume(PS1 &ps1) {
     }
     cpu.SetRegister(28, mem.Read32(sjBuf + 0x2C));
     cpu.SetRegister(2, 1);
+    // longjmp completes exception handling — clear guard so future exceptions
+    // (VBlank counter increments, CDROM, DMA) are processed normally.
+    inExceptionHandler = false;
     cpu.SetPC(ra);
     if (traceEnabled) {
       log.LogFmt(AIO::Emulator::Common::LogLevel::Info, "PS1.HLE",

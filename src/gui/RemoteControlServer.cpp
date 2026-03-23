@@ -1,10 +1,14 @@
 #include "gui/RemoteControlServer.h"
+#include "gui/GameStorePage.h"
+#include "gui/GamesLibraryPage.h"
 #include "gui/HomeScreen.h"
 #include "gui/MainWindow.h"
+#include "gui/StreamingHubWidget.h"
 #include "input/InputManager.h"
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -12,6 +16,7 @@
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QMetaMethod>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QStackedWidget>
@@ -215,8 +220,113 @@ bool RemoteControlServer::tryParseHttpRequest(QByteArray &buffer,
 
 // ─── Construction / lifecycle ────────────────────────────────────────────
 
+// Convert a goTo suffix to a URL-style slug.
+// "GameStore"     → "game-store"
+// "MainMenu"      → "main-menu"
+// "NAS"           → "nas"  (consecutive caps are NOT split)
+// "EmulatorSelect" → "emulator-select"
+QString RemoteControlServer::methodToSlug(const QByteArray &nameWithoutGoTo) {
+  QString result;
+  const QString s = QString::fromLatin1(nameWithoutGoTo);
+  for (int i = 0; i < s.size(); ++i) {
+    if (i > 0 && s[i].isUpper() && s[i - 1].isLower())
+      result += '-';
+    result += s[i].toLower();
+  }
+  return result;
+}
+
+// Build the navigate route table at construction time.
+//
+// Phase 1 — auto-discover every zero-argument goTo* slot on MainWindow via
+//           QMetaObject introspection. A new goToX() slot in MainWindow
+//           automatically becomes a navigate target with no edits here.
+//
+// Phase 2 — register short aliases ("home", "store", …) pointing at the
+//           canonical slugs discovered in phase 1.
+//
+// Phase 3 — register special lambdas for targets that require more than one
+//           function call (emulator-type routing, streaming apps).
+void RemoteControlServer::buildNavTable() {
+  // ── Phase 1: introspect goTo* slots ─────────────────────────────
+  const QMetaObject *mo = window_->metaObject();
+  for (int i = 0; i < mo->methodCount(); ++i) {
+    const QMetaMethod method = mo->method(i);
+    if (method.parameterCount() != 0)
+      continue;
+    if (method.methodType() != QMetaMethod::Slot &&
+        method.methodType() != QMetaMethod::Method)
+      continue;
+    const QByteArray name = method.name();
+    if (!name.startsWith("goTo"))
+      continue;
+
+    const QByteArray suffix = name.mid(4); // strip "goTo"
+    const QString slug = methodToSlug(suffix);
+    // Capture slot name by value so the lambda owns it
+    navTable_[slug] = [w = window_, slotName = name]() {
+      QMetaObject::invokeMethod(w, slotName.constData(), Qt::QueuedConnection);
+    };
+  }
+
+  // ── Phase 2: short aliases ───────────────────────────────────────
+  auto alias = [&](const QString &from, const QString &to) {
+    if (navTable_.contains(to))
+      navTable_[from] = navTable_[to];
+  };
+  alias("home", "main-menu");
+  alias("main", "main-menu");
+  alias("menu", "main-menu");
+  alias("emulators", "emulator-select");
+  alias("games", "game-select");
+  alias("store", "game-store");
+  alias("library", "games-library");
+  alias("mirror", "screen-mirror");
+  alias("airplay", "screen-mirror");
+
+  // ── Phase 3: special-case lambdas ───────────────────────────────
+  auto addLambda = [&](const QString &slug, std::function<void()> fn) {
+    navTable_[slug] = std::move(fn);
+  };
+  addLambda("gba", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::GBA;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("ps1", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::PS1;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("playstation", navTable_["ps1"]);
+  addLambda("switch", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::Switch;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("nintendo-switch", navTable_["switch"]);
+  addLambda("youtube", [w = window_]() { w->launchStreamingApp(0); });
+  addLambda("netflix", [w = window_]() { w->launchStreamingApp(1); });
+  addLambda("disney+", [w = window_]() { w->launchStreamingApp(2); });
+  addLambda("disneyplus", navTable_["disney+"]);
+  addLambda("hulu", [w = window_]() { w->launchStreamingApp(3); });
+}
+
 RemoteControlServer::RemoteControlServer(MainWindow *window, QObject *parent)
     : QObject(parent), window_(window) {
+  startTimeMs_ = QDateTime::currentMSecsSinceEpoch();
   const QString envPort = qEnvironmentVariable("AIO_REMOTE_PORT");
   if (!envPort.isEmpty()) {
     bool ok = false;
@@ -224,6 +334,8 @@ RemoteControlServer::RemoteControlServer(MainWindow *window, QObject *parent)
     if (ok && p > 0 && p <= 65535)
       configuredPort_ = static_cast<quint16>(p);
   }
+  buildNavTable();
+  initEventMonitor();
   connect(&server_, &QTcpServer::newConnection, this,
           &RemoteControlServer::onNewConnection);
 }
@@ -337,10 +449,14 @@ RemoteControlServer::route(const HttpRequest &req) {
     return handleStateInput();
   if (req.path == "/state/emulator" && req.method == "GET")
     return handleStateEmulator();
+  if (req.path == "/state/audio" && req.method == "GET")
+    return handleStateAudio();
   if (req.path == "/state/widgets" && req.method == "GET")
     return handleStateWidgets();
   if (req.path == "/state/page" && req.method == "GET")
     return handleStatePage();
+  if (req.path == "/events" && req.method == "GET")
+    return handleEvents(req);
   if (req.path == "/execute" && req.method == "POST")
     return handleExecute(req);
   if (req.path == "/input/key" && req.method == "POST")
@@ -373,6 +489,184 @@ RemoteControlServer::errorResponse(int status, const QString &message) {
   obj["error"] = message;
   return jsonResponse(status,
                       QJsonDocument(obj).toJson(QJsonDocument::Compact));
+}
+
+// ─── Event ring buffer ───────────────────────────────────────────────────
+
+void RemoteControlServer::appendEvent(const QString &type,
+                                      const QJsonObject &data) {
+  RCEvent ev;
+  ev.timestampMs = QDateTime::currentMSecsSinceEpoch() - startTimeMs_;
+  ev.type = type;
+  ev.data = data;
+  if (eventLog_.size() >= kMaxEvents)
+    eventLog_.removeFirst();
+  eventLog_.append(std::move(ev));
+}
+
+void RemoteControlServer::initEventMonitor() {
+  // Connect to stacked widget page changes
+  auto *stacked = window_->findChild<QStackedWidget *>();
+  if (stacked) {
+    connect(stacked, &QStackedWidget::currentChanged, this,
+            [this, stacked](int index) {
+              QWidget *w = stacked->widget(index);
+              QJsonObject d;
+              d["pageIndex"] = index;
+              d["page"] = w ? w->objectName() : QString("unknown");
+              appendEvent("page_changed", d);
+            });
+  }
+
+  // Poll emulator state every 200 ms — atomics can't be connected to signals
+  monitorTimer_ = new QTimer(this);
+  monitorTimer_->setInterval(200);
+  connect(monitorTimer_, &QTimer::timeout, this,
+          &RemoteControlServer::onMonitorTick);
+  monitorTimer_->start();
+
+  // Seed so first tick doesn't fire spurious transitions
+  prevRunning_ = window_->emulatorRunning.load();
+  prevPaused_ = window_->emulatorPaused.load();
+  prevFrameNumber_ = window_->emulatorFrameNumber.load();
+  lastFrameAdvanceMs_ = QDateTime::currentMSecsSinceEpoch();
+}
+
+void RemoteControlServer::onMonitorTick() {
+  const bool running = window_->emulatorRunning.load();
+  const bool paused = window_->emulatorPaused.load();
+  const quint64 frame = window_->emulatorFrameNumber.load();
+  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+  const char *emuTypes[] = {"none", "GBA", "Switch", "PS1"};
+  const int emuIdx = static_cast<int>(window_->currentEmulator);
+  const QString emuType =
+      (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
+
+  // Emulator started
+  if (running && !prevRunning_) {
+    QJsonObject d;
+    d["emulatorType"] = emuType;
+    appendEvent("emulator_started", d);
+    lastFrameAdvanceMs_ = nowMs;
+  }
+
+  // Emulator stopped
+  if (!running && prevRunning_) {
+    QJsonObject d;
+    d["emulatorType"] = emuType;
+    d["frameCount"] = static_cast<qint64>(frame);
+    appendEvent("emulator_stopped", d);
+  }
+
+  // Paused / resumed
+  if (running) {
+    if (paused && !prevPaused_) {
+      QJsonObject d;
+      d["emulatorType"] = emuType;
+      d["frameNumber"] = static_cast<qint64>(frame);
+      appendEvent("emulator_paused", d);
+    }
+    if (!paused && prevPaused_) {
+      QJsonObject d;
+      d["emulatorType"] = emuType;
+      d["frameNumber"] = static_cast<qint64>(frame);
+      appendEvent("emulator_resumed", d);
+    }
+  }
+
+  // Frame stall detection: running + not paused + no frame advance in 2 s
+  if (running && !paused) {
+    if (frame != prevFrameNumber_) {
+      lastFrameAdvanceMs_ = nowMs;
+    } else if ((nowMs - lastFrameAdvanceMs_) > 2000) {
+      // Only fire once per stall (re-fires every 2 s if stall persists)
+      if ((nowMs - lastFrameAdvanceMs_) % 2000 < 250) {
+        QJsonObject d;
+        d["emulatorType"] = emuType;
+        d["frameNumber"] = static_cast<qint64>(frame);
+        d["stalledForMs"] = static_cast<qint64>(nowMs - lastFrameAdvanceMs_);
+        appendEvent("emulator_stalled", d);
+      }
+    }
+  }
+
+  // Audio silence detection: running + silent (> 98 % silence)
+  if (running && !paused) {
+    const auto metrics = window_->GetAudioMetrics();
+    const bool silent = (metrics.silenceRatio > 0.98f);
+    if (silent && !prevAudioSilence_) {
+      QJsonObject d;
+      d["emulatorType"] = emuType;
+      d["frameNumber"] = static_cast<qint64>(frame);
+      d["rmsDb"] = static_cast<double>(metrics.rmsDb);
+      appendEvent("audio_silence_detected", d);
+    }
+    if (!silent && prevAudioSilence_) {
+      QJsonObject d;
+      d["emulatorType"] = emuType;
+      d["rmsDb"] = static_cast<double>(metrics.rmsDb);
+      appendEvent("audio_resumed", d);
+    }
+    prevAudioSilence_ = silent;
+  } else {
+    prevAudioSilence_ = false;
+  }
+
+  prevRunning_ = running;
+  prevPaused_ = paused;
+  prevFrameNumber_ = frame;
+}
+
+// ─── GET /events ─────────────────────────────────────────────────────────
+
+RemoteControlServer::HttpResponse
+RemoteControlServer::handleEvents(const HttpRequest &req) {
+  // Parse query params: ?since=<ms>&limit=<N>
+  qint64 since = -1;
+  int limit = 100;
+
+  const auto parts = req.query.split('&', Qt::SkipEmptyParts);
+  for (const QString &part : parts) {
+    const int eq = part.indexOf('=');
+    if (eq < 0)
+      continue;
+    const QString key = part.left(eq);
+    const QString val = part.mid(eq + 1);
+    if (key == "since") {
+      bool ok = false;
+      qint64 v = val.toLongLong(&ok);
+      if (ok)
+        since = v;
+    } else if (key == "limit") {
+      bool ok = false;
+      int v = val.toInt(&ok);
+      if (ok && v > 0)
+        limit = qMin(v, kMaxEvents);
+    }
+  }
+
+  QJsonArray events;
+  for (const RCEvent &ev : eventLog_) {
+    if (since >= 0 && ev.timestampMs <= since)
+      continue;
+    QJsonObject obj;
+    obj["t"] = ev.timestampMs;
+    obj["type"] = ev.type;
+    if (!ev.data.isEmpty())
+      obj["data"] = ev.data;
+    events.append(obj);
+    if (events.size() >= limit)
+      break;
+  }
+
+  QJsonObject resp;
+  resp["ok"] = true;
+  resp["events"] = events;
+  resp["count"] = events.size();
+  resp["totalStored"] = eventLog_.size();
+  resp["serverUptimeMs"] = QDateTime::currentMSecsSinceEpoch() - startTimeMs_;
+  return jsonResponse(200, QJsonDocument(resp).toJson(QJsonDocument::Compact));
 }
 
 // ─── GET /health ─────────────────────────────────────────────────────────
@@ -434,6 +728,11 @@ RemoteControlServer::handleKeyInput(const HttpRequest &req) {
     QKeyEvent releaseEvent(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
     QCoreApplication::sendEvent(window_, &releaseEvent);
   }
+
+  QJsonObject evData;
+  evData["key"] = keyName;
+  evData["event"] = eventType;
+  appendEvent("key_injected", evData);
 
   QJsonObject resp;
   resp["ok"] = true;
@@ -555,13 +854,21 @@ RemoteControlServer::handleClickInput(const HttpRequest &req) {
                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
   QCoreApplication::sendEvent(target, &releaseEvent);
 
+  const QString targetName = target->objectName().isEmpty()
+                                 ? target->metaObject()->className()
+                                 : target->objectName();
+
+  QJsonObject evData;
+  evData["x"] = x;
+  evData["y"] = y;
+  evData["targetWidget"] = targetName;
+  appendEvent("click_injected", evData);
+
   QJsonObject resp;
   resp["ok"] = true;
   resp["x"] = x;
   resp["y"] = y;
-  resp["target_widget"] = target->objectName().isEmpty()
-                              ? target->metaObject()->className()
-                              : target->objectName();
+  resp["target_widget"] = targetName;
   return jsonResponse(200, QJsonDocument(resp).toJson(QJsonDocument::Compact));
 }
 
@@ -645,6 +952,8 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleState() {
     QJsonObject nav;
     nav["focusRow"] = homeScreen->focusRow_;
     nav["focusCol"] = homeScreen->focusCol_;
+    nav["organizeMode"] = homeScreen->organizeMode();
+    nav["columnCount"] = homeScreen->gridColumnCount_;
     // Get the focused tile name
     if (homeScreen->focusRow_ >= 0 &&
         homeScreen->focusRow_ < homeScreen->rows_.size()) {
@@ -699,6 +1008,8 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStateNavigation() {
     grid["focusRow"] = homeScreen->focusRow_;
     grid["focusCol"] = homeScreen->focusCol_;
     grid["rowCount"] = homeScreen->rows_.size();
+    grid["organizeMode"] = homeScreen->organizeMode();
+    grid["columnCount"] = homeScreen->gridColumnCount_;
 
     // List all tiles with their state
     QJsonArray tilesArray;
@@ -782,6 +1093,33 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStateEmulator() {
     obj["audioRecording"] = window_->IsAudioRecording();
     obj["avRecording"] = window_->IsAVRecording();
   }
+
+  return jsonResponse(200, QJsonDocument(obj).toJson(QJsonDocument::Compact));
+}
+
+// ─── GET /state/audio — live audio analysis metrics ──────────────────────
+
+RemoteControlServer::HttpResponse RemoteControlServer::handleStateAudio() {
+  QJsonObject obj;
+  obj["ok"] = true;
+
+  const bool running = window_->emulatorRunning.load();
+  obj["active"] = running;
+  obj["recording"] = window_->IsAudioRecording();
+  obj["avRecording"] = window_->IsAVRecording();
+
+  const auto metrics = window_->GetAudioMetrics();
+  obj["sampleRate"] = metrics.sampleRate;
+  obj["channels"] = 2;
+  obj["rmsLeft"] = static_cast<double>(metrics.rmsLeft);
+  obj["rmsRight"] = static_cast<double>(metrics.rmsRight);
+  obj["rmsDb"] = static_cast<double>(metrics.rmsDb);
+  obj["silenceRatio"] = static_cast<double>(metrics.silenceRatio);
+  obj["clippingRatio"] = static_cast<double>(metrics.clippingRatio);
+  obj["peakLeft"] = metrics.peakLeft;
+  obj["peakRight"] = metrics.peakRight;
+  obj["windowSamples"] = metrics.windowSamples;
+  obj["metricsActive"] = metrics.active;
 
   return jsonResponse(200, QJsonDocument(obj).toJson(QJsonDocument::Compact));
 }
@@ -940,6 +1278,8 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
       nav["focusRow"] = homeScreen->focusRow_;
       nav["focusCol"] = homeScreen->focusCol_;
       nav["rowCount"] = homeScreen->rows_.size();
+      nav["organizeMode"] = homeScreen->organizeMode();
+      nav["columnCount"] = homeScreen->gridColumnCount_;
       const char *kindNames[] = {"GBA",      "PS1",     "Switch",  "Media",
                                  "Settings", "YouTube", "Netflix", "Disney+",
                                  "Hulu",     "Blank"};
@@ -962,6 +1302,56 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
     obj["emulatorType"] =
         (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
     obj["emulatorRunning"] = window_->emulatorRunning.load();
+    obj["emulatorPaused"] = window_->emulatorPaused.load();
+    obj["emulatorFrame"] =
+        static_cast<qint64>(window_->emulatorFrameNumber.load());
+  }
+
+  if (stacked) {
+    QWidget *current = stacked->currentWidget();
+
+    if (auto *storePage = qobject_cast<AIO::GUI::GameStorePage *>(current)) {
+      QJsonObject s;
+      const char *focusAreaNames[] = {"Tabs", "Grid", "Detail"};
+      int faIdx = static_cast<int>(storePage->focusArea_);
+      s["focusArea"] =
+          (faIdx >= 0 && faIdx < 3) ? focusAreaNames[faIdx] : "unknown";
+      s["tabFocus"] = storePage->tabFocus_;
+      s["gridFocusRow"] = storePage->gridFocusRow_;
+      s["gridFocusCol"] = storePage->gridFocusCol_;
+      s["totalGames"] = storePage->allGames_.size();
+      s["filteredGames"] = storePage->filteredGames_.size();
+      s["steamGames"] = storePage->steamGames_.size();
+      s["detailVisible"] = storePage->detailVisible_;
+      if (storePage->activeCategoryIndex_ >= 0 &&
+          storePage->activeCategoryIndex_ < storePage->categories_.size())
+        s["activeCategory"] =
+            storePage->categories_[storePage->activeCategoryIndex_];
+      else
+        s["activeCategory"] = QString();
+      obj["gameStore"] = s;
+    }
+
+    if (auto *libPage = qobject_cast<AIO::GUI::GamesLibraryPage *>(current)) {
+      QJsonObject s;
+      const char *filterNames[] = {"All", "GBA", "PS1", "Switch"};
+      int fIdx = static_cast<int>(libPage->filter_);
+      s["filter"] = (fIdx >= 0 && fIdx < 4) ? filterNames[fIdx] : "unknown";
+      s["chipFocus"] = libPage->chipFocus_;
+      s["inChips"] = libPage->inChips_;
+      s["gridRow"] = libPage->gridRow_;
+      s["gridCol"] = libPage->gridCol_;
+      s["totalGames"] = libPage->allGames_.size();
+      s["displayGames"] = libPage->displayGames_.size();
+      obj["gamesLibrary"] = s;
+    }
+
+    if (auto *hub = qobject_cast<AIO::GUI::StreamingHubWidget *>(current)) {
+      QJsonObject s;
+      s["focusedIndex"] = hub->focusedIndex_;
+      s["lastLaunchedIndex"] = hub->lastLaunchedIndex_;
+      obj["streamingHub"] = s;
+    }
   }
 
   return jsonResponse(200, QJsonDocument(obj).toJson(QJsonDocument::Compact));
@@ -982,6 +1372,8 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
 //   list-actions   — return the list of supported actions
 //   dump-frame     — write current emulator frame to a file path
 //   set-emulator   — set emulator type before launching (gba, ps1, switch)
+//   launch-steam-game     — open/install a Steam game by appId
+//   launch-installed-game  — launch a local installed game/app by path
 
 RemoteControlServer::HttpResponse
 RemoteControlServer::handleExecute(const HttpRequest &req) {
@@ -1003,72 +1395,24 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     if (target.isEmpty())
       return errorResponse(400, "navigate: missing 'page' param");
 
-    if (target == "home" || target == "main" || target == "menu") {
-      QMetaObject::invokeMethod(window_, &MainWindow::goToMainMenu,
-                                Qt::QueuedConnection);
-    } else if (target == "settings") {
-      QMetaObject::invokeMethod(window_, &MainWindow::goToSettings,
-                                Qt::QueuedConnection);
-    } else if (target == "emulators" || target == "emulator-select") {
-      QMetaObject::invokeMethod(window_, &MainWindow::goToEmulatorSelect,
-                                Qt::QueuedConnection);
-    } else if (target == "gba") {
-      QMetaObject::invokeMethod(
-          window_,
-          [win = window_]() {
-            win->currentEmulator = MainWindow::EmulatorType::GBA;
-            win->goToGameSelect();
-          },
-          Qt::QueuedConnection);
-    } else if (target == "ps1" || target == "playstation") {
-      QMetaObject::invokeMethod(
-          window_,
-          [win = window_]() {
-            win->currentEmulator = MainWindow::EmulatorType::PS1;
-            win->goToGameSelect();
-          },
-          Qt::QueuedConnection);
-    } else if (target == "switch" || target == "nintendo-switch") {
-      QMetaObject::invokeMethod(
-          window_,
-          [win = window_]() {
-            win->currentEmulator = MainWindow::EmulatorType::Switch;
-            win->goToGameSelect();
-          },
-          Qt::QueuedConnection);
-    } else if (target == "games" || target == "game-select") {
-      QMetaObject::invokeMethod(window_, &MainWindow::goToGameSelect,
-                                Qt::QueuedConnection);
-    } else if (target == "nas") {
-      QMetaObject::invokeMethod(window_, &MainWindow::goToNAS,
-                                Qt::QueuedConnection);
-    } else if (target.startsWith("streaming:") || target == "youtube" ||
-               target == "netflix" || target == "disney+" || target == "hulu") {
-      int app = -1;
-      QString appName = target;
-      if (target.startsWith("streaming:"))
-        appName = target.mid(10);
-      if (appName == "youtube")
-        app = 0;
-      else if (appName == "netflix")
-        app = 1;
-      else if (appName == "disney+" || appName == "disneyplus" ||
-               appName == "disney")
-        app = 2;
-      else if (appName == "hulu")
-        app = 3;
-      if (app < 0)
-        return errorResponse(400,
-                             "navigate: unknown streaming app: " + appName);
-      QMetaObject::invokeMethod(
-          window_, [win = window_, app]() { win->launchStreamingApp(app); },
-          Qt::QueuedConnection);
-    } else if (target == "emulator-settings") {
-      QMetaObject::invokeMethod(window_, &MainWindow::goToEmulatorSettings,
-                                Qt::QueuedConnection);
-    } else {
-      return errorResponse(400, "navigate: unknown page: " + target);
+    const auto it = navTable_.constFind(target);
+    if (it == navTable_.constEnd()) {
+      const QString known = QStringList(navTable_.keys()).join(", ");
+      return errorResponse(400, "navigate: unknown page '" + target +
+                                    "'. Known: " + known);
     }
+    QJsonObject evData;
+    evData["target"] = target;
+    appendEvent("navigate_requested", evData);
+
+    // Stop emulator cleanly before navigating away: avoids stale running-state
+    // showing on the destination page and stops background audio/rendering.
+    if (window_->emulatorRunning.load()) {
+      window_->StopEmulatorThread();
+      window_->displayTimer->stop();
+    }
+
+    it.value()(); // dispatch — lambdas already handle QueuedConnection
 
     QJsonObject resp;
     resp["ok"] = true;
@@ -1251,10 +1595,9 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
       a["params"] = paramsDesc;
       actions.append(a);
     };
-    addAction("navigate", "Go to a named page",
-              "{page: "
-              "home|settings|emulators|gba|ps1|switch|games|nas|youtube|"
-              "netflix|disney+|hulu|emulator-settings}");
+    addAction(
+        "navigate", "Go to a named page",
+        qPrintable("{page: " + QStringList(navTable_.keys()).join("|") + "}"));
     addAction("select", "Move homescreen selection to a tile",
               "{row: int, col: int}");
     addAction("press", "Press a key (with optional repeat)",
@@ -1266,11 +1609,297 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     addAction("dump-frame", "Write current emulator frame to a PPM file",
               "{path: string}");
     addAction("list-actions", "Return this action catalog", "{}");
+    addAction("start-audio-recording",
+              "Start recording emulator audio output to a WAV file",
+              "{path: string}");
+    addAction("stop-audio-recording",
+              "Stop recording audio and finalize the WAV file", "{}");
+    addAction(
+        "launch-rom",
+        "Load a ROM and start emulation (stops any running emulator first). "
+        "Path is absolute or relative to the configured romDirectory.",
+        "{path: string}");
+    addAction("launch-steam-game", "Launch or install a Steam game by appId",
+              "{appId: string|int}");
+    addAction("launch-installed-game",
+              "Launch a local installed game/app by path", "{path: string}");
+    addAction("stop-game",
+              "Stop the running emulator and return to the home screen", "{}");
+    addAction(
+        "pause",
+        "Pause the running emulator (must be running and not already paused)",
+        "{}");
+    addAction("resume", "Resume a paused emulator", "{}");
+    addAction("toggle-pause", "Toggle emulator pause state", "{}");
+    addAction("step-frame",
+              "Advance exactly one frame (emulator must be paused)", "{}");
 
     QJsonObject resp;
     resp["ok"] = true;
     resp["action"] = "list-actions";
     resp["actions"] = actions;
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── start-audio-recording ─────────────────────────────────────────────
+  if (action == "start-audio-recording") {
+    const QString path = params["path"].toString();
+    if (path.isEmpty())
+      return errorResponse(400, "start-audio-recording: missing 'path' param");
+
+    if (window_->IsAudioRecording()) {
+      return errorResponse(
+          400, "start-audio-recording: already recording to " +
+                   QString::fromStdString(window_->GetAudioRecordingPath()));
+    }
+
+    const bool ok = window_->StartAudioRecording(path.toStdString());
+
+    QJsonObject resp;
+    resp["ok"] = ok;
+    resp["action"] = "start-audio-recording";
+    resp["path"] = path;
+    if (!ok)
+      resp["error"] = "Failed to start recording";
+    return jsonResponse(ok ? 200 : 500,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── stop-audio-recording ──────────────────────────────────────────────
+  if (action == "stop-audio-recording") {
+    if (!window_->IsAudioRecording()) {
+      return errorResponse(400,
+                           "stop-audio-recording: not currently recording");
+    }
+
+    const QString path =
+        QString::fromStdString(window_->GetAudioRecordingPath());
+    const double duration = window_->GetAudioRecordingDuration();
+
+    window_->StopAudioRecording();
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "stop-audio-recording";
+    resp["path"] = path;
+    resp["duration_seconds"] = duration;
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── stop-game ─────────────────────────────────────────────────────────
+  if (action == "stop-game") {
+    const bool wasRunning = window_->emulatorRunning.load();
+    if (!wasRunning)
+      return errorResponse(400, "stop-game: no emulator is running");
+
+    const QString emuTypes[] = {"none", "GBA", "Switch", "PS1"};
+    int emuIdx = static_cast<int>(window_->currentEmulator);
+    const QString emuType =
+        (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
+
+    QMetaObject::invokeMethod(window_, "stopGameToHome", Qt::QueuedConnection);
+
+    QJsonObject evData;
+    evData["emulatorType"] = emuType;
+    appendEvent("game_stopped", evData);
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "stop-game";
+    resp["emulatorType"] = emuType;
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── pause ─────────────────────────────────────────────────────────────
+  if (action == "pause") {
+    if (!window_->emulatorRunning.load())
+      return errorResponse(400, "pause: no emulator is running");
+    if (window_->emulatorPaused.load())
+      return errorResponse(400, "pause: emulator is already paused");
+
+    window_->emulatorPaused.store(true, std::memory_order_relaxed);
+    appendEvent("emulator_paused", {});
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "pause";
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── resume ────────────────────────────────────────────────────────────
+  if (action == "resume") {
+    if (!window_->emulatorRunning.load())
+      return errorResponse(400, "resume: no emulator is running");
+    if (!window_->emulatorPaused.load())
+      return errorResponse(400, "resume: emulator is not paused");
+
+    window_->emulatorPaused.store(false, std::memory_order_relaxed);
+    appendEvent("emulator_resumed", {});
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "resume";
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── toggle-pause ──────────────────────────────────────────────────────
+  if (action == "toggle-pause") {
+    if (!window_->emulatorRunning.load())
+      return errorResponse(400, "toggle-pause: no emulator is running");
+
+    const bool nowPaused = !window_->emulatorPaused.load();
+    window_->emulatorPaused.store(nowPaused, std::memory_order_relaxed);
+    appendEvent(nowPaused ? "emulator_paused" : "emulator_resumed", {});
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "toggle-pause";
+    resp["paused"] = nowPaused;
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── step-frame ────────────────────────────────────────────────────────
+  // Advances the emulator exactly one frame. Requires emulator to be paused.
+  if (action == "step-frame") {
+    if (!window_->emulatorRunning.load())
+      return errorResponse(400, "step-frame: no emulator is running");
+    if (!window_->emulatorPaused.load())
+      return errorResponse(400, "step-frame: emulator must be paused first");
+
+    window_->emulatorStepOne.store(true, std::memory_order_relaxed);
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "step-frame";
+    resp["frame"] = static_cast<qint64>(window_->emulatorFrameNumber.load());
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── launch-rom ────────────────────────────────────────────────────────
+  // Loads a ROM and starts emulation. Stops any running emulator first.
+  // Path may be absolute, relative to romDirectory, or relative to CWD.
+  if (action == "launch-rom") {
+    const QString rawPath = params["path"].toString().trimmed();
+    if (rawPath.isEmpty())
+      return errorResponse(400, "launch-rom: missing 'path' param");
+
+    // Resolve path: absolute → as-is; relative → try romDirectory, workspace
+    // root, and workspace test_roms/ (binary lives at build/bin/AIOServer so
+    // ../../ is the workspace root).
+    QString resolved;
+    if (QFileInfo(rawPath).isAbsolute()) {
+      resolved = rawPath;
+    } else {
+      const QString workspaceRoot =
+          QDir(QCoreApplication::applicationDirPath() + "/../..")
+              .canonicalPath();
+      const QStringList candidates = {
+          QDir(window_->romDirectory).absoluteFilePath(rawPath),
+          QDir::current().absoluteFilePath(rawPath),
+          QDir(workspaceRoot).absoluteFilePath(rawPath),
+          QDir(workspaceRoot + "/test_roms").absoluteFilePath(rawPath),
+      };
+      for (const QString &c : candidates) {
+        if (QFileInfo::exists(c)) {
+          resolved = c;
+          break;
+        }
+      }
+    }
+    if (resolved.isEmpty() || !QFileInfo::exists(resolved))
+      return errorResponse(404, "launch-rom: file not found: " + rawPath);
+
+    // Detect emulator type from extension.
+    const QString lower = resolved.toLower();
+    MainWindow::EmulatorType emuType = MainWindow::EmulatorType::None;
+    if (lower.endsWith(".gba"))
+      emuType = MainWindow::EmulatorType::GBA;
+    else if (lower.endsWith(".bin") || lower.endsWith(".cue") ||
+             lower.endsWith(".iso") || lower.endsWith(".img"))
+      emuType = MainWindow::EmulatorType::PS1;
+    else
+      return errorResponse(400, "launch-rom: unrecognized extension "
+                                "(supported: .gba .bin .cue .iso .img)");
+
+    // Stop any currently-running emulator cleanly.
+    if (window_->emulatorRunning.load()) {
+      window_->StopEmulatorThread();
+      window_->displayTimer->stop();
+    }
+
+    window_->currentEmulator = emuType;
+    QMetaObject::invokeMethod(
+        window_, [w = window_, path = resolved]() { w->startGame(path); },
+        Qt::QueuedConnection);
+
+    const char *emuNames[] = {"none", "GBA", "Switch", "PS1"};
+    int emuIdx = static_cast<int>(emuType);
+
+    QJsonObject evData;
+    evData["path"] = resolved;
+    evData["emulatorType"] = emuNames[emuIdx];
+    appendEvent("launch_rom", evData);
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "launch-rom";
+    resp["path"] = resolved;
+    resp["emulatorType"] = emuNames[emuIdx];
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── launch-steam-game ──────────────────────────────────────────────────
+  if (action == "launch-steam-game") {
+    const QString steamAppId = params["appId"].toString().trimmed();
+    if (steamAppId.isEmpty())
+      return errorResponse(400, "launch-steam-game: missing 'appId' param");
+
+    if (window_->steamService_)
+      window_->steamService_->refreshInstalledGames();
+
+    QMetaObject::invokeMethod(
+        window_,
+        [w = window_, steamAppId]() { w->launchSteamGame(steamAppId); },
+        Qt::QueuedConnection);
+
+    QJsonObject evData;
+    evData["steamAppId"] = steamAppId;
+    appendEvent("launch_steam_game", evData);
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "launch-steam-game";
+    resp["appId"] = steamAppId;
+    return jsonResponse(200,
+                        QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  }
+
+  // ── launch-installed-game ──────────────────────────────────────────────
+  if (action == "launch-installed-game") {
+    const QString path = params["path"].toString().trimmed();
+    if (path.isEmpty())
+      return errorResponse(400, "launch-installed-game: missing 'path' param");
+
+    QMetaObject::invokeMethod(
+        window_, [w = window_, path]() { w->launchInstalledGame(path); },
+        Qt::QueuedConnection);
+
+    QJsonObject evData;
+    evData["path"] = path;
+    appendEvent("launch_installed_game", evData);
+
+    QJsonObject resp;
+    resp["ok"] = true;
+    resp["action"] = "launch-installed-game";
+    resp["path"] = path;
     return jsonResponse(200,
                         QJsonDocument(resp).toJson(QJsonDocument::Compact));
   }

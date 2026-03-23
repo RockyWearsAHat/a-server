@@ -1183,3 +1183,50 @@ TEST(APUResamplerTest, LinearInterpolationSmooths) {
       << "Linear interpolation should prevent full-amplitude jumps between "
          "consecutive output samples";
 }
+
+// GBATEK APU §Sound Controller - Square 1: when sweep negate is set, the new
+// frequency is computed with 1's complement negation (shadow + ~delta), NOT
+// 2's complement (shadow - delta).  For a non-zero shift this produces a
+// result that is 1 less than the 2's complement version.
+TEST(APUTest, Ch1Sweep_NegateUses1sComplement) {
+  GBAMemory mem;
+  APU apu(mem);
+  mem.SetAPU(&apu);
+  mem.Reset();
+  apu.Reset();
+
+  // Enable master sound.
+  mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
+
+  // SOUND1CNT_L (0x04000060): sweep period=1, negate=1, shift=1
+  //   bits [6:4]=period(1), bit[3]=negate(1), bits[2:0]=shift(1) → 0x19
+  mem.Write16(0x04000060, 0x0019u);
+
+  // SOUND1CNT_H (0x04000062): duty=50%, envelope vol=15 (sustained), no
+  // length. 0xF800
+  mem.Write16(0x04000062, 0xF800u);
+
+  // SOUND1CNT_X (0x04000064): frequency=200, trigger
+  //   bit15=trigger, frequency in bits[10:0]
+  const int initialFreq = 200;
+  mem.Write16(0x04000064, static_cast<uint16_t>(0x8000u | initialFreq));
+  apu.Update(0); // process the trigger write
+
+  // After trigger: sweepShadow == initialFreq == 200, sweepPeriod==1.
+  // frameSequencerCycles starts at 0; steps fire at each FRAME_SEQ_PERIOD.
+  // Step 0 fires at cycle 32768 (length only).
+  // Step 1 fires at cycle 65536 (nothing).
+  // Step 2 fires at cycle 98304 → ClockSweep fires.
+  // 3 * 32768 + 1 to land just past the step-2 boundary.
+  apu.Update(3 * 32768 + 1);
+
+  // Expected 1's complement result:
+  //   delta = 200 >> 1 = 100
+  //   new_freq = 200 + (~100) = 200 + (-101) = 99
+  // 2's complement would give 200 - 100 = 100.
+  const int expected1sComplement = initialFreq + (~(initialFreq >> 1));
+  EXPECT_EQ(apu.GetCh1Frequency(), expected1sComplement)
+      << "Channel 1 sweep negate must use 1's complement (GBATEK APU spec)";
+  EXPECT_NE(apu.GetCh1Frequency(), initialFreq - (initialFreq >> 1))
+      << "Frequency must not use 2's complement subtraction";
+}

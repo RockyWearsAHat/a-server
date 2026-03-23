@@ -46,7 +46,7 @@ bool IsOversizedTriangle(const TriangleRasterVertex &v0,
                          const TriangleRasterVertex &v1,
                          const TriangleRasterVertex &v2) {
   return std::max({v0.x, v1.x, v2.x}) - std::min({v0.x, v1.x, v2.x}) > 1023 ||
-         std::max({v0.y, v1.y, v2.y}) - std::min({v0.y, v1.y, v2.y}) > 1023;
+         std::max({v0.y, v1.y, v2.y}) - std::min({v0.y, v1.y, v2.y}) > 511;
 }
 
 bool NormalizeTriangleForRaster(TriangleRasterVertex &v0,
@@ -311,13 +311,16 @@ void PS1GPU::WriteGP0(uint32_t value) {
         while (true) {
           uint8_t r = static_cast<uint8_t>(
               polyLineLastR +
-              (shadedPolyPendingR - polyLineLastR) * step / totalSteps);
+              ((shadedPolyPendingR - polyLineLastR) * step + totalSteps / 2) /
+                  totalSteps);
           uint8_t g = static_cast<uint8_t>(
               polyLineLastG +
-              (shadedPolyPendingG - polyLineLastG) * step / totalSteps);
+              ((shadedPolyPendingG - polyLineLastG) * step + totalSteps / 2) /
+                  totalSteps);
           uint8_t b = static_cast<uint8_t>(
               polyLineLastB +
-              (shadedPolyPendingB - polyLineLastB) * step / totalSteps);
+              ((shadedPolyPendingB - polyLineLastB) * step + totalSteps / 2) /
+                  totalSteps);
           PutPixel(cx, cy, ColorToVRAM(r, g, b));
           if (cx == x1 && cy == y1)
             break;
@@ -824,11 +827,16 @@ void PS1GPU::GP0_TextureWindow(uint32_t cmd) {
 void PS1GPU::GP0_DrawAreaTopLeft(uint32_t cmd) {
   drawAreaLeft = cmd & 0x3FF;
   drawAreaTop = (cmd >> 10) & 0x1FF;
+  if constexpr (Trace::GPU_CMD)
+    LogDebug("GP0(E3) DrawAreaTopLeft: left=%u top=%u", drawAreaLeft, drawAreaTop);
 }
 
 void PS1GPU::GP0_DrawAreaBottomRight(uint32_t cmd) {
   drawAreaRight = cmd & 0x3FF;
   drawAreaBottom = (cmd >> 10) & 0x1FF;
+  if constexpr (Trace::GPU_CMD)
+    LogDebug("GP0(E4) DrawAreaBottomRight: right=%u bottom=%u", drawAreaRight,
+             drawAreaBottom);
 }
 
 void PS1GPU::GP0_DrawOffset(uint32_t cmd) {
@@ -971,8 +979,6 @@ void PS1GPU::GP0_TexturedTriangle(const std::vector<uint32_t> &params,
   TriangleRasterVertex vtx0{x0, y0, 0, 0, 0, u0, v0};
   TriangleRasterVertex vtx1{x1, y1, 0, 0, 0, u1, v1};
   TriangleRasterVertex vtx2{x2, y2, 0, 0, 0, u2, v2};
-  if (IsOversizedTriangle(vtx0, vtx1, vtx2))
-    return;
 
   int32_t area = 0;
   if (!NormalizeTriangleForRaster(vtx0, vtx1, vtx2, area))
@@ -1228,8 +1234,6 @@ void PS1GPU::GP0_ShadedTexturedTriangle(const std::vector<uint32_t> &params,
   TriangleRasterVertex vtx0{x0, y0, r0, g0, b0, u0, v0};
   TriangleRasterVertex vtx1{x1, y1, r1, g1, b1, u1, v1};
   TriangleRasterVertex vtx2{x2, y2, r2, g2, b2, u2, v2};
-  if (IsOversizedTriangle(vtx0, vtx1, vtx2))
-    return;
 
   int32_t area = 0;
   if (!NormalizeTriangleForRaster(vtx0, vtx1, vtx2, area))
@@ -2080,10 +2084,6 @@ void PS1GPU::RasterizeTriangle(int16_t x0, int16_t y0, uint8_t r0, uint8_t g0,
   TriangleRasterVertex vtx0{x0, y0, r0, g0, b0};
   TriangleRasterVertex vtx1{x1, y1, r1, g1, b1};
   TriangleRasterVertex vtx2{x2, y2, r2, g2, b2};
-
-  // X spans a signed 11-bit range, while Y spans a signed 10-bit range.
-  if (IsOversizedTriangle(vtx0, vtx1, vtx2))
-    return;
 
   int32_t area = 0;
   if (!NormalizeTriangleForRaster(vtx0, vtx1, vtx2, area))

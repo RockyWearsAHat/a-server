@@ -80,11 +80,24 @@ private:
   // Transfer counters for debugging
   std::array<uint32_t, DMA::NUM_CHANNELS> transferCounts{};
 
+  // ─── Cycle Stall Tracking ────────────────────────────────────────────
+  // Cycles consumed by the last DMA transfer; consumed by PS1::Step.
+  uint32_t pendingCycles = 0;
+
+public:
+  // Returns and clears accumulated DMA stall cycles for this step.
+  uint32_t GetAndClearPendingCycles() {
+    uint32_t c = pendingCycles;
+    pendingCycles = 0;
+    return c;
+  }
+
+private:
   // ─── Transfer Execution ─────────────────────────────────────────────
   void CheckAndStartTransfer(uint32_t channelIndex);
   void DoTransfer(uint32_t channelIndex);
-  void DoBlockTransfer(uint32_t channelIndex);
-  void DoLinkedListTransfer(uint32_t channelIndex);
+  uint32_t DoBlockTransfer(uint32_t channelIndex);      // Returns word count
+  uint32_t DoLinkedListTransfer(uint32_t channelIndex); // Returns word count
 
   bool IsChannelEnabled(uint32_t channelIndex) const;
   void SetIRQFlag(uint32_t channelIndex);

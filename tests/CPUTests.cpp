@@ -5683,3 +5683,139 @@ TEST_F(CPUTest, Pipeline_SelfModifyingCode) {
          "the old instruction to be prefetched before self-modifying code "
          "completes.";
 }
+
+// ARM7TDMI TRM §4.4: STM with R15 in the register list stores
+// instruction_address + 12. The emulator advances registers[15] to
+// instrAddr + 4 before Decode, so the STM code must add 8 to get the
+// architecturally correct value.
+TEST_F(CPUTest, STM_StoresPC_Plus12) {
+  // Place STM instruction at 0x08000000 (ROM base, where PC starts).
+  // STMIA R0, {R15}  (bit 15 set in reglist, W=0, P=0, U=1)
+  // Encoding: cond=AL(0xE) | 100(0x4) | P=0 U=1 S=0 W=0 L=0 | Rn=0 | reglist
+  // = 0xE8800000 | Rn<<16 | reglist
+  // Rn = R1 (index 1), reglist = 0x8000 (R15 only)
+  // 0xE8810000 | 0x8000 = 0xE8818000
+  // SetRegister here: R1 = EWRAM base 0x02000000 (store destination)
+  cpu.SetRegister(1, 0x02000000);
+
+  // Write STMIA R1, {R15} at ROM 0x08000000
+  const uint32_t instrAddr = 0x08000000;
+  memory.WriteROM32(instrAddr, 0xE8818000u);
+  cpu.FlushPipeline();
+  cpu.Step();
+
+  // ARM7TDMI TRM: STM stores instrAddr + 12 for the GBA's ARM7TDMI chip.
+  const uint32_t stored = memory.Read32(0x02000000);
+  EXPECT_EQ(stored, instrAddr + 12)
+      << "STM with R15 should store instruction_address + 12 per ARM7TDMI TRM";
+}
+
+// ARM7TDMI has 7 processor modes; FIQ, Abort, and Undefined each have their
+// own banked SP/LR/SPSR.  Switching into one of these modes must not corrupt
+// the registers of the previous mode, and switching back must restore them.
+TEST_F(CPUTest, SwitchMode_FIQ_BanksRegisters) {
+  // Start in System mode (the reset default).
+  ASSERT_EQ(cpu.GetCPSR() & 0x1F, 0x1Fu); // System
+
+  // Set distinctive SP and LR in System mode.
+  cpu.SetRegister(13, 0xDEAD1300u);
+  cpu.SetRegister(14, 0xDEAD1400u);
+
+  // Switch to FIQ mode — FIQ has its own SP/LR and has no link to System SP/LR.
+  cpu.SwitchModeForTest(CPUMode::FIQ);
+  EXPECT_EQ(cpu.GetCPSR() & 0x1Fu, CPUMode::FIQ);
+
+  // FIQ SP/LR start as 0 (freshly initialized bank).
+  EXPECT_EQ(cpu.GetRegister(13), 0u) << "FIQ SP should come from fiq bank";
+  EXPECT_EQ(cpu.GetRegister(14), 0u) << "FIQ LR should come from fiq bank";
+
+  // Write into FIQ-banked SP/LR.
+  cpu.SetRegister(13, 0xF19A0000u);
+  cpu.SetRegister(14, 0xF19B0000u);
+
+  // Return to System mode — System SP/LR must be restored.
+  cpu.SwitchModeForTest(CPUMode::SYSTEM);
+  EXPECT_EQ(cpu.GetCPSR() & 0x1Fu, CPUMode::SYSTEM);
+  EXPECT_EQ(cpu.GetRegister(13), 0xDEAD1300u)
+      << "System SP must be restored after leaving FIQ";
+  EXPECT_EQ(cpu.GetRegister(14), 0xDEAD1400u)
+      << "System LR must be restored after leaving FIQ";
+
+  // Re-enter FIQ — the values written above should still be in the FIQ bank.
+  cpu.SwitchModeForTest(CPUMode::FIQ);
+  EXPECT_EQ(cpu.GetRegister(13), 0xF19A0000u)
+      << "FIQ SP should survive round-trip through System mode";
+  EXPECT_EQ(cpu.GetRegister(14), 0xF19B0000u)
+      << "FIQ LR should survive round-trip through System mode";
+}
+
+TEST_F(CPUTest, SwitchMode_FIQ_BanksR8toR12) {
+  // FIQ is the only ARM mode that banks R8–R12 in addition to R13/R14.
+  cpu.SetRegister(8, 0xAABB0008u);
+  cpu.SetRegister(9, 0xAABB0009u);
+  cpu.SetRegister(10, 0xAABB000Au);
+  cpu.SetRegister(11, 0xAABB000Bu);
+  cpu.SetRegister(12, 0xAABB000Cu);
+
+  cpu.SwitchModeForTest(CPUMode::FIQ);
+  // FIQ R8–R12 start at 0; user values must have been saved.
+  for (int r = 8; r <= 12; ++r) {
+    EXPECT_EQ(cpu.GetRegister(r), 0u)
+        << "R" << r << " should now be from FIQ bank (initialized to 0)";
+  }
+
+  // Set FIQ-specific R8–R12.
+  cpu.SetRegister(8, 0xF1900008u);
+  cpu.SetRegister(9, 0xF1900009u);
+  cpu.SetRegister(10, 0xF190000Au);
+  cpu.SetRegister(11, 0xF190000Bu);
+  cpu.SetRegister(12, 0xF190000Cu);
+
+  // Return to System — user R8–R12 must be restored.
+  cpu.SwitchModeForTest(CPUMode::SYSTEM);
+  EXPECT_EQ(cpu.GetRegister(8), 0xAABB0008u);
+  EXPECT_EQ(cpu.GetRegister(9), 0xAABB0009u);
+  EXPECT_EQ(cpu.GetRegister(10), 0xAABB000Au);
+  EXPECT_EQ(cpu.GetRegister(11), 0xAABB000Bu);
+  EXPECT_EQ(cpu.GetRegister(12), 0xAABB000Cu);
+}
+
+TEST_F(CPUTest, SwitchMode_Undefined_BanksRegisters) {
+  cpu.SetRegister(13, 0xDEAD1300u);
+  cpu.SetRegister(14, 0xDEAD1400u);
+
+  cpu.SwitchModeForTest(CPUMode::UNDEFINED);
+  EXPECT_EQ(cpu.GetCPSR() & 0x1Fu, CPUMode::UNDEFINED);
+  EXPECT_EQ(cpu.GetRegister(13), 0u)
+      << "Undefined SP should start from und bank";
+  EXPECT_EQ(cpu.GetRegister(14), 0u)
+      << "Undefined LR should start from und bank";
+
+  cpu.SetRegister(13, 0xC0DE1300u);
+  cpu.SetRegister(14, 0xC0DE1400u);
+
+  cpu.SwitchModeForTest(CPUMode::SYSTEM);
+  EXPECT_EQ(cpu.GetRegister(13), 0xDEAD1300u)
+      << "System SP must be restored after leaving Undefined mode";
+  EXPECT_EQ(cpu.GetRegister(14), 0xDEAD1400u)
+      << "System LR must be restored after leaving Undefined mode";
+}
+
+TEST_F(CPUTest, SwitchMode_Abort_BanksRegisters) {
+  cpu.SetRegister(13, 0xDEAD1300u);
+  cpu.SetRegister(14, 0xDEAD1400u);
+
+  cpu.SwitchModeForTest(CPUMode::ABORT);
+  EXPECT_EQ(cpu.GetCPSR() & 0x1Fu, CPUMode::ABORT);
+  EXPECT_EQ(cpu.GetRegister(13), 0u) << "Abort SP should start from abt bank";
+  EXPECT_EQ(cpu.GetRegister(14), 0u) << "Abort LR should start from abt bank";
+
+  cpu.SetRegister(13, 0xAB031300u);
+  cpu.SetRegister(14, 0xAB031400u);
+
+  cpu.SwitchModeForTest(CPUMode::SYSTEM);
+  EXPECT_EQ(cpu.GetRegister(13), 0xDEAD1300u)
+      << "System SP must be restored after leaving Abort mode";
+  EXPECT_EQ(cpu.GetRegister(14), 0xDEAD1400u)
+      << "System LR must be restored after leaving Abort mode";
+}

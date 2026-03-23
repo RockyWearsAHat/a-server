@@ -76,6 +76,9 @@ public:
   int GetFifoACount() const { return fifoA_Count; }
   int GetFifoBCount() const { return fifoB_Count; }
 
+  // Channel 1 frequency accessor (for sweep accuracy tests)
+  int GetCh1Frequency() const { return hwCh1.frequency; }
+
   // Ring buffer fill level (for audio timing synchronization)
   // Returns a value from 0.0 (empty) to 1.0 (full)
   float GetRingBufferFillRatio() const {

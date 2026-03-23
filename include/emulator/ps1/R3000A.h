@@ -115,6 +115,9 @@ private:
   uint64_t instructionCount = 0;
   uint64_t cycleCount = 0;
   bool halted = false;
+  // Extra cycles consumed beyond the base 1-cycle-per-instruction
+  // (GTE command stall, MULT/DIV latency). Reset each Step().
+  int pendingExtraCycles = 0;
 
   // ─── Instruction Cache (I-cache) ───────────────────────────────────
   // PS1 R3000A: 4KB, 256 lines × 4 words, direct-mapped

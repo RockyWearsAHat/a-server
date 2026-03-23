@@ -13,6 +13,7 @@ namespace AIO::Emulator::PS1 {
 
 class PS1Memory;
 class InterruptController;
+class PS1SPU;
 
 class CDROM : public Common::Loggable {
 public:
@@ -33,6 +34,9 @@ public:
 
   // ─── Timing ─────────────────────────────────────────────────────────
   void Tick(uint32_t cpuCycles);
+
+  // ─── XA-ADPCM Integration ───────────────────────────────────────────
+  void SetSPU(PS1SPU *spuPtr) { spu = spuPtr; }
 
   // ─── Sector-Level Access (for HLE BIOS EXE loading) ─────────────────
   static constexpr uint32_t RAW_SECTOR_SIZE = 2352;
@@ -107,6 +111,13 @@ private:
   uint8_t xaFilterFile = 0;
   uint8_t xaFilterChannel = 0;
 
+  // ─── XA-ADPCM Decoder State ─────────────────────────────────────────
+  // SPU pointer for delivering decoded XA audio (set via SetSPU)
+  PS1SPU *spu = nullptr;
+  // Per-channel ADPCM filter history (prev1[0], prev2[1])
+  int16_t xaPrevL[2] = {0, 0};
+  int16_t xaPrevR[2] = {0, 0};
+
   // ─── Delayed Second Response (for multi-response commands) ──────────
   bool secondResponsePending = false;
   uint32_t secondResponseDelay = 0;
@@ -139,6 +150,11 @@ private:
   void CmdGetlocP();
   void CmdGetTN();
   void CmdGetTD();
+
+  // ─── XA-ADPCM Decode ────────────────────────────────────────────────
+  // Decode one 2304-byte XA audio sector and push samples to the SPU.
+  // audioData must point to raw-sector byte 24 (start of Mode2 data).
+  void DecodeXASector(const uint8_t *audioData, uint8_t coding);
 
   void PushResponse(uint8_t value);
   void SetInterrupt(uint8_t type);

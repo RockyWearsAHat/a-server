@@ -9,10 +9,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QSettings>
-#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 #include <QTextStream>
@@ -40,8 +38,6 @@ constexpr auto kSettingsApp = "GBAEmulator";
 constexpr auto kYouTubeReadonlyScope =
     "https://www.googleapis.com/auth/youtube.readonly";
 constexpr auto kDefaultYouTubeProxyUrl = "http://127.0.0.1:8916";
-constexpr qint64 kResolvedStreamCacheTtlMs = 5 * 60 * 1000;
-constexpr size_t kResolvedStreamCacheMaxEntries = 128;
 constexpr int kExtraDiscoveryRailsPerLevel = 2;
 
 struct ExtraDiscoveryRailSpec {
@@ -76,14 +72,6 @@ struct HttpResponse {
   long statusCode = 0;
   std::string body;
 };
-
-struct CachedResolvedStream {
-  YouTubeResolvedStream stream;
-  qint64 expiresAtMs = 0;
-};
-
-std::mutex gResolvedStreamCacheMutex;
-std::unordered_map<std::string, CachedResolvedStream> gResolvedStreamCache;
 
 std::string UrlEncodeQuery(const std::string &text) {
   std::ostringstream enc;
@@ -157,149 +145,6 @@ std::string TrimTrailingSlash(const std::string &value) {
     --end;
   }
   return value.substr(0, end);
-}
-
-QString ResolveYtDlpExecutable() {
-  const QString configured = qEnvironmentVariable("AIO_YT_DLP_PATH").trimmed();
-  if (!configured.isEmpty()) {
-    return QFileInfo(configured).absoluteFilePath();
-  }
-
-  const QString discovered = QStandardPaths::findExecutable(
-      QStringLiteral("yt-dlp"),
-      {QStringLiteral("/opt/homebrew/bin"), QStringLiteral("/usr/local/bin")});
-  if (!discovered.isEmpty()) {
-    return discovered;
-  }
-
-  return QStringLiteral("yt-dlp");
-}
-
-std::optional<YouTubeResolvedStream>
-TryGetCachedPlaybackStream(const std::string &videoId) {
-  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-  std::scoped_lock lock(gResolvedStreamCacheMutex);
-
-  const auto it = gResolvedStreamCache.find(videoId);
-  if (it == gResolvedStreamCache.end()) {
-    return std::nullopt;
-  }
-  if (it->second.expiresAtMs <= nowMs) {
-    gResolvedStreamCache.erase(it);
-    return std::nullopt;
-  }
-
-  return it->second.stream;
-}
-
-void CacheResolvedPlaybackStream(const std::string &videoId,
-                                 const YouTubeResolvedStream &stream) {
-  std::scoped_lock lock(gResolvedStreamCacheMutex);
-
-  if (gResolvedStreamCache.size() >= kResolvedStreamCacheMaxEntries) {
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    for (auto it = gResolvedStreamCache.begin();
-         it != gResolvedStreamCache.end();) {
-      if (it->second.expiresAtMs <= nowMs) {
-        it = gResolvedStreamCache.erase(it);
-      } else {
-        ++it;
-      }
-    }
-
-    if (gResolvedStreamCache.size() >= kResolvedStreamCacheMaxEntries) {
-      gResolvedStreamCache.erase(gResolvedStreamCache.begin());
-    }
-  }
-
-  gResolvedStreamCache[videoId] = {stream, QDateTime::currentMSecsSinceEpoch() +
-                                               kResolvedStreamCacheTtlMs};
-}
-
-std::optional<YouTubeResolvedStream>
-ResolvePlaybackStreamLocally(const std::string &videoId) {
-  if (videoId.empty()) {
-    return std::nullopt;
-  }
-
-  if (const auto cached = TryGetCachedPlaybackStream(videoId);
-      cached.has_value()) {
-    return cached;
-  }
-
-  const QString executable = ResolveYtDlpExecutable();
-  const QString videoUrl = QStringLiteral("https://www.youtube.com/watch?v=%1")
-                               .arg(QString::fromStdString(videoId));
-  const QStringList args = {
-      QStringLiteral("--dump-single-json"),
-      QStringLiteral("--no-playlist"),
-      QStringLiteral("--no-warnings"),
-      QStringLiteral("--format"),
-      QStringLiteral("best[height<=720][ext=mp4][acodec!=none][vcodec!=none]/"
-                     "best[height<=720][acodec!=none][vcodec!=none]/"
-                     "best[height<=1080][ext=mp4][acodec!=none][vcodec!=none]/"
-                     "best[height<=1080][acodec!=none][vcodec!=none]/"
-                     "best[ext=mp4][acodec!=none][vcodec!=none]/"
-                     "best[acodec!=none][vcodec!=none]"),
-      videoUrl,
-  };
-
-  QProcess process;
-  process.setProgram(executable);
-  process.setArguments(args);
-  process.start();
-
-  if (!process.waitForStarted(5000)) {
-    std::cerr << "[YouTube] Failed to start yt-dlp from "
-              << executable.toStdString() << std::endl;
-    return std::nullopt;
-  }
-
-  if (!process.waitForFinished(45000)) {
-    process.kill();
-    process.waitForFinished(2000);
-    std::cerr << "[YouTube] yt-dlp timed out while resolving " << videoId
-              << std::endl;
-    return std::nullopt;
-  }
-
-  const QByteArray stdoutBytes = process.readAllStandardOutput();
-  const QByteArray stderrBytes = process.readAllStandardError();
-  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-    std::cerr << "[YouTube] yt-dlp failed for video " << videoId << ": "
-              << stderrBytes.trimmed().toStdString() << std::endl;
-    return std::nullopt;
-  }
-
-  QJsonParseError parseError;
-  const auto doc = QJsonDocument::fromJson(stdoutBytes.trimmed(), &parseError);
-  if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
-    std::cerr << "[YouTube] yt-dlp returned invalid JSON for video " << videoId
-              << std::endl;
-    return std::nullopt;
-  }
-
-  const auto obj = doc.object();
-  const QString streamUrl = obj.value(QStringLiteral("url")).toString();
-  if (streamUrl.isEmpty()) {
-    std::cerr << "[YouTube] yt-dlp returned no direct stream URL for video "
-              << videoId << std::endl;
-    return std::nullopt;
-  }
-
-  YouTubeResolvedStream resolved;
-  resolved.streamUrl = streamUrl.toStdString();
-  resolved.title = obj.value(QStringLiteral("title"))
-                       .toString(QStringLiteral("YouTube"))
-                       .toStdString();
-  resolved.durationSeconds =
-      std::max(0, obj.value(QStringLiteral("duration")).toInt());
-  resolved.thumbnailUrl =
-      obj.value(QStringLiteral("thumbnail")).toString().toStdString();
-  resolved.webpageUrl =
-      obj.value(QStringLiteral("webpage_url")).toString(videoUrl).toStdString();
-  CacheResolvedPlaybackStream(videoId, resolved);
-  return resolved;
 }
 
 bool EnvFlagEnabled(const char *name) {
@@ -882,8 +727,9 @@ std::string YouTubeService::getAccountAvatarUrl() {
 }
 
 std::optional<YouTubeResolvedStream>
-YouTubeService::resolvePlaybackStream(const std::string &videoId) {
-  return ResolvePlaybackStreamLocally(videoId);
+YouTubeService::resolvePlaybackStream(const std::string & /*videoId*/) {
+  // Playback now handled by the embedded YouTube web player.
+  return std::nullopt;
 }
 
 std::string YouTubeService::makeApiRequest(const std::string &endpoint,

@@ -127,3 +127,68 @@ TEST_F(PS1TimerTest, TickDotClock_IncrementsDotClockTimer) {
   uint32_t counter = timers->Read32(0x1F801100);
   EXPECT_GT(counter, 0u);
 }
+
+// ─── Sync Modes (NOCASH PSX §Timers) ─────────────────────────────────────
+
+TEST_F(PS1TimerTest, Timer2_SyncMode0_StopsCounter) {
+  // Sync mode 0+3 for T2 = stop counter permanently.
+  // mode = syncEnable(bit0)=1, syncMode(bits1-2)=0 → 0x0001
+  timers->Write32(0x1F801124, 0x0001); // T2 mode: sync enabled, mode 0
+  timers->Tick(1000);
+  EXPECT_EQ(timers->Read32(0x1F801120), 0u)
+      << "T2 sync mode 0 must stop counter";
+}
+
+TEST_F(PS1TimerTest, Timer2_SyncMode3_StopsCounter) {
+  // mode = syncEnable=1, syncMode=3 → bits: 1 | (3<<1) = 0x0007
+  timers->Write32(0x1F801124, 0x0007); // T2 mode: sync enabled, mode 3
+  timers->Tick(1000);
+  EXPECT_EQ(timers->Read32(0x1F801120), 0u)
+      << "T2 sync mode 3 must stop counter";
+}
+
+TEST_F(PS1TimerTest, Timer0_SyncMode0_PausesDuringHBlank) {
+  // mode = syncEnable=1, syncMode=0 → 0x0001
+  timers->Write32(0x1F801104, 0x0001); // T0 mode: sync enabled, mode 0
+  // Simulate HBlank active
+  timers->TickHBlank();
+  // Tick within the HBlank window; T0 should NOT advance
+  timers->Tick(100);
+  EXPECT_EQ(timers->Read32(0x1F801100), 0u)
+      << "T0 sync mode 0 must pause during HBlank";
+}
+
+TEST_F(PS1TimerTest, Timer0_SyncMode0_RunsOutsideHBlank) {
+  timers->Write32(0x1F801104, 0x0001); // T0 sync mode 0
+  // No TickHBlank — hblankActive = false, so counter must advance
+  timers->Tick(100);
+  EXPECT_GT(timers->Read32(0x1F801100), 0u)
+      << "T0 sync mode 0 must count outside HBlank";
+}
+
+TEST_F(PS1TimerTest, Timer1_SyncMode1_ResetsAtVBlank) {
+  // mode = syncEnable=1, syncMode=1 → bits: 1 | (1<<1) = 0x0003
+  timers->Write32(0x1F801114, 0x0003); // T1 mode: sync enabled, mode 1
+  // Advance T1
+  timers->Tick(200);
+  EXPECT_GT(timers->Read32(0x1F801110), 0u); // sanity: counter advanced
+  // Trigger VBlank — mode 1 must reset counter to 0
+  timers->SetVBlankState(true);
+  EXPECT_EQ(timers->Read32(0x1F801110), 0u)
+      << "T1 sync mode 1 must reset counter at VBlank start";
+}
+
+TEST_F(PS1TimerTest, Timer1_SyncMode3_BlockedUntilFirstVBlank) {
+  // mode = syncEnable=1, syncMode=3 → 1 | (3<<1) = 0x0007
+  timers->Write32(0x1F801114, 0x0007);
+  // Before first VBlank T1 must not count
+  timers->Tick(500);
+  EXPECT_EQ(timers->Read32(0x1F801110), 0u)
+      << "T1 sync mode 3 must be stopped before first VBlank";
+  // After first VBlank T1 must free-run
+  timers->SetVBlankState(true);
+  timers->SetVBlankState(false);
+  timers->Tick(100);
+  EXPECT_GT(timers->Read32(0x1F801110), 0u)
+      << "T1 sync mode 3 must free-run after first VBlank";
+}

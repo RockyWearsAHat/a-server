@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": ".github/hooks/scripts/build-gate.sh",
+        "timeout": 120
+      }
+    ]
+  }
+}

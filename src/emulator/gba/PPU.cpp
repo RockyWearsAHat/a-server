@@ -397,7 +397,8 @@ void PPU::Update(int cycles) {
             bg3y_internal |= 0xF0000000;
 
           if (dispstat & 0x8) { // VBlank IRQ Enable
-            uint16_t if_reg = memory.ReadIORegister16Internal(0x202) | 1;
+            uint16_t if_reg =
+                memory.ReadIORegister16Internal(0x202) | 1;
             memory.WriteIORegisterInternal(0x202, if_reg);
           }
 
@@ -1173,50 +1174,74 @@ void PPU::RenderMode4() {
 }
 
 void PPU::RenderMode5() {
-  // Mode 5: 160x128 16bpp Bitmap (direct color), double buffered
-  // Smaller resolution centered on screen
-  // Frame buffer at 0x06000000 (or 0x0600A000 for page 2)
-  // Each pixel is 2 bytes (BGR555)
+  // Mode 5: 160×128 16bpp Bitmap (direct color), double buffered.
+  // BG2 is the active layer.  The 160×128 framebuffer is positioned on the
+  // 240×160 screen via BG2's affine matrix (PA/PB/PC/PD) and reference
+  // points (BGX/BGY).  GBATEK §Video Mode 5; ARM7TDMI TRM §affine BG.
 
   uint16_t dispcnt = ReadRegister(0x00);
   bool page1 = (dispcnt >> 4) & 1; // Bit 4 = Display Frame Select
 
-  uint32_t vramBase = page1 ? 0x0600A000 : 0x06000000;
-
-  // Mode 5 is 160x128, centered would start at (40, 16) on 240x160 screen
-  // But games typically handle positioning themselves
-  // We render the 160x128 area into the top-left for simplicity
-  // (Games may use affine to position it)
-
-  const int MODE5_WIDTH = 160;
-  const int MODE5_HEIGHT = 128;
+  uint32_t vramBase = page1 ? 0x0600A000u : 0x06000000u;
 
   const int bgPriority = ReadRegister(0x0C) & 0x3; // BG2 priority
 
-  if (scanline < MODE5_HEIGHT) {
-    for (int x = 0; x < MODE5_WIDTH && x < SCREEN_WIDTH; ++x) {
+  // BG2 affine parameters in 8.8 fixed-point (register offsets 0x20–0x26).
+  int16_t pa = static_cast<int16_t>(ReadRegister(0x20));
+  int16_t pb = static_cast<int16_t>(ReadRegister(0x22));
+  int16_t pc = static_cast<int16_t>(ReadRegister(0x24));
+  int16_t pd = static_cast<int16_t>(ReadRegister(0x26));
+
+  // Use the internal reference point latched at VBlank and stepped each
+  // scanline by (PB, PD).  This is the same register pair used by the affine
+  // tile-map backgrounds in modes 1 and 2.
+  int32_t cx = bg2x_internal;
+  int32_t cy = bg2y_internal;
+
+  static constexpr int MODE5_WIDTH = 160;
+  static constexpr int MODE5_HEIGHT = 128;
+
+  for (int x = 0; x < SCREEN_WIDTH; ++x) {
+    const int tx = cx >> 8;
+    const int ty = cy >> 8;
+
+    if (tx >= 0 && tx < MODE5_WIDTH && ty >= 0 && ty < MODE5_HEIGHT) {
       if (!IsLayerEnabledAtPixel(x, scanline, 2)) {
+        cx += pa;
+        cy += pc;
         continue;
       }
-      uint32_t addr = vramBase + (scanline * MODE5_WIDTH + x) * 2;
+
+      uint32_t addr =
+          vramBase + static_cast<uint32_t>(ty * MODE5_WIDTH + tx) * 2u;
       uint16_t color = ReadSnapshotVram16(vramSnapshot.data(), addr);
 
-      uint8_t r = (color & 0x1F) << 3;
-      uint8_t g = ((color >> 5) & 0x1F) << 3;
-      uint8_t b = ((color >> 10) & 0x1F) << 3;
+      const uint8_t r = (color & 0x1F) << 3;
+      const uint8_t g = ((color >> 5) & 0x1F) << 3;
+      const uint8_t b = ((color >> 10) & 0x1F) << 3;
 
       const int pixelIndex = scanline * SCREEN_WIDTH + x;
       if (bgPriority <= priorityBuffer[pixelIndex]) {
         underColorBuffer[pixelIndex] = backBuffer[pixelIndex];
         underLayerBuffer[pixelIndex] = layerBuffer[pixelIndex];
-        backBuffer[pixelIndex] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        backBuffer[pixelIndex] = 0xFF000000u |
+                                 (static_cast<uint32_t>(r) << 16) |
+                                 (static_cast<uint32_t>(g) << 8) | b;
         layerBuffer[pixelIndex] = 2;
         objSemiTransparentBuffer[pixelIndex] = 0;
-        priorityBuffer[pixelIndex] = (uint8_t)bgPriority;
+        priorityBuffer[pixelIndex] = static_cast<uint8_t>(bgPriority);
       }
     }
+    // Coordinates outside the 160×128 framebuffer are transparent (backdrop).
+
+    cx += pa;
+    cy += pc;
   }
-  // Scanlines >= 128 will just show backdrop
+
+  // Step the internal reference point for the next scanline.
+  // Per ARM affine BG spec: X reference += PB per scanline, Y ref += PD.
+  bg2x_internal += pb;
+  bg2y_internal += pd;
 }
 
 void PPU::RenderMode1(bool objEnabled) {

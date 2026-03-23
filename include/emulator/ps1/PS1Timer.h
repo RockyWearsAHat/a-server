@@ -51,6 +51,7 @@ public:
   void Tick(uint32_t cpuCycles);
   void TickHBlank();                // Called per scanline for timer 1
   void TickDotClock(uint32_t dots); // Called per dot clock for timer 0
+  void SetVBlankState(bool active); // Called from PS1::Step each step
 
   // ─── Debug ──────────────────────────────────────────────────────────
   void DumpState(std::ostream &os) const;
@@ -64,6 +65,15 @@ private:
   std::array<TimerChannel, Timer::NUM_TIMERS> channels{};
 
   uint32_t timer2Div8Accum = 0;
+
+  // ─── Blank State (for sync mode gating/reset) ─────────────────────
+  bool hblankActive = false;
+  bool vblankActive = false;
+  uint32_t hblankCyclesRemaining = 0;
+  // Sync mode 3: once the first blank is seen, timer switches to free-run
+  bool syncFreeRun[Timer::NUM_TIMERS] = {};
+  // HBlank active duration in CPU cycles (NTSC: ~534/2171 of scanline)
+  static constexpr uint32_t HBLANK_DURATION_CYCLES = 534;
 
   void TickChannel(uint32_t index, uint32_t ticks);
   void CheckIRQ(uint32_t index);

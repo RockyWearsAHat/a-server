@@ -347,3 +347,92 @@ TEST(MemoryMapTest, RomWaitstateMirrors) {
   EXPECT_EQ(mem.Read8(0x08000000u), 0x11u);
   EXPECT_EQ(mem.Read8(0x08000001u), 0x22u);
 }
+
+// Flash save protocol tests
+// GBATEK §GBA Cartridge Flash Memory: two-unlock + command sequences.
+
+static void FlashUnlock(GBAMemory &mem) {
+  mem.Write8(0x0E005555u, 0xAAu); // AA → 0x5555
+  mem.Write8(0x0E002AAAu, 0x55u); // 55 → 0x2AAA
+}
+
+TEST(MemoryMapTest, Flash512_ByteWrite_AndRead) {
+  // Verify the A0 byte-write sequence writes a single byte.
+  GBAMemory mem;
+  mem.Reset();
+  mem.SetSaveType(SaveType::Flash512);
+
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0xA0u); // A0 = byte-write prepare
+  mem.Write8(0x0E001234u, 0x5Cu); // data byte at offset 0x1234
+
+  EXPECT_EQ(mem.Read8(0x0E001234u), 0x5Cu)
+      << "Flash byte-write should persist via A0 command";
+}
+
+TEST(MemoryMapTest, Flash512_SectorErase_ClearsSector) {
+  // GBATEK §Flash: sector erase – unlock, 80@5555, unlock, 30@sector.
+  GBAMemory mem;
+  mem.Reset();
+  mem.SetSaveType(SaveType::Flash512);
+
+  // Pre-fill sector with non-0xFF
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0xA0u);
+  mem.Write8(0x0E000000u, 0x12u);
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0xA0u);
+  mem.Write8(0x0E000001u, 0x34u);
+
+  ASSERT_EQ(mem.Read8(0x0E000000u), 0x12u) << "Setup: byte 0 should be 0x12";
+  ASSERT_EQ(mem.Read8(0x0E000001u), 0x34u) << "Setup: byte 1 should be 0x34";
+
+  // Execute sector erase at offset 0x0000 (sector base = 0x0000)
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0x80u); // erase-mode command
+  FlashUnlock(mem);
+  mem.Write8(0x0E000000u, 0x30u); // 30 → sector base
+
+  EXPECT_EQ(mem.Read8(0x0E000000u), 0xFFu)
+      << "Sector erase must set byte 0 to 0xFF";
+  EXPECT_EQ(mem.Read8(0x0E000001u), 0xFFu)
+      << "Sector erase must set byte 1 to 0xFF";
+  EXPECT_EQ(mem.Read8(0x0E000FFFu), 0xFFu)
+      << "Sector erase must reach last byte of 4KB sector";
+}
+
+TEST(MemoryMapTest, Flash512_ChipErase_ClearsAllBytes) {
+  // GBATEK §Flash: chip erase – unlock, 80@5555, unlock, 10@5555.
+  // This test specifically verifies the fix for the unreachable chip-erase bug:
+  // the second unlock (state==2) was overwriting flashCmd=0x80 with 0x10
+  // before the erase check could fire.
+  GBAMemory mem;
+  mem.Reset();
+  mem.SetSaveType(SaveType::Flash512);
+
+  // Write to two different sectors
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0xA0u);
+  mem.Write8(0x0E000000u, 0xA5u);
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0xA0u);
+  mem.Write8(0x0E009000u, 0xB7u);
+
+  ASSERT_NE(mem.Read8(0x0E000000u), 0xFFu)
+      << "Setup: offset 0 should be written";
+  ASSERT_NE(mem.Read8(0x0E009000u), 0xFFu)
+      << "Setup: offset 0x9000 should be written";
+
+  // Execute chip erase: unlock, 80@5555, unlock, 10@5555
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0x80u); // erase-mode command
+  FlashUnlock(mem);
+  mem.Write8(0x0E005555u, 0x10u); // chip erase trigger
+
+  EXPECT_EQ(mem.Read8(0x0E000000u), 0xFFu)
+      << "Chip erase must reset offset 0 to 0xFF";
+  EXPECT_EQ(mem.Read8(0x0E009000u), 0xFFu)
+      << "Chip erase must reset offset 0x9000 to 0xFF";
+  EXPECT_EQ(mem.Read8(0x0E00FFFFu), 0xFFu)
+      << "Chip erase must reset last byte of 64KB to 0xFF";
+}

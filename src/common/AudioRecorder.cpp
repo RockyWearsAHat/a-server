@@ -1,6 +1,7 @@
 #include "common/AudioRecorder.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 
@@ -73,6 +74,9 @@ bool AudioRecorder::IsRecording() const {
 
 void AudioRecorder::RecordSamples(const int16_t *samples,
                                   int numStereoSamples) {
+  // Always update live metrics, regardless of recording state.
+  FeedSamples(samples, numStereoSamples);
+
   if (!recording_.load(std::memory_order_acquire) || !samples ||
       numStereoSamples <= 0) {
     return;
@@ -83,6 +87,92 @@ void AudioRecorder::RecordSamples(const int16_t *samples,
   int totalSamples = numStereoSamples * config_.channels;
   sampleBuffer_.insert(sampleBuffer_.end(), samples, samples + totalSamples);
   totalSamples_.fetch_add(numStereoSamples, std::memory_order_relaxed);
+}
+
+void AudioRecorder::FeedSamples(const int16_t *samples, int numStereoSamples) {
+  if (!samples || numStereoSamples <= 0)
+    return;
+
+  // Window size = 1 second of stereo data at the configured rate.
+  // Floor at 1024 to avoid divide-by-zero when sample rate is not yet set.
+  const int windowSize = std::max(config_.sampleRate, 1024);
+
+  // Accumulate into current window.
+  // This runs on the SDL audio callback thread — no lock needed for writes;
+  // only the snapshot publish below takes metrics_mutex_.
+  for (int i = 0; i < numStereoSamples; ++i) {
+    const int16_t L = samples[i * 2 + 0];
+    const int16_t R = samples[i * 2 + 1];
+
+    const double dL = static_cast<double>(L);
+    const double dR = static_cast<double>(R);
+    windSumSqLeft_ += dL * dL;
+    windSumSqRight_ += dR * dR;
+
+    const int absL = std::abs(static_cast<int>(L));
+    const int absR = std::abs(static_cast<int>(R));
+    if (absL > windPeakLeft_)
+      windPeakLeft_ = absL;
+    if (absR > windPeakRight_)
+      windPeakRight_ = absR;
+
+    // Silence: both channels below ~1.5% of full scale (512/32767)
+    if (absL < 512 && absR < 512)
+      windSilentCount_++;
+
+    // Clipping: either channel within 7 of max (≥32760)
+    if (absL >= 32760 || absR >= 32760)
+      windClipCount_++;
+
+    windSampleCount_++;
+  }
+  metricsActive_ = true;
+
+  // Publish snapshot when a full window has been accumulated.
+  if (windSampleCount_ >= windowSize) {
+    AudioMetrics snap;
+    snap.sampleRate = config_.sampleRate;
+    snap.windowSamples = windSampleCount_;
+    snap.active = true;
+
+    const double rmsL = std::sqrt(windSumSqLeft_ / windSampleCount_) / 32767.0;
+    const double rmsR = std::sqrt(windSumSqRight_ / windSampleCount_) / 32767.0;
+    snap.rmsLeft = static_cast<float>(rmsL);
+    snap.rmsRight = static_cast<float>(rmsR);
+
+    const double rmsMax = std::max(rmsL, rmsR);
+    snap.rmsDb =
+        (rmsMax > 0.0) ? static_cast<float>(20.0 * std::log10(rmsMax)) : -96.0f;
+
+    snap.silenceRatio = static_cast<float>(windSilentCount_) /
+                        static_cast<float>(windSampleCount_);
+    snap.clippingRatio = static_cast<float>(windClipCount_) /
+                         static_cast<float>(windSampleCount_);
+    snap.peakLeft = windPeakLeft_;
+    snap.peakRight = windPeakRight_;
+
+    {
+      std::lock_guard<std::mutex> lk(metrics_mutex_);
+      metrics_snapshot_ = snap;
+    }
+
+    // Reset window accumulators for the next window.
+    windSumSqLeft_ = 0.0;
+    windSumSqRight_ = 0.0;
+    windPeakLeft_ = 0;
+    windPeakRight_ = 0;
+    windSilentCount_ = 0;
+    windClipCount_ = 0;
+    windSampleCount_ = 0;
+  }
+}
+
+AudioRecorder::AudioMetrics AudioRecorder::GetMetrics() const {
+  std::lock_guard<std::mutex> lk(metrics_mutex_);
+  AudioMetrics snap = metrics_snapshot_;
+  snap.sampleRate = config_.sampleRate;
+  snap.active = metricsActive_;
+  return snap;
 }
 
 void AudioRecorder::RecordRawBytes(const uint8_t *data, int bytes) {

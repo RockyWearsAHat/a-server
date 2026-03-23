@@ -262,6 +262,11 @@ private:
   static void DispatchNextCallbackOrResume(PS1 &ps1);
 
   // EvCB RAM sync helpers
+  // Fire all enabled events with matching classId, regardless of spec.
+  // Used for library-defined event classes where all registered events
+  // fire on the same hardware condition (e.g. class F0000011h on VBlank).
+  static void DeliverEventClass(uint32_t classId);
+
   static void WriteEvCBToRAM(int slot);
   static void ReadEvCBFromRAM(int slot);
   static constexpr uint32_t EvCBStatusFree = 0x0000;

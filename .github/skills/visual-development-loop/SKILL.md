@@ -8,6 +8,19 @@ user-invocable: false
 
 Use this skill when code inspection alone cannot answer whether the rendered output is correct.
 
+## Emulator Runtime Verification
+
+This skill also covers emulator accuracy verification — not just UI appearance. When checking whether emulators work with real ROMs:
+
+- Boot app: `python3 scripts/visual_dev_loop.py boot --no-focus`
+- Launch ROM via RC: `python3 scripts/visual_dev_loop.py execute launch-rom --params '{"rom":"<filename>"}'` — resolves against `test_roms/` automatically
+- Poll emulator state: `poll-state --endpoint emulator` → verify `frameNumber` advances, `running` is true, no crashes
+- Pause / step: `execute pause`, `execute step-frame`, `execute resume`
+- Stop ROM: `execute stop-game` → returns to home screen
+- Headless smoke test: `./build/bin/AIOServer --headless --rom <path> --headless-max-ms 5000 --headless-dump-ppm /tmp/frame.ppm --headless-assert-nonblack`
+- Screenshot + judge: capture rendered game frame, use MCP `analyze_images` to verify it matches expected game visuals
+- Available ROMs: `test_roms/` (workspace-relative) — GBA (`.gba`), PS1 (`.bin/.cue` in subdirs), Switch (`.xci`)
+
 ## Choose The Cheapest Sufficient Check First
 
 - If the question is about widget existence, properties, layout wiring, or QSS selectors, read the source first.
@@ -16,8 +29,9 @@ Use this skill when code inspection alone cannot answer whether the rendered out
 
 ## Two Mechanisms
 
-- App control: run `python3 scripts/visual_dev_loop.py <cmd>` in the terminal for `boot`, `screenshot`, `snapshot`, `key`, `click`, `session --plan`, `status`, `poll-state`, and `kill`.
-- Image judgment: call `analyze_images` (MCP tool `mcp_aioserver-vis_analyze_images`) with 1–10 image paths and a freeform goal.
+- App control: run `python3 scripts/visual_dev_loop.py <cmd>` in the terminal for `boot`, `screenshot`, `snapshot`, `key`, `click`, `execute`, `session --plan`, `status`, `poll-state`, `poll-events`, and `kill`.
+- Image judgment: call `analyze_images` through the `aioserver-vision/*` MCP tool namespace with 1–10 image paths and a freeform goal.
+- Judgment criteria: follow the AAA Visual Design Audit Standard (`.github/instructions/visual-audit.instructions.md`). Use the structured output format with category scores.
 
 Do not substitute terminal `analyze` output for MCP image judgment.
 
@@ -30,9 +44,15 @@ python3 scripts/visual_dev_loop.py poll-state --endpoint state
 python3 scripts/visual_dev_loop.py poll-state --endpoint navigation
 python3 scripts/visual_dev_loop.py poll-state --endpoint input
 python3 scripts/visual_dev_loop.py poll-state --endpoint emulator
+python3 scripts/visual_dev_loop.py poll-state --endpoint audio
+python3 scripts/visual_dev_loop.py poll-state --endpoint page
+python3 scripts/visual_dev_loop.py poll-state --endpoint widgets
+python3 scripts/visual_dev_loop.py poll-events --limit 20
 ```
 
-Endpoints: `state` (full snapshot: page, inputMode, focusWidget, navigation, geometry), `navigation` (homeGrid tiles, hoveredIndex), `input` (mouse/controller mode, pressed buttons), `emulator` (type, running, paused, frameNumber).
+Endpoints: `state` (full snapshot: page, inputMode, focusWidget, navigation, geometry), `navigation` (homeGrid tiles, hoveredIndex), `input` (mouse/controller mode, pressed buttons), `emulator` (type, running, paused, frameNumber), `audio` (playing, sampleRate, channels), `page` (per-page structured state: gameStore/gamesLibrary/streamingHub objects), `widgets` (visible widget tree).
+
+`poll-events [--since <epochMs>] [--limit <N>]` streams the ring buffer (last 500 events): `navigate_requested`, `page_changed`, `emulator_started/stopped/paused/resumed`, `audio_silence_detected/resumed`, `key_injected`, `click_injected`, `launch_rom`, `game_stopped`.
 
 Use `boot --no-focus` to launch without stealing focus from the user's current work.
 

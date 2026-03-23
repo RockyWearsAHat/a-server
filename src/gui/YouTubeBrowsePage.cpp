@@ -112,10 +112,13 @@ int tileWidthForViewport(int viewportWidth) {
 }
 
 QString scrubDescription(QString text) {
-  text.replace(QRegularExpression(QStringLiteral("https?://\\S+")), QString());
-  text.replace(QRegularExpression(QStringLiteral("(?i)download:?\\s*")),
-               QString());
-  text.replace(QRegularExpression(QStringLiteral("(?i)stream/")), QString());
+  static const QRegularExpression reUrl(QStringLiteral("https?://\\S+"));
+  static const QRegularExpression reDownload(
+      QStringLiteral("(?i)download:?\\s*"));
+  static const QRegularExpression reStream(QStringLiteral("(?i)stream/"));
+  text.replace(reUrl, QString());
+  text.replace(reDownload, QString());
+  text.replace(reStream, QString());
   return text.simplified();
 }
 
@@ -481,7 +484,7 @@ void YouTubeBrowsePage::setupUi() {
   topBar_->setObjectName("aioTopBar");
   topBar_->installEventFilter(this);
   auto *barLayout = new QHBoxLayout(topBar_);
-  barLayout->setContentsMargins(0, 2, 0, 2);
+  barLayout->setContentsMargins(0, 4, 0, 4);
   barLayout->setSpacing(8);
 
   backButton_ = new QPushButton(topBar_);
@@ -566,7 +569,7 @@ void YouTubeBrowsePage::setupUi() {
   auto *heroCopyWrap = new QWidget(heroCard_);
   heroCopyWrap->setObjectName("aioYouTubeHeroCopy");
   auto *heroCopyColumn = new QVBoxLayout(heroCopyWrap);
-  heroCopyColumn->setContentsMargins(28, 24, 28, 24);
+  heroCopyColumn->setContentsMargins(24, 24, 24, 24);
   heroCopyColumn->setSpacing(8);
 
   heroEyebrowLabel_ = new QLabel("DISCOVER", heroCard_);
@@ -2458,14 +2461,17 @@ QString YouTubeBrowsePage::qrImageUrlForSession() const {
 
 void YouTubeBrowsePage::updateFocusStyle() {
   if (libraryHeader_) {
-    libraryHeader_->setProperty("aio_expanded", librarySectionExpanded_);
-    libraryHeader_->style()->unpolish(libraryHeader_);
-    libraryHeader_->style()->polish(libraryHeader_);
-    libraryHeader_->update();
-    if (auto *chevron = libraryHeader_->findChild<QLabel *>(
-            "aioYouTubeGuideSectionChevron")) {
-      chevron->setText(librarySectionExpanded_ ? QStringLiteral("v")
-                                               : QStringLiteral(">"));
+    if (libraryHeader_->property("aio_expanded").toBool() !=
+        librarySectionExpanded_) {
+      libraryHeader_->setProperty("aio_expanded", librarySectionExpanded_);
+      libraryHeader_->style()->unpolish(libraryHeader_);
+      libraryHeader_->style()->polish(libraryHeader_);
+      libraryHeader_->update();
+      if (auto *chevron = libraryHeader_->findChild<QLabel *>(
+              "aioYouTubeGuideSectionChevron")) {
+        chevron->setText(librarySectionExpanded_ ? QStringLiteral("v")
+                                                 : QStringLiteral(">"));
+      }
     }
   }
 
@@ -2480,6 +2486,15 @@ void YouTubeBrowsePage::updateFocusStyle() {
         inputMode_ == InputMode::Mouse && guideIndex == hoveredGuideIndex_;
     const bool activePage =
         !guideSelected_ && guideIndex == selectedGuideIndex_;
+
+    const bool changed =
+        button->property("aio_selected").toBool() != selected ||
+        button->property("aio_hovered").toBool() != hovered ||
+        button->property("aio_active_page").toBool() != activePage;
+    if (!changed) {
+      continue;
+    }
+
     button->setProperty("aio_selected", selected);
     button->setProperty("aio_hovered", hovered);
     button->setProperty("aio_active_page", activePage);
@@ -2516,21 +2531,26 @@ void YouTubeBrowsePage::updateFocusStyle() {
   if (authCard_) {
     const bool selected = authCardSelected_;
     const bool hovered = inputMode_ == InputMode::Mouse && authCardHovered_;
-    authCard_->setProperty(kTileSelectedProperty, selected);
-    authCard_->setProperty(kTileHoveredProperty, hovered);
-    authCard_->style()->unpolish(authCard_);
-    authCard_->style()->polish(authCard_);
-    authCard_->update();
+    const bool authChanged =
+        authCard_->property(kTileSelectedProperty).toBool() != selected ||
+        authCard_->property(kTileHoveredProperty).toBool() != hovered;
+    if (authChanged) {
+      authCard_->setProperty(kTileSelectedProperty, selected);
+      authCard_->setProperty(kTileHoveredProperty, hovered);
+      authCard_->style()->unpolish(authCard_);
+      authCard_->style()->polish(authCard_);
+      authCard_->update();
 
-    auto *shadow = ensureShadowEffect(authCard_);
-    if (selected) {
-      animateShadow(shadow, 34.0, QPointF(0.0, 12.0), QColor(255, 108, 96, 104),
-                    170);
-    } else if (hovered) {
-      animateShadow(shadow, 20.0, QPointF(0.0, 8.0), QColor(255, 255, 255, 38),
-                    140);
-    } else {
-      animateShadow(shadow, 0.0, QPointF(0.0, 0.0), Qt::transparent, 120);
+      auto *shadow = ensureShadowEffect(authCard_);
+      if (selected) {
+        animateShadow(shadow, 34.0, QPointF(0.0, 12.0),
+                      QColor(255, 108, 96, 104), 170);
+      } else if (hovered) {
+        animateShadow(shadow, 20.0, QPointF(0.0, 8.0),
+                      QColor(255, 255, 255, 38), 140);
+      } else {
+        animateShadow(shadow, 0.0, QPointF(0.0, 0.0), Qt::transparent, 120);
+      }
     }
   }
 
@@ -2540,11 +2560,13 @@ void YouTubeBrowsePage::updateFocusStyle() {
         selectedGuideIndex_ < static_cast<int>(guideItems_.size()) &&
         (guideItems_[selectedGuideIndex_].key == QStringLiteral("account") ||
          guideItems_[selectedGuideIndex_].key == QStringLiteral("connect"));
-    accountButton_->setProperty("aio_selected",
-                                authCardSelected_ || accountGuideActive);
-    accountButton_->style()->unpolish(accountButton_);
-    accountButton_->style()->polish(accountButton_);
-    accountButton_->update();
+    const bool accountSelected = authCardSelected_ || accountGuideActive;
+    if (accountButton_->property("aio_selected").toBool() != accountSelected) {
+      accountButton_->setProperty("aio_selected", accountSelected);
+      accountButton_->style()->unpolish(accountButton_);
+      accountButton_->style()->polish(accountButton_);
+      accountButton_->update();
+    }
   }
 
   for (int railIndex = 0; railIndex < static_cast<int>(railTiles_.size());
@@ -2562,6 +2584,14 @@ void YouTubeBrowsePage::updateFocusStyle() {
       const bool hovered = inputMode_ == InputMode::Mouse &&
                            railIndex == hoveredRailIndex_ &&
                            itemIndex == hoveredItemIndex_;
+
+      const bool tileChanged =
+          tile->property(kTileSelectedProperty).toBool() != selected ||
+          tile->property(kTileHoveredProperty).toBool() != hovered;
+      if (!tileChanged) {
+        continue;
+      }
+
       const QRect baseRect = tile->property(kTileBaseRectProperty).toRect();
       const QRect targetRect = selected ? expandedRectFor(baseRect) : baseRect;
       tile->setProperty(kTileSelectedProperty, selected);
@@ -2569,7 +2599,9 @@ void YouTubeBrowsePage::updateFocusStyle() {
       tile->style()->unpolish(tile);
       tile->style()->polish(tile);
       tile->update();
-      tile->raise();
+      if (selected) {
+        tile->raise();
+      }
 
       animateRect(tile, targetRect, selected ? 170 : 140);
 

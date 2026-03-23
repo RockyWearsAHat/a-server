@@ -150,3 +150,117 @@ TEST_F(PS1ControllerTest, DumpState_WritesOutput) {
   controller->DumpState(os);
   EXPECT_FALSE(os.str().empty());
 }
+
+// ─── DualShock Analog Pad Protocol ─────────────────────────────────────
+
+// Switching to analog mode changes padId to 0x73.
+TEST_F(PS1ControllerTest, SetPadType_Analog_ChangesID) {
+  controller->SetPadType(true);
+
+  controller->WriteData(0x01);
+  controller->ReadData(); // 0xFF
+
+  controller->WriteData(0x42);
+  uint8_t id = controller->ReadData();
+  EXPECT_EQ(id, 0x73u); // ANALOG_PAD_ID
+}
+
+// Analog pad returns 9 bytes total: ID + 0x5A + buttons_lo + buttons_hi
+// + analogRX + analogRY + analogLX + analogLY (8 bytes after 0x01 select).
+TEST_F(PS1ControllerTest, AnalogPad_FullSequence) {
+  controller->SetPadType(true);
+  controller->SetButtonState(0xFFFF); // All released
+  controller->SetAnalogStickState(0x10, 0x20, 0x30, 0x40);
+
+  // 0x01 — select
+  controller->WriteData(0x01);
+  controller->ReadData(); // 0xFF
+
+  // 0x42 — poll
+  controller->WriteData(0x42);
+  uint8_t idByte = controller->ReadData();
+  EXPECT_EQ(idByte, 0x73u);
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0x5Au);
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0xFFu); // buttons lo
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0xFFu); // buttons hi
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0x10u); // analogRX
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0x20u); // analogRY
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0x30u); // analogLX
+
+  controller->WriteData(0x00);
+  EXPECT_EQ(controller->ReadData(), 0x40u); // analogLY
+}
+
+// Switching back to digital pad gives normal 5-byte response.
+TEST_F(PS1ControllerTest, SetPadType_Digital_RestoresShortResponse) {
+  controller->SetPadType(true);
+  controller->SetPadType(false);
+
+  controller->WriteData(0x01);
+  controller->ReadData();
+
+  controller->WriteData(0x42);
+  uint8_t id = controller->ReadData();
+  EXPECT_EQ(id, 0x41u); // DIGITAL_PAD_ID
+
+  controller->WriteData(0x00);
+  controller->ReadData(); // 0x5A
+  controller->WriteData(0x00);
+  controller->ReadData(); // buttons lo
+  controller->WriteData(0x00);
+  controller->ReadData(); // buttons hi
+
+  // No more bytes — next poll starts fresh
+  controller->WriteData(0x00);
+  uint8_t extra = controller->ReadData();
+  EXPECT_EQ(extra, 0xFFu); // Done/Idle: 0xFF
+}
+
+// Analog stick state persists across multiple polls.
+// Real PS1 games deassert JOY_SEL (bit 1 of CTRL) between polls to reset the
+// SIO state machine to Idle before each new poll.
+TEST_F(PS1ControllerTest, AnalogStickState_PersistsAcrossPolls) {
+  controller->SetPadType(true);
+  controller->SetAnalogStickState(0xAA, 0xBB, 0xCC, 0xDD);
+
+  auto doOnePoll = [&]() {
+    // Simulate JOY_SEL assert then deassert so the SIO resets to Idle
+    controller->WriteCtrl(0x0002); // assert bit 1
+    controller->WriteCtrl(0x0000); // deassert bit 1 → CommState = Idle
+
+    controller->WriteData(0x01);
+    controller->ReadData();
+    controller->WriteData(0x42);
+    controller->ReadData(); // id
+    controller->WriteData(0x00);
+    controller->ReadData(); // 0x5A
+    controller->WriteData(0x00);
+    controller->ReadData(); // buttons lo
+    controller->WriteData(0x00);
+    controller->ReadData(); // buttons hi
+
+    controller->WriteData(0x00);
+    EXPECT_EQ(controller->ReadData(), 0xAAu); // RX
+    controller->WriteData(0x00);
+    EXPECT_EQ(controller->ReadData(), 0xBBu); // RY
+    controller->WriteData(0x00);
+    EXPECT_EQ(controller->ReadData(), 0xCCu); // LX
+    controller->WriteData(0x00);
+    EXPECT_EQ(controller->ReadData(), 0xDDu); // LY
+  };
+
+  doOnePoll();
+  doOnePoll();
+}

@@ -75,7 +75,7 @@ endforeach()
 
 # Find Qt6
 set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt")
-find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets Network Multimedia MultimediaWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets WebEngineWidgets Network Test Multimedia)
 
 # Find SDL2
 find_package(SDL2 REQUIRED)
@@ -83,6 +83,18 @@ find_package(SDL2 REQUIRED)
 # Optional: libcurl (used by YouTube service skeleton)
 find_package(CURL REQUIRED)
 
+# OpenSSL (required by AirPlay HAP pairing)
+if(APPLE)
+    set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
+endif()
+find_package(OpenSSL REQUIRED)
+
+# Apple AV frameworks for AirPlay H.264 decode
+if(APPLE)
+    find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+    find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+endif()
 
 # Helps clangd/VSCode index the *same* flags CMake builds with.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

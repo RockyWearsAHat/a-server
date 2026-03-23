@@ -177,6 +177,28 @@ void ARM7TDMI::Reset() {
   spsr_irq = 0;
   r13_usr = 0x03007F00;
   r14_usr = 0;
+  // Undefined, Abort, and FIQ banked registers (ARM7TDMI TRM §2.9).
+  // These modes are rarely entered intentionally on GBA but must preserve
+  // register state correctly when firmware or exception handlers use them.
+  r13_und = 0;
+  r14_und = 0;
+  spsr_und = 0;
+  r13_abt = 0;
+  r14_abt = 0;
+  spsr_abt = 0;
+  r8_fiq = 0;
+  r9_fiq = 0;
+  r10_fiq = 0;
+  r11_fiq = 0;
+  r12_fiq = 0;
+  r13_fiq = 0;
+  r14_fiq = 0;
+  spsr_fiq = 0;
+  r8_usr = 0;
+  r9_usr = 0;
+  r10_usr = 0;
+  r11_usr = 0;
+  r12_usr = 0;
 
   // When no real BIOS is present, use DirectBoot: skip BIOS and jump straight
   // to ROM entry (0x08000000). Hardware state is initialized by
@@ -280,6 +302,34 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     r14_svc = registers[Register::LR];
     spsr_svc = spsr;
     break;
+  case CPUMode::UNDEFINED:
+    r13_und = registers[Register::SP];
+    r14_und = registers[Register::LR];
+    spsr_und = spsr;
+    break;
+  case CPUMode::ABORT:
+    r13_abt = registers[Register::SP];
+    r14_abt = registers[Register::LR];
+    spsr_abt = spsr;
+    break;
+  case CPUMode::FIQ:
+    // FIQ banks R8–R14 (ARM7TDMI TRM §2.9). Save FIQ-banked values and
+    // restore user R8–R12 so the destination mode sees the correct registers.
+    r8_fiq = registers[8];
+    r9_fiq = registers[9];
+    r10_fiq = registers[10];
+    r11_fiq = registers[11];
+    r12_fiq = registers[12];
+    r13_fiq = registers[Register::SP];
+    r14_fiq = registers[Register::LR];
+    spsr_fiq = spsr;
+    // Restore user-mode R8–R12 now that FIQ is no longer active.
+    registers[8] = r8_usr;
+    registers[9] = r9_usr;
+    registers[10] = r10_usr;
+    registers[11] = r11_usr;
+    registers[12] = r12_usr;
+    break;
   }
 
   // Load new registers from bank
@@ -332,6 +382,32 @@ void ARM7TDMI::SwitchMode(uint32_t newMode) {
     registers[Register::SP] = r13_svc;
     registers[Register::LR] = r14_svc;
     spsr = spsr_svc;
+    break;
+  case CPUMode::UNDEFINED:
+    registers[Register::SP] = r13_und;
+    registers[Register::LR] = r14_und;
+    spsr = spsr_und;
+    break;
+  case CPUMode::ABORT:
+    registers[Register::SP] = r13_abt;
+    registers[Register::LR] = r14_abt;
+    spsr = spsr_abt;
+    break;
+  case CPUMode::FIQ:
+    // FIQ banks R8–R14. Save user R8–R12 and load FIQ-banked values.
+    r8_usr = registers[8];
+    r9_usr = registers[9];
+    r10_usr = registers[10];
+    r11_usr = registers[11];
+    r12_usr = registers[12];
+    registers[8] = r8_fiq;
+    registers[9] = r9_fiq;
+    registers[10] = r10_fiq;
+    registers[11] = r11_fiq;
+    registers[12] = r12_fiq;
+    registers[Register::SP] = r13_fiq;
+    registers[Register::LR] = r14_fiq;
+    spsr = spsr_fiq;
     break;
   }
 
@@ -492,64 +568,76 @@ void ARM7TDMI::Step() {
     // fall-through to instruction execution
   }
 
-  // Sanity Check SP - crash with detailed diagnostics
-  if (registers[13] == 0) {
-    std::cerr << "\n[FATAL] SP is 0! CPSR=0x" << std::hex << cpsr << " Mode=0x"
-              << (cpsr & 0x1F) << std::dec << std::endl;
-    std::cerr << "Last PC: 0x" << std::hex << lastPC << std::dec << std::endl;
-    std::cerr << "Current PC: 0x" << std::hex << registers[15] << std::dec
-              << std::endl;
-    std::cerr << "Thumb mode: " << (thumbMode ? "YES" : "NO") << std::endl;
-    std::cerr << "r13_irq: 0x" << std::hex << r13_irq << std::dec << std::endl;
-    std::cerr << "r13_usr: 0x" << std::hex << r13_usr << std::dec << std::endl;
-
-    // Show the instruction that's about to execute
-    if (registers[15] < 0x4000) {
-      uint32_t opcode = memory.Read32(registers[15]);
-      std::cerr << "Next instruction at PC: 0x" << std::hex << opcode
-                << std::dec << std::endl;
-    }
-
-    // Dump memory around IRQ stack to see if it's been overwritten
-    std::cerr << "\nMemory at IRQ stack base (0x03007FA0):" << std::endl;
-    for (uint32_t addr = 0x03007FA0; addr < 0x03007FC0; addr += 4) {
-      uint32_t val = memory.Read32(addr);
-      std::cerr << "  0x" << std::hex << addr << ": 0x" << val << std::dec
+  // Sanity Check SP - crash with detailed diagnostics.
+  // Only fire in User/System mode (steady-state game execution). Exception
+  // modes (FIQ, IRQ, SVC, Abort, Undefined) legitimately have SP=0 during
+  // GBA crt0 mode-stack initialization — each mode is entered just long
+  // enough to set its banked SP, then the code switches to the next mode.
+  // Also skip if already halted to prevent crash-log spam.
+  {
+    const uint32_t curMode = cpsr & 0x1F;
+    const bool isUserOrSystem =
+        (curMode == CPUMode::USER || curMode == CPUMode::SYSTEM);
+    if (registers[13] == 0 && isUserOrSystem && !halted) {
+      std::cerr << "\n[FATAL] SP is 0! CPSR=0x" << std::hex << cpsr
+                << " Mode=0x" << (cpsr & 0x1F) << std::dec << std::endl;
+      std::cerr << "Last PC: 0x" << std::hex << lastPC << std::dec << std::endl;
+      std::cerr << "Current PC: 0x" << std::hex << registers[15] << std::dec
                 << std::endl;
-    }
+      std::cerr << "Thumb mode: " << (thumbMode ? "YES" : "NO") << std::endl;
+      std::cerr << "r13_irq: 0x" << std::hex << r13_irq << std::dec
+                << std::endl;
+      std::cerr << "r13_usr: 0x" << std::hex << r13_usr << std::dec
+                << std::endl;
 
-    std::cerr
-        << "\n** SP CORRUPTION DETECTED - IRQ stack has been overwritten. **\n"
-        << std::endl;
-
-    // Write crash info to a log file (same pattern as invalid-PC handler).
-    halted = true;
-    FILE *logFile = fopen("crash_log.txt", "a");
-    if (logFile) {
-      fprintf(logFile, "==== Emulator Crash (SP==0) ====\n");
-      fprintf(logFile, "LastPC: 0x%08X\n", lastPC);
-      fprintf(logFile, "PC:     0x%08X\n", registers[15]);
-      fprintf(logFile, "SP:     0x%08X\n", registers[13]);
-      fprintf(logFile, "LR:     0x%08X\n", registers[14]);
-      fprintf(logFile, "CPSR:   0x%08X\n", cpsr);
-      fprintf(logFile, "Mode:   0x%02X\n", (unsigned)(cpsr & 0x1F));
-      fprintf(logFile, "Thumb:  %d\n", thumbMode ? 1 : 0);
-      fprintf(logFile, "r13_irq: 0x%08X\n", r13_irq);
-      fprintf(logFile, "r13_usr: 0x%08X\n", r13_usr);
-      for (int i = 0; i < 16; ++i) {
-        fprintf(logFile, "R%d: 0x%08X\n", i, registers[i]);
+      // Show the instruction that's about to execute
+      if (registers[15] < 0x4000) {
+        uint32_t opcode = memory.Read32(registers[15]);
+        std::cerr << "Next instruction at PC: 0x" << std::hex << opcode
+                  << std::dec << std::endl;
       }
-      fprintf(logFile, "IRQ stack base dump (0x03007FA0..0x03007FBC):\n");
+
+      // Dump memory around IRQ stack to see if it's been overwritten
+      std::cerr << "\nMemory at IRQ stack base (0x03007FA0):" << std::endl;
       for (uint32_t addr = 0x03007FA0; addr < 0x03007FC0; addr += 4) {
-        fprintf(logFile, "  0x%08X: 0x%08X\n", addr, memory.Read32(addr));
+        uint32_t val = memory.Read32(addr);
+        std::cerr << "  0x" << std::hex << addr << ": 0x" << val << std::dec
+                  << std::endl;
       }
-      fclose(logFile);
-    }
 
-    if (CrashPopupCallback)
-      CrashPopupCallback("crash_log.txt");
-    return;
-  }
+      std::cerr << "\n** SP CORRUPTION DETECTED - IRQ stack has been "
+                   "overwritten. **\n"
+                << std::endl;
+
+      // Write crash info to a log file (same pattern as invalid-PC handler).
+      halted = true;
+      FILE *logFile = fopen("crash_log.txt", "a");
+      if (logFile) {
+        fprintf(logFile, "==== Emulator Crash (SP==0) ====\n");
+        fprintf(logFile, "LastPC: 0x%08X\n", lastPC);
+        fprintf(logFile, "PC:     0x%08X\n", registers[15]);
+        fprintf(logFile, "SP:     0x%08X\n", registers[13]);
+        fprintf(logFile, "LR:     0x%08X\n", registers[14]);
+        fprintf(logFile, "CPSR:   0x%08X\n", cpsr);
+        fprintf(logFile, "Mode:   0x%02X\n", (unsigned)(cpsr & 0x1F));
+        fprintf(logFile, "Thumb:  %d\n", thumbMode ? 1 : 0);
+        fprintf(logFile, "r13_irq: 0x%08X\n", r13_irq);
+        fprintf(logFile, "r13_usr: 0x%08X\n", r13_usr);
+        for (int i = 0; i < 16; ++i) {
+          fprintf(logFile, "R%d: 0x%08X\n", i, registers[i]);
+        }
+        fprintf(logFile, "IRQ stack base dump (0x03007FA0..0x03007FBC):\n");
+        for (uint32_t addr = 0x03007FA0; addr < 0x03007FC0; addr += 4) {
+          fprintf(logFile, "  0x%08X: 0x%08X\n", addr, memory.Read32(addr));
+        }
+        fclose(logFile);
+      }
+
+      if (CrashPopupCallback)
+        CrashPopupCallback("crash_log.txt");
+      return;
+    }
+  } // end SP==0 check block
 
   // Log BIOS IRQ return path (0x1c0-0x1d0) with LR value
   if (kEnableHeavyCpuTraces && registers[15] >= 0x1c0 &&
@@ -1250,7 +1338,9 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
         const uint32_t modeFromSpsr = GetCPUMode(spsrCopy);
         if (modeFromSpsr != CPUMode::USER && modeFromSpsr != CPUMode::SYSTEM &&
             modeFromSpsr != CPUMode::IRQ &&
-            modeFromSpsr != CPUMode::SUPERVISOR) {
+            modeFromSpsr != CPUMode::SUPERVISOR &&
+            modeFromSpsr != CPUMode::FIQ && modeFromSpsr != CPUMode::ABORT &&
+            modeFromSpsr != CPUMode::UNDEFINED) {
           spsrCopy = spsr_irq;
         }
       }
@@ -1259,7 +1349,9 @@ void ARM7TDMI::ExecuteDataProcessing(uint32_t instruction) {
       // Defensive: an invalid SPSR (mode==0) will corrupt CPSR/Thumb state and
       // cascade.
       if (newMode != CPUMode::USER && newMode != CPUMode::SYSTEM &&
-          newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR) {
+          newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR &&
+          newMode != CPUMode::FIQ && newMode != CPUMode::ABORT &&
+          newMode != CPUMode::UNDEFINED) {
         halted = true;
         sleepHalt = false;
         debuggerHalt = false;
@@ -1588,7 +1680,9 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
         }
 
         if (i == 15)
-          val += 4; // PC store quirk? Usually PC+12
+          val += 8; // ARM7TDMI TRM §4.4: STM stores PC = instrAddr + 12.
+                    // registers[15] already holds instrAddr+4 at execute time,
+                    // so +8 yields the architecturally-correct instrAddr+12.
 
         TraceWatchWrite32(currentInstrAddr, currentInstrThumb,
                           currentInstrThumb ? (uint32_t)currentOp16
@@ -1608,7 +1702,9 @@ void ARM7TDMI::ExecuteBlockDataTransfer(uint32_t instruction) {
     const uint32_t oldMode = GetCPUMode(cpsr);
     const uint32_t newMode = GetCPUMode(spsrCopy);
     if (newMode != CPUMode::USER && newMode != CPUMode::SYSTEM &&
-        newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR) {
+        newMode != CPUMode::IRQ && newMode != CPUMode::SUPERVISOR &&
+        newMode != CPUMode::FIQ && newMode != CPUMode::ABORT &&
+        newMode != CPUMode::UNDEFINED) {
       halted = true;
       sleepHalt = false;
       debuggerHalt = false;
@@ -1857,7 +1953,8 @@ void ARM7TDMI::ExecuteBIOSFunction(uint32_t biosPC) {
 
   case 0x188: // VBlankIntrWait
   {
-    // Enable VBlank IRQ in DISPSTAT (Bit 3). Many games assume BIOS does this.
+    // Enable VBlank IRQ in DISPSTAT (Bit 3). Many games assume BIOS does
+    // this.
     uint16_t dispstat = memory.Read16(IORegs::REG_DISPSTAT);
     memory.Write16(IORegs::REG_DISPSTAT, dispstat | 0x0008);
 
@@ -2171,16 +2268,9 @@ void ARM7TDMI::ExecuteSWI(uint32_t comment) {
   }
   case 0x05: // VBlankIntrWait
   {
-    // VBlankIntrWait is equivalent to:
-    // R0 = 1 (clear old flags)
-    // R1 = 1 (wait for VBlank IRQ, bit 0)
-    // Then call IntrWait (SWI 0x04)
-
-    // Enable VBlank IRQ in DISPSTAT (Bit 3) - Required for VBlank IRQ to fire
+    // First call: enable VBlank IRQ and set up IntrWait params
     uint16_t dispstat = memory.Read16(IORegs::REG_DISPSTAT);
     memory.Write16(IORegs::REG_DISPSTAT, dispstat | 0x0008);
-
-    // Set up for IntrWait: R0=1, R1=1
     registers[0] = 1; // Clear old flags
     registers[1] = 1; // Wait for VBlank IRQ (bit 0)
 
@@ -3128,29 +3218,9 @@ void ARM7TDMI::DecodeThumb(uint16_t instruction, uint32_t pcValue) {
           ArithmeticShiftRight(val, offset == 0 ? 32 : offset, tempCPSR, true);
     }
 
-    // Debug shift operations at VBlank handler input processing - DISABLED
-    /*
-    if (registers[15] >= 0x80014c4 && registers[15] <= 0x80014ca) {
-        static int shiftLogCount = 0;
-        if (shiftLogCount++ < 200 || (val != 0xfffffc00 && val != 0xfc000000)) {
-            std::cout << "[SHIFT at VBlankHandler] PC=0x" << std::hex <<
-    registers[15]
-                      << " opcode=" << std::dec << opcode << " offset=" <<
-    offset
-                      << " val=0x" << std::hex << val << " res=0x" << res <<
-    std::dec << std::endl;
-        }
-    }
-    */
-
     UpdateNZFlags(cpsr, res);
     SetCPSRFlag(cpsr, CPSR::FLAG_C, CarryFlagSet(tempCPSR));
     registers[rd] = res;
-
-    if (registers[15] >= 0x080015d8 && registers[15] <= 0x08001610) {
-      // std::cout << "Shift: Rd=R" << rd << " Val=0x" << std::hex << res <<
-      // std::endl;
-    }
   }
   // Format 3: Move/Compare/Add/Subtract Immediate
   // 001x xxxx xxxx xxxx

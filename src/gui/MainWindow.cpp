@@ -35,6 +35,8 @@
 #include "gui/EmulatorSelectAdapter.h"
 #include "gui/EmulatorSettingsAdapter.h"
 #include "gui/GameSelectAdapter.h"
+#include "gui/GameStorePage.h"
+#include "gui/GamesLibraryPage.h"
 #include "gui/LogViewerDialog.h"
 #include "gui/MainMenuAdapter.h"
 #include "gui/MainWindow.h"
@@ -84,7 +86,7 @@ static void ShowCrashPopup(const char *logPath) {
   QCoreApplication::quit();
 }
 
-struct YouTubeServerAutobootConfig {
+struct ServerAutobootConfig {
   QString nodeExecutable;
   QString workDir;
   QString entryPath;
@@ -162,7 +164,7 @@ static int ResolveLocalServerPort(const QString &workDir) {
   return 8916;
 }
 
-static bool WaitForYouTubeServerReady(int port, int timeoutMs) {
+static bool WaitForServerReady(int port, int timeoutMs) {
   QNetworkAccessManager manager;
   QElapsedTimer elapsed;
   elapsed.start();
@@ -194,10 +196,13 @@ static bool WaitForYouTubeServerReady(int port, int timeoutMs) {
   return false;
 }
 
-static std::optional<YouTubeServerAutobootConfig>
-ResolveYouTubeServerAutobootConfig() {
-  const QByteArray enabled = qgetenv("AIO_YOUTUBE_SERVER_AUTOBOOT");
-  if (enabled.isEmpty() || enabled == "0") {
+static std::optional<ServerAutobootConfig> ResolveServerAutobootConfig() {
+  // If an external server URL is configured, don't start the local one.
+  if (!qgetenv("AIO_SERVER_URL").isEmpty()) {
+    return std::nullopt;
+  }
+  // Explicit opt-out.
+  if (qgetenv("AIO_YOUTUBE_SERVER_AUTOBOOT") == "0") {
     return std::nullopt;
   }
 
@@ -223,67 +228,67 @@ ResolveYouTubeServerAutobootConfig() {
     return std::nullopt;
   }
 
-  return YouTubeServerAutobootConfig{nodeExecutable, workDir, entryPath, port};
+  return ServerAutobootConfig{nodeExecutable, workDir, entryPath, port};
 }
 
 namespace AIO {
 namespace GUI {
 
-void MainWindow::maybeAutostartYouTubeServer() {
-  if (youtubeServerProcess_) {
+void MainWindow::maybeAutostartServer() {
+  if (serverProcess_) {
     return;
   }
 
-  const auto config = ResolveYouTubeServerAutobootConfig();
+  const auto config = ResolveServerAutobootConfig();
   if (!config.has_value()) {
     return;
   }
 
-  if (WaitForYouTubeServerReady(config->port, 1000)) {
+  if (WaitForServerReady(config->port, 1000)) {
     std::cout << "[YouTube] Server already running on port " << config->port
               << std::endl;
     return;
   }
 
-  youtubeServerProcess_ = new QProcess(this);
-  youtubeServerProcess_->setProgram(config->nodeExecutable);
-  youtubeServerProcess_->setArguments({config->entryPath});
-  youtubeServerProcess_->setWorkingDirectory(config->workDir);
-  youtubeServerProcess_->setProcessChannelMode(QProcess::ForwardedChannels);
-  youtubeServerProcess_->start();
+  serverProcess_ = new QProcess(this);
+  serverProcess_->setProgram(config->nodeExecutable);
+  serverProcess_->setArguments({config->entryPath});
+  serverProcess_->setWorkingDirectory(config->workDir);
+  serverProcess_->setProcessChannelMode(QProcess::ForwardedChannels);
+  serverProcess_->start();
 
-  if (!youtubeServerProcess_->waitForStarted(5000)) {
-    std::cerr << "[YouTube] Failed to autostart server from "
+  if (!serverProcess_->waitForStarted(5000)) {
+    std::cerr << "[Server] Failed to autostart server from "
               << config->entryPath.toStdString() << std::endl;
-    youtubeServerProcess_->deleteLater();
-    youtubeServerProcess_ = nullptr;
+    serverProcess_->deleteLater();
+    serverProcess_ = nullptr;
     return;
   }
 
-  if (!WaitForYouTubeServerReady(config->port, 6000)) {
+  if (!WaitForServerReady(config->port, 6000)) {
     std::cerr << "[YouTube] Autostarted server did not become healthy on port "
               << config->port << std::endl;
   }
 
-  std::cout << "[YouTube] Autostarted local YouTube server on port "
-            << config->port << std::endl;
+  std::cout << "[Server] Autostarted local server on port " << config->port
+            << std::endl;
 }
 
-void MainWindow::stopAutostartedYouTubeServer() {
-  if (!youtubeServerProcess_) {
+void MainWindow::stopAutostartedServer() {
+  if (!serverProcess_) {
     return;
   }
 
-  if (youtubeServerProcess_->state() != QProcess::NotRunning) {
-    youtubeServerProcess_->terminate();
-    if (!youtubeServerProcess_->waitForFinished(3000)) {
-      youtubeServerProcess_->kill();
-      youtubeServerProcess_->waitForFinished(2000);
+  if (serverProcess_->state() != QProcess::NotRunning) {
+    serverProcess_->terminate();
+    if (!serverProcess_->waitForFinished(3000)) {
+      serverProcess_->kill();
+      serverProcess_->waitForFinished(2000);
     }
   }
 
-  youtubeServerProcess_->deleteLater();
-  youtubeServerProcess_ = nullptr;
+  serverProcess_->deleteLater();
+  serverProcess_ = nullptr;
 }
 
 MainWindow::MainWindow(QWidget *parent)
@@ -291,9 +296,9 @@ MainWindow::MainWindow(QWidget *parent)
       gba(std::make_unique<AIO::Emulator::GBA::GBA>()),
       switchEmulator(std::make_unique<AIO::Emulator::Switch::SwitchEmulator>()),
       ps1Emulator(std::make_unique<AIO::Emulator::PS1::PS1>()) {
-  maybeAutostartYouTubeServer();
+  maybeAutostartServer();
   QObject::connect(qApp, &QCoreApplication::aboutToQuit, this,
-                   [this]() { stopAutostartedYouTubeServer(); });
+                   [this]() { stopAutostartedServer(); });
 
   // Register crash callback for GUI mode.
   AIO::Emulator::GBA::CrashPopupCallback = &ShowCrashPopup;
@@ -355,6 +360,9 @@ MainWindow::MainWindow(QWidget *parent)
   setupEmulatorSettingsPage();
   setupSettingsPage();
   setupNASPage();
+  setupScreenMirrorPage();
+  setupGamesLibraryPage();
+  setupGameStorePage();
   // Streaming is enabled by default. Keep a kill switch so WebEngine can be
   // disabled quickly on machines with driver/platform issues.
   streamingEnabled_ =
@@ -391,6 +399,9 @@ MainWindow::MainWindow(QWidget *parent)
   stackedWidget->addWidget(youTubePlayerPage);
   stackedWidget->addWidget(streamingWebPage);
   stackedWidget->addWidget(nasPage);
+  stackedWidget->addWidget(screenMirrorPage_);
+  stackedWidget->addWidget(gamesLibraryPage_);
+  stackedWidget->addWidget(gameStorePage_);
   stackedWidget->setCurrentWidget(homeScreenPage);
 
   // Keep focus on the currently visible page by default.
@@ -430,7 +441,7 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
-  stopAutostartedYouTubeServer();
+  stopAutostartedServer();
   StopEmulatorThread();
   closeAudio();
 }

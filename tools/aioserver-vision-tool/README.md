@@ -1,9 +1,10 @@
 # AIOServer Vision Tool
 
-This workspace-local VS Code extension contributes one unified image analysis tool (with two naming variants for compatibility):
+This workspace-local VS Code extension exposes one MCP tool namespace for image analysis:
 
-- `aioserver-analyze-images`
-- `aioserver_analyze_images`
+- `aioserver-vision/*`
+
+The underlying tool name is `analyze_images`.
 
 It also contributes one chat participant:
 
@@ -32,7 +33,7 @@ This extension is the bridge between:
 
 ## Expected usage
 
-Once the extension is installed in the normal VS Code profile, Copilot Chat can use `@aioserver-vision` for direct image analysis, and the extension exposes the same image-aware analysis through the language model tools above.
+Once the extension is installed in the normal VS Code profile, Copilot Chat can use `@aioserver-vision` for direct image analysis, and the extension exposes the same image-aware analysis through the MCP tool namespace above.
 
 ## Activation
 
@@ -95,16 +96,14 @@ All three of the following must be true at call time:
 
 ### How agents should call the tool
 
-Agents and models interact with this pipeline through one tool:
-
-**`mcp_aioserver-vis_analyze_images`** — analyze 1–10 images with a freeform goal
+Agents and models interact with this pipeline through the `aioserver-vision/*` namespace using the `analyze_images` tool.
 
 ```
 image_paths: ["/absolute/path/to/screenshot1.png", "/absolute/path/to/screenshot2.png"]
 goal:        "Compare these two designs for layout and color consistency"
 ```
 
-The `mcp_` prefix and the `aioserver-vis` server name come from how VS Code exposes MCP tools to the language model. The underlying tool name registered in `mcp-server.js` is `analyze_images`.
+The workspace registers the MCP server as `aioserver-vision` in `.vscode/mcp.json`. The underlying tool name registered in `mcp-server.js` is `analyze_images`.
 
 ### Common failure modes
 

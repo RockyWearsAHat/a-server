@@ -1931,6 +1931,16 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           break;
         }
         if (flashState == 2 && offset == 0x5555) {
+          // GBATEK §Flash: Chip erase is triggered by writing 0x10 to 0x5555
+          // after the full two-unlock + 0x80 + two-unlock sequence.  The
+          // second unlock (AA→5555, 55→2AAA) brings us back to state 2;
+          // check for the 0x10 trigger *before* overwriting flashCmd so the
+          // prior 0x80 context is still visible.
+          if (value == 0x10 && flashCmd == 0x80) {
+            std::fill(sram.begin(), sram.end(), static_cast<uint8_t>(0xFF));
+            flashState = 0;
+            break;
+          }
           flashCmd = value;
           switch (value) {
           case 0x90: // Enter ID mode
@@ -1980,12 +1990,6 @@ void GBAMemory::Write8(uint32_t address, uint8_t value) {
           for (int i = 0; i < 0x1000 && (sectorBase + i) < sram.size(); ++i) {
             sram[sectorBase + i] = 0xFF;
           }
-          flashState = 0;
-          break;
-        }
-        // Full chip erase: after 0x80 command sequence, write 0x10 to 0x5555
-        if (flashCmd == 0x80 && offset == 0x5555 && value == 0x10) {
-          std::fill(sram.begin(), sram.end(), 0xFF);
           flashState = 0;
           break;
         }
@@ -2565,21 +2569,6 @@ void GBAMemory::PerformDMA(int channel) {
   const uint8_t dstTopByte = (uint8_t)(currentDst >> 24);
   if (dstTopByte == 0x05) {
     paletteDirtyByDMA = true;
-    // DIAG: trace DMA palette writes with PPU timing
-    static int dmaPalLog = 0;
-    if (dmaPalLog < 50) {
-      dmaPalLog++;
-      FILE *pf = fopen("/tmp/ogdk_pal_writes.txt", "a");
-      if (pf) {
-        fprintf(pf,
-                "DMA%d palette: dst=0x%08X src=0x%08X count=%u %s timing=%d "
-                "scanline=%d cycle=%d\n",
-                channel, currentDst, currentSrc, count,
-                is32Bit ? "32bit" : "16bit", timing, ppuTimingScanline,
-                ppuTimingCycle);
-        fclose(pf);
-      }
-    }
   }
   if (dstTopByte == 0x06)
     vramDirtyByDMA = true;

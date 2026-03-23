@@ -22,9 +22,11 @@
 #include <QUrlQuery>
 #include <QVBoxLayout>
 
-#include <QtMultimedia/QAudioOutput>
-#include <QtMultimedia/QMediaPlayer>
-#include <QtMultimediaWidgets/QVideoWidget>
+#include <QWebEngineProfile>
+#include <QWebEngineSettings>
+#include <QWebEngineView>
+#include <QtWebEngineCore/QWebEngineFullScreenRequest>
+#include <QtWebEngineCore/QWebEnginePage>
 
 #include <thread>
 
@@ -54,45 +56,6 @@ QString extractYouTubeVideoId(const QString &url) {
   return QString();
 }
 
-void prefetchLikelyNextStreams(
-    AIO::Streaming::YouTubeService *service,
-    const std::vector<AIO::Streaming::VideoContent> &videos) {
-  if (!service || videos.empty()) {
-    return;
-  }
-
-  std::vector<std::string> ids;
-  ids.reserve(2);
-  for (const auto &video : videos) {
-    std::string id = video.id;
-    if (id.empty()) {
-      id = extractYouTubeVideoId(QString::fromStdString(video.videoUrl))
-               .toStdString();
-    }
-    if (id.empty()) {
-      continue;
-    }
-    if (std::find(ids.begin(), ids.end(), id) != ids.end()) {
-      continue;
-    }
-
-    ids.push_back(id);
-    if (ids.size() >= 2) {
-      break;
-    }
-  }
-
-  if (ids.empty()) {
-    return;
-  }
-
-  std::thread([service, ids = std::move(ids)]() {
-    for (const auto &id : ids) {
-      service->resolvePlaybackStream(id);
-    }
-  }).detach();
-}
-
 } // namespace
 
 YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
@@ -119,19 +82,34 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
   surfaceLayout->setContentsMargins(0, 0, 0, 0);
   surfaceLayout->setSpacing(0);
 
-  videoWidget_ = new QVideoWidget(surfaceFrame_);
-  videoWidget_->setObjectName("aioYouTubePlaybackView");
-  videoWidget_->setAspectRatioMode(Qt::KeepAspectRatioByExpanding);
-  videoWidget_->setFocusPolicy(Qt::StrongFocus);
-  videoWidget_->installEventFilter(this);
-  surfaceLayout->addWidget(videoWidget_);
+  const QString storagePath =
+      QDir(QDir::homePath()).filePath(".aioserver/youtube-player");
+  QDir().mkpath(storagePath);
+  webProfile_ = new QWebEngineProfile("youtube-player", this);
+  webProfile_->setPersistentStoragePath(storagePath);
+  webProfile_->setCachePath(storagePath + "/cache");
+  webProfile_->setPersistentCookiesPolicy(
+      QWebEngineProfile::ForcePersistentCookies);
+  webProfile_->setHttpUserAgent(
+      "Mozilla/5.0 (SMART-TV; Linux; Tizen 7.0) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/120.0.6099.308 Safari/537.36");
 
-  audioOutput_ = new QAudioOutput(this);
-  audioOutput_->setVolume(1.0f);
+  auto *page = new QWebEnginePage(webProfile_, this);
+  webView_ = new QWebEngineView(surfaceFrame_);
+  webView_->setPage(page);
+  webView_->setObjectName("aioYouTubePlaybackView");
+  webView_->setFocusPolicy(Qt::StrongFocus);
+  webView_->installEventFilter(this);
 
-  mediaPlayer_ = new QMediaPlayer(this);
-  mediaPlayer_->setAudioOutput(audioOutput_);
-  mediaPlayer_->setVideoOutput(videoWidget_);
+  auto *webSettings = webView_->settings();
+  webSettings->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
+  webSettings->setAttribute(QWebEngineSettings::LocalStorageEnabled, true);
+  webSettings->setAttribute(QWebEngineSettings::PlaybackRequiresUserGesture,
+                            false);
+  webSettings->setAttribute(QWebEngineSettings::FullScreenSupportEnabled, true);
+  webSettings->setAttribute(QWebEngineSettings::FocusOnNavigationEnabled, true);
+
+  surfaceLayout->addWidget(webView_);
   stageLayout->addWidget(surfaceFrame_, 0, 0, Qt::AlignCenter);
 
   chromeOverlay_ = new QWidget(videoStage_);
@@ -260,9 +238,7 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
       chromeHideTimer_->start();
       return;
     }
-    const bool playing = mediaPlayer_ && mediaPlayer_->playbackState() ==
-                                             QMediaPlayer::PlayingState;
-    if (playing && !loadFailed_ && focusZone_ != FocusZone::Web) {
+    if (webPlayerPlaying_ && !loadFailed_ && focusZone_ != FocusZone::Web) {
       setFocusZone(FocusZone::Web);
     }
   });
@@ -284,106 +260,73 @@ YouTubePlayerPage::YouTubePlayerPage(QWidget *parent) : QWidget(parent) {
   connect(reloadButton_, &QToolButton::clicked, this,
           [this]() { reloadCurrentVideo(); });
 
-  connect(
-      mediaPlayer_, &QMediaPlayer::mediaStatusChanged, this,
-      [this](QMediaPlayer::MediaStatus status) {
-        switch (status) {
-        case QMediaPlayer::LoadingMedia:
-        case QMediaPlayer::BufferingMedia:
-          if (!playerReady_ && !loadFailed_) {
-            updateStatusText(QStringLiteral("Preparing playback..."));
-          }
-          break;
-        case QMediaPlayer::LoadedMedia:
-        case QMediaPlayer::BufferedMedia:
-          if (!loadFailed_) {
-            playerReady_ = true;
-            updatePlaybackChrome();
-          }
-          break;
-        case QMediaPlayer::InvalidMedia:
-          playerReady_ = false;
-          loadFailed_ = true;
-          updateStatusText(QStringLiteral("Video stream could not be loaded"));
-          updatePlaybackChrome();
-          break;
-        case QMediaPlayer::EndOfMedia:
-          updateStatusText(QStringLiteral("Playback finished"));
-          updatePlaybackChrome();
-          if (!recommendedVideos_.empty() && autoplayChipLabel_ &&
-              autoplayTimer_) {
-            autoplayCountdown_ = 5;
-            autoplayChipLabel_->setText(QStringLiteral("Up next in 5\u2026"));
-            autoplayChipLabel_->show();
-            autoplayChipLabel_->raise();
-            autoplayTimer_->start();
-          }
-          break;
-        default:
-          break;
-        }
-      });
-  connect(mediaPlayer_, &QMediaPlayer::playbackStateChanged, this,
-          [this](QMediaPlayer::PlaybackState state) {
-            if (state == QMediaPlayer::PlayingState && !loadFailed_) {
-              playerReady_ = true;
-              updateStatusText(QStringLiteral("Playing"));
-            }
-            updatePlaybackChrome();
-          });
-  connect(mediaPlayer_, &QMediaPlayer::positionChanged, this,
-          [this](qint64 position) {
-            const int currentSeconds =
-                static_cast<int>(std::max<qint64>(0, position / 1000));
-            const int durationSeconds = static_cast<int>(
-                std::max<qint64>(0, mediaPlayer_->duration() / 1000));
-            syncTimelineFromPlayback(currentSeconds, durationSeconds);
-            if (youTube_ && !currentVideoId_.isEmpty() && currentSeconds > 0 &&
-                (lastPersistedProgressSeconds_ < 0 ||
-                 currentSeconds >= lastPersistedProgressSeconds_ + 15)) {
-              youTube_->updateWatchProgress(currentVideoId_.toStdString(),
-                                            currentSeconds);
-              lastPersistedProgressSeconds_ = currentSeconds;
-            }
-          });
-  connect(mediaPlayer_, &QMediaPlayer::durationChanged, this,
-          [this](qint64 duration) {
-            syncTimelineFromPlayback(
-                static_cast<int>(
-                    std::max<qint64>(0, mediaPlayer_->position() / 1000)),
-                static_cast<int>(std::max<qint64>(0, duration / 1000)));
-          });
-  connect(mediaPlayer_, &QMediaPlayer::errorOccurred, this,
-          [this](QMediaPlayer::Error, const QString &errorString) {
-            playerReady_ = false;
-            loadFailed_ = true;
-            updateStatusText(errorString.trimmed().isEmpty()
-                                 ? QStringLiteral("Video playback failed")
-                                 : errorString.trimmed());
-            updatePlaybackChrome();
-          });
-  connect(videoWidget_, &QVideoWidget::fullScreenChanged, this,
-          [this](bool fullScreen) {
-            if (fullScreen) {
-              topBar_->hide();
-              statusLabel_->hide();
-              if (overlayPanel_) {
-                overlayPanel_->hide();
-              }
+  connect(webView_->page(), &QWebEnginePage::loadStarted, this, [this]() {
+    if (!loadFailed_) {
+      updateStatusText(QStringLiteral("Loading YouTube player..."));
+      updatePlaybackChrome();
+    }
+  });
+  connect(webView_->page(), &QWebEnginePage::loadFinished, this,
+          [this](bool ok) {
+            if (ok) {
+              injectPlayerBridge();
+              updateStatusText(QStringLiteral("Player loaded"));
             } else {
-              topBar_->show();
-              statusLabel_->show();
-              if (overlayPanel_) {
-                overlayPanel_->show();
+              loadFailed_ = true;
+              playerReady_ = false;
+              updateStatusText(QStringLiteral("Failed to load YouTube player"));
+            }
+            updatePlaybackChrome();
+            updateCenterStageCard();
+          });
+  connect(webView_->page(), &QWebEnginePage::titleChanged, this,
+          [this](const QString &title) {
+            if (!title.isEmpty() && title != QStringLiteral("about:blank")) {
+              QString cleaned = title;
+              cleaned.remove(QStringLiteral(" - YouTube"));
+              if (!cleaned.isEmpty()) {
+                setTopBarText(cleaned);
+                if (overlayPanel_) {
+                  overlayPanel_->setPlayerTitle(cleaned);
+                }
               }
             }
           });
+  connect(webView_->page(), &QWebEnginePage::fullScreenRequested, this,
+          [this](QWebEngineFullScreenRequest request) { request.accept(); });
 
-  connect(mediaPlayer_, &QMediaPlayer::sourceChanged, this, [this]() {
-    playerReady_ = false;
-    loadFailed_ = false;
-    updateStatusText("Loading video...");
-    updatePlaybackChrome();
+  progressPollTimer_ = new QTimer(this);
+  progressPollTimer_->setInterval(1000);
+  connect(progressPollTimer_, &QTimer::timeout, this, [this]() {
+    if (!webView_ || currentVideoId_.isEmpty())
+      return;
+
+    webView_->page()->runJavaScript(
+        QStringLiteral("(function(){"
+                       "var p=document.getElementById('movie_player');"
+                       "if(!p||!p.getCurrentTime)return null;"
+                       "return{t:p.getCurrentTime(),d:p.getDuration(),s:p."
+                       "getPlayerState()}"
+                       "})()"),
+        [this](const QVariant &result) {
+          if (!result.isValid() || result.isNull())
+            return;
+          const auto map = result.toMap();
+          const int currentSec = static_cast<int>(map["t"].toDouble());
+          const int durationSec = static_cast<int>(map["d"].toDouble());
+          const int state = map.contains("s") ? map["s"].toInt() : -1;
+
+          syncTimelineFromPlayback(currentSec, durationSec);
+          handlePlayerStateChange(state);
+
+          if (youTube_ && !currentVideoId_.isEmpty() && currentSec > 0 &&
+              (lastPersistedProgressSeconds_ < 0 ||
+               currentSec >= lastPersistedProgressSeconds_ + 15)) {
+            youTube_->updateWatchProgress(currentVideoId_.toStdString(),
+                                          currentSec);
+            lastPersistedProgressSeconds_ = currentSec;
+          }
+        });
   });
 
   updateStatusText("Ready");
@@ -453,73 +396,33 @@ void YouTubePlayerPage::playVideoUrl(const QString &url) {
   lastPersistedProgressSeconds_ = -1;
   playerReady_ = false;
   loadFailed_ = false;
+  webPlayerPlaying_ = false;
   syncTimelineFromPlayback(0, 0);
   requestRelatedVideos(currentVideoId_);
   updateCenterStageCard();
-  if (mediaPlayer_) {
-    mediaPlayer_->stop();
-    mediaPlayer_->setSource(QUrl());
+
+  if (progressPollTimer_) {
+    progressPollTimer_->stop();
   }
 
   if (currentVideoId_.isEmpty()) {
-    if (mediaPlayer_) {
-      mediaPlayer_->setSource(QUrl(url));
-      mediaPlayer_->play();
+    if (webView_) {
+      webView_->setUrl(QUrl(url));
     }
   } else {
-    updateStatusText("Resolving stream...");
-    const uint64_t requestId = ++playbackRequestSerial_;
-    const QString videoId = currentVideoId_;
-    QPointer<YouTubePlayerPage> guard(this);
-    auto *service = youTube_;
-    std::thread([guard, requestId, service, videoId]() {
-      const auto stream =
-          service ? service->resolvePlaybackStream(videoId.toStdString())
-                  : std::nullopt;
-      if (!guard) {
-        return;
-      }
-      QMetaObject::invokeMethod(
-          guard.data(),
-          [guard, requestId, videoId, stream]() {
-            if (!guard || requestId != guard->playbackRequestSerial_ ||
-                videoId != guard->currentVideoId_) {
-              return;
-            }
-            if (!stream.has_value()) {
-              guard->loadFailed_ = true;
-              guard->playerReady_ = false;
-              guard->updateStatusText(
-                  QStringLiteral("Could not resolve a local playback stream"));
-              guard->updatePlaybackChrome();
-              guard->updateCenterStageCard();
-              return;
-            }
-
-            const QString title =
-                QString::fromStdString(stream->title).trimmed();
-            guard->setTopBarText(title.isEmpty() ? QStringLiteral("YouTube")
-                                                 : title);
-            if (guard->overlayPanel_) {
-              guard->overlayPanel_->setPlayerTitle(
-                  title.isEmpty() ? QStringLiteral("Now playing") : title);
-              guard->overlayPanel_->setChannelName(guard->currentChannelName_);
-            }
-            guard->currentPlaybackUrl_ =
-                QString::fromStdString(stream->webpageUrl);
-            guard->updateStatusText(QStringLiteral("Preparing playback..."));
-            if (guard->mediaPlayer_) {
-              guard->mediaPlayer_->setSource(
-                  QUrl(QString::fromStdString(stream->streamUrl)));
-              guard->mediaPlayer_->play();
-            }
-            guard->updateCenterStageCard();
-          },
-          Qt::QueuedConnection);
-    }).detach();
+    updateStatusText("Loading YouTube player...");
+    const QString embedUrl =
+        QStringLiteral("https://www.youtube-nocookie.com/embed/%1"
+                       "?autoplay=1&rel=0&modestbranding=1&iv_load_policy=3"
+                       "&enablejsapi=1&origin=https://www.youtube-nocookie.com"
+                       "&playsinline=1&fs=1")
+            .arg(currentVideoId_);
+    if (webView_) {
+      webView_->setUrl(QUrl(embedUrl));
+    }
   }
-  if (videoWidget_) {
-    videoWidget_->setFocus();
+  if (webView_) {
+    webView_->setFocus();
   }
 }
 
@@ -551,7 +454,6 @@ void YouTubePlayerPage::requestRelatedVideos(const QString &videoId) {
             return;
           }
           guard->recommendedVideos_ = videos;
-          prefetchLikelyNextStreams(guard->youTube_, guard->recommendedVideos_);
           guard->selectedRecommendationIndex_ = 0;
           guard->rebuildRecommendations();
           guard->updateOverlayHints();
@@ -597,8 +499,8 @@ void YouTubePlayerPage::setFocusZone(FocusZone zone) {
     if (chromeHideTimer_) {
       chromeHideTimer_->stop();
     }
-    if (videoWidget_) {
-      videoWidget_->setFocus(Qt::OtherFocusReason);
+    if (webView_) {
+      webView_->setFocus(Qt::OtherFocusReason);
     }
   } else if (!hasFocus()) {
     setFocus(Qt::OtherFocusReason);
@@ -641,8 +543,7 @@ void YouTubePlayerPage::updateOverlayHints() {
 }
 
 void YouTubePlayerPage::updatePlaybackChrome() {
-  const bool playing = mediaPlayer_ && mediaPlayer_->playbackState() ==
-                                           QMediaPlayer::PlayingState;
+  const bool playing = webPlayerPlaying_;
   const bool recommendationsFocused = focusZone_ == FocusZone::Recommendations;
   const bool timelineFocused = focusZone_ == FocusZone::Timeline;
   const bool compactChrome =
@@ -685,14 +586,12 @@ void YouTubePlayerPage::updatePlaybackChrome() {
 
   // Start auto-hide timer when overlay becomes visible during active playback
   if (chromeHideTimer_) {
-    const bool playingNow = mediaPlayer_ && mediaPlayer_->playbackState() ==
-                                                QMediaPlayer::PlayingState;
-    if (showOverlay && playingNow && !loadFailed_ &&
+    if (showOverlay && webPlayerPlaying_ && !loadFailed_ &&
         focusZone_ != FocusZone::Web) {
       if (!chromeHideTimer_->isActive()) {
         chromeHideTimer_->start();
       }
-    } else if (!showOverlay || !playingNow) {
+    } else if (!showOverlay || !webPlayerPlaying_) {
       chromeHideTimer_->stop();
     }
   }
@@ -703,8 +602,7 @@ void YouTubePlayerPage::updateStateChips() {
     return;
   }
 
-  const bool playing = mediaPlayer_ && mediaPlayer_->playbackState() ==
-                                           QMediaPlayer::PlayingState;
+  const bool playing = webPlayerPlaying_;
   QString stateText;
   QString stateKind;
   if (loadFailed_) {
@@ -754,8 +652,7 @@ void YouTubePlayerPage::updateCenterStageCard() {
     return;
   }
 
-  const bool playing = mediaPlayer_ && mediaPlayer_->playbackState() ==
-                                           QMediaPlayer::PlayingState;
+  const bool playing = webPlayerPlaying_;
   const bool showCard = loadFailed_ || !playerReady_ || !playing;
 
   QString title = QStringLiteral("Preparing playback");
@@ -816,9 +713,7 @@ bool YouTubePlayerPage::handleKeyPress(QKeyEvent *event) {
 
   // Restart auto-hide timer on any key interaction when chrome is visible
   if (chromeHideTimer_ && focusZone_ != FocusZone::Web) {
-    const bool nowPlaying = mediaPlayer_ && mediaPlayer_->playbackState() ==
-                                                QMediaPlayer::PlayingState;
-    if (nowPlaying && !loadFailed_) {
+    if (webPlayerPlaying_ && !loadFailed_) {
       chromeHideTimer_->start();
     }
   }
@@ -1018,7 +913,7 @@ bool YouTubePlayerPage::handleKeyPress(QKeyEvent *event) {
 }
 
 bool YouTubePlayerPage::eventFilter(QObject *watched, QEvent *event) {
-  if (watched == videoWidget_ && event) {
+  if (watched == webView_ && event) {
     if (event->type() == QEvent::KeyPress) {
       if (handleKeyPress(static_cast<QKeyEvent *>(event))) {
         return true;
@@ -1029,28 +924,27 @@ bool YouTubePlayerPage::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void YouTubePlayerPage::seekRelativeSeconds(int deltaSeconds) {
-  if (!mediaPlayer_) {
+  if (!webView_) {
     return;
   }
-  const qint64 duration = std::max<qint64>(0, mediaPlayer_->duration());
-  const qint64 current = std::max<qint64>(0, mediaPlayer_->position());
-  const qint64 next = std::clamp<qint64>(
-      current + static_cast<qint64>(deltaSeconds) * 1000, 0, duration);
-  mediaPlayer_->setPosition(next);
+  const QString js = QStringLiteral(
+      "(function(){var p=document.getElementById('movie_player');"
+      "if(p&&p.seekTo){p.seekTo(p.getCurrentTime()+(%1),true);}})()");
+  webView_->page()->runJavaScript(js.arg(deltaSeconds));
   if (overlayPanel_) {
     overlayPanel_->flashSeekDelta(deltaSeconds);
   }
 }
 
 void YouTubePlayerPage::togglePlayback() {
-  if (!mediaPlayer_) {
+  if (!webView_) {
     return;
   }
-  if (mediaPlayer_->playbackState() == QMediaPlayer::PlayingState) {
-    mediaPlayer_->pause();
-  } else {
-    mediaPlayer_->play();
-  }
+  const QString js = QStringLiteral(
+      "(function(){var p=document.getElementById('movie_player');"
+      "if(!p)return;"
+      "if(p.getPlayerState()===1){p.pauseVideo();}else{p.playVideo();}})()");
+  webView_->page()->runJavaScript(js);
 }
 
 void YouTubePlayerPage::reloadCurrentVideo() {
@@ -1118,18 +1012,18 @@ void YouTubePlayerPage::updatePlaybackSurfaceGeometry() {
 }
 
 void YouTubePlayerPage::applyVideoBlur(bool enabled) {
-  if (!videoWidget_) {
+  if (!webView_) {
     return;
   }
   if (enabled) {
     if (!videoBlurEffect_) {
       videoBlurEffect_ = new QGraphicsBlurEffect();
       videoBlurEffect_->setBlurHints(QGraphicsBlurEffect::PerformanceHint);
-      videoWidget_->setGraphicsEffect(videoBlurEffect_);
+      webView_->setGraphicsEffect(videoBlurEffect_);
     }
     videoBlurEffect_->setBlurRadius(16.0);
   } else {
-    videoWidget_->setGraphicsEffect(nullptr);
+    webView_->setGraphicsEffect(nullptr);
     videoBlurEffect_ = nullptr;
   }
 }
@@ -1159,6 +1053,63 @@ void YouTubePlayerPage::refreshChromeStateProperties(bool recommendationsActive,
     overlayPanel_->style()->unpolish(overlayPanel_);
     overlayPanel_->style()->polish(overlayPanel_);
     overlayPanel_->update();
+  }
+}
+
+void YouTubePlayerPage::injectPlayerBridge() {
+  if (!webView_)
+    return;
+
+  // Start polling for player state via the YouTube IFrame API
+  if (progressPollTimer_ && !progressPollTimer_->isActive()) {
+    progressPollTimer_->start();
+  }
+}
+
+void YouTubePlayerPage::handlePlayerStateChange(int ytState) {
+  // YouTube IFrame API states:
+  // -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued
+  const bool wasPlaying = webPlayerPlaying_;
+
+  switch (ytState) {
+  case 1: // playing
+    webPlayerPlaying_ = true;
+    playerReady_ = true;
+    loadFailed_ = false;
+    updateStatusText(QStringLiteral("Playing"));
+    break;
+  case 2: // paused
+    webPlayerPlaying_ = false;
+    playerReady_ = true;
+    break;
+  case 3: // buffering
+    webPlayerPlaying_ = false;
+    if (!playerReady_ && !loadFailed_) {
+      updateStatusText(QStringLiteral("Buffering..."));
+    }
+    break;
+  case 0: // ended
+    webPlayerPlaying_ = false;
+    updateStatusText(QStringLiteral("Playback finished"));
+    if (!recommendedVideos_.empty() && autoplayChipLabel_ && autoplayTimer_) {
+      autoplayCountdown_ = 5;
+      autoplayChipLabel_->setText(QStringLiteral("Up next in 5\u2026"));
+      autoplayChipLabel_->show();
+      autoplayChipLabel_->raise();
+      autoplayTimer_->start();
+    }
+    break;
+  case -1: // unstarted
+  case 5:  // cued
+    webPlayerPlaying_ = false;
+    break;
+  default:
+    return;
+  }
+
+  if (wasPlaying != webPlayerPlaying_) {
+    updatePlaybackChrome();
+    updateCenterStageCard();
   }
 }
 

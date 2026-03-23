@@ -1,7 +1,7 @@
 # Root Makefile wrapper - delegates to cmake/Makefile
 # Run this from the project root directory
 
-.PHONY: all clean configure build test help install-vision-tool reinstall-vision-tool
+.PHONY: all clean configure build test help install-vision-tool reinstall-vision-tool research-tool-check
 
 %:
 	@$(MAKE) -C cmake $@
@@ -27,6 +27,9 @@ install-vision-tool:
 reinstall-vision-tool:
 	@code --uninstall-extension local.aioserver-vision-tool >/dev/null 2>&1 || true
 	@cd tools/aioserver-vision-tool && npm run install:local
+
+research-tool-check:
+	@printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"make","version":"1.0"}}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n' | node ./tools/aioserver-research-tool/mcp-server.js
 
 coverage:
 	@$(MAKE) -C cmake coverage

@@ -15,6 +15,10 @@ void PS1Controller::Reset() {
   pad.buttons = 0xFFFF;
   pad.connected = true;
   pad.padId = Controller::DIGITAL_PAD_ID;
+  pad.analogRX = 0x80;
+  pad.analogRY = 0x80;
+  pad.analogLX = 0x80;
+  pad.analogLY = 0x80;
 
   txData = 0;
   rxData = 0xFF;
@@ -159,6 +163,45 @@ void PS1Controller::ProcessByte(uint8_t txByte) {
     break;
 
   case CommState::SendingButtons_Hi:
+    // For analog pad (0x73): continue with 4 axis bytes (NOCASH PSX §SIO)
+    if (pad.padId == Controller::ANALOG_PAD_ID) {
+      commState = CommState::SendingAnalogRX;
+      rxData = pad.analogRX;
+      rxReady = true;
+      stat |= (1 << 7);
+      transferDelay = 100;
+    } else {
+      commState = CommState::Done;
+      rxData = 0xFF;
+      // No ACK on last byte of digital response
+    }
+    break;
+
+  case CommState::SendingAnalogRX:
+    commState = CommState::SendingAnalogRY;
+    rxData = pad.analogRY;
+    rxReady = true;
+    stat |= (1 << 7);
+    transferDelay = 100;
+    break;
+
+  case CommState::SendingAnalogRY:
+    commState = CommState::SendingAnalogLX;
+    rxData = pad.analogLX;
+    rxReady = true;
+    stat |= (1 << 7);
+    transferDelay = 100;
+    break;
+
+  case CommState::SendingAnalogLX:
+    commState = CommState::SendingAnalogLY;
+    rxData = pad.analogLY;
+    rxReady = true;
+    stat |= (1 << 7);
+    transferDelay = 100;
+    break;
+
+  case CommState::SendingAnalogLY:
     commState = CommState::Done;
     rxData = 0xFF;
     // No ACK on last byte
@@ -175,6 +218,18 @@ void PS1Controller::SetButtonState(uint16_t buttons) { pad.buttons = buttons; }
 
 void PS1Controller::SetControllerConnected(bool connected) {
   pad.connected = connected;
+}
+
+void PS1Controller::SetAnalogStickState(uint8_t rx, uint8_t ry, uint8_t lx,
+                                        uint8_t ly) {
+  pad.analogRX = rx;
+  pad.analogRY = ry;
+  pad.analogLX = lx;
+  pad.analogLY = ly;
+}
+
+void PS1Controller::SetPadType(bool analog) {
+  pad.padId = analog ? Controller::ANALOG_PAD_ID : Controller::DIGITAL_PAD_ID;
 }
 
 void PS1Controller::Tick(uint32_t cycles) {

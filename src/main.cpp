@@ -83,6 +83,7 @@ int main(int argc, char *argv[]) {
       QStringLiteral(":/fonts/NotoSans-SemiBold.ttf"));
   QFontDatabase::addApplicationFont(
       QStringLiteral(":/fonts/NotoSans-ExtraBold.ttf"));
+  QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Walter.ttf"));
   (void)fontId;
   QFont defaultFont(QStringLiteral("Noto Sans"), 14);
   defaultFont.setHintingPreference(QFont::PreferNoHinting);
@@ -412,7 +413,7 @@ int main(int argc, char *argv[]) {
       }
 
       if (!headless) {
-        window.show();
+        window.showMaximized();
       }
 
       if (parser.isSet(inputScriptOption)) {
@@ -570,7 +571,7 @@ int main(int argc, char *argv[]) {
         // NAS-only headless mode is valid.
       }
       if (!headless) {
-        window.show();
+        window.showMaximized();
       }
       if (startupStreamingApp.has_value()) {
         AIO::Emulator::Common::Logger::Instance().LogFmt(

@@ -1,6 +1,7 @@
 #include "emulator/ps1/CDROM.h"
 #include "emulator/ps1/InterruptController.h"
 #include "emulator/ps1/PS1Memory.h"
+#include "emulator/ps1/PS1SPU.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -42,6 +43,8 @@ void CDROM::Reset() {
   secondResponseDelay = 0;
   secondResponseType = 0;
   secondResponseData.clear();
+  xaPrevL[0] = xaPrevL[1] = 0;
+  xaPrevR[0] = xaPrevR[1] = 0;
 }
 
 bool CDROM::LoadDisc(const std::string &path) {
@@ -117,20 +120,23 @@ uint8_t CDROM::Read8(uint32_t addr) {
       stat |= 0x40; // Data FIFO not empty
     if (commandPending)
       stat |= 0x80; // Busy
-    LogInfo("CDROM-R reg0 status=0x%02X idx=%d respEmpty=%d busy=%d", stat,
-            index, responseFIFO.empty() ? 1 : 0, commandPending ? 1 : 0);
+    if constexpr (Trace::CDROM_TRACE)
+      LogDebug("CDROM-R reg0 status=0x%02X idx=%d respEmpty=%d busy=%d", stat,
+               index, responseFIFO.empty() ? 1 : 0, commandPending ? 1 : 0);
     return stat;
   }
   case 1: {
     // Response FIFO
     if (responseFIFO.empty()) {
-      LogInfo("CDROM-R reg1 response=0x00 (empty)");
+      if constexpr (Trace::CDROM_TRACE)
+        LogDebug("CDROM-R reg1 response=0x00 (empty)");
       return 0;
     }
     uint8_t val = responseFIFO.front();
     responseFIFO.pop();
-    LogInfo("CDROM-R reg1 response=0x%02X remaining=%zu", val,
-            responseFIFO.size());
+    if constexpr (Trace::CDROM_TRACE)
+      LogDebug("CDROM-R reg1 response=0x%02X remaining=%zu", val,
+               responseFIFO.size());
     return val;
   }
   case 2: {
@@ -144,10 +150,12 @@ uint8_t CDROM::Read8(uint32_t addr) {
     if (index & 1) {
       // Interrupt flag (with index bit)
       uint8_t val = interruptFlag | 0xE0;
-      LogInfo("CDROM-R reg3 intFlag=0x%02X (raw=0x%02X)", val, interruptFlag);
+      if constexpr (Trace::CDROM_TRACE)
+        LogDebug("CDROM-R reg3 intFlag=0x%02X (raw=0x%02X)", val, interruptFlag);
       return val;
     }
-    LogInfo("CDROM-R reg3 intEnable=0x%02X", interruptEnable | 0xE0);
+    if constexpr (Trace::CDROM_TRACE)
+      LogDebug("CDROM-R reg3 intEnable=0x%02X", interruptEnable | 0xE0);
     return interruptEnable | 0xE0;
   }
   default:
@@ -158,7 +166,8 @@ uint8_t CDROM::Read8(uint32_t addr) {
 void CDROM::Write8(uint32_t addr, uint8_t value) {
   uint32_t reg = addr - IO::CDROM_BASE;
 
-  LogInfo("CDROM-W reg%d.idx%d val=0x%02X", reg, index, value);
+  if constexpr (Trace::CDROM_TRACE)
+    LogDebug("CDROM-W reg%d.idx%d val=0x%02X", reg, index, value);
 
   switch (reg) {
   case 0:
@@ -210,12 +219,14 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
         // the next sector. The next sector fires on its own inter-sector
         // timing or when the game acks the INT (where we shorten the delay).
         dataReadPos = 0;
-        LogInfo("CDROM request data: dataBuf.size=%zu dataReadPos=0 "
-                "reading=%s readDelay=%u sectorBufferReady=%s",
-                dataBuf.size(), reading ? "true" : "false", readDelay,
-                sectorBufferReady ? "true" : "false");
+        if constexpr (Trace::CDROM_TRACE)
+          LogDebug("CDROM request data: dataBuf.size=%zu dataReadPos=0 "
+                   "reading=%s readDelay=%u sectorBufferReady=%s",
+                   dataBuf.size(), reading ? "true" : "false", readDelay,
+                   sectorBufferReady ? "true" : "false");
       } else {
-        LogInfo("CDROM clear data: dataBuf had %zu bytes", dataBuf.size());
+        if constexpr (Trace::CDROM_TRACE)
+          LogDebug("CDROM clear data: dataBuf had %zu bytes", dataBuf.size());
         dataBuf.clear();
         dataReadPos = 0;
         sectorBufferReady = false;
@@ -226,11 +237,12 @@ void CDROM::Write8(uint32_t addr, uint8_t value) {
       {
         uint8_t oldFlag = interruptFlag;
         interruptFlag &= ~(value & 0x1F);
-        LogInfo("CDROM INT ack: val=0x%02X old=0x%02X new=0x%02X pending=%zu "
-                "reading=%s sectorBufferReady=%s readDelay=%u",
-                value, oldFlag, interruptFlag, pendingIRQs.size(),
-                reading ? "true" : "false",
-                sectorBufferReady ? "true" : "false", readDelay);
+        if constexpr (Trace::CDROM_TRACE)
+          LogDebug("CDROM INT ack: val=0x%02X old=0x%02X new=0x%02X pending=%zu "
+                   "reading=%s sectorBufferReady=%s readDelay=%u",
+                   value, oldFlag, interruptFlag, pendingIRQs.size(),
+                   reading ? "true" : "false",
+                   sectorBufferReady ? "true" : "false", readDelay);
       }
       // De-assert IRQ line when all interrupt flags are cleared
       if ((interruptFlag & 0x07) == 0) {
@@ -284,10 +296,11 @@ void CDROM::Tick(uint32_t cpuCycles) {
         }
 
         interruptFlag = next.type;
-        LogInfo(
-            "CDROM DeliverQueued INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
-            next.type, interruptEnable, interruptFlag,
-            (interruptEnable & interruptFlag) ? 1 : 0);
+        if constexpr (Trace::CDROM_TRACE)
+          LogDebug(
+              "CDROM DeliverQueued INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
+              next.type, interruptEnable, interruptFlag,
+              (interruptEnable & interruptFlag) ? 1 : 0);
         if (interruptEnable & interruptFlag) {
           interrupts.RequestIRQ(IRQ::CDROM);
         }
@@ -340,10 +353,11 @@ void CDROM::Tick(uint32_t cpuCycles) {
       uint32_t dataSize =
           (mode & 0x20) ? 0x924 : 0x800; // Whole sector vs data only
 
-      LogInfo("SectorReady: pos=%02u:%02u:%02u offset=0x%X dataSize=0x%X "
-              "intFlag=0x%02X",
-              seekMinutes, seekSeconds, seekSector, sectorOffset, dataSize,
-              interruptFlag);
+      if constexpr (Trace::CDROM_TRACE)
+        LogDebug("SectorReady: pos=%02u:%02u:%02u offset=0x%X dataSize=0x%X "
+                 "intFlag=0x%02X",
+                 seekMinutes, seekSeconds, seekSector, sectorOffset, dataSize,
+                 interruptFlag);
 
       if (sectorOffset + dataSize <= discData.size()) {
         // Check whether this is an XA Mode 2 Form 2 sector (ADPCM audio).
@@ -374,9 +388,17 @@ void CDROM::Tick(uint32_t cpuCycles) {
             bool adpcmEnabled = (mode & 0x40) != 0;
             bool matchesFilter = adpcmEnabled && (xaFile == xaFilterFile) &&
                                  (xaChannel == xaFilterChannel);
-            LogInfo("XA sector: file=%u ch=%u submode=0x%02X match=%d adpcm=%d",
-                    xaFile, xaChannel, submode, matchesFilter ? 1 : 0,
-                    adpcmEnabled ? 1 : 0);
+            if constexpr (Trace::CDROM_TRACE)
+              LogDebug("XA sector: file=%u ch=%u submode=0x%02X match=%d adpcm=%d",
+                       xaFile, xaChannel, submode, matchesFilter ? 1 : 0,
+                       adpcmEnabled ? 1 : 0);
+            // Decode and feed to SPU if the filter matches and ADPCM is enabled
+            if (matchesFilter && spu != nullptr) {
+              uint8_t coding = discData[rawLbaOffset * RAW_SECTOR_SIZE + 19];
+              const uint8_t *audioData =
+                  discData.data() + rawLbaOffset * RAW_SECTOR_SIZE + 24;
+              DecodeXASector(audioData, coding);
+            }
             // Do not populate dataBuf; advance to next sector immediately
             seekSector++;
             if (seekSector >= 75) {
@@ -435,7 +457,8 @@ void CDROM::Tick(uint32_t cpuCycles) {
 // ─── Command Execution ─────────────────────────────────────────────────
 
 void CDROM::ExecuteCommand(uint8_t cmd) {
-  LogInfo("Executing CD command %02X", cmd);
+  if constexpr (Trace::CDROM_TRACE)
+    LogDebug("Executing CD command %02X", cmd);
 
   switch (cmd) {
   case 0x01:
@@ -761,7 +784,8 @@ void CDROM::CmdSetFilter() {
 void CDROM::AcknowledgeInterrupt() {
   uint8_t oldFlag = interruptFlag;
   interruptFlag = 0;
-  LogInfo("CDROM HLE ack: old=0x%02X new=0x%00X pending=%zu", oldFlag,
+  if constexpr (Trace::CDROM_TRACE)
+    LogDebug("CDROM HLE ack: old=0x%02X new=0x%00X pending=%zu", oldFlag,
           interruptFlag, pendingIRQs.size());
 
   if (!pendingIRQs.empty() && !queuedDeliveryPending) {
@@ -785,15 +809,17 @@ void CDROM::SetInterrupt(uint8_t type) {
       copy.pop();
     }
     pendingIRQs.push(std::move(queued));
-    LogInfo("CDROM QueueInterrupt INT%d (current flag=0x%02X, queue depth=%zu)",
-            type, interruptFlag, pendingIRQs.size());
+    if constexpr (Trace::CDROM_TRACE)
+      LogDebug("CDROM QueueInterrupt INT%d (current flag=0x%02X, queue depth=%zu)",
+               type, interruptFlag, pendingIRQs.size());
     return;
   }
 
   interruptFlag = type & 0x07;
-  LogInfo("CDROM SetInterrupt INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
-          type, interruptEnable, interruptFlag,
-          (interruptEnable & interruptFlag) ? 1 : 0);
+  if constexpr (Trace::CDROM_TRACE)
+    LogDebug("CDROM SetInterrupt INT%d intEnable=0x%02X flag=0x%02X willIRQ=%d",
+             type, interruptEnable, interruptFlag,
+             (interruptEnable & interruptFlag) ? 1 : 0);
   if (interruptEnable & interruptFlag) {
     interrupts.RequestIRQ(IRQ::CDROM);
   }
@@ -885,6 +911,98 @@ std::string CDROM::GetDebugSummary() const {
      << ":" << static_cast<int>(seekSeconds) << ":"
      << static_cast<int>(seekSector);
   return os.str();
+}
+
+// ─── XA-ADPCM Decode ────────────────────────────────────────────────────
+// Decodes one XA-ADPCM audio sector and feeds samples to the SPU.
+//
+// Sector audio data layout (PSX-SPX §CDROM XA Audio ADPCM Compression):
+//   18 sound groups × 128 bytes = 2304 bytes starting at raw-sector offset 24.
+//   Each sound group:
+//     Bytes  0–7 : Sound Parameters SP0..SP7 (bits[3:0]=shift,
+//     bits[6:4]=filter) Bytes  8–15: Duplicate of SP0..SP7 Bytes 16–127: 8
+//     sound units × 14 bytes of 4-bit nibble data
+//   For stereo: even units (0,2,4,6) = L, odd units (1,3,5,7) = R.
+//   Filter coefficients identical to SPU voice ADPCM (NOCASH PSX §SPU ADPCM).
+void CDROM::DecodeXASector(const uint8_t *audioData, uint8_t coding) {
+  static constexpr int32_t filterPos[5] = {0, 60, 115, 98, 122};
+  static constexpr int32_t filterNeg[5] = {0, 0, -52, -55, -60};
+
+  const bool isStereo = (coding & 0x01) != 0;
+  const bool isHalfRate = (coding & 0x04) != 0; // true = 18900 Hz
+  const bool is8bit = (coding & 0x10) != 0;     // true = 8-bit ADPCM
+  const uint32_t sampleRate = isHalfRate ? 18900u : 37800u;
+
+  if (is8bit) {
+    // 8-bit XA ADPCM: extremely rare in commercial titles — skip with log.
+    LogInfo("XA 8-bit ADPCM sector (coding=0x%02X) — not yet decoded", coding);
+    return;
+  }
+
+  // Maximum samples per channel: 18 groups × 8 units × 28 samples = 4032
+  static constexpr uint32_t MAX_PER_CH = 18 * 8 * 28;
+  int16_t leftBuf[MAX_PER_CH];
+  int16_t rightBuf[MAX_PER_CH];
+  uint32_t leftCount = 0;
+  uint32_t rightCount = 0;
+
+  for (uint32_t g = 0; g < 18; g++) {
+    const uint8_t *group = audioData + g * 128;
+
+    for (uint32_t u = 0; u < 8; u++) {
+      // Sound parameter for this unit (byte u in the 8-byte SP block)
+      uint8_t sp = group[u];
+      uint8_t shift = sp & 0x0F;
+      uint8_t filter = (sp >> 4) & 0x07;
+      if (filter >= 5)
+        filter = 0;
+
+      const int32_t f0 = filterPos[filter];
+      const int32_t f1 = filterNeg[filter];
+
+      // Nibble data for this unit starts at group byte 16 + u*14
+      const uint8_t *unitData = group + 16 + u * 14;
+
+      // Select channel and filter-history state
+      const bool isRight = isStereo && ((u & 1) != 0);
+      int16_t &prev1 = isRight ? xaPrevR[0] : xaPrevL[0];
+      int16_t &prev2 = isRight ? xaPrevR[1] : xaPrevL[1];
+      int16_t *dst = isRight ? (rightBuf + rightCount) : (leftBuf + leftCount);
+
+      for (int i = 0; i < 28; i++) {
+        uint8_t b = unitData[i / 2];
+        int32_t nib = (i & 1) ? static_cast<int32_t>(b >> 4)
+                              : static_cast<int32_t>(b & 0x0F);
+        if (nib >= 8)
+          nib -= 16; // sign-extend 4-bit
+
+        int32_t s =
+            (nib << (12 - shift)) + (static_cast<int32_t>(prev1) * f0 +
+                                     static_cast<int32_t>(prev2) * f1 + 32) /
+                                        64;
+        s = std::clamp(s, -32768, 32767);
+
+        dst[i] = static_cast<int16_t>(s);
+        prev2 = prev1;
+        prev1 = static_cast<int16_t>(s);
+      }
+
+      if (isRight)
+        rightCount += 28;
+      else
+        leftCount += 28;
+    }
+  }
+
+  // Mono: duplicate L to R
+  if (!isStereo) {
+    std::copy(leftBuf, leftBuf + leftCount, rightBuf);
+    rightCount = leftCount;
+  }
+
+  if (spu != nullptr && leftCount > 0) {
+    spu->FeedXASamples(leftBuf, rightBuf, leftCount, sampleRate);
+  }
 }
 
 } // namespace AIO::Emulator::PS1

@@ -230,7 +230,10 @@ int R3000A::Step() {
   instructionCount++;
   cycleCount++;
 
-  return 1; // Each instruction takes 1 cycle (simplified)
+  int extra = pendingExtraCycles;
+  pendingExtraCycles = 0;
+  cycleCount += extra;
+  return 1 + extra;
 }
 
 // ─── Instruction Dispatch ──────────────────────────────────────────────
@@ -542,6 +545,7 @@ void R3000A::OpMULT(uint32_t instr) {
       static_cast<int64_t>(static_cast<int32_t>(regs[GetRT(instr)]));
   lo = static_cast<uint32_t>(result);
   hi = static_cast<uint32_t>(result >> 32);
+  pendingExtraCycles += 11; // MULT = 12 cycles total (NOCASH PSX)
 }
 
 void R3000A::OpMULTU(uint32_t instr) {
@@ -549,6 +553,7 @@ void R3000A::OpMULTU(uint32_t instr) {
                     static_cast<uint64_t>(regs[GetRT(instr)]);
   lo = static_cast<uint32_t>(result);
   hi = static_cast<uint32_t>(result >> 32);
+  pendingExtraCycles += 11; // MULTU = 12 cycles total (NOCASH PSX)
 }
 
 void R3000A::OpDIV(uint32_t instr) {
@@ -564,6 +569,7 @@ void R3000A::OpDIV(uint32_t instr) {
     lo = static_cast<uint32_t>(n / d);
     hi = static_cast<uint32_t>(n % d);
   }
+  pendingExtraCycles += 35; // DIV = 36 cycles total (NOCASH PSX)
 }
 
 void R3000A::OpDIVU(uint32_t instr) {
@@ -576,6 +582,7 @@ void R3000A::OpDIVU(uint32_t instr) {
     lo = n / d;
     hi = n % d;
   }
+  pendingExtraCycles += 35; // DIVU = 36 cycles total (NOCASH PSX)
 }
 
 // ─── Branch/Jump ───────────────────────────────────────────────────────
@@ -918,8 +925,11 @@ void R3000A::ExecuteCOP2(uint32_t instr) {
 
   uint32_t rs = GetRS(instr);
   if (rs & 0x10) {
-    if (gte)
+    if (gte) {
       gte->Execute(instr & 0x1FFFFFF);
+      // Stall CPU for actual GTE command cycles (NOCASH PSX §GTE)
+      pendingExtraCycles += static_cast<int>(gte->GetLastCommandCycles()) - 1;
+    }
     return;
   }
 

@@ -39,9 +39,25 @@ void PS1SPU::Reset() {
   cdVolumeR = 0;
   extVolumeL = 0;
   extVolumeR = 0;
+  // Reset XA-ADPCM input buffer
+  xaBufL.fill(0);
+  xaBufR.fill(0);
+  xaWritePos = 0;
+  xaReadPos = 0;
+  xaCount = 0;
+  xaSampleRate = 37800;
+  xaFracAccum = 0;
+  xaHeldL = 0;
+  xaHeldR = 0;
   transferAddr = 0;
   cycleAccumulator = 0;
   spuIRQFired = false;
+  reverbRegs.fill(0);
+  reverbBufferAddr = 0;
+  reverbCycleAccum = 0;
+  noiseLevel = 0;
+  noiseTimer = 0;
+  lastVoiceOutput.fill(0);
 }
 
 // ─── Register Interface ─────────────────────────────────────────────────
@@ -77,6 +93,14 @@ uint16_t PS1SPU::ReadRegister(uint32_t addr) const {
   }
 
   // Global registers
+  // Reverb config registers: 0x1F801DC0 - 0x1F801DFE (NOCASH PSX §SPU)
+  if (addr >= IO::SPU_REVERB_CONFIG_BASE && addr <= IO::SPU_REVERB_CONFIG_END) {
+    uint32_t regIndex = (addr - IO::SPU_REVERB_CONFIG_BASE) / 2;
+    if (regIndex < 32)
+      return static_cast<uint16_t>(reverbRegs[regIndex]);
+    return 0;
+  }
+
   switch (addr) {
   case IO::SPU_MAIN_VOL_L:
     return static_cast<uint16_t>(mainVolumeL);
@@ -171,6 +195,14 @@ void PS1SPU::WriteRegister(uint32_t addr, uint16_t value) {
     return;
   }
 
+  // Reverb config registers: 0x1F801DC0 - 0x1F801DFE (NOCASH PSX §SPU)
+  if (addr >= IO::SPU_REVERB_CONFIG_BASE && addr <= IO::SPU_REVERB_CONFIG_END) {
+    uint32_t regIndex = (addr - IO::SPU_REVERB_CONFIG_BASE) / 2;
+    if (regIndex < 32)
+      reverbRegs[regIndex] = static_cast<int16_t>(value);
+    return;
+  }
+
   // Global registers
   switch (addr) {
   case IO::SPU_MAIN_VOL_L:
@@ -223,6 +255,8 @@ void PS1SPU::WriteRegister(uint32_t addr, uint16_t value) {
     break;
   case IO::SPU_REVERB_BASE:
     reverbBase = value;
+    // mBASE write also resets the circular buffer pointer (NOCASH PSX)
+    reverbBufferAddr = static_cast<uint32_t>(value) * 8;
     break;
   case IO::SPU_IRQ_ADDR:
     irqAddr = value;
@@ -350,6 +384,8 @@ void PS1SPU::Tick(uint32_t cpuCycles) {
   constexpr uint32_t cyclesPerSample = Clock::CPU_HZ / Clock::SPU_SAMPLE_RATE;
   while (cycleAccumulator >= cyclesPerSample) {
     cycleAccumulator -= cyclesPerSample;
+    // Advance noise LFSR each 44100Hz sample (NOCASH PSX)
+    TickNoise();
     // Process one sample tick for all voices
     for (uint32_t i = 0; i < SPU::NUM_VOICES; i++) {
       if (voices[i].adsrPhase != ADSRPhase::Off) {
@@ -364,34 +400,308 @@ void PS1SPU::Tick(uint32_t cpuCycles) {
 uint32_t PS1SPU::GetSamples(int16_t *buffer, uint32_t maxSamples) {
   // Mix all active voices into stereo interleaved buffer
   for (uint32_t s = 0; s < maxSamples; s++) {
+    int32_t reverbInL = 0;
+    int32_t reverbInR = 0;
     int32_t mixL = 0;
     int32_t mixR = 0;
 
     for (uint32_t v = 0; v < SPU::NUM_VOICES; v++) {
-      if (voices[v].adsrPhase == ADSRPhase::Off)
+      if (voices[v].adsrPhase == ADSRPhase::Off) {
+        lastVoiceOutput[v] = 0;
         continue;
+      }
 
-      int16_t sample = DecodeSample(voices[v], v);
+      uint16_t effectiveSampleRate = voices[v].sampleRate;
+
+      // FM pitch modulation: factor from previous voice amplitude (NOCASH PSX)
+      if (v > 0 && (fmMode & (1u << v))) {
+        int32_t factor = static_cast<int32_t>(lastVoiceOutput[v - 1]) + 0x8000;
+        int32_t step =
+            (static_cast<int32_t>(voices[v].sampleRate) * factor) >> 15;
+        if (step > 0x3FFF)
+          step = 0x4000;
+        if (step < 0)
+          step = 0;
+        effectiveSampleRate = static_cast<uint16_t>(step);
+      }
+
+      int16_t sample;
+      // Noise output: substitute LFSR level for ADPCM sample (NOCASH PSX)
+      if (noiseMode & (1u << v)) {
+        // Advance sampleCounter as usual so voice timing stays consistent
+        voices[v].sampleCounter += effectiveSampleRate;
+        while (voices[v].sampleCounter >= SPU::SAMPLE_RATE_BASE)
+          voices[v].sampleCounter -= SPU::SAMPLE_RATE_BASE;
+        sample = noiseLevel;
+      } else {
+        uint16_t savedRate = voices[v].sampleRate;
+        voices[v].sampleRate = effectiveSampleRate;
+        sample = DecodeSample(voices[v], v);
+        voices[v].sampleRate = savedRate;
+      }
+
       int32_t vol = voices[v].adsrLevel;
-
-      // Apply voice volume and ADSR
       int32_t scaledSample = (static_cast<int32_t>(sample) * vol) >> 15;
-      mixL += (scaledSample * voices[v].volumeL) >> 15;
-      mixR += (scaledSample * voices[v].volumeR) >> 15;
+      lastVoiceOutput[v] =
+          static_cast<int16_t>(std::clamp(scaledSample, -32768, 32767));
+
+      int32_t voiceL = (scaledSample * voices[v].volumeL) >> 15;
+      int32_t voiceR = (scaledSample * voices[v].volumeR) >> 15;
+      mixL += voiceL;
+      mixR += voiceR;
+
+      // Accumulate reverb input for voices with reverb enabled
+      if (reverbOn & (1u << v)) {
+        reverbInL += voiceL;
+        reverbInR += voiceR;
+      }
     }
+
+    // Process reverb at the SPU sample rate (using cycle accumulator)
+    reverbCycleAccum++;
+    if (reverbCycleAccum >= 2) {
+      reverbCycleAccum = 0;
+      int32_t reverbL = 0, reverbR = 0;
+      ProcessReverb(reverbInL, reverbInR, reverbL, reverbR);
+      mixL += reverbL;
+      mixR += reverbR;
+    }
+
+    // Mix XA-ADPCM (CD audio) — rate-convert from xaSampleRate to 44100 Hz.
+    // Consume one XA sample for every (44100 / xaSampleRate) output samples.
+    xaFracAccum += xaSampleRate;
+    while (xaFracAccum >= Clock::SPU_SAMPLE_RATE) {
+      xaFracAccum -= Clock::SPU_SAMPLE_RATE;
+      if (xaCount > 0) {
+        xaHeldL = xaBufL[xaReadPos];
+        xaHeldR = xaBufR[xaReadPos];
+        xaReadPos = (xaReadPos + 1) & (XA_BUFFER_CAPACITY - 1);
+        xaCount--;
+      }
+    }
+    mixL += (static_cast<int32_t>(xaHeldL) * cdVolumeL) >> 15;
+    mixR += (static_cast<int32_t>(xaHeldR) * cdVolumeR) >> 15;
 
     // Apply main volume
     mixL = (mixL * mainVolumeL) >> 15;
     mixR = (mixR * mainVolumeR) >> 15;
-
-    // Clamp to 16-bit
     buffer[s * 2] = static_cast<int16_t>(std::clamp(mixL, -32768, 32767));
     buffer[s * 2 + 1] = static_cast<int16_t>(std::clamp(mixR, -32768, 32767));
   }
   return maxSamples;
 }
 
-// ─── ADPCM Decoding ────────────────────────────────────────────────────
+// ─── XA-ADPCM Input ──────────────────────────────────────────────────────
+// Called by CDROM decoder to push decoded stereo XA samples into the circular
+// buffer.  Rate conversion to 44100 Hz happens in GetSamples().
+
+void PS1SPU::FeedXASamples(const int16_t *left, const int16_t *right,
+                           uint32_t count, uint32_t sampleRate) {
+  xaSampleRate = sampleRate;
+  for (uint32_t i = 0; i < count; i++) {
+    if (xaCount < XA_BUFFER_CAPACITY) {
+      xaBufL[xaWritePos] = left[i];
+      xaBufR[xaWritePos] = right[i];
+      xaWritePos = (xaWritePos + 1) & (XA_BUFFER_CAPACITY - 1);
+      xaCount++;
+    }
+    // Buffer full: silently drop. Keeps audio in sync even if the host
+    // outruns the consumer (no burst of old samples on next drain).
+  }
+}
+
+// ─── Noise Generator (NOCASH PSX §SPU Noise) ─────────────────────────────
+
+void PS1SPU::TickNoise() {
+  // LFSR: ParityBit = Level.Bit15 XOR Bit12 XOR Bit11 XOR Bit10 XOR 1
+  // IF Timer < 0: Level = Level*2 + ParityBit; Timer += (0x20000 >> NoiseShift)
+  uint32_t noiseShift = (spuCtrl >> 8) & 0x3F;
+  int32_t reloadPeriod = static_cast<int32_t>(0x20000u >> noiseShift);
+  noiseTimer -= 1;
+  if (noiseTimer < 0) {
+    uint16_t lvl = static_cast<uint16_t>(noiseLevel);
+    int parity =
+        (((lvl >> 15) ^ (lvl >> 12) ^ (lvl >> 11) ^ (lvl >> 10)) & 1) ^ 1;
+    noiseLevel =
+        static_cast<int16_t>(static_cast<uint16_t>((lvl << 1) | parity));
+    noiseTimer += reloadPeriod;
+  }
+}
+
+// ─── Reverb Engine (NOCASH PSX §SPU Reverb Formula) ─────────────────────
+
+// Reverb register indices (from the 32 reverb config regs at 0x1F801DC0):
+enum ReverbReg {
+  vIIR = 0,
+  vCOMB1,
+  vCOMB2,
+  vCOMB3,
+  vCOMB4,
+  vWALL,
+  vAPF1,
+  vAPF2,
+  mLSAME,
+  mRSAME,
+  mLCOMB1,
+  mRCOMB1,
+  mLCOMB2,
+  mRCOMB2,
+  dLSAME,
+  dRSAME,
+  mLDIFF,
+  mRDIFF,
+  mLCOMB3,
+  mRCOMB3,
+  mLCOMB4,
+  mRCOMB4,
+  dLDIFF,
+  dRDIFF,
+  mLAPF1,
+  mRAPF1,
+  mLAPF2,
+  mRAPF2,
+  vLIN,
+  vRIN,
+  vLOUT,
+  vROUT
+};
+
+uint32_t PS1SPU::ReverbWrap(int32_t rawByteAddr) const {
+  uint32_t base = static_cast<uint32_t>(reverbBase) * 8;
+  uint32_t spuSize = static_cast<uint32_t>(spuRAM.size()) * 2; // in bytes
+  if (base >= spuSize)
+    base = 0;
+  uint32_t bufSize = spuSize - base;
+  if (bufSize == 0)
+    return 0;
+  // Wrap within [base .. spuSize)
+  int32_t offset = rawByteAddr % static_cast<int32_t>(bufSize);
+  if (offset < 0)
+    offset += static_cast<int32_t>(bufSize);
+  return base + static_cast<uint32_t>(offset);
+}
+
+int16_t PS1SPU::ReadReverbBuf(int32_t s16RegIndex, int32_t extraBytes) const {
+  // s16RegIndex: 0-based index into reverbRegs[]
+  // address = reverbBufferAddr + reverbRegs[s16RegIndex]*8 + extraBytes,
+  // wrapped
+  int32_t offset =
+      static_cast<int32_t>(reverbRegs[s16RegIndex]) * 8 + extraBytes;
+  int32_t rawAddr = static_cast<int32_t>(reverbBufferAddr) + offset;
+  uint32_t addr = ReverbWrap(rawAddr);
+  uint32_t wordAddr = (addr / 2) % spuRAM.size();
+  return static_cast<int16_t>(spuRAM[wordAddr]);
+}
+
+void PS1SPU::WriteReverbBuf(int32_t s16RegIndex, int16_t value) {
+  int32_t offset = static_cast<int32_t>(reverbRegs[s16RegIndex]) * 8;
+  int32_t rawAddr = static_cast<int32_t>(reverbBufferAddr) + offset;
+  uint32_t addr = ReverbWrap(rawAddr);
+  uint32_t wordAddr = (addr / 2) % spuRAM.size();
+  spuRAM[wordAddr] = static_cast<uint16_t>(value);
+}
+
+void PS1SPU::ProcessReverb(int32_t inputL, int32_t inputR, int32_t &outL,
+                           int32_t &outR) {
+  // Full NOCASH PSX reverb formula
+  // All multiplications are 1.15 fixed-point (>>15 for result)
+  auto mul15 = [](int32_t a, int16_t b) -> int32_t {
+    return (a * static_cast<int32_t>(b)) >> 15;
+  };
+
+  int32_t Lin = mul15(inputL, reverbRegs[vLIN]);
+  int32_t Rin = mul15(inputR, reverbRegs[vRIN]);
+
+  // Same-side reflections
+  int16_t tmpL = static_cast<int16_t>(std::clamp(
+      mul15(Lin + mul15(ReadReverbBuf(dLSAME, 0), reverbRegs[vWALL]) -
+                ReadReverbBuf(mLSAME, -2),
+            reverbRegs[vIIR]) +
+          ReadReverbBuf(mLSAME, -2),
+      -32768, 32767));
+  WriteReverbBuf(mLSAME, tmpL);
+
+  int16_t tmpR = static_cast<int16_t>(std::clamp(
+      mul15(Rin + mul15(ReadReverbBuf(dRSAME, 0), reverbRegs[vWALL]) -
+                ReadReverbBuf(mRSAME, -2),
+            reverbRegs[vIIR]) +
+          ReadReverbBuf(mRSAME, -2),
+      -32768, 32767));
+  WriteReverbBuf(mRSAME, tmpR);
+
+  // Cross reflections
+  int16_t tmpLD = static_cast<int16_t>(std::clamp(
+      mul15(Lin + mul15(ReadReverbBuf(dRDIFF, 0), reverbRegs[vWALL]) -
+                ReadReverbBuf(mLDIFF, -2),
+            reverbRegs[vIIR]) +
+          ReadReverbBuf(mLDIFF, -2),
+      -32768, 32767));
+  WriteReverbBuf(mLDIFF, tmpLD);
+
+  int16_t tmpRD = static_cast<int16_t>(std::clamp(
+      mul15(Rin + mul15(ReadReverbBuf(dLDIFF, 0), reverbRegs[vWALL]) -
+                ReadReverbBuf(mRDIFF, -2),
+            reverbRegs[vIIR]) +
+          ReadReverbBuf(mRDIFF, -2),
+      -32768, 32767));
+  WriteReverbBuf(mRDIFF, tmpRD);
+
+  // Comb filters
+  int32_t Lout = mul15(ReadReverbBuf(mLCOMB1, 0), reverbRegs[vCOMB1]) +
+                 mul15(ReadReverbBuf(mLCOMB2, 0), reverbRegs[vCOMB2]) +
+                 mul15(ReadReverbBuf(mLCOMB3, 0), reverbRegs[vCOMB3]) +
+                 mul15(ReadReverbBuf(mLCOMB4, 0), reverbRegs[vCOMB4]);
+  int32_t Rout = mul15(ReadReverbBuf(mRCOMB1, 0), reverbRegs[vCOMB1]) +
+                 mul15(ReadReverbBuf(mRCOMB2, 0), reverbRegs[vCOMB2]) +
+                 mul15(ReadReverbBuf(mRCOMB3, 0), reverbRegs[vCOMB3]) +
+                 mul15(ReadReverbBuf(mRCOMB4, 0), reverbRegs[vCOMB4]);
+
+  // All-pass filter 1
+  Lout -=
+      mul15(ReadReverbBuf(mLAPF1, static_cast<int32_t>(reverbRegs[vAPF1]) * -8),
+            reverbRegs[vAPF1]);
+  int16_t apf1L = static_cast<int16_t>(std::clamp(Lout, -32768, 32767));
+  WriteReverbBuf(mLAPF1, apf1L);
+  Lout = mul15(Lout, reverbRegs[vAPF1]) +
+         ReadReverbBuf(mLAPF1, static_cast<int32_t>(reverbRegs[vAPF1]) * -8);
+
+  Rout -=
+      mul15(ReadReverbBuf(mRAPF1, static_cast<int32_t>(reverbRegs[vAPF1]) * -8),
+            reverbRegs[vAPF1]);
+  int16_t apf1R = static_cast<int16_t>(std::clamp(Rout, -32768, 32767));
+  WriteReverbBuf(mRAPF1, apf1R);
+  Rout = mul15(Rout, reverbRegs[vAPF1]) +
+         ReadReverbBuf(mRAPF1, static_cast<int32_t>(reverbRegs[vAPF1]) * -8);
+
+  // All-pass filter 2
+  Lout -=
+      mul15(ReadReverbBuf(mLAPF2, static_cast<int32_t>(reverbRegs[vAPF2]) * -8),
+            reverbRegs[vAPF2]);
+  int16_t apf2L = static_cast<int16_t>(std::clamp(Lout, -32768, 32767));
+  WriteReverbBuf(mLAPF2, apf2L);
+  Lout = mul15(Lout, reverbRegs[vAPF2]) +
+         ReadReverbBuf(mLAPF2, static_cast<int32_t>(reverbRegs[vAPF2]) * -8);
+
+  Rout -=
+      mul15(ReadReverbBuf(mRAPF2, static_cast<int32_t>(reverbRegs[vAPF2]) * -8),
+            reverbRegs[vAPF2]);
+  int16_t apf2R = static_cast<int16_t>(std::clamp(Rout, -32768, 32767));
+  WriteReverbBuf(mRAPF2, apf2R);
+  Rout = mul15(Rout, reverbRegs[vAPF2]) +
+         ReadReverbBuf(mRAPF2, static_cast<int32_t>(reverbRegs[vAPF2]) * -8);
+
+  // Output volume scaling
+  outL = mul15(Lout, reverbRegs[vLOUT]);
+  outR = mul15(Rout, reverbRegs[vROUT]);
+
+  // Advance circular buffer pointer (wraps within reverb buffer region)
+  uint32_t newAddr = reverbBufferAddr + 2;
+  // Wrap to mBASE if we've exceeded SPU RAM or the buffer base
+  uint32_t topAddr = static_cast<uint32_t>(spuRAM.size()) * 2;
+  if (newAddr >= topAddr)
+    newAddr = static_cast<uint32_t>(reverbBase) * 8;
+  reverbBufferAddr = newAddr;
+}
 
 int16_t PS1SPU::DecodeSample(SPUVoice &voice, uint32_t voiceIndex) {
   // Advance sample position using fixed-point counter

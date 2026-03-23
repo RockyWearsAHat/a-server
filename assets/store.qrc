@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/store">
+    <file alias="catalog.json">store/catalog.json</file>
+    <file>store/steam-genres.json</file>
+  </qresource>
+</RCC>

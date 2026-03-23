@@ -29,6 +29,9 @@ namespace AIO::GUI {
 class MainMenuAdapter;
 class EmulatorSelectAdapter;
 class GameSelectAdapter;
+class GamesLibraryPage;
+class GameStorePage;
+class SteamService;
 class EmulatorSettingsAdapter;
 class SettingsMenuAdapter;
 class NASAdapter;
@@ -102,6 +105,9 @@ public:
   bool StartAudioRecording(const std::string &path);
   bool StopAudioRecording();
   bool IsAudioRecording() const;
+  std::string GetAudioRecordingPath() const;
+  double GetAudioRecordingDuration() const;
+  AIO::Common::AudioRecorder::AudioMetrics GetAudioMetrics() const;
 
   // Combined A/V recording for development/testing.
   // Records framebuffer + audio directly from emulator buffers.
@@ -150,6 +156,21 @@ public slots:
   /** @brief Navigate to the NAS page. */
   void goToNAS();
 
+  /** @brief Navigate to the screen mirror page. */
+  void goToScreenMirror();
+
+  /** @brief Navigate to the unified games library page. */
+  void goToGamesLibrary();
+
+  /** @brief Launch a locally installed game or app by path. */
+  void launchInstalledGame(const QString &path);
+
+  /** @brief Navigate to the game store page. */
+  void goToGameStore();
+
+  /** @brief Launch a Steam game by app ID. */
+  void launchSteamGame(const QString &steamAppId);
+
 private slots:
   /** @brief UI refresh tick for the emulator framebuffer/status. */
   void UpdateDisplay();
@@ -190,8 +211,11 @@ private:
   void setupSettingsPage();
   void setupStreamingPages();
   void setupNASPage();
-  void maybeAutostartYouTubeServer();
-  void stopAutostartedYouTubeServer();
+  void setupScreenMirrorPage();
+  void setupGamesLibraryPage();
+  void setupGameStorePage();
+  void maybeAutostartServer();
+  void stopAutostartedServer();
 
   void loadSettings();
   void saveSettings();
@@ -227,6 +251,10 @@ private:
   QWidget *youTubePlayerPage;
   QWidget *streamingWebPage;
   QWidget *nasPage;
+  QWidget *screenMirrorPage_ = nullptr;
+  AIO::GUI::GamesLibraryPage *gamesLibraryPage_ = nullptr;
+  AIO::GUI::GameStorePage *gameStorePage_ = nullptr;
+  AIO::GUI::SteamService *steamService_ = nullptr;
 
   QListWidget *gameListWidget;
   QLabel *romPathLabel;
@@ -353,10 +381,12 @@ private:
   // Published by UI/input polling; consumed/applied by emulation thread.
   // 0x03FF = all released (GBA KEYINPUT is active-low).
   std::atomic<uint16_t> pendingEmuKeyinput{0x03FF};
-  QProcess *youtubeServerProcess_ = nullptr;
+  QProcess *serverProcess_ = nullptr;
 
   // Localhost HTTP server for programmatic input injection (visual dev loop)
   friend class RemoteControlServer;
+
+  QWidget *nowPlayingOverlay_ = nullptr;
 };
 
 } // namespace GUI

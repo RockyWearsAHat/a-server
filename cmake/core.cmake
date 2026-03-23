@@ -70,6 +70,7 @@ set_target_properties(SwitchEmulator PROPERTIES
 add_executable(AIOServer 
     ${PROJECT_ROOT}/src/main.cpp
     ${PROJECT_ROOT}/assets/fonts.qrc
+    ${PROJECT_ROOT}/assets/store.qrc
     ${PROJECT_ROOT}/src/common/Dotenv.cpp
     ${PROJECT_ROOT}/src/common/Logging.cpp
     ${PROJECT_ROOT}/src/common/CssVars.cpp
@@ -91,6 +92,13 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/StreamingWebViewPage.cpp
     ${PROJECT_ROOT}/src/gui/NASPage.cpp
     ${PROJECT_ROOT}/src/gui/NASAdapter.cpp
+    ${PROJECT_ROOT}/src/gui/ScreenMirrorPage.cpp
+    ${PROJECT_ROOT}/src/gui/GameStorePage.cpp
+    ${PROJECT_ROOT}/src/gui/SteamService.cpp
+    ${PROJECT_ROOT}/src/gui/GamesLibraryPage.cpp
+    ${PROJECT_ROOT}/src/screenmirror/AirPlayReceiver.cpp
+    ${PROJECT_ROOT}/src/screenmirror/AirPlayPairing.cpp
+    ${PROJECT_ROOT}/src/screenmirror/MirrorSessionManager.cpp
     ${PROJECT_ROOT}/src/gui/YouTubeBrowsePage.cpp
     ${PROJECT_ROOT}/src/gui/YouTubePlayerPage.cpp
     ${PROJECT_ROOT}/src/gui/youtube/YouTubePlayerOverlay.cpp
@@ -121,6 +129,12 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/StreamingWebViewPage.h
     ${PROJECT_ROOT}/include/gui/NASPage.h
     ${PROJECT_ROOT}/include/gui/NASAdapter.h
+    ${PROJECT_ROOT}/include/gui/ScreenMirrorPage.h
+    ${PROJECT_ROOT}/include/gui/GameStorePage.h
+    ${PROJECT_ROOT}/include/gui/SteamService.h
+    ${PROJECT_ROOT}/include/gui/GamesLibraryPage.h
+    ${PROJECT_ROOT}/include/screenmirror/AirPlayReceiver.h
+    ${PROJECT_ROOT}/include/screenmirror/MirrorSessionManager.h
     ${PROJECT_ROOT}/include/gui/YouTubeBrowsePage.h
     ${PROJECT_ROOT}/include/gui/YouTubePlayerPage.h
     ${PROJECT_ROOT}/include/gui/youtube/YouTubePlayerOverlay.h
@@ -145,10 +159,18 @@ target_include_directories(AIOServer PRIVATE
     ${PROJECT_ROOT}/src/gui
     ${SDL2_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
+    ${OPENSSL_INCLUDE_DIR}
     $<TARGET_PROPERTY:Qt6::Widgets,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(AIOServer PRIVATE Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets GBAEmulator SwitchEmulator PS1Emulator SDL2::SDL2 CURL::libcurl)
+target_link_libraries(AIOServer PRIVATE
+    Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
+    GBAEmulator SwitchEmulator PS1Emulator SDL2::SDL2
+    CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
+    $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
+    $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>
+    $<$<BOOL:${APPLE}>:${COREMEDIA_FRAMEWORK}>
+)
 
 # Precompiled headers — compile heavy Qt + stdlib headers once, reuse across all TUs
 target_precompile_headers(AIOServer PRIVATE

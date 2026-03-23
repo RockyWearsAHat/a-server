@@ -124,18 +124,20 @@ void PS1DMA::CheckAndStartTransfer(uint32_t channelIndex) {
 void PS1DMA::DoTransfer(uint32_t channelIndex) {
   auto &ch = channels[channelIndex];
 
+  uint32_t wordsTransferred = 0;
   switch (ch.syncMode()) {
   case DMA::SyncMode::MANUAL:
   case DMA::SyncMode::REQUEST:
-    DoBlockTransfer(channelIndex);
+    wordsTransferred = DoBlockTransfer(channelIndex);
     break;
   case DMA::SyncMode::LINKED_LIST:
-    DoLinkedListTransfer(channelIndex);
+    wordsTransferred = DoLinkedListTransfer(channelIndex);
     break;
   default:
     LogWarn("DMA ch%u: unknown sync mode %u", channelIndex, ch.syncMode());
     break;
   }
+  pendingCycles += wordsTransferred * 4;
 
   // Transfer complete — clear active bit and trigger
   ch.channelControl &= ~((1 << 24) | (1 << 28));
@@ -144,7 +146,7 @@ void PS1DMA::DoTransfer(uint32_t channelIndex) {
   transferCounts[channelIndex]++;
 }
 
-void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
+uint32_t PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
   auto &ch = channels[channelIndex];
 
   uint32_t wordCount;
@@ -174,7 +176,7 @@ void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
       LogDebug("DMA OTC: built ordering table, %u entries at %08X", wordCount,
                ch.baseAddr);
     }
-    return;
+    return wordCount;
   }
 
   int32_t step = ch.stepBackward() ? -4 : 4;
@@ -241,23 +243,26 @@ void PS1DMA::DoBlockTransfer(uint32_t channelIndex) {
              channelIndex, wordCount, ch.baseAddr,
              ch.directionFromRAM() ? "fromRAM" : "toRAM");
   }
+  return wordCount;
 }
 
-void PS1DMA::DoLinkedListTransfer(uint32_t channelIndex) {
+uint32_t PS1DMA::DoLinkedListTransfer(uint32_t channelIndex) {
   // Linked list mode is only used by GPU (channel 2)
   if (channelIndex != DMA::Channel::GPU) {
     LogWarn("DMA ch%u: linked list mode not supported for this channel",
             channelIndex);
-    return;
+    return 0;
   }
 
   uint32_t addr = channels[channelIndex].baseAddr & 0x001FFFFC;
   uint32_t safetyCounter = 0;
+  uint32_t totalWords = 0;
   constexpr uint32_t MAX_LINKED_LIST_ENTRIES = 0x100000;
 
   while (safetyCounter < MAX_LINKED_LIST_ENTRIES) {
     uint32_t header = memory.ReadRAM32(addr);
     uint32_t wordCount = header >> 24;
+    totalWords += wordCount;
 
     for (uint32_t i = 0; i < wordCount; i++) {
       addr += 4;
@@ -273,8 +278,10 @@ void PS1DMA::DoLinkedListTransfer(uint32_t channelIndex) {
   }
 
   if constexpr (Trace::DMA_TRACE) {
-    LogDebug("DMA GPU linked list transfer: %u entries", safetyCounter);
+    LogDebug("DMA GPU linked list transfer: %u entries, %u words",
+             safetyCounter, totalWords);
   }
+  return totalWords;
 }
 
 void PS1DMA::SetIRQFlag(uint32_t channelIndex) {

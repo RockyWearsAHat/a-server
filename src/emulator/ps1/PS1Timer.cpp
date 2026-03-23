@@ -17,6 +17,11 @@ void PS1Timer::Reset() {
     ch.oneShotFired = false;
   }
   timer2Div8Accum = 0;
+  hblankActive = false;
+  vblankActive = false;
+  hblankCyclesRemaining = 0;
+  for (auto &b : syncFreeRun)
+    b = false;
 }
 
 uint32_t PS1Timer::Read32(uint32_t addr) const {
@@ -80,6 +85,16 @@ void PS1Timer::Write32(uint32_t addr, uint32_t value) {
 }
 
 void PS1Timer::Tick(uint32_t cpuCycles) {
+  // Update HBlank active duration
+  if (hblankActive) {
+    if (cpuCycles >= hblankCyclesRemaining) {
+      hblankCyclesRemaining = 0;
+      hblankActive = false;
+    } else {
+      hblankCyclesRemaining -= cpuCycles;
+    }
+  }
+
   // Timer 2: PSX-SPX specifies sources 0,1 = system clock and 2,3 = system/8.
   uint32_t timer2Source = channels[2].clockSource();
   if (timer2Source == 0 || timer2Source == 1) {
@@ -106,9 +121,46 @@ void PS1Timer::Tick(uint32_t cpuCycles) {
 }
 
 void PS1Timer::TickHBlank() {
-  // Timer 1 can be clocked by hblank
+  // Set HBlank active and arm duration counter (gating for sync mode 0/2)
+  hblankActive = true;
+  hblankCyclesRemaining = HBLANK_DURATION_CYCLES;
+
+  // Timer 0 blank-edge events (per NOCASH PSX §Timers):
+  if (channels[0].syncEnable()) {
+    uint32_t sm = channels[0].syncMode();
+    // Modes 1 and 2: reset counter to 0 at start of HBlank
+    if (sm == 1 || sm == 2) {
+      channels[0].counter = 0;
+    }
+    // Mode 3: first HBlank received — unlock free-run
+    if (sm == 3 && !syncFreeRun[0]) {
+      syncFreeRun[0] = true;
+    }
+  }
+
+  // Timer 1 HBlank as clock source (existing behaviour)
   if (channels[1].clockSource() == 1 || channels[1].clockSource() == 3) {
     TickChannel(1, 1);
+  }
+}
+
+void PS1Timer::SetVBlankState(bool active) {
+  bool wasActive = vblankActive;
+  vblankActive = active;
+
+  // Timer 1 blank-edge events on VBlank start (per NOCASH PSX §Timers)
+  if (!wasActive && active) {
+    if (channels[1].syncEnable()) {
+      uint32_t sm = channels[1].syncMode();
+      // Modes 1 and 2: reset counter to 0 at start of VBlank
+      if (sm == 1 || sm == 2) {
+        channels[1].counter = 0;
+      }
+      // Mode 3: first VBlank received — unlock free-run
+      if (sm == 3 && !syncFreeRun[1]) {
+        syncFreeRun[1] = true;
+      }
+    }
   }
 }
 
@@ -121,6 +173,41 @@ void PS1Timer::TickDotClock(uint32_t dots) {
 
 void PS1Timer::TickChannel(uint32_t index, uint32_t ticks) {
   auto &ch = channels[index];
+
+  // ─── Timer 2 sync mode (NOCASH PSX §Timers) ────────────────────────────
+  // Sync mode 0 or 3 = stop counter. Sync mode 1 or 2 = free-run (no effect).
+  if (index == 2 && ch.syncEnable()) {
+    uint32_t sm = ch.syncMode();
+    if (sm == 0 || sm == 3)
+      return; // Counter permanently stopped
+    // sm == 1 or 2: free-run — fall through to normal tick
+  }
+
+  // ─── Timer 0 (HBlank) and Timer 1 (VBlank) sync gating ──────────────────
+  if (index < 2 && ch.syncEnable()) {
+    bool blankActive = (index == 0) ? hblankActive : vblankActive;
+    switch (ch.syncMode()) {
+    case 0:
+      // Pause counter during blank
+      if (blankActive)
+        return;
+      break;
+    case 1:
+      // Reset at blank start (handled in TickHBlank/SetVBlankState).
+      // Counter runs normally between blanks.
+      break;
+    case 2:
+      // Reset at blank start (handled externally); pause outside blank.
+      if (!blankActive)
+        return;
+      break;
+    case 3:
+      // Pause until first blank, then free-run forever.
+      if (!syncFreeRun[index])
+        return;
+      break;
+    }
+  }
 
   for (uint32_t i = 0; i < ticks; i++) {
     uint16_t prevCounter = ch.counter;

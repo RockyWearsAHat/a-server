@@ -105,3 +105,42 @@ TEST_F(PS1DMATest, Reset_RestoresDefaults) {
 TEST_F(PS1DMATest, GetDebugSummary_NotEmpty) {
   EXPECT_FALSE(dma->GetDebugSummary().empty());
 }
+
+// ─── Cycle Stall ────────────────────────────────────────────────────────────
+
+TEST_F(PS1DMATest, OTC_Transfer_GeneratesPendingCycles) {
+  // Enable channel 6 in DPCR (OTC), set up 4-entry ordering table
+  dma->Write32(0x1F8010F0, 0x08888888);
+  uint32_t baseAddr = 0x00000C00;
+  uint32_t numEntries = 4;
+  // OTC: base=C00, blockControl = numEntries (manual mode,
+  // blockSize=numEntries)
+  dma->Write32(0x1F8010E0, baseAddr);
+  dma->Write32(0x1F8010E4, numEntries);
+  // Trigger: sync=MANUAL(0), direction to RAM(0), start(bit24)
+  dma->Write32(0x1F8010E8, (1 << 24) | (1 << 28));
+
+  // After the transfer, pending cycles must be non-zero (4 cycles/word)
+  EXPECT_GT(dma->GetAndClearPendingCycles(), 0u)
+      << "DMA transfer must accumulate pending CPU stall cycles";
+  // Second call must return 0 (already consumed)
+  EXPECT_EQ(dma->GetAndClearPendingCycles(), 0u);
+}
+
+// ─── DPCR Enable Bit ───────────────────────────────────────────────────
+TEST_F(PS1DMATest, DPCR_DisabledChannel6_BlocksOTCTransfer) {
+  // Disable all DMA channels in DPCR (all enable bits = 0, priority bits only)
+  dma->Write32(0x1F8010F0, 0x00000000);
+
+  // Set up OTC (ch6) base address and block size
+  uint32_t baseAddr = 0x00001000;
+  memory->WriteRAM32(baseAddr, 0xDEADBEEFu); // sentinel
+  dma->Write32(0x1F8010E0, baseAddr);      // MADR
+  dma->Write32(0x1F8010E4, 4);              // BCR blockSize=4
+  // CHCR: manual sync, direction=toRAM, active+trigger (bits 24+28)
+  dma->Write32(0x1F8010E8, 0x11000002);
+
+  // Sentinel must remain unchanged — transfer was blocked by DPCR
+  EXPECT_EQ(memory->ReadRAM32(baseAddr), 0xDEADBEEFu)
+      << "OTC transfer executed despite DPCR ch6 being disabled";
+}

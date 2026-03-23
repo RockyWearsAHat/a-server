@@ -4,9 +4,11 @@
 
 #include <QWidget>
 
+class QFrame;
 class QLabel;
 class QPushButton;
 class QStackedWidget;
+class QTimer;
 class QToolButton;
 class QWebEngineProfile;
 class QWebEngineView;
@@ -51,15 +53,26 @@ private:
   QLabel *titleLabel_ = nullptr;
   QLabel *statusLabel_ = nullptr;
   QLabel *errorLabel_ = nullptr;
+  QLabel *hintLabel_ = nullptr;
   QWidget *errorStrip_ = nullptr;
   QPushButton *retryButton_ = nullptr;
   QToolButton *backButton_ = nullptr;
+  QToolButton *forwardButton_ = nullptr;
   QToolButton *appHomeButton_ = nullptr;
   QToolButton *homeButton_ = nullptr;
   QToolButton *reloadButton_ = nullptr;
 
-  std::array<QWebEngineView *, 4> appViews_{};
-  std::array<QWebEngineProfile *, 4> appProfiles_{};
+  QWidget *loadingPage_ = nullptr;
+  QLabel *loadingServiceName_ = nullptr;
+  QFrame *loadingAccent_ = nullptr;
+  QLabel *loadingIndicator_ = nullptr;
+  QTimer *dotsTimer_ = nullptr;
+  QTimer *hintHideTimer_ = nullptr;
+  int dotsCount_ = 0;
+  bool loadingVisible_ = false;
+
+  std::array<QWebEngineView *, 5> appViews_{};
+  std::array<QWebEngineProfile *, 5> appProfiles_{};
   int currentAppIndex_ = -1;
 };
 

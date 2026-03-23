@@ -128,6 +128,11 @@ void ButtonListAdapter::applyHoveredInternal() {
 
     // Set property as string for QSS matching ("true" or "false").
     const char *value = shouldBeSelected ? "true" : "false";
+
+    // Skip re-polish when property is already the desired value.
+    if (b->property("aio_selected").toString() == QLatin1String(value))
+      continue;
+
     b->setProperty("aio_selected", value);
 
     // Force style re-evaluation and repaint.

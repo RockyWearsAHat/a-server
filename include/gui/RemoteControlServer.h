@@ -1,10 +1,14 @@
 #pragma once
 
 #include <QByteArray>
+#include <QJsonObject>
 #include <QMap>
 #include <QObject>
 #include <QString>
 #include <QTcpServer>
+#include <QTimer>
+#include <QVector>
+#include <functional>
 
 class QMainWindow;
 class QTcpSocket;
@@ -34,9 +38,12 @@ class MainWindow;
  *   GET  /state/navigation    — navigation selection details
  *   GET  /state/input         — input mode and controller state
  *   GET  /state/emulator      — emulator runtime info (if running)
+ *   GET  /state/audio         — live audio metrics (RMS, silence, clipping)
  *   GET  /state/widgets       — visible widget tree with geometry
  *   GET  /state/page          — detailed current-page introspection
  *   GET  /health              — liveness check
+ *   GET  /events              — chronological ring buffer of app events
+ *                               (?since=<epochMs>&limit=<N>)
  *
  * Programmable Endpoint:
  *   POST /execute             — run a named action with parameters
@@ -61,8 +68,32 @@ public:
 
 private slots:
   void onNewConnection();
+  void onMonitorTick();
 
 private:
+  // ── Event ring buffer ────────────────────────────────────────────────
+  struct RCEvent {
+    qint64 timestampMs = 0; // ms since RC server started
+    QString type;
+    QJsonObject data;
+  };
+  static constexpr int kMaxEvents = 500;
+  QVector<RCEvent> eventLog_;
+  qint64 startTimeMs_ = 0;
+
+  // Emulator monitor state (updated each tick)
+  bool prevRunning_ = false;
+  bool prevPaused_ = false;
+  quint64 prevFrameNumber_ = 0;
+  qint64 lastFrameAdvanceMs_ = 0;
+  bool prevAudioSilence_ = false;
+
+  QTimer *monitorTimer_ = nullptr;
+
+  void appendEvent(const QString &type, const QJsonObject &data = {});
+  void initEventMonitor();
+
+  // ── HTTP infra ───────────────────────────────────────────────────────
   struct HttpRequest {
     QString method;
     QString path;
@@ -97,8 +128,10 @@ private:
   HttpResponse handleStateNavigation();
   HttpResponse handleStateInput();
   HttpResponse handleStateEmulator();
+  HttpResponse handleStateAudio();
   HttpResponse handleStateWidgets();
   HttpResponse handleStatePage();
+  HttpResponse handleEvents(const HttpRequest &req);
   HttpResponse handleExecute(const HttpRequest &req);
 
   void writePortFile(quint16 port);
@@ -108,6 +141,13 @@ private:
 
   HttpResponse jsonResponse(int status, const QByteArray &json);
   HttpResponse errorResponse(int status, const QString &message);
+
+  // Nav route table — built once at construction from MainWindow's goTo* slots
+  // plus alias/special-case lambdas. Adding a new slot to MainWindow is all
+  // that's needed; no wiring here.
+  QMap<QString, std::function<void()>> navTable_;
+  void buildNavTable();
+  static QString methodToSlug(const QByteArray &nameWithoutGoTo);
 };
 
 } // namespace GUI

@@ -1,10 +1,10 @@
 ---
-description: "Route visual verification, analysis, and resolution planning requests to Visual Engineer."
-agent: Visual Engineer
+description: "Route visual verification, analysis, and resolution planning requests through Project Lead."
+agent: Project Lead
 argument-hint: "Describe the behavior to verify, the expected state, any existing artifacts, and whether you need a plan or just a pass/fail result."
 ---
 
-Use this prompt for visual verification, problem analysis, and implementation planning.
+`Project Lead` should delegate screenshot capture and visual judgment to `Visual Engineer` when the task requires rendered-output verification.
 
 Include:
 
