@@ -16,7 +16,7 @@ Repository-local Copilot customization for AIO Server. Three-phase delivery: **P
 ├── skills/                  # On-demand procedures (loaded only when agents need them)
 ├── prompts/                 # Human-invoked entry points
 ├── README.md
-└── copilot-instructions.md  # Always-on product overview and core constraints
+└── copilot-instructions.md  # Always-on repo baseline only
 ```
 
 ## Agent Hierarchy
@@ -63,6 +63,7 @@ Main Agent (coordinator — delegates only, context reserved for user iteration)
 - **Tool restrictions enforce roles.** Delegating agents include `agent` in their `tools:` list to enable subagent calls, plus only the tool categories their role requires. This prevents agents from doing work they should delegate.
 - **Methodology lives in skills, not agents.** Agent files define identity, tools, and delegation boundaries. Skills contain step-by-step procedures. This prevents agents from self-executing when they should be loading a skill.
 - **Hooks enforce, instructions suggest.** The build-gate Stop hook deterministically blocks completion when the build fails. Instructions are probabilistic guidance.
+- **Protect the control surface.** Agents should not routinely rewrite `.github/` customization files. Instructions, agents, skills, prompts, and hooks are the control surface and are edited only when the user explicitly asks for Copilot customization changes.
 - **Parse the full request.** Before delegating, identify EVERY distinct feature/fix requested — not just the one mentioned most.
 - **Three clean phases.** Planning → Development → Testing. No mixing.
 - **Compact handoffs.** Goal, domain scope, constraints, expected outcome. No transcript dumps or file paths in briefs.
@@ -74,6 +75,7 @@ Main Agent (coordinator — delegates only, context reserved for user iteration)
 ## Hooks (deterministic lifecycle enforcement)
 
 - `build-gate.json` — **Stop hook**: runs `make build` when the agent tries to complete. Blocks if build fails. Prevents agents from declaring "done" with broken code. Includes `stop_hook_active` guard to prevent infinite retry loops.
+- `customization-guard.json` — `UserPromptSubmit` + `PreToolUse` hooks: allow edits to the `.github/` Copilot control surface only when the user's prompt explicitly asks for customization work.
 
 ## Instructions (path-matched, auto-loaded)
 
@@ -130,3 +132,4 @@ Main Agent (coordinator — delegates only, context reserved for user iteration)
 - When `R&D Lead` discovers reusable findings, it should hand them to `Explore` so the result becomes shared cache instead of one-off chat context.
 - `Project Lead` and `Senior Engineer` should consume the cache and route missing knowledge to `Explore`, not do open-ended discovery themselves.
 - Prefer updating durable references over repeated broad search. On this project, stale or missing internal documentation is a workflow bug.
+- Keep mutable product status and rollout notes in `.github/knowledge/` or human docs, not in `copilot-instructions.md`.

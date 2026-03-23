@@ -1,6 +1,5 @@
 ---
 name: Quality Auditor
-model: Claude Sonnet 4.6 (copilot)
 description: "QA specialist — audits code quality, workflow health, and standards compliance. Tasked by Project Lead during the testing phase."
 argument-hint: "Describe what to audit: code quality concerns, workflow issues, or standards compliance check."
 tools: ["read", "search", "todo"]

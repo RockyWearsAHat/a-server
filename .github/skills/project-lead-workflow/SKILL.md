@@ -42,9 +42,16 @@ You MUST complete thorough research before creating any implementation plan.
 ### If Action Type = `implement`
 
 - Write a concrete implementation plan grounded in Phase 1 findings.
+- Include explicit acceptance criteria. Prefer concrete, testable outcomes over vague success language.
+- Classify the task by risk before dispatching:
+  - Critical: emulator correctness, startup/shutdown, persistence, protocol behavior
+  - High: Qt ownership, threading, shared navigation, build graph changes
+  - Medium: page or feature behavior inside an existing subsystem
+  - Low: tests, docs, narrow refactors
 - Delegate to Senior Engineer with: what exists now, what needs to change, which files, and specific acceptance criteria.
 - Senior Engineer owns implementation AND verification. It loops internally until verified.
 - You do NOT separately dispatch Test Engineer or Visual Engineer — Senior Engineer has them.
+- For native C++/Qt/CMake work, tell Senior Engineer to load `native-cpp-workflow` and the matching scoped instruction files.
 
 ### If Action Type = `research-only`
 
@@ -60,6 +67,13 @@ You MUST complete thorough research before creating any implementation plan.
 - If blockers: adjust the plan and re-dispatch.
 - If complete and verified: proceed to Phase 4.
 - Multiple SEs for independent sub-tasks are fine. Read each result after all complete.
+
+### Evaluation checklist
+
+- Did the result satisfy every acceptance criterion from the plan?
+- Did the verification level match the risk tier?
+- If the task was native-code heavy, did the result confirm build plus the smallest relevant test scope?
+- Did the implementation stay within the approved problem and avoid opportunistic expansion?
 
 ## Phase 4: Final Comprehensive Review
 

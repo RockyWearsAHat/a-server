@@ -1,6 +1,5 @@
 ---
 name: R&D Lead
-model: Claude Sonnet 4.6 (copilot)
 description: "Research specialist for design questions, tradeoffs, and external documentation gaps."
 argument-hint: "Describe the specific question, the decision it supports, and any file or subsystem context."
 tools: ["agent", "read", "search", "web", "memory", "todo"]

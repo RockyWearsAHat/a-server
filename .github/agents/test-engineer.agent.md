@@ -1,6 +1,5 @@
 ---
 name: Test Engineer
-model: Claude Sonnet 4.6 (copilot)
 description: "QA specialist — runs targeted tests, interprets failures, adds regression coverage. Tasked by Senior Engineer during verification."
 argument-hint: "Describe what to test: the component, expected behavior, the changes made, and any known failure modes."
 tools: ["read", "search", "execute", "todo"]

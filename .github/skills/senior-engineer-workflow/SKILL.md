@@ -61,6 +61,17 @@ Object lifecycle (Qt parent-child ownership), signal/slot threading, resource in
 - Consume the approved plan and existing knowledge; don't broaden into open-ended research.
 - Use Explore to check `.github/knowledge/` for cached facts before asking PL for clarification.
 - Handle only trivial one-line fixes directly.
+- For C++/Qt/CMake tasks, load `native-cpp-workflow` before dispatching implementation.
+
+## Acceptance Criteria and Risk
+
+- Translate the Project Lead brief into concrete acceptance criteria before dispatch.
+- Match verification depth to risk:
+	- Critical: build plus targeted tests and runtime confirmation where applicable
+	- High: build plus targeted tests, and visual/runtime checks if lifecycle or UI is involved
+	- Medium: build plus targeted tests or visual confirmation
+	- Low: smallest relevant verification only
+- Do not sign off work that lacks explicit proof for the relevant risk tier.
 
 ## Diff Review (MANDATORY after every Code Engineer delivery)
 
@@ -69,8 +80,15 @@ Treat every delivery like a pull request:
 1. **Behavioral correctness**: Does the code DO what it claims? Trace the logic — don't trust comments or method names. Stubs and empty handlers are NOT "working."
 2. **Completeness**: Is the full pipeline connected end-to-end? A UI wired to a never-emitted signal is not complete.
 3. **Scope discipline**: Only touches the right files? No unnecessary abstractions or dead code?
-4. **Convention compliance**: Qt/QSS sync, emulator accuracy (spec-sourced), test conventions (targeted).
+4. **Convention compliance**: Qt/QSS sync, emulator accuracy (spec-sourced), test conventions (targeted), native C++ ownership and include discipline.
 5. **Comment accuracy**: Comments must not make false claims. Flag and fix contradictions.
+
+### Native-code review additions
+
+- Are headers, implementation files, call sites, and tests updated together?
+- Does QObject ownership remain valid and obvious?
+- If threads are involved, is signal delivery mode explicit where needed?
+- Did the change modify the smallest necessary build target instead of introducing parallel CMake behavior?
 
 If ANY check fails, send specific feedback to Code Engineer. Do not report PASS until every check passes on actual code.
 
@@ -79,7 +97,7 @@ If ANY check fails, send specific feedback to Code Engineer. Do not report PASS 
 1. **Build**: Confirm `make build` passes.
 2. **Test**: Delegate to Test Engineer for targeted tests. Failures → back to Code Engineer.
 3. **Visual** (if UI changed): Delegate to Visual Engineer. Failures → back to Code Engineer.
-4. **Knowledge update**: Update `.github/knowledge/` for every subsystem that changed.
+4. **Knowledge update**: Update `.github/knowledge/` only when the work changes durable facts, debugging knowledge, workflow behavior, or architecture guidance that future agents should reuse.
 
 Loop until all tasks pass. Do NOT report back with failures.
 

@@ -79,6 +79,6 @@ Every brief MUST include:
 - Runtime-verify: dispatch to Senior Engineer with ROM paths and criteria.
 - Multi-step work: delegate to Project Lead(s).
 - After all leads report: run `make build` as final sanity check, then report.
-- If feature status changed, update the Product Overview in `copilot-instructions.md`.
+- If a request changes durable repo facts, update the relevant `.github/knowledge/` note or human-facing doc. Update `copilot-instructions.md` only when the always-on runtime baseline itself changed.
 - Don't hand back until EVERY lead completes. Resolve failures before closing.
 - Don't run the full test suite as a final step. Leads verify their own scope.

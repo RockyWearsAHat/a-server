@@ -23,6 +23,7 @@ applyTo: "src/**/*.cpp,include/**/*.h,include/**/*.hpp"
 - Qt signal/slot across threads requires `Qt::QueuedConnection` or will crash silently or non-deterministically.
 - QSettings persists state between runs. Stale settings can cause unexpected behavior after refactors — clear with `QSettings().clear()` if state-related bugs don't reproduce cleanly.
 - Qt WebEngine runs in a separate process. Crashes in WebEngine content don't produce SIGSEGV in the main process — check WebEngine's own console output.
+- Preventive Qt C++ conventions for these failure modes live in `.github/instructions/qt-cpp.instructions.md`.
 
 ## Crash signals
 

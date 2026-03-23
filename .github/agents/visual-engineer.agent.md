@@ -1,6 +1,5 @@
 ---
 name: Visual Engineer
-model: Claude Sonnet 4.6 (copilot)
 description: "Visual verification specialist — captures screenshots, makes visual judgments. Tasked by Senior Engineer during verification."
 argument-hint: "Describe the behavior to verify, the expected state, and any existing artifacts."
 tools: ["agent", "read", "search", "execute", "memory"]
