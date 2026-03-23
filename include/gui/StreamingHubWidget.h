@@ -13,7 +13,7 @@ namespace GUI {
 
 class RemoteControlServer;
 
-enum class StreamingApp { YouTube, Netflix, DisneyPlus, Hulu, Store };
+enum class StreamingApp { YouTube, Netflix, DisneyPlus, Hulu };
 
 // Custom painted tile showing a brand gradient + logo glyph + service name.
 class StreamingTile final : public QFrame {

@@ -215,14 +215,10 @@ void MainWindow::launchInstalledGame(const QString &path) {
 }
 
 void MainWindow::goToGameStore() {
-  // The store is a WebEngine wrapper for store.steampowered.com —
-  // same pattern as Netflix/Hulu/Disney+.
-  auto *web = qobject_cast<StreamingWebViewPage *>(streamingWebPage);
-  if (!web)
+  if (!gameStorePage_)
     return;
-  stackedWidget->setCurrentWidget(streamingWebPage);
-  web->openApp(AIO::GUI::StreamingApp::Store);
-  streamingWebPage->setFocus();
+  stackedWidget->setCurrentWidget(gameStorePage_);
+  gameStorePage_->setFocus();
 }
 
 void MainWindow::launchSteamGame(const QString &steamAppId) {

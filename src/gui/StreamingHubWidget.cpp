@@ -37,8 +37,6 @@ BrandColors brandColorsFor(StreamingApp app) {
     return {QColor(16, 55, 185), QColor(4, 18, 78), QColor(30, 80, 240, 160)};
   case StreamingApp::Hulu:
     return {QColor(24, 68, 42), QColor(12, 36, 22), QColor(28, 231, 131, 160)};
-  case StreamingApp::Store:
-    return {QColor(90, 62, 6), QColor(45, 30, 3), QColor(212, 168, 32, 160)};
   }
   return {};
 }
@@ -53,8 +51,6 @@ QString appNameFor(StreamingApp app) {
     return QStringLiteral("Disney+");
   case StreamingApp::Hulu:
     return QStringLiteral("Hulu");
-  case StreamingApp::Store:
-    return QStringLiteral("Steam Store");
   }
   return QStringLiteral("Streaming");
 }
@@ -77,9 +73,6 @@ QString appDescriptionFor(StreamingApp app) {
     return QStringLiteral(
         "Lean-back streaming with shared profile storage, stronger focus "
         "behavior, and consistent app-home recovery.");
-  case StreamingApp::Store:
-    return QStringLiteral(
-        "Browse, discover, and purchase games from the Steam store.");
   }
   return QStringLiteral("Shared streaming platform.");
 }

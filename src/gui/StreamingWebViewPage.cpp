@@ -43,8 +43,6 @@ QColor brandAccentForApp(AIO::GUI::StreamingApp app) {
     return QColor(30, 80, 240);
   case AIO::GUI::StreamingApp::Hulu:
     return QColor(28, 231, 131);
-  case AIO::GUI::StreamingApp::Store:
-    return QColor(212, 168, 32); // store-accent #d4a820
   }
   return QColor(100, 181, 246);
 }
@@ -277,8 +275,6 @@ QString StreamingWebViewPage::titleForApp(AIO::GUI::StreamingApp app) const {
     return "Disney+";
   case StreamingApp::Hulu:
     return "Hulu";
-  case StreamingApp::Store:
-    return "Steam Store";
   }
   return "Streaming";
 }
@@ -293,8 +289,6 @@ QString StreamingWebViewPage::urlForApp(AIO::GUI::StreamingApp app) const {
     return "https://www.disneyplus.com/home";
   case StreamingApp::Hulu:
     return "https://www.hulu.com/hub/home";
-  case StreamingApp::Store:
-    return "https://store.steampowered.com/";
   }
   return "https://www.youtube.com";
 }
@@ -310,8 +304,6 @@ StreamingWebViewPage::profileKeyForApp(AIO::GUI::StreamingApp app) const {
     return "disneyplus";
   case StreamingApp::Hulu:
     return "hulu";
-  case StreamingApp::Store:
-    return "steam-store";
   }
   return "streaming";
 }
