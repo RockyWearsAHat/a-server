@@ -34,7 +34,7 @@
 #include "gui/ScreenMirrorPage.h"
 #include "gui/SettingsMenuAdapter.h"
 #include "gui/SteamService.h"
-#include "gui/StreamingHubWidget.h"
+#include "gui/StreamingApp.h"
 #include "gui/StreamingWebViewPage.h"
 #include "gui/YouTubeBrowsePage.h"
 #include "gui/YouTubePlayerPage.h"
@@ -327,9 +327,6 @@ void MainWindow::launchSteamGame(const QString &steamAppId) {
 void MainWindow::openStreaming() { goToMainMenu(); }
 
 void MainWindow::setupStreamingPages() {
-  auto *hub = new StreamingHubWidget(this);
-  streamingHubPage = hub;
-
   auto *yt = new YouTubeBrowsePage(this);
   youTubeBrowsePage = yt;
 
@@ -339,12 +336,6 @@ void MainWindow::setupStreamingPages() {
   auto *web = new StreamingWebViewPage(this);
   streamingWebPage = web;
 
-  connect(hub, &StreamingHubWidget::launchRequested, this,
-          [this](AIO::GUI::StreamingApp app) {
-            launchStreamingApp(static_cast<int>(app));
-          });
-  connect(hub, &StreamingHubWidget::homeRequested, this,
-          &MainWindow::goToMainMenu);
   connect(web, &StreamingWebViewPage::homeRequested, this,
           &MainWindow::goToMainMenu);
 
@@ -371,10 +362,6 @@ void MainWindow::setupStreamingPages() {
 
 void MainWindow::launchStreamingApp(int app) {
   const auto selectedApp = static_cast<AIO::GUI::StreamingApp>(app);
-
-  if (auto *hub = qobject_cast<StreamingHubWidget *>(streamingHubPage)) {
-    hub->noteAppLaunched(selectedApp);
-  }
 
   // YouTube uses the Data API + native Qt UI (no WebEngine).
   if (selectedApp == AIO::GUI::StreamingApp::YouTube) {

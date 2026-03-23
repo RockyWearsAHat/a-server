@@ -3,7 +3,7 @@
 #include "gui/GamesLibraryPage.h"
 #include "gui/HomeScreen.h"
 #include "gui/MainWindow.h"
-#include "gui/StreamingHubWidget.h"
+#include "gui/StreamingApp.h"
 #include "input/InputManager.h"
 
 #include <QApplication>
@@ -1346,12 +1346,6 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
       obj["gamesLibrary"] = s;
     }
 
-    if (auto *hub = qobject_cast<AIO::GUI::StreamingHubWidget *>(current)) {
-      QJsonObject s;
-      s["focusedIndex"] = hub->focusedIndex_;
-      s["lastLaunchedIndex"] = hub->lastLaunchedIndex_;
-      obj["streamingHub"] = s;
-    }
   }
 
   return jsonResponse(200, QJsonDocument(obj).toJson(QJsonDocument::Compact));

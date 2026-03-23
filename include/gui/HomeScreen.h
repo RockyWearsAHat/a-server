@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gui/StreamingHubWidget.h" // StreamingApp enum
+#include "gui/StreamingApp.h"
 
 #include <QFrame>
 #include <QStringList>

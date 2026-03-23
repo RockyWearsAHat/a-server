@@ -1,6 +1,6 @@
 #include "gui/StreamingWebViewPage.h"
 
-#include "gui/StreamingHubWidget.h"
+#include "gui/StreamingApp.h"
 
 #include <QApplication>
 #include <QDir>

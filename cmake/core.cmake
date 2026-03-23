@@ -87,7 +87,6 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Navigation.cpp
     ${PROJECT_ROOT}/src/gui/mainwindow/MainWindow_Pages.cpp
     ${PROJECT_ROOT}/src/gui/LogViewerDialog.cpp
-    ${PROJECT_ROOT}/src/gui/StreamingHubWidget.cpp
     ${PROJECT_ROOT}/src/gui/HomeScreen.cpp
     ${PROJECT_ROOT}/src/gui/StreamingWebViewPage.cpp
     ${PROJECT_ROOT}/src/gui/NASPage.cpp
@@ -124,7 +123,6 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/MainWindow.h
     ${PROJECT_ROOT}/include/nas/NASServer.h
     ${PROJECT_ROOT}/include/gui/LogViewerDialog.h
-    ${PROJECT_ROOT}/include/gui/StreamingHubWidget.h
     ${PROJECT_ROOT}/include/gui/HomeScreen.h
     ${PROJECT_ROOT}/include/gui/StreamingWebViewPage.h
     ${PROJECT_ROOT}/include/gui/NASPage.h

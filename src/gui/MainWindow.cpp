@@ -370,18 +370,6 @@ MainWindow::MainWindow(QWidget *parent)
   if (streamingEnabled_) {
     setupStreamingPages();
   } else {
-    streamingHubPage = new QWidget(this);
-    auto *layout = new QVBoxLayout(streamingHubPage);
-    auto *label = new QLabel("Streaming disabled by AIO_DISABLE_STREAMING=1",
-                             streamingHubPage);
-    label->setAlignment(Qt::AlignCenter);
-    auto *backBtn = new QPushButton("Back", streamingHubPage);
-    backBtn->setFocusPolicy(Qt::StrongFocus);
-    layout->addWidget(label);
-    layout->addWidget(backBtn);
-    layout->setAlignment(backBtn, Qt::AlignHCenter);
-    connect(backBtn, &QPushButton::clicked, this, &MainWindow::goToMainMenu);
-
     // Placeholders so stackedWidget indices remain valid.
     youTubeBrowsePage = new QWidget(this);
     youTubePlayerPage = new QWidget(this);
@@ -394,7 +382,6 @@ MainWindow::MainWindow(QWidget *parent)
   stackedWidget->addWidget(emulatorPage);
   stackedWidget->addWidget(emulatorSettingsPage);
   stackedWidget->addWidget(settingsPage);
-  stackedWidget->addWidget(streamingHubPage);
   stackedWidget->addWidget(youTubeBrowsePage);
   stackedWidget->addWidget(youTubePlayerPage);
   stackedWidget->addWidget(streamingWebPage);

@@ -246,7 +246,6 @@ private:
   QWidget *emulatorPage;
   QWidget *emulatorSettingsPage;
   QWidget *settingsPage;
-  QWidget *streamingHubPage;
   QWidget *youTubeBrowsePage;
   QWidget *youTubePlayerPage;
   QWidget *streamingWebPage;

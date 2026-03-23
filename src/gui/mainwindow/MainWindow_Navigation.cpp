@@ -38,7 +38,7 @@ void MainWindow::setupNavigation() {
     const auto snapshot = AIO::Input::InputManager::instance().pollNow();
 
     const bool inStreamingUi =
-        (current == streamingHubPage) || (current == streamingWebPage) ||
+        (current == streamingWebPage) ||
         (current == youTubeBrowsePage) || (current == youTubePlayerPage);
 
     // Publish KEYINPUT for the emulation thread. When we're not actively
@@ -255,7 +255,7 @@ void MainWindow::onPageChanged() {
   // Publish an immediate KEYINPUT update on page transitions so emulation
   // never starts with stale UI navigation state.
   const bool inStreamingUi =
-      (current == streamingHubPage) || (current == streamingWebPage) ||
+      (current == streamingWebPage) ||
       (current == youTubeBrowsePage) || (current == youTubePlayerPage);
   const uint16_t desiredKeyinput =
       (inEmu && !inStreamingUi)
@@ -478,7 +478,7 @@ void MainWindow::onUIAction(const AIO::GUI::UIActionFrame &frame) {
   }
 
   const bool forwardToStreamingPage =
-      (current == homeScreenPage) || (current == streamingHubPage) ||
+      (current == homeScreenPage) ||
       (current == streamingWebPage) || (current == youTubeBrowsePage) ||
       (current == youTubePlayerPage) ||
       (current == static_cast<QWidget *>(gamesLibraryPage_)) ||

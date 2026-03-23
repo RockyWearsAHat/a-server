@@ -4,7 +4,7 @@
 #include "emulator/gba/ARM7TDMI.h"
 #include "gui/MainWindow.h"
 #include "gui/RemoteControlServer.h"
-#include "gui/StreamingHubWidget.h"
+#include "gui/StreamingApp.h"
 #include "input/InputManager.h"
 #include "nas/NASServer.h"
 #include <QApplication>

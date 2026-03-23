@@ -825,13 +825,13 @@ void MainWindow::UpdateDisplay() {
   // directly. Important: do NOT drive menu navigation here as well, or we'll
   // double-dispatch actions.
   const bool isSubAppPage =
-      (current == emulatorPage) || (current == streamingHubPage) ||
-      (current == streamingWebPage) || (current == youTubeBrowsePage) ||
+      (current == emulatorPage) || (current == streamingWebPage) ||
+      (current == youTubeBrowsePage) ||
       (current == youTubePlayerPage);
 
   const bool inStreamingUi =
-      (current == streamingHubPage) || (current == streamingWebPage) ||
-      (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+      (current == streamingWebPage) || (current == youTubeBrowsePage) ||
+      (current == youTubePlayerPage);
 
   // Sub-app layer: synthesize basic keys for pages that rely on keyPressEvent.
   // Note: emulator runtime itself is fed via gba->UpdateInput below.
