@@ -30,6 +30,7 @@
 #include "emulator/gba/GBA.h"
 #include "emulator/ps1/PS1.h"
 #include "emulator/switch/SwitchEmulator.h"
+#include "emulator/windows/WindowsEmulator.h"
 
 #include "common/AssetPaths.h"
 #include "gui/EmulatorSelectAdapter.h"
@@ -295,7 +296,9 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), settings("AIOServer", "GBAEmulator"),
       gba(std::make_unique<AIO::Emulator::GBA::GBA>()),
       switchEmulator(std::make_unique<AIO::Emulator::Switch::SwitchEmulator>()),
-      ps1Emulator(std::make_unique<AIO::Emulator::PS1::PS1>()) {
+      ps1Emulator(std::make_unique<AIO::Emulator::PS1::PS1>()),
+      windowsEmulator(
+          std::make_unique<AIO::Emulator::Windows::WindowsEmulator>()) {
   maybeAutostartServer();
   QObject::connect(qApp, &QCoreApplication::aboutToQuit, this,
                    [this]() { stopAutostartedServer(); });

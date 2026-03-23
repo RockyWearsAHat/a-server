@@ -3,6 +3,7 @@
 #include "emulator/gba/GBA.h"
 #include "emulator/ps1/PS1.h"
 #include "emulator/switch/SwitchEmulator.h"
+#include "emulator/windows/WindowsEmulator.h"
 
 #include "emulator/switch/GpuCore.h"
 
@@ -191,6 +192,7 @@ uint64_t MainWindow::GetEmulatedMilliseconds() const {
     }
     break;
   case EmulatorType::Switch:
+  case EmulatorType::Windows:
   case EmulatorType::None:
     break;
   }
@@ -434,6 +436,17 @@ void MainWindow::LoadROM(const std::string &path) {
         displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
       }
     }
+  } else if (currentEmulator == EmulatorType::Windows) {
+    success = windowsEmulator->LoadROM(path);
+    if (success) {
+      displayImage = QImage(1280, 720, QImage::Format_ARGB32);
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
   }
 
   if (success) {
@@ -506,6 +519,9 @@ void MainWindow::SetEmulatorType(int type) {
   } else if (type == 2) {
     currentEmulator = EmulatorType::PS1;
     std::cout << "[MainWindow] Set emulator type to PS1" << std::endl;
+  } else if (type == 3) {
+    currentEmulator = EmulatorType::Windows;
+    std::cout << "[MainWindow] Set emulator type to Windows" << std::endl;
   }
 }
 
@@ -733,6 +749,8 @@ void MainWindow::EmulatorThreadMain() {
       ps1CycleCarry = totalCycles - kPs1CyclesPerFrame;
     } else if (currentEmulator == EmulatorType::Switch) {
       switchEmulator->RunFrame();
+    } else if (currentEmulator == EmulatorType::Windows) {
+      windowsEmulator->RunFrame();
     }
 
     // Always save frame snapshot for step-back capability (BEFORE incrementing
@@ -826,12 +844,11 @@ void MainWindow::UpdateDisplay() {
   // double-dispatch actions.
   const bool isSubAppPage =
       (current == emulatorPage) || (current == streamingWebPage) ||
-      (current == youTubeBrowsePage) ||
-      (current == youTubePlayerPage);
+      (current == youTubeBrowsePage) || (current == youTubePlayerPage);
 
-  const bool inStreamingUi =
-      (current == streamingWebPage) || (current == youTubeBrowsePage) ||
-      (current == youTubePlayerPage);
+  const bool inStreamingUi = (current == streamingWebPage) ||
+                             (current == youTubeBrowsePage) ||
+                             (current == youTubePlayerPage);
 
   // Sub-app layer: synthesize basic keys for pages that rely on keyPressEvent.
   // Note: emulator runtime itself is fed via gba->UpdateInput below.
@@ -1074,6 +1091,11 @@ void MainWindow::UpdateDisplay() {
           avRecorder_.RecordVideoFrame(recordFrame);
         }
       }
+    }
+  } else if (currentEmulator == EmulatorType::Windows) {
+    const QImage &fb = windowsEmulator->GetFramebuffer();
+    if (!fb.isNull()) {
+      displayImage = fb.copy();
     }
   }
 

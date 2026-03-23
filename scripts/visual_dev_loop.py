@@ -12,6 +12,7 @@ Usage:
     visual_dev_loop.py focus
     visual_dev_loop.py screenshot [--output PATH] [--window]
     visual_dev_loop.py snapshot [--rom ROM | --app APP] [--wait-ms MS] [--input-script PATH] [--output PATH] [--full-screen] [--window-only]
+    visual_dev_loop.py execute ACTION [--params JSON]
     visual_dev_loop.py user-test-create [--rom ROM | --app APP] [--wait-ms MS] [--input-script PATH] [--snap-key F9] [--abort-key F10]
     visual_dev_loop.py click   --x X --y Y [--window-relative]
     visual_dev_loop.py click-percent --percent-x X --percent-y Y [--image PATH]
@@ -1557,6 +1558,32 @@ def cmd_status(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_execute(args: argparse.Namespace) -> None:
+    """Execute a named remote-control action exposed by AIOServer."""
+    try:
+        params = json.loads(args.params) if args.params else {}
+    except json.JSONDecodeError as e:
+        _err(f"Invalid params JSON: {e}")
+        return
+
+    if not isinstance(params, dict):
+        _err("--params must decode to a JSON object")
+        return
+
+    try:
+        data = _remote_post("/execute", {"action": args.action, "params": params})
+        _ok(**data)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {"status": e.code, "body": body}
+        _err(f"Execute failed: HTTP {e.code}", action=args.action, response=payload)
+    except Exception as e:
+        _err(f"Execute failed: {e}", action=args.action)
+
+
 def cmd_kill(args: argparse.Namespace) -> None:
     _kill_aioserver()
     _ok(killed=True)
@@ -2511,6 +2538,10 @@ def main() -> None:
 
     sub.add_parser("status", help="Check AIOServer status")
 
+    p = sub.add_parser("execute", help="Call a named remote-control action on AIOServer")
+    p.add_argument("action", help="Remote-control action name, for example navigate or launch-rom")
+    p.add_argument("--params", default="{}", help="JSON object of action parameters")
+
     p = sub.add_parser("poll-state", help="Poll full application state from remote control server")
     p.add_argument("--endpoint", default="state",
                    choices=["state", "navigation", "input", "emulator", "audio", "page", "widgets"],
@@ -2559,7 +2590,7 @@ def main() -> None:
         "wait-for-text": cmd_wait_for_text,
         "key": cmd_key, "key-sequence": cmd_key_sequence,
         "type": cmd_type, "wait": cmd_wait,
-        "analyze": cmd_analyze, "status": cmd_status, "poll-state": cmd_poll_state, "poll-events": cmd_poll_events,
+        "analyze": cmd_analyze, "status": cmd_status, "execute": cmd_execute, "poll-state": cmd_poll_state, "poll-events": cmd_poll_events,
         "kill": cmd_kill,
         "clean": cmd_clean,
         "session": cmd_session,

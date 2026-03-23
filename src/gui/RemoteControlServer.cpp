@@ -3,7 +3,6 @@
 #include "gui/GamesLibraryPage.h"
 #include "gui/HomeScreen.h"
 #include "gui/MainWindow.h"
-#include "gui/StreamingApp.h"
 #include "input/InputManager.h"
 
 #include <QApplication>
@@ -1345,7 +1344,6 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
       s["displayGames"] = libPage->displayGames_.size();
       obj["gamesLibrary"] = s;
     }
-
   }
 
   return jsonResponse(200, QJsonDocument(obj).toJson(QJsonDocument::Compact));

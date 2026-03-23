@@ -100,6 +100,9 @@ static QStringList steamAppsCandidates() {
 
 static constexpr int kMaxApps = 500;
 static constexpr const char *kCacheTimestampKey = "SteamService/lastFetchTs";
+static constexpr const char *kCacheSchemaVersionKey =
+    "SteamService/cacheSchemaVersion";
+static constexpr int kCacheSchemaVersion = 2;
 static const qint64 kCacheTtlSecs = 86400;
 
 SteamService::SteamService(QObject *parent)
@@ -152,6 +155,9 @@ void SteamService::enrichWithGenres(QList<SteamGame> &games) {
 
 bool SteamService::loadFromCache(QList<SteamGame> &games) {
   QSettings settings;
+  const int schemaVersion = settings.value(kCacheSchemaVersionKey, 0).toInt();
+  if (schemaVersion != kCacheSchemaVersion)
+    return false;
   const qint64 ts = settings.value(kCacheTimestampKey, 0).toLongLong();
   const qint64 now = QDateTime::currentSecsSinceEpoch();
   if (now - ts > kCacheTtlSecs)
@@ -208,6 +214,7 @@ void SteamService::saveToCache(const QList<SteamGame> &games) {
 
   QSettings settings;
   settings.setValue(kCacheTimestampKey, QDateTime::currentSecsSinceEpoch());
+  settings.setValue(kCacheSchemaVersionKey, kCacheSchemaVersion);
 }
 
 void SteamService::fetchTopGames() {

@@ -1014,33 +1014,45 @@ QLabel[role="footer"] {
 
 #aioStoreHeader {
   background: transparent;
-  padding: 8px 32px;
+  padding: 16px 48px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 #aioStoreTitle {
-  color: #ffffff;
+  color: #f0f0f0;
   font-size: 32px;
   font-weight: 700;
 }
 
 #aioStoreSubtitle {
-  color: rgba(255, 255, 255, 0.45);
-  font-size: 14px;
+  color: #999999;
+  font-size: 16px;
+}
+
+#aioStoreBackHint {
+  color: #666666;
+  font-size: 13px;
 }
 
 #aioStoreTabBar {
   background: transparent;
-  padding: 0 32px;
+  padding: 8px 48px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 #aioStoreTabLabel {
   color: rgba(240, 240, 240, 0.50);
   font-size: 16px;
   font-weight: 600;
-  padding: 10px 24px;
+  padding: 12px 24px;
   border-radius: 20px;
   background: transparent;
+}
+
+#aioStoreTabLabel[aio_active="true"] {
+  color: #f0f0f0;
+  background: rgba(212, 168, 32, 0.08);
+  border: 1px solid rgba(212, 168, 32, 0.22);
 }
 
 #aioStoreTabLabel[aio_selected="true"] {
@@ -1049,10 +1061,49 @@ QLabel[role="footer"] {
   border: 2px solid rgba(212, 168, 32, 0.50);
 }
 
+#aioStoreShelfHeader {
+  background: transparent;
+}
+
+#aioStoreShelfEyebrow {
+  color: #d4a820;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#aioStoreShelfTitle {
+  color: #f0f0f0;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+#aioStoreShelfSummary {
+  color: #999999;
+  font-size: 16px;
+}
+
 #aioGameCard {
   background: transparent;
-  border-radius: 12px;
+  border-radius: 16px;
   border: none;
+}
+
+#aioStoreCardTitle {
+  color: #f0f0f0;
+  padding: 4px 12px 4px 12px;
+}
+
+#aioStoreCardMeta {
+  color: #999999;
+  padding: 0 12px 8px 12px;
+}
+
+#aioStoreCardMeta[aio_tone="library"] {
+  color: #64b5f6;
+}
+
+#aioStoreCardMeta[aio_tone="sale"] {
+  color: #d4a820;
 }
 
 /* GameCard focus ring is handled entirely in GameStorePage.cpp :: GameCard::
@@ -1061,31 +1112,68 @@ QLabel[role="footer"] {
 #aioStoreDetailPanel {
   background: #121212;
   border-left: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 8px;
 }
 
 #aioStoreDetailTitle {
   color: #ffffff;
   font-size: 20px;
   font-weight: 700;
+  padding: 4px 0;
 }
 
 #aioStoreDetailMeta {
   color: #999999;
-  font-size: 13px;
+  font-size: 14px;
+}
+
+#aioStoreDetailRating {
+  color: #d4a820;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+#aioStoreDetailCategory {
+  color: #64b5f6;
+  background: rgba(100, 181, 246, 0.12);
+  border: 1px solid rgba(100, 181, 246, 0.30);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 #aioStoreDetailDesc {
   color: #f0f0f0;
   font-size: 14px;
+  line-height: 1.4;
+}
+
+
+#aioStoreStateCard {
+  background: #121212;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+#aioStoreStateTitle {
+  color: #f0f0f0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+#aioStoreStateBody {
+  color: #999999;
+  font-size: 16px;
 }
 
 
 #aioStoreToast {
-  background: rgba(30, 30, 30, 0.94);
+  background: rgba(18, 18, 18, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 12px 24px;
-  color: #ffffff;
+  color: #f0f0f0;
   font-size: 16px;
 }
 
@@ -1093,7 +1181,7 @@ QLabel[role="footer"] {
 /* ===== Game Store ===== */
 #aioStoreInstalledBadge {
     background-color: rgba(63, 185, 80, 0.18);
-    color: #3fb950;
+  color: #64b5f6;
     border: 1px solid rgba(63, 185, 80, 0.32);
     border-radius: 6px;
     font-size: 12px;
@@ -1102,7 +1190,7 @@ QLabel[role="footer"] {
 }
 
 #aioStorePlayButton {
-    background-color: #3fb950;
+  background-color: #d4a820;
     color: #0a0a0a;
     border: none;
     border-radius: 12px;
@@ -1113,13 +1201,13 @@ QLabel[role="footer"] {
 }
 
 #aioStorePlayButton:hover, #aioStorePlayButton:focus {
-    background-color: #4fc860;
+  background-color: rgba(212, 168, 32, 0.85);
 }
 
 #aioStoreInstallButton {
-    background-color: #64b5f6;
+  background-color: #64b5f6;
     color: #0a0a0a;
-    border: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 12px;
     font-size: 14px;
     font-weight: 600;

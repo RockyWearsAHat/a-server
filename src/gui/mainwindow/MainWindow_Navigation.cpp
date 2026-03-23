@@ -37,9 +37,9 @@ void MainWindow::setupNavigation() {
     // macOS. Other consumers can use snapshot() as a read-only view.
     const auto snapshot = AIO::Input::InputManager::instance().pollNow();
 
-    const bool inStreamingUi =
-        (current == streamingWebPage) ||
-        (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+    const bool inStreamingUi = (current == streamingWebPage) ||
+                               (current == youTubeBrowsePage) ||
+                               (current == youTubePlayerPage);
 
     // Publish KEYINPUT for the emulation thread. When we're not actively
     // running the emulator (or when streaming pages are active), force
@@ -254,9 +254,9 @@ void MainWindow::onPageChanged() {
 
   // Publish an immediate KEYINPUT update on page transitions so emulation
   // never starts with stale UI navigation state.
-  const bool inStreamingUi =
-      (current == streamingWebPage) ||
-      (current == youTubeBrowsePage) || (current == youTubePlayerPage);
+  const bool inStreamingUi = (current == streamingWebPage) ||
+                             (current == youTubeBrowsePage) ||
+                             (current == youTubePlayerPage);
   const uint16_t desiredKeyinput =
       (inEmu && !inStreamingUi)
           ? (scriptEnabled_.load(std::memory_order_relaxed) ? scriptKeyState_
@@ -478,9 +478,8 @@ void MainWindow::onUIAction(const AIO::GUI::UIActionFrame &frame) {
   }
 
   const bool forwardToStreamingPage =
-      (current == homeScreenPage) ||
-      (current == streamingWebPage) || (current == youTubeBrowsePage) ||
-      (current == youTubePlayerPage) ||
+      (current == homeScreenPage) || (current == streamingWebPage) ||
+      (current == youTubeBrowsePage) || (current == youTubePlayerPage) ||
       (current == static_cast<QWidget *>(gamesLibraryPage_)) ||
       (current == static_cast<QWidget *>(gameStorePage_));
   if (!forwardToStreamingPage) {

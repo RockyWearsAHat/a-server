@@ -41,19 +41,18 @@ public:
   explicit GameCard(const StoreGame &game, QWidget *parent = nullptr)
       : QFrame(parent), game_(game) {
     setObjectName(QStringLiteral("aioGameCard"));
-    setFixedSize(200, 240);
-    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    setFixedHeight(320);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(0);
     titleLabel_ = new QLabel(game.title, this);
+    titleLabel_->setObjectName(QStringLiteral("aioStoreCardTitle"));
     titleLabel_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     QFont tf;
-    tf.setPixelSize(14);
+    tf.setPixelSize(16);
     tf.setWeight(QFont::Bold);
     titleLabel_->setFont(tf);
-    titleLabel_->setStyleSheet(
-        QStringLiteral("color: #ffffff; padding: 4px 10px 2px 10px;"));
     const QString priceStr =
         game.isRomGame
             ? game.category
@@ -61,17 +60,17 @@ public:
                    ? QStringLiteral("-%1% off").arg(game.discountPercent)
                    : formatPrice(game.priceUsdCents));
     pubLabel_ = new QLabel(priceStr, this);
+    pubLabel_->setObjectName(QStringLiteral("aioStoreCardMeta"));
     pubLabel_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     QFont pf;
-    pf.setPixelSize(12);
+    pf.setPixelSize(13);
     pubLabel_->setFont(pf);
-    pubLabel_->setStyleSheet(
-        game.isRomGame
-            ? QStringLiteral("color: #9c8cff; padding: 0 10px 8px 10px;")
-            : ((game.isOnSale && game.discountPercent > 0)
-                   ? QStringLiteral("color: #4caf50; padding: 0 10px 8px 10px;")
-                   : QStringLiteral(
-                         "color: #999999; padding: 0 10px 8px 10px;")));
+    pubLabel_->setProperty("aio_tone",
+                           game.isRomGame
+                               ? QStringLiteral("library")
+                               : ((game.isOnSale && game.discountPercent > 0)
+                                      ? QStringLiteral("sale")
+                                      : QStringLiteral("default")));
     lay->addStretch(1);
     lay->addWidget(titleLabel_);
     lay->addWidget(pubLabel_);
@@ -92,10 +91,11 @@ protected:
     p.setRenderHint(QPainter::Antialiasing);
     p.setClipRect(rect());
     const QRectF r(rect());
-    const qreal radius = 12.0;
+    const qreal radius = 16.0;
     QLinearGradient grad(r.topLeft(), r.bottomLeft());
-    grad.setColorAt(0.0, game_.coverColor.lighter(145));
-    grad.setColorAt(1.0, game_.coverColor.darker(138));
+    grad.setColorAt(0.0, game_.coverColor.lighter(140));
+    grad.setColorAt(0.6, game_.coverColor);
+    grad.setColorAt(1.0, game_.coverColor.darker(160));
     QPainterPath path;
     path.addRoundedRect(r, radius, radius);
     p.fillPath(path, grad);
@@ -134,7 +134,7 @@ protected:
     // Sale badge (top-right corner) — only shown when game is discounted
     if (game_.isOnSale && game_.discountPercent > 0) {
       const QString saleText =
-          QStringLiteral("-%1%%").arg(game_.discountPercent);
+          QStringLiteral("-%1%").arg(game_.discountPercent);
       QFont badgeFont;
       badgeFont.setPixelSize(12);
       badgeFont.setWeight(QFont::Bold);
@@ -153,12 +153,12 @@ protected:
     if (game_.isInstalled) {
       const QString installedText = QStringLiteral("Installed");
       QFont instFont;
-      instFont.setPixelSize(12);
+      instFont.setPixelSize(13);
       instFont.setWeight(QFont::Medium);
       p.setFont(instFont);
       const QFontMetrics fm(instFont);
       const int tw = fm.horizontalAdvance(installedText);
-      const QRectF instRect(r.left() + 8, r.bottom() - 28, tw + 16, 20);
+      const QRectF instRect(r.left() + 12, r.bottom() - 32, tw + 16, 24);
       QPainterPath instPath;
       instPath.addRoundedRect(instRect, 6, 6);
       p.fillPath(instPath, QColor(63, 185, 80, 200));
@@ -168,26 +168,34 @@ protected:
 
     // Focus ring — crisp 3px white border at card boundary (tvOS/PS5 style)
     if (property("aio_selected").toBool()) {
+      QPainterPath glow;
+      glow.addRoundedRect(r.adjusted(3.0, 3.0, -3.0, -3.0), radius - 3.0,
+                          radius - 3.0);
+      p.setPen(QPen(QColor(255, 255, 255, 60), 8.0));
+      p.setBrush(Qt::NoBrush);
+      p.drawPath(glow);
+
       QPainterPath ring;
       ring.addRoundedRect(r.adjusted(1.5, 1.5, -1.5, -1.5), radius - 1.5,
                           radius - 1.5);
-      p.setPen(QPen(QColor(255, 255, 255, 224), 3.0));
+      p.setPen(QPen(QColor(255, 255, 255, 236), 4.0));
       p.setBrush(Qt::NoBrush);
       p.drawPath(ring);
     }
 
     // Source chip — small badge top-left showing origin (Steam or console)
     {
-      const QString srcText =
-          game_.isRomGame ? game_.category
-    : (game_.sourceLabel.isEmpty() ? QStringLiteral("CATALOG") : game_.sourceLabel);
+      const QString srcText = game_.category.isEmpty()
+                                  ? (game_.isRomGame ? QStringLiteral("Library")
+                                                     : QStringLiteral("Store"))
+                                  : game_.category;
       QFont srcFont;
       srcFont.setPixelSize(12);
       srcFont.setWeight(QFont::DemiBold);
       p.setFont(srcFont);
       const QFontMetrics sfm(srcFont);
-      const int sw = sfm.horizontalAdvance(srcText) + 12;
-      const QRectF srcRect(r.left() + 8, r.top() + 8, sw, 18);
+      const int sw = sfm.horizontalAdvance(srcText) + 16;
+      const QRectF srcRect(r.left() + 12, r.top() + 12, sw, 22);
       QPainterPath srcPath;
       srcPath.addRoundedRect(srcRect, 6, 6);
       const QColor bg = game_.isRomGame ? QColor(156, 140, 255, 55)
@@ -210,9 +218,8 @@ private:
 GameStorePage::GameStorePage(QWidget *parent) : QWidget(parent) {
   setObjectName(QStringLiteral("aioGameStorePage"));
   setFocusPolicy(Qt::StrongFocus);
-  // No static catalog load — data comes from SteamService via setSteamService()
-  // Populate minimal "All" category so the tab bar renders before data arrives
   categories_.append(QStringLiteral("All"));
+  categories_.append(QStringLiteral("My Library"));
   setupUi();
 }
 
@@ -222,17 +229,100 @@ void GameStorePage::setSteamService(SteamService *service) {
           &GameStorePage::onSteamGamesReady);
   connect(steamService_, &SteamService::fetchError, this,
           &GameStorePage::showSteamError);
+  requestCatalogIfNeeded();
+}
+
+void GameStorePage::requestCatalogIfNeeded() {
+  if (!steamService_ || catalogRequested_)
+    return;
+  catalogRequested_ = true;
+  catalogLoading_ = true;
+  errorShown_ = false;
+  errorMessage_.clear();
+  rebuildGrid();
+  steamService_->fetchTopGames();
+}
+
+void GameStorePage::applyActiveCategoryFilter() {
+  if (categories_.isEmpty()) {
+    filteredGames_.clear();
+    updateShelfHeader();
+    return;
+  }
+
+  activeCategoryIndex_ =
+      qBound(0, activeCategoryIndex_, categories_.size() - 1);
+  const QString &cat = categories_[activeCategoryIndex_];
+  filteredGames_.clear();
+
+  if (cat == QStringLiteral("My Library")) {
+    filteredGames_ = libraryGames_;
+    libraryModeActive_ = true;
+  } else if (cat == QStringLiteral("All")) {
+    filteredGames_ = allGames_;
+    if (filteredGames_.isEmpty() && !libraryGames_.isEmpty())
+      filteredGames_ = libraryGames_;
+    libraryModeActive_ = false;
+  } else {
+    for (const auto &game : allGames_) {
+      if (game.category == cat)
+        filteredGames_.append(game);
+    }
+    libraryModeActive_ = false;
+  }
+
+  updateShelfHeader();
+}
+
+void GameStorePage::updateShelfHeader() {
+  if (!shelfEyebrow_ || !shelfTitle_ || !shelfSummary_)
+    return;
+
+  const QString activeCategory =
+      (activeCategoryIndex_ >= 0 && activeCategoryIndex_ < categories_.size())
+          ? categories_[activeCategoryIndex_]
+          : QStringLiteral("All");
+  const bool showingLibrary = activeCategory == QStringLiteral("My Library") ||
+                              (activeCategory == QStringLiteral("All") &&
+                               allGames_.isEmpty() && !libraryGames_.isEmpty());
+  shelfEyebrow_->setText(showingLibrary ? QStringLiteral("YOUR COLLECTION")
+                                        : QStringLiteral("DISCOVER"));
+  shelfTitle_->setText(showingLibrary
+                           ? QStringLiteral("Installed and Local Games")
+                           : (activeCategory == QStringLiteral("All")
+                                  ? QStringLiteral("Featured Catalog")
+                                  : activeCategory));
+
+  if (catalogLoading_ && allGames_.isEmpty()) {
+    shelfSummary_->setText(
+        QStringLiteral("Fetching curated catalog and live deals..."));
+  } else if (errorShown_ && filteredGames_.isEmpty()) {
+    shelfSummary_->setText(
+        errorMessage_.isEmpty()
+            ? QStringLiteral("The store is unavailable right now.")
+            : errorMessage_);
+  } else {
+    const int totalCount = filteredGames_.size();
+    if (showingLibrary) {
+      shelfSummary_->setText(
+          QStringLiteral("%1 ready to launch from your device and linked apps.")
+              .arg(totalCount));
+    } else if (activeCategory == QStringLiteral("All")) {
+      shelfSummary_->setText(
+          QStringLiteral("Browse %1 curated titles in a console-style catalog.")
+              .arg(totalCount));
+    } else {
+      shelfSummary_->setText(QStringLiteral("%1 titles in %2.")
+                                 .arg(totalCount)
+                                 .arg(activeCategory));
+    }
+  }
 }
 
 void GameStorePage::onSteamGamesReady(const QList<AIO::GUI::SteamGame> &games) {
+  catalogLoading_ = false;
   errorShown_ = false;
-  if (loadingLabel_)
-    loadingLabel_->hide();
-
-  if (steamService_ && !steamService_->isSteamInstalled()) {
-    showSteamError(QStringLiteral("Game catalog is unavailable on this system."));
-    return;
-  }
+  errorMessage_.clear();
 
   steamGames_ = games;
 
@@ -245,7 +335,6 @@ void GameStorePage::onSteamGamesReady(const QList<AIO::GUI::SteamGame> &games) {
   QStringList sorted(catSet.begin(), catSet.end());
   sorted.sort(Qt::CaseInsensitive);
   categories_.append(sorted);
-  // My Library is always the last tab
   categories_.append(QStringLiteral("My Library"));
 
   // Rebuild tab labels
@@ -285,60 +374,26 @@ void GameStorePage::onSteamGamesReady(const QList<AIO::GUI::SteamGame> &games) {
     g.priceUsdCents = sg.priceUsdCents;
     g.discountPercent = sg.discountPercent;
     g.isOnSale = sg.isOnSale;
-    g.sourceLabel = QStringLiteral("CATALOG");
+    g.sourceLabel = QStringLiteral("STORE");
     allGames_.append(g);
   }
 
   activeCategoryIndex_ = 0;
   tabFocus_ = 0;
-  filteredGames_ = allGames_;
   scanLibrary();
+  applyActiveCategoryFilter();
   rebuildGrid();
   updateTabFocus();
   updateGridFocus();
 }
 
 void GameStorePage::showSteamError(const QString &msg) {
-  if (errorShown_)
-    return;
+  catalogLoading_ = false;
   errorShown_ = true;
-  if (loadingLabel_)
-    loadingLabel_->hide();
-  // Clear the grid and show an error message in its place
-  for (auto *c : cards_)
-    delete c;
-  cards_.clear();
-  if (gridHost_) {
-    delete gridHost_->layout();
-    auto *errLay = new QVBoxLayout(gridHost_);
-    errLay->setContentsMargins(48, 64, 48, 64);
-    errLay->setAlignment(Qt::AlignCenter);
-    auto *errCard = new QFrame(gridHost_);
-    errCard->setObjectName(QStringLiteral("aioStoreErrorCard"));
-    auto *errCardLay = new QVBoxLayout(errCard);
-    errCardLay->setContentsMargins(32, 32, 32, 32);
-    errCardLay->setSpacing(12);
-    auto *icon = new QLabel(QStringLiteral("⚠"), errCard);
-    icon->setAlignment(Qt::AlignCenter);
-    QFont iconFont;
-    iconFont.setPixelSize(48);
-    icon->setFont(iconFont);
-    icon->setStyleSheet(QStringLiteral("color: rgba(220,50,50,0.8);"));
-    auto *errMsg = new QLabel(msg, errCard);
-    errMsg->setAlignment(Qt::AlignCenter);
-    errMsg->setWordWrap(true);
-    auto *backBtn = new QPushButton(QStringLiteral("Return to Home"), errCard);
-    backBtn->setObjectName(QStringLiteral("aioStoreInstallButton"));
-    connect(backBtn, &QPushButton::clicked, this,
-            &GameStorePage::homeRequested);
-    errCardLay->addWidget(icon);
-    errCardLay->addWidget(errMsg);
-    errCardLay->addSpacing(12);
-    errCardLay->addWidget(backBtn, 0, Qt::AlignCenter);
-    errLay->addStretch();
-    errLay->addWidget(errCard, 0, Qt::AlignCenter);
-    errLay->addStretch();
-  }
+  errorMessage_ = msg;
+  scanLibrary();
+  applyActiveCategoryFilter();
+  rebuildGrid();
 }
 
 void GameStorePage::loadCatalog() {
@@ -417,11 +472,10 @@ void GameStorePage::setupUi() {
   auto *outer = new QVBoxLayout(this);
   outer->setContentsMargins(0, 0, 0, 0);
   outer->setSpacing(0);
-  // Header
   headerBar_ = new QWidget(this);
   headerBar_->setObjectName(QStringLiteral("aioStoreHeader"));
   auto *hdrLay = new QHBoxLayout(headerBar_);
-  hdrLay->setContentsMargins(32, 12, 32, 12);
+  hdrLay->setContentsMargins(48, 16, 48, 16);
   hdrLay->setSpacing(16);
   auto *iconLbl = new QLabel(headerBar_);
   iconLbl->setFixedSize(36, 36);
@@ -445,7 +499,8 @@ void GameStorePage::setupUi() {
   storeTitle->setObjectName(QStringLiteral("aioStoreTitle"));
   titleStack->addWidget(storeTitle);
   auto *storeSub = new QLabel(
-      QStringLiteral("Browse & discover games  ·  Your catalog & local library"),
+      QStringLiteral(
+          "Browse & discover games  ·  Your catalog & local library"),
       headerBar_);
   storeSub->setObjectName(QStringLiteral("aioStoreSubtitle"));
   titleStack->addWidget(storeSub);
@@ -453,16 +508,15 @@ void GameStorePage::setupUi() {
   hdrLay->addStretch();
   auto *backHint =
       new QLabel(QStringLiteral("[ Esc ] Return home"), headerBar_);
-  backHint->setStyleSheet(
-      QStringLiteral("color: rgba(255,255,255,0.3); font-size: 13px;"));
+  backHint->setObjectName(QStringLiteral("aioStoreBackHint"));
   hdrLay->addWidget(backHint);
   outer->addWidget(headerBar_);
-  // Tab bar
+
   tabBar_ = new QWidget(this);
   tabBar_->setObjectName(QStringLiteral("aioStoreTabBar"));
   auto *tabLay = new QHBoxLayout(tabBar_);
-  tabLay->setContentsMargins(32, 0, 32, 0);
-  tabLay->setSpacing(4);
+  tabLay->setContentsMargins(48, 8, 48, 8);
+  tabLay->setSpacing(8);
   for (const QString &cat : categories_) {
     auto *lbl = new QLabel(cat, tabBar_);
     lbl->setObjectName(QStringLiteral("aioStoreTabLabel"));
@@ -472,7 +526,26 @@ void GameStorePage::setupUi() {
   }
   tabLay->addStretch();
   outer->addWidget(tabBar_);
-  // Content area
+
+  shelfHeader_ = new QWidget(this);
+  shelfHeader_->setObjectName(QStringLiteral("aioStoreShelfHeader"));
+  auto *shelfLay = new QVBoxLayout(shelfHeader_);
+  shelfLay->setContentsMargins(48, 24, 48, 16);
+  shelfLay->setSpacing(4);
+  shelfEyebrow_ = new QLabel(QStringLiteral("DISCOVER"), shelfHeader_);
+  shelfEyebrow_->setObjectName(QStringLiteral("aioStoreShelfEyebrow"));
+  shelfLay->addWidget(shelfEyebrow_);
+  shelfTitle_ = new QLabel(QStringLiteral("Featured Catalog"), shelfHeader_);
+  shelfTitle_->setObjectName(QStringLiteral("aioStoreShelfTitle"));
+  shelfLay->addWidget(shelfTitle_);
+  shelfSummary_ = new QLabel(
+      QStringLiteral("Launching a native game catalog and your local library."),
+      shelfHeader_);
+  shelfSummary_->setObjectName(QStringLiteral("aioStoreShelfSummary"));
+  shelfSummary_->setWordWrap(true);
+  shelfLay->addWidget(shelfSummary_);
+  outer->addWidget(shelfHeader_);
+
   contentArea_ = new QWidget(this);
   auto *contLay = new QHBoxLayout(contentArea_);
   contLay->setContentsMargins(0, 0, 0, 0);
@@ -488,13 +561,13 @@ void GameStorePage::setupUi() {
   // Detail panel
   detailPanel_ = new QFrame(this);
   detailPanel_->setObjectName(QStringLiteral("aioStoreDetailPanel"));
-  detailPanel_->setFixedWidth(300);
+  detailPanel_->setFixedWidth(400);
   detailPanel_->setVisible(false);
   auto *detLay = new QVBoxLayout(detailPanel_);
-  detLay->setContentsMargins(16, 20, 16, 20);
-  detLay->setSpacing(10);
+  detLay->setContentsMargins(24, 24, 24, 24);
+  detLay->setSpacing(12);
   detailArt_ = new QLabel(detailPanel_);
-  detailArt_->setFixedHeight(120);
+  detailArt_->setFixedHeight(180);
   detailArt_->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
   detLay->addWidget(detailArt_);
   detailTitle_ = new QLabel(detailPanel_);
@@ -511,15 +584,10 @@ void GameStorePage::setupUi() {
   metaRow->addStretch();
   detLay->addLayout(metaRow);
   detailRating_ = new QLabel(detailPanel_);
-  detailRating_->setStyleSheet(
-      QStringLiteral("color: #d49c1c; font-size: 16px; font-weight: 700;"));
+  detailRating_->setObjectName(QStringLiteral("aioStoreDetailRating"));
   detLay->addWidget(detailRating_);
   detailCategory_ = new QLabel(detailPanel_);
-  detailCategory_->setObjectName(QStringLiteral("aioStoreDetailMeta"));
-  detailCategory_->setStyleSheet(QStringLiteral(
-      "color: #64b5f6; background: rgba(100,181,246,0.12); border: 1px solid "
-      "rgba(100,181,246,0.3); border-radius: 10px; padding: 3px 10px; "
-      "font-size: 12px; font-weight: 600;"));
+  detailCategory_->setObjectName(QStringLiteral("aioStoreDetailCategory"));
   detLay->addWidget(detailCategory_);
   detailDescription_ = new QLabel(detailPanel_);
   detailDescription_->setObjectName(QStringLiteral("aioStoreDetailDesc"));
@@ -557,39 +625,82 @@ void GameStorePage::setupUi() {
   toastTimer_->setSingleShot(true);
   connect(toastTimer_, &QTimer::timeout, toastWidget_, &QWidget::hide);
 
-  // Loading placeholder shown until SteamService delivers data
-  loadingOverlay_ = new QWidget(gridHost_);
-  auto *loadingLay = new QVBoxLayout(loadingOverlay_);
-  loadingLay->setAlignment(Qt::AlignCenter);
-  loadingLabel_ =
-      new QLabel(QStringLiteral("Loading catalog…"), loadingOverlay_);
-  loadingLabel_->setAlignment(Qt::AlignCenter);
-  loadingLabel_->setStyleSheet(
-      QStringLiteral("color: #999999; font-size: 16px;"));
-  loadingLay->addWidget(loadingLabel_);
-
   rebuildGrid();
   updateTabFocus();
   updateGridFocus();
+  updateShelfHeader();
 }
 void GameStorePage::rebuildGrid() {
   kGridCols = computeGridCols();
-  for (auto *c : cards_)
-    delete c;
   cards_.clear();
   if (!gridHost_)
     return;
+  const auto childWidgets =
+      gridHost_->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
+  for (QWidget *child : childWidgets)
+    delete child;
   delete gridHost_->layout();
-  auto *grid = new QGridLayout(gridHost_);
-  grid->setContentsMargins(24, 16, 24, 24);
-  grid->setHorizontalSpacing(12);
-  grid->setVerticalSpacing(12);
 
-  if (filteredGames_.isEmpty() && loadingLabel_) {
-    loadingLabel_->show();
-  } else if (loadingLabel_) {
-    loadingLabel_->hide();
+  if (filteredGames_.isEmpty()) {
+    auto *stateLay = new QVBoxLayout(gridHost_);
+    stateLay->setContentsMargins(48, 24, 48, 48);
+    stateLay->setSpacing(0);
+    stateLay->addStretch();
+
+    auto *stateCard = new QFrame(gridHost_);
+    stateCard->setObjectName(QStringLiteral("aioStoreStateCard"));
+    stateCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    auto *cardLay = new QVBoxLayout(stateCard);
+    cardLay->setContentsMargins(32, 32, 32, 32);
+    cardLay->setSpacing(12);
+
+    auto *stateTitle = new QLabel(stateCard);
+    stateTitle->setObjectName(QStringLiteral("aioStoreStateTitle"));
+    stateTitle->setAlignment(Qt::AlignCenter);
+    auto *stateBody = new QLabel(stateCard);
+    stateBody->setObjectName(QStringLiteral("aioStoreStateBody"));
+    stateBody->setAlignment(Qt::AlignCenter);
+    stateBody->setWordWrap(true);
+
+    if (catalogLoading_) {
+      stateTitle->setText(QStringLiteral("Loading catalog"));
+      stateBody->setText(QStringLiteral(
+          "Pulling in store listings, discounts, and your local library."));
+    } else if (errorShown_) {
+      stateCard->setObjectName(QStringLiteral("aioStoreErrorCard"));
+      stateTitle->setText(QStringLiteral("Store temporarily unavailable"));
+      stateBody->setText(
+          errorMessage_.isEmpty()
+              ? QStringLiteral("The catalog could not be loaded right now. Try "
+                               "again shortly or browse My Library.")
+              : errorMessage_);
+    } else {
+      stateTitle->setText(QStringLiteral("Nothing here yet"));
+      if (libraryModeActive_) {
+        stateBody->setText(QStringLiteral(
+            "Add ROMs to your configured library folder or install games "
+            "through the store to populate this shelf."));
+      } else {
+        stateBody->setText(
+            QStringLiteral("This shelf is empty right now. Try another "
+                           "category or open My Library."));
+      }
+    }
+
+    cardLay->addWidget(stateTitle);
+    cardLay->addWidget(stateBody);
+    stateLay->addWidget(stateCard, 0, Qt::AlignCenter);
+    stateLay->addStretch();
+    gridFocusRow_ = 0;
+    gridFocusCol_ = 0;
+    updateShelfHeader();
+    return;
   }
+
+  auto *grid = new QGridLayout(gridHost_);
+  grid->setContentsMargins(48, 24, 48, 48);
+  grid->setHorizontalSpacing(24);
+  grid->setVerticalSpacing(24);
 
   for (int i = 0; i < filteredGames_.size(); ++i) {
     auto *card = new GameCard(filteredGames_[i], gridHost_);
@@ -597,9 +708,10 @@ void GameStorePage::rebuildGrid() {
     cards_.append(card);
   }
   for (int c = 0; c < kGridCols; ++c)
-    grid->setColumnStretch(c, 0);
+    grid->setColumnStretch(c, 1);
   gridFocusRow_ = 0;
   gridFocusCol_ = 0;
+  updateShelfHeader();
   updateGridFocus();
 }
 
@@ -610,8 +722,10 @@ int GameStorePage::rowsInGrid() const {
 
 void GameStorePage::updateTabFocus() {
   for (int i = 0; i < tabLabels_.size(); ++i) {
-    const bool sel = (focusArea_ == FocusArea::Tabs && i == tabFocus_);
-    tabLabels_[i]->setProperty("aio_selected", sel ? "true" : "false");
+    const bool focused = (focusArea_ == FocusArea::Tabs && i == tabFocus_);
+    const bool active = (i == activeCategoryIndex_);
+    tabLabels_[i]->setProperty("aio_selected", focused ? "true" : "false");
+    tabLabels_[i]->setProperty("aio_active", active ? "true" : "false");
     tabLabels_[i]->style()->unpolish(tabLabels_[i]);
     tabLabels_[i]->style()->polish(tabLabels_[i]);
   }
@@ -642,23 +756,47 @@ void GameStorePage::activateFocusedGame() {
 void GameStorePage::showDetailPanel(const StoreGame &game) {
   detailVisible_ = true;
   detailPanel_->setVisible(true);
-  QPixmap artPm(detailPanel_->width() - 32, 120);
+  QPixmap artPm(detailPanel_->width() - 48, 180);
   artPm.fill(Qt::transparent);
   {
     QPainter p(&artPm);
     p.setRenderHint(QPainter::Antialiasing);
     QLinearGradient g(0, 0, 0, artPm.height());
-    g.setColorAt(0.0, game.coverColor);
-    g.setColorAt(1.0, game.coverColor.darker(220));
+    g.setColorAt(0.0, game.coverColor.lighter(130));
+    g.setColorAt(1.0, game.coverColor.darker(200));
     QPainterPath pp;
-    pp.addRoundedRect(QRectF(artPm.rect()), 8, 8);
+    pp.addRoundedRect(QRectF(artPm.rect()), 12, 12);
     p.fillPath(pp, g);
+
+    // Decorative diagonal
+    QPainterPath diag;
+    const QRectF ar(artPm.rect());
+    diag.moveTo(ar.left(), ar.top() + ar.height() * 0.6);
+    diag.lineTo(ar.right(), ar.top() + ar.height() * 0.2);
+    diag.lineTo(ar.right(), ar.top() + ar.height() * 0.4);
+    diag.lineTo(ar.left(), ar.top() + ar.height() * 0.8);
+    diag.closeSubpath();
+    p.fillPath(diag, QColor(255, 255, 255, 18));
+
+    // Large initial
+    QFont initFont;
+    initFont.setPixelSize(static_cast<int>(ar.height() * 0.4));
+    initFont.setWeight(QFont::Bold);
+    p.setFont(initFont);
+    p.setPen(QColor(255, 255, 255, 48));
+    const QString initial = game.title.isEmpty() ? QStringLiteral("?")
+                                                 : game.title.left(1).toUpper();
+    p.drawText(ar, Qt::AlignCenter, initial);
+
+    // Title overlay at bottom
     p.setPen(QColor(255, 255, 255, 200));
     QFont f;
-    f.setPixelSize(16);
+    f.setPixelSize(18);
     f.setWeight(QFont::Bold);
     p.setFont(f);
-    p.drawText(artPm.rect(), Qt::AlignCenter, game.title);
+    const QRectF textRect(ar.left() + 16, ar.bottom() - 48, ar.width() - 32,
+                          32);
+    p.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, game.title);
   }
   detailArt_->setPixmap(artPm);
   detailTitle_->setText(game.title);
@@ -690,9 +828,8 @@ void GameStorePage::showDetailPanel(const StoreGame &game) {
                              "Press Enter or click below to launch it.")
             : QStringLiteral("Open the catalog to browse screenshots, "
                              "read reviews, and manage this title."));
-    installBtn_->setText(game.isInstalled
-                             ? QStringLiteral("Launch Game")
-                             : QStringLiteral("Open in Store"));
+    installBtn_->setText(game.isInstalled ? QStringLiteral("Launch Game")
+                                          : QStringLiteral("Open in Store"));
     installBtn_->setObjectName(game.isInstalled
                                    ? QStringLiteral("aioStorePlayButton")
                                    : QStringLiteral("aioStoreInstallButton"));
@@ -707,9 +844,8 @@ void GameStorePage::showDetailPanel(const StoreGame &game) {
                              "Press Enter or click below to launch it.")
             : QStringLiteral("Open the catalog to browse screenshots, "
                              "read reviews, and manage this title."));
-    installBtn_->setText(game.isInstalled
-                             ? QStringLiteral("Launch Game")
-                             : QStringLiteral("Open in Store"));
+    installBtn_->setText(game.isInstalled ? QStringLiteral("Launch Game")
+                                          : QStringLiteral("Open in Store"));
     installBtn_->setObjectName(game.isInstalled
                                    ? QStringLiteral("aioStorePlayButton")
                                    : QStringLiteral("aioStoreInstallButton"));
@@ -739,6 +875,7 @@ void GameStorePage::showComingSoonToast() {
 
 void GameStorePage::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
+  requestCatalogIfNeeded();
   focusArea_ = FocusArea::Grid;
   detailVisible_ = false;
   if (detailPanel_)
@@ -746,8 +883,11 @@ void GameStorePage::showEvent(QShowEvent *event) {
   gridFocusRow_ = 0;
   gridFocusCol_ = 0;
   scanLibrary();
+  applyActiveCategoryFilter();
   const int newCols = computeGridCols();
   if (newCols != kGridCols)
+    rebuildGrid();
+  else
     rebuildGrid();
   updateTabFocus();
   updateGridFocus();
@@ -769,17 +909,7 @@ void GameStorePage::keyPressEvent(QKeyEvent *event) {
       updateGridFocus();
     } else if (key == Qt::Key_Return || key == Qt::Key_Enter) {
       activeCategoryIndex_ = tabFocus_;
-      const QString &cat = categories_[activeCategoryIndex_];
-      if (cat == QStringLiteral("My Library")) {
-        filteredGames_ = libraryGames_;
-      } else if (cat == QStringLiteral("All")) {
-        filteredGames_ = allGames_;
-      } else {
-        filteredGames_.clear();
-        for (const auto &g : allGames_)
-          if (g.category == cat)
-            filteredGames_.append(g);
-      }
+      applyActiveCategoryFilter();
       rebuildGrid();
       focusArea_ = FocusArea::Grid;
       updateTabFocus();

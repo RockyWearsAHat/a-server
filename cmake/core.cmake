@@ -67,6 +67,26 @@ set_target_properties(SwitchEmulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SwitchEmulator"
 )
 
+# ─── Windows Compat Layer ─────────────────────────────────────────────────
+add_library(WindowsCompatLayer STATIC
+    ${PROJECT_ROOT}/src/emulator/windows/WindowsEmulator.cpp
+    ${PROJECT_ROOT}/src/emulator/windows/X86_64Core.cpp
+    ${PROJECT_ROOT}/src/emulator/windows/WinMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/windows/WinAPILayer.cpp
+    ${PROJECT_ROOT}/src/emulator/windows/WinProcess.cpp
+)
+
+target_include_directories(WindowsCompatLayer PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(WindowsCompatLayer PUBLIC Qt6::Gui)
+
+set_target_properties(WindowsCompatLayer PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/WindowsCompatLayer"
+)
+
 add_executable(AIOServer 
     ${PROJECT_ROOT}/src/main.cpp
     ${PROJECT_ROOT}/assets/fonts.qrc
@@ -163,7 +183,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator SwitchEmulator PS1Emulator SDL2::SDL2
+    GBAEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

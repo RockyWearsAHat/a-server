@@ -70,15 +70,19 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 
 Detailed architecture notes live alongside this source map in `.github/knowledge/`. Check the relevant doc before researching a subsystem from scratch.
 
-| Domain                  | Knowledge Doc                           | Covers                                                          |
-| ----------------------- | --------------------------------------- | --------------------------------------------------------------- |
-| GUI shell & navigation  | `gui-architecture.md`                   | Page stack, NavigationController, adapters, MainWindow partials |
-| AirPlay / Screen Mirror | `airplay-nas-architecture.md`           | Bonjour, pairing protocol, HTTP endpoints, NAS browser          |
-| YouTube                 | `youtube-streaming-architecture.md`     | Browse/player pages, server backend, yt-dlp pipeline            |
-| Streaming services      | `qt-webengine-streaming-integration.md` | WebEngine wrappers, StreamingWebViewPage, DRM                   |
-| GBA emulator            | `gba-emulator-architecture.md`          | CPU, PPU, APU, memory, BIOS, timing                             |
-| PS1 emulator            | `ps1-emulator-architecture.md`          | R3000A, GPU, SPU, DMA, GTE, CDROM, timers                       |
-| Build system            | `build-infrastructure.md`               | Makefile chain, CMake, vcpkg, test binaries                     |
-| Research policy         | `research-policy.md`                    | Source priority, spec-first rules, prohibited sources           |
-| Agent workflow          | `agent-knowledge-flow.md`               | Knowledge retrieval path, cache-first rules                     |
-| Copilot setup           | `copilot-customization-layout.md`       | Agent roles, tool namespaces, layout rules                      |
+| Domain                  | Knowledge Doc                             | Covers                                                          |
+| ----------------------- | ----------------------------------------- | --------------------------------------------------------------- |
+| GUI shell & navigation  | `gui-architecture.md`                     | Page stack, NavigationController, adapters, MainWindow partials |
+| AirPlay / Screen Mirror | `airplay-nas-architecture.md`             | Bonjour, pairing protocol, HTTP endpoints, NAS browser          |
+| YouTube                 | `youtube-streaming-architecture.md`       | Browse/player pages, server backend, yt-dlp pipeline            |
+| Streaming services      | `qt-webengine-streaming-integration.md`   | WebEngine wrappers, StreamingWebViewPage, DRM                   |
+| GBA emulator            | `gba-emulator-architecture.md`            | CPU, PPU, APU, memory, BIOS, timing                             |
+| PS1 emulator            | `ps1-emulator-architecture.md`            | R3000A, GPU, SPU, DMA, GTE, CDROM, timers                       |
+| Build system            | `build-infrastructure.md`                 | Makefile chain, CMake, vcpkg, test binaries                     |
+| Research policy         | `research-policy.md`                      | Source priority, spec-first rules, prohibited sources           |
+| Agent workflow          | `agent-knowledge-flow.md`                 | Knowledge retrieval path, cache-first rules                     |
+| Audit research          | `audit-research-baseline-flow.md`         | Baseline-first research order, cache write-back rules           |
+| UI state control        | `ui-state-and-transition-bugs.md`         | Hidden state, invalid transitions, sequence bug prevention      |
+| Observability           | `path-dependent-bug-observability.md`     | Correlation, traces, structured events, rollout context         |
+| Release safety          | `release-safety-and-feature-decisions.md` | Flags, canaries, centralized decisions, rollback patterns       |
+| Copilot setup           | `copilot-customization-layout.md`         | Agent roles, tool namespaces, layout rules                      |

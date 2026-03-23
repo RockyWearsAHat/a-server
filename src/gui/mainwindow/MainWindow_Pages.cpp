@@ -210,6 +210,11 @@ void MainWindow::launchInstalledGame(const QString &path) {
     // Switch runtime is intentionally unavailable in production UI.
     return;
   }
+  if (lower.endsWith(QStringLiteral(".exe"))) {
+    currentEmulator = EmulatorType::Windows;
+    startGame(path);
+    return;
+  }
 
   qWarning() << "Unsupported installed game or app launch path:" << path;
 }

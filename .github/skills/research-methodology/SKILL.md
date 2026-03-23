@@ -23,6 +23,7 @@ Use as many Explore subagents as the problem requires. No artificial limit.
 **Example pattern** (AirPlay screen mirroring):
 
 Batch 1 (all at once):
+
 - Explore → read current codebase implementation
 - Explore → read cached knowledge from `.github/knowledge/`
 - Explore → read `reference-sources.md` for known doc URLs
@@ -31,24 +32,28 @@ Batch 1 (all at once):
 - Yourself → `search_web` for protocol specifications
 
 Batch 2 (after batch 1, targeting gaps):
+
 - Explore → read specific source files found in batch 1
 - Explore → cross-reference codebase against spec requirements
 - Yourself → `fetch_pages` on official doc URLs found in batch 1
 
 Batch 3 (if needed):
+
 - Explore → verify implementation details against spec findings
 - Explore → write knowledge doc to `.github/knowledge/`
 
 ## Research Workflow
 
-### Step 1: Parallel Initial Sweep
+### Step 1: Baseline Load
 
-Launch ALL simultaneously:
+Do this before any external research:
 
-- **Reference sources**: Read `.github/knowledge/reference-sources.md` for known-good URLs. Fetch those pages.
+- **Reference sources**: Read `.github/knowledge/reference-sources.md` for known-good URLs.
 - **Knowledge cache**: Dispatch Explore to read existing research in `.github/knowledge/`.
-- **Codebase understanding**: Dispatch multiple Explore agents to read the current implementation.
-- **Official doc search**: Run `search_web` for official developer documentation on every major sub-topic.
+- **Codebase understanding**: Dispatch Explore agents to read the current implementation only as needed to define the research target.
+- **Checkpoint unknowns**: List what the baseline already answers, what may be stale, and what still needs outside verification.
+
+External doc search starts only after this baseline pass. The cache is the warm start; the open web is for gaps, freshness, and conflict resolution.
 
 ### Step 2: Deep-Dive on Gaps
 
@@ -70,6 +75,8 @@ Use MCP write tools to create or refresh notes in `.github/knowledge/`:
 - `append_to_knowledge_note` — add to existing note
 
 This is mandatory. Include source tiers on every claim.
+
+Cache writes should be normalized conclusions, not raw browsing transcripts. Include the claim, source tier, verified date, scope, and whether the finding is new, revalidated, stale, or superseded.
 
 ## Context Management
 

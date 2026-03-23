@@ -72,6 +72,9 @@ private:
   void showComingSoonToast();
   void showSteamError(const QString &msg);
   void scanLibrary();
+  void requestCatalogIfNeeded();
+  void applyActiveCategoryFilter();
+  void updateShelfHeader();
   int colsInGrid() const;
   int rowsInGrid() const;
   int computeGridCols() const;
@@ -90,6 +93,10 @@ private:
   QWidget *headerBar_ = nullptr;
   QWidget *tabBar_ = nullptr;
   QVector<QLabel *> tabLabels_;
+  QWidget *shelfHeader_ = nullptr;
+  QLabel *shelfEyebrow_ = nullptr;
+  QLabel *shelfTitle_ = nullptr;
+  QLabel *shelfSummary_ = nullptr;
 
   QWidget *contentArea_ = nullptr;
   QScrollArea *gridScroll_ = nullptr;
@@ -114,11 +121,11 @@ private:
   SteamService *steamService_ = nullptr;
   QList<SteamGame> steamGames_;
 
-  QWidget *loadingOverlay_ = nullptr;
-  QLabel *loadingLabel_ = nullptr;
-
   bool libraryModeActive_ = false;
+  bool catalogRequested_ = false;
+  bool catalogLoading_ = false;
   QVector<StoreGame> libraryGames_;
+  QString errorMessage_;
 
   int kGridCols = 4;
 

@@ -28,13 +28,13 @@ When dispatched directly for a `debug-fix` task:
 
 ### Crash Signal Reference
 
-| Exit | Signal  | Meaning                    | First Step                                     |
-| ---- | ------- | -------------------------- | ---------------------------------------------- |
-| 139  | SIGSEGV | Null/bad pointer deref     | Check last debug.log line, find the deref      |
-| 134  | SIGABRT | Assertion / abort()        | Read assertion message in stderr or debug.log  |
-| 136  | SIGFPE  | Division by zero / FP      | Find the arithmetic in the call path           |
-| 137  | SIGKILL | OOM or external kill       | Check memory usage, large allocations          |
-| 0    | —       | Clean exit                 | Not a crash — check logic for early exit       |
+| Exit | Signal  | Meaning                | First Step                                    |
+| ---- | ------- | ---------------------- | --------------------------------------------- |
+| 139  | SIGSEGV | Null/bad pointer deref | Check last debug.log line, find the deref     |
+| 134  | SIGABRT | Assertion / abort()    | Read assertion message in stderr or debug.log |
+| 136  | SIGFPE  | Division by zero / FP  | Find the arithmetic in the call path          |
+| 137  | SIGKILL | OOM or external kill   | Check memory usage, large allocations         |
+| 0    | —       | Clean exit             | Not a crash — check logic for early exit      |
 
 ### Diagnosis Protocol
 
@@ -67,10 +67,10 @@ Object lifecycle (Qt parent-child ownership), signal/slot threading, resource in
 
 - Translate the Project Lead brief into concrete acceptance criteria before dispatch.
 - Match verification depth to risk:
-	- Critical: build plus targeted tests and runtime confirmation where applicable
-	- High: build plus targeted tests, and visual/runtime checks if lifecycle or UI is involved
-	- Medium: build plus targeted tests or visual confirmation
-	- Low: smallest relevant verification only
+  - Critical: build plus targeted tests and runtime confirmation where applicable
+  - High: build plus targeted tests, and visual/runtime checks if lifecycle or UI is involved
+  - Medium: build plus targeted tests or visual confirmation
+  - Low: smallest relevant verification only
 - Do not sign off work that lacks explicit proof for the relevant risk tier.
 
 ## Diff Review (MANDATORY after every Code Engineer delivery)
