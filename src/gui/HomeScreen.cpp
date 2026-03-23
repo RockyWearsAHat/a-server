@@ -16,7 +16,9 @@
 #include <QTime>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <cmath>
+#include <QGridLayout>
+#include <QSettings>
+#include <algorithm>
 #include <cstdlib>
 
 namespace AIO {
@@ -49,6 +51,9 @@ GradientSpec gradientFor(HomeTileKind kind, bool focused) {
   case HomeTileKind::MediaServer:
     return focused ? GradientSpec{QColor(25, 145, 185), QColor(5, 35, 52)}
                    : GradientSpec{QColor(18, 95, 128), QColor(5, 30, 45)};
+  case HomeTileKind::ScreenMirror:
+    return focused ? GradientSpec{QColor(42, 178, 146), QColor(7, 46, 38)}
+                   : GradientSpec{QColor(30, 125, 103), QColor(7, 36, 29)};
   case HomeTileKind::Settings:
     return focused ? GradientSpec{QColor(100, 112, 170), QColor(32, 38, 62)}
                    : GradientSpec{QColor(68, 76, 120), QColor(26, 32, 50)};
@@ -64,6 +69,12 @@ GradientSpec gradientFor(HomeTileKind kind, bool focused) {
   case HomeTileKind::Hulu:
     return focused ? GradientSpec{QColor(16, 88, 48), QColor(4, 28, 14)}
                    : GradientSpec{QColor(10, 58, 32), QColor(3, 22, 10)};
+  case HomeTileKind::Store:
+    return focused ? GradientSpec{QColor(210, 148, 28), QColor(68, 42, 5)}
+                   : GradientSpec{QColor(140, 98, 18), QColor(45, 28, 4)};
+  case HomeTileKind::Library:
+    return focused ? GradientSpec{QColor(35, 145, 210), QColor(8, 34, 58)}
+                   : GradientSpec{QColor(22, 92, 145), QColor(6, 24, 44)};
   case HomeTileKind::Blank:
     return focused ? GradientSpec{QColor(34, 36, 48), QColor(16, 18, 24)}
                    : GradientSpec{QColor(26, 28, 36), QColor(14, 16, 22)};
@@ -82,6 +93,8 @@ TileStyle styleFor(HomeTileKind kind) {
     return {QColor(255, 60, 50, 38), QColor(255, 60, 50, 72)};
   case HomeTileKind::MediaServer:
     return {QColor(0, 190, 230, 32), QColor(0, 190, 230, 64)};
+  case HomeTileKind::ScreenMirror:
+    return {QColor(42, 178, 146, 28), QColor(42, 178, 146, 64)};
   case HomeTileKind::Settings:
     return {QColor(170, 180, 200, 24), QColor(170, 180, 200, 52)};
   case HomeTileKind::YouTube:
@@ -92,6 +105,10 @@ TileStyle styleFor(HomeTileKind kind) {
     return {QColor(17, 60, 207, 36), QColor(17, 60, 207, 70)};
   case HomeTileKind::Hulu:
     return {QColor(28, 231, 131, 28), QColor(28, 231, 131, 56)};
+  case HomeTileKind::Store:
+    return {QColor(212, 156, 28, 28), QColor(212, 156, 28, 56)};
+  case HomeTileKind::Library:
+    return {QColor(64, 181, 246, 28), QColor(64, 181, 246, 60)};
   case HomeTileKind::Blank:
     return {QColor(120, 130, 150, 10), QColor(120, 130, 150, 22)};
   }
@@ -108,6 +125,8 @@ const char *labelFor(HomeTileKind kind) {
     return "Switch";
   case HomeTileKind::MediaServer:
     return "Media";
+  case HomeTileKind::ScreenMirror:
+    return "Mirror";
   case HomeTileKind::Settings:
     return "Settings";
   case HomeTileKind::YouTube:
@@ -118,6 +137,10 @@ const char *labelFor(HomeTileKind kind) {
     return "Disney+";
   case HomeTileKind::Hulu:
     return "Hulu";
+  case HomeTileKind::Store:
+    return "Store";
+  case HomeTileKind::Library:
+    return "Library";
   case HomeTileKind::Blank:
     return "";
   }
@@ -134,6 +157,8 @@ const char *subtitleFor(HomeTileKind kind) {
     return "Modern titles";
   case HomeTileKind::MediaServer:
     return "Browse your library";
+  case HomeTileKind::ScreenMirror:
+    return "Cast from devices";
   case HomeTileKind::Settings:
     return "Preferences";
   case HomeTileKind::YouTube:
@@ -144,6 +169,10 @@ const char *subtitleFor(HomeTileKind kind) {
     return "Movies & shows";
   case HomeTileKind::Hulu:
     return "Stream live & on demand";
+  case HomeTileKind::Store:
+    return "Discover new games";
+  case HomeTileKind::Library:
+    return "Installed apps & games";
   case HomeTileKind::Blank:
     return "";
   }
@@ -161,6 +190,8 @@ QColor ambientGlowFor(HomeTileKind kind) {
     return QColor(255, 60, 50, 255);
   case HomeTileKind::MediaServer:
     return QColor(0, 210, 255, 240);
+  case HomeTileKind::ScreenMirror:
+    return QColor(42, 178, 146, 240);
   case HomeTileKind::Settings:
     return QColor(190, 200, 235, 220);
   case HomeTileKind::YouTube:
@@ -171,6 +202,10 @@ QColor ambientGlowFor(HomeTileKind kind) {
     return QColor(30, 80, 240, 255);
   case HomeTileKind::Hulu:
     return QColor(28, 231, 131, 240);
+  case HomeTileKind::Store:
+    return QColor(212, 156, 28, 245);
+  case HomeTileKind::Library:
+    return QColor(64, 181, 246, 240);
   case HomeTileKind::Blank:
     return QColor(0, 0, 0, 0);
   }
@@ -218,29 +253,30 @@ void HomeTile::paintEvent(QPaintEvent *) {
   const QRectF r(rect());
   const bool focused = property("aio_selected").toBool();
   const qreal fp = focusProgress_; // 0→1 animated
-  const qreal radius = 18.0;
+  const qreal radius = 16.0;
 
-  // Scale transform: unfocused 1.0 → focused 1.08
-  const qreal scale = 1.0 + 0.08 * fp;
+  // Content fill with a subtle scale (1.0 → 1.04).
+  // The focus ring is drawn AFTER p.restore() so it always sits at exact widget
+  // boundaries — not affected by the scale transform.
+  const qreal scale = 1.0 + 0.04 * fp;
   p.save();
   p.translate(r.center());
   p.scale(scale, scale);
   p.translate(-r.center());
 
   const auto grad = gradientFor(kind_, focused);
-  const qreal margin = qMax(8.0, r.width() * 0.038);
-  QRectF tileRect = r.adjusted(margin, margin, -margin, -margin);
+  // Content fills the full tile rect — no inset margin wasted space.
+  const QRectF tileRect = r;
 
   // ── STEP 1: Main gradient fill ──
+  QPainterPath bg;
+  bg.addRoundedRect(tileRect, radius, radius);
   QLinearGradient lg(tileRect.topLeft(), tileRect.bottomLeft());
   lg.setColorAt(0.0, grad.top);
   lg.setColorAt(1.0, grad.bottom);
-
-  QPainterPath bg;
-  bg.addRoundedRect(tileRect, radius, radius);
   p.fillPath(bg, lg);
 
-  // Subtle noise-like texture via fine radial overlay
+  // Subtle radial texture overlay
   {
     QRadialGradient rg(tileRect.center(), tileRect.width() * 0.8);
     rg.setColorAt(0.0, QColor(255, 255, 255, focused ? 8 : 4));
@@ -249,10 +285,10 @@ void HomeTile::paintEvent(QPaintEvent *) {
     p.fillPath(bg, rg);
   }
 
-  // Dim overlay on unfocused tiles — moderate push-back, not crushing
+  // Dim unfocused tiles — moderate push-back
   if (fp < 0.99) {
     p.fillPath(bg, QColor(0, 0, 0,
-                          static_cast<int>(55 * (1.0 - qBound(0.0, fp, 1.0)))));
+                          static_cast<int>(60 * (1.0 - qBound(0.0, fp, 1.0)))));
   }
 
   // ── STEP 2: Top-edge highlight — glass depth ──
@@ -260,12 +296,12 @@ void HomeTile::paintEvent(QPaintEvent *) {
     QLinearGradient shine(
         tileRect.topLeft(),
         QPointF(tileRect.left(), tileRect.top() + tileRect.height() * 0.22));
-    shine.setColorAt(
-        0.0,
-        QColor(255, 255, 255, static_cast<int>(8 + 44 * qBound(0.0, fp, 1.0))));
+    shine.setColorAt(0.0,
+                     QColor(255, 255, 255,
+                            static_cast<int>(10 + 40 * qBound(0.0, fp, 1.0))));
     shine.setColorAt(
         0.5,
-        QColor(255, 255, 255, static_cast<int>(2 + 22 * qBound(0.0, fp, 1.0))));
+        QColor(255, 255, 255, static_cast<int>(2 + 18 * qBound(0.0, fp, 1.0))));
     shine.setColorAt(1.0, QColor(255, 255, 255, 0));
     p.fillPath(bg, shine);
   }
@@ -273,32 +309,24 @@ void HomeTile::paintEvent(QPaintEvent *) {
   // Specular rim — bright top-edge band for glass material feel
   if (kind_ != HomeTileKind::Blank) {
     QLinearGradient rim(tileRect.topLeft(),
-                        QPointF(tileRect.left(), tileRect.top() + 5.0));
+                        QPointF(tileRect.left(), tileRect.top() + 4.0));
     rim.setColorAt(0.0,
                    QColor(255, 255, 255,
-                          static_cast<int>(25 + 50 * qBound(0.0, fp, 1.0))));
+                          static_cast<int>(20 + 45 * qBound(0.0, fp, 1.0))));
     rim.setColorAt(1.0, QColor(255, 255, 255, 0));
     p.fillPath(bg, rim);
   }
 
-  // ── STEP 3: Tile edge definition ──
   if (kind_ == HomeTileKind::Blank) {
+    p.restore();
+    // Blank placeholder: dashed border at widget coords
     const qreal bw = 0.5 + 1.0 * fp;
     QPen pen(focused ? QColor(255, 255, 255, 40) : QColor(255, 255, 255, 12),
              bw, Qt::DashLine);
     pen.setDashPattern({6, 4});
     p.setPen(pen);
     p.setBrush(Qt::NoBrush);
-    p.drawRoundedRect(tileRect, radius, radius);
-  } else {
-    // No focus border — focus via scale + shadow + dimming (Apple TV style)
-    p.setPen(QPen(QColor(255, 255, 255, 8), 0.5));
-    p.setBrush(Qt::NoBrush);
-    p.drawRoundedRect(tileRect, radius, radius);
-  }
-
-  if (kind_ == HomeTileKind::Blank) {
-    p.restore();
+    p.drawRoundedRect(r.adjusted(1, 1, -1, -1), radius, radius);
     return;
   }
 
@@ -350,6 +378,21 @@ void HomeTile::paintEvent(QPaintEvent *) {
                QString::fromLatin1(sub));
   }
   p.restore();
+
+  // ── Focus ring: drawn after restore, always at exact widget boundary ──
+  // This is the tvOS/PS5/Switch pattern: a crisp, stable ring that doesn't
+  // scale or skew — it sits at a fixed position outside the card artwork.
+  {
+    const qreal ringAlpha =
+        focused ? (180.0 + 75.0 * qBound(0.0, fp, 1.0)) : 14.0;
+    const qreal ringWidth = focused ? 3.0 : 1.0;
+    QPainterPath ring;
+    ring.addRoundedRect(r.adjusted(1.5, 1.5, -1.5, -1.5), radius, radius);
+    p.setPen(
+        QPen(QColor(255, 255, 255, static_cast<int>(ringAlpha)), ringWidth));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(ring);
+  }
 }
 
 void HomeTile::paintIcon(QPainter &p, const QRectF &box, const QColor &col) {
@@ -775,6 +818,79 @@ void HomeTile::paintIcon(QPainter &p, const QRectF &box, const QColor &col) {
     break;
   }
 
+  case HomeTileKind::ScreenMirror: {
+    const qreal s = qMin(box.width(), box.height());
+    const QPointF ctr = box.center();
+    const qreal w = s * 0.78;
+    const qreal h = s * 0.46;
+    QRectF screen(ctr.x() - w / 2, ctr.y() - h / 2 - s * 0.05, w, h);
+    QPainterPath frame;
+    frame.addRoundedRect(screen, s * 0.05, s * 0.05);
+    p.fillPath(frame, col);
+    p.fillPath(frame, QColor(255, 255, 255, 24));
+
+    p.setPen(QPen(col, qMax(2.0, s * 0.04), Qt::SolidLine, Qt::RoundCap));
+    p.setBrush(Qt::NoBrush);
+    const qreal arc = s * 0.28;
+    p.drawArc(QRectF(ctr.x() - arc / 2, ctr.y() + h * 0.12, arc, arc), 32 * 16,
+              116 * 16);
+    p.drawArc(QRectF(ctr.x() - arc * 0.78, ctr.y() + h * 0.22, arc * 1.56,
+                     arc * 1.56),
+              35 * 16, 110 * 16);
+    p.setPen(Qt::NoPen);
+    p.setBrush(col);
+    p.drawEllipse(QPointF(ctr.x(), ctr.y() + h * 0.46), s * 0.045, s * 0.045);
+    break;
+  }
+
+  case HomeTileKind::Store: {
+    const qreal s = qMin(box.width(), box.height());
+    const QPointF ctr = box.center();
+    const qreal w = s * 0.62;
+    const qreal h = s * 0.54;
+    QRectF bag(ctr.x() - w / 2, ctr.y() - h * 0.10, w, h);
+    QPainterPath bagPath;
+    bagPath.addRoundedRect(bag, s * 0.07, s * 0.07);
+    p.fillPath(bagPath, col);
+    p.fillPath(bagPath, QColor(255, 255, 255, 22));
+
+    p.setPen(QPen(QColor(255, 255, 255, 205), qMax(2.0, s * 0.035),
+                  Qt::SolidLine, Qt::RoundCap));
+    p.setBrush(Qt::NoBrush);
+    const qreal hw = w * 0.42;
+    const qreal hh = h * 0.42;
+    p.drawArc(QRectF(ctr.x() - hw / 2, bag.top() - hh * 0.52, hw, hh), 0,
+              180 * 16);
+    p.setPen(Qt::NoPen);
+    break;
+  }
+
+  case HomeTileKind::Library: {
+    const qreal s = qMin(box.width(), box.height());
+    const QPointF ctr = box.center();
+    const QRectF outer(ctr.x() - s * 0.28, ctr.y() - s * 0.28, s * 0.56,
+                       s * 0.56);
+    QPainterPath outerPath;
+    outerPath.addRoundedRect(outer, s * 0.06, s * 0.06);
+    p.fillPath(outerPath, col);
+
+    const QColor inner = QColor(255, 255, 255, 44);
+    const qreal cell = s * 0.12;
+    const qreal gap = s * 0.08;
+    const qreal left = outer.left() + gap;
+    const qreal top = outer.top() + gap;
+    for (int row = 0; row < 3; ++row) {
+      for (int colIdx = 0; colIdx < 3; ++colIdx) {
+        if (row == 1 && colIdx == 1)
+          continue;
+        p.fillRect(QRectF(left + colIdx * (cell + gap),
+                          top + row * (cell + gap), cell, cell),
+                   inner);
+      }
+    }
+    break;
+  }
+
   case HomeTileKind::Blank:
     break;
 
@@ -794,223 +910,398 @@ HomeScreen::HomeScreen(QWidget *parent) : QWidget(parent) {
 
 void HomeScreen::setupUi() {
   const int blanksEnabled = qEnvironmentVariableIntValue("HOMESCREEN_BLANKS");
-
-  // Outer vertical layout: header + content
   auto *outerLayout = new QVBoxLayout(this);
   outerLayout->setContentsMargins(0, 0, 0, 0);
   outerLayout->setSpacing(0);
-
-  // Header bar — minimal app chrome
   {
     auto *hdr = new QWidget(this);
-    hdr->setFixedHeight(44);
+    hdr->setObjectName(QStringLiteral("aioHomeTopBar"));
+    hdr->setFixedHeight(52);
     auto *hdrLay = new QHBoxLayout(hdr);
-    hdrLay->setContentsMargins(36, 10, 36, 0);
-    auto *appTitle = new QLabel(QStringLiteral("AIO"), hdr);
-    appTitle->setStyleSheet(QStringLiteral(
-        "color: rgba(255,255,255,150); font-family: 'Noto Sans'; "
-        "font-size: 15px; font-weight: 600; letter-spacing: 2px;"));
+    hdrLay->setContentsMargins(40, 10, 40, 0);
+    auto *appTitle = new QLabel(QStringLiteral("AIO ENTERTAINMENT SYSTEM"), hdr);
+    appTitle->setObjectName(QStringLiteral("aioHomeBrand"));
     hdrLay->addWidget(appTitle);
     hdrLay->addStretch();
     auto *clockLabel = new QLabel(hdr);
-    clockLabel->setStyleSheet(QStringLiteral(
-        "color: rgba(255,255,255,100); font-family: 'Noto Sans'; "
-        "font-size: 13px; font-weight: 400;"));
-    clockLabel->setText(
-        QTime::currentTime().toString(QStringLiteral("h:mm AP")));
+    clockLabel->setObjectName(QStringLiteral("aioHomeClock"));
+    clockLabel->setText(QTime::currentTime().toString(QStringLiteral("h:mm AP")));
     hdrLay->addWidget(clockLabel);
     auto *clockTimer = new QTimer(this);
     connect(clockTimer, &QTimer::timeout, clockLabel, [clockLabel]() {
-      clockLabel->setText(
-          QTime::currentTime().toString(QStringLiteral("h:mm AP")));
+      clockLabel->setText(QTime::currentTime().toString(QStringLiteral("h:mm AP")));
     });
     clockTimer->start(60000);
     outerLayout->addWidget(hdr);
   }
-
-  QWidget *gridHost;
+  {
+    auto *hero = new QWidget(this);
+    hero->setObjectName(QStringLiteral("aioHomeHero"));
+    auto *heroLay = new QVBoxLayout(hero);
+    heroLay->setContentsMargins(52, 18, 52, 20);
+    heroLay->setSpacing(6);
+    eyebrowLabel_ = new QLabel(QStringLiteral("HOME"), hero);
+    eyebrowLabel_->setObjectName(QStringLiteral("aioHomeHeroEyebrow"));
+    heroLay->addWidget(eyebrowLabel_);
+    titleLabel_ = new QLabel(QStringLiteral("Welcome Back"), hero);
+    titleLabel_->setObjectName(QStringLiteral("aioHomeHeroTitle"));
+    heroLay->addWidget(titleLabel_);
+    subtitleLabel_ = new QLabel(QStringLiteral("Pick a tile and press Select to launch."), hero);
+    subtitleLabel_->setObjectName(QStringLiteral("aioHomeHeroSubtitle"));
+    subtitleLabel_->setWordWrap(true);
+    heroLay->addWidget(subtitleLabel_);
+    auto *chipRow = new QHBoxLayout();
+    chipRow->setContentsMargins(0, 4, 0, 0);
+    chipRow->setSpacing(10);
+    modeChipLabel_ = new QLabel(QStringLiteral("BROWSE MODE"), hero);
+    modeChipLabel_->setObjectName(QStringLiteral("aioHomeModeChip"));
+    chipRow->addWidget(modeChipLabel_);
+    hintLabel_ = new QLabel(QStringLiteral("D-pad navigate  \u00b7  Select launch  \u00b7  Home returns here"), hero);
+    hintLabel_->setObjectName(QStringLiteral("aioHomeHint"));
+    chipRow->addWidget(hintLabel_);
+    chipRow->addStretch();
+    heroLay->addLayout(chipRow);
+    outerLayout->addWidget(hero);
+  }
   if (blanksEnabled) {
     scrollArea_ = new QScrollArea(this);
     scrollArea_->setWidgetResizable(true);
     scrollArea_->setFrameShape(QFrame::NoFrame);
     scrollArea_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scrollArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scrollArea_->setStyleSheet(QStringLiteral(
-        "QScrollArea { background: transparent; border: none; }"));
-
+    scrollArea_->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
     scrollContent_ = new QWidget();
     scrollContent_->setObjectName(QStringLiteral("aioHomeScrollContent"));
-    scrollContent_->setStyleSheet(
-        QStringLiteral("#aioHomeScrollContent { background: transparent; }"));
-    gridHost = scrollContent_;
-
+    scrollContent_->setStyleSheet(QStringLiteral("#aioHomeScrollContent { background: transparent; }"));
+    gridHost_ = scrollContent_;
     outerLayout->addWidget(scrollArea_, 1);
   } else {
     auto *gridWidget = new QWidget(this);
-    gridHost = gridWidget;
+    gridWidget->setObjectName(QStringLiteral("aioHomeGridHost"));
     scrollContent_ = gridWidget;
+    gridHost_ = gridWidget;
     outerLayout->addWidget(gridWidget, 1);
   }
-
-  auto *grid = new QGridLayout(gridHost);
-  grid->setContentsMargins(52, 20, 52, 32);
-  grid->setHorizontalSpacing(10);
-  grid->setVerticalSpacing(10);
-
-  // 12-column grid: row 0 = 3 emulators, row 1 = 4 streaming, row 2 = 2 utils
+  gridLayout_ = new QGridLayout(gridHost_);
+  gridLayout_->setContentsMargins(52, 18, 52, 52);
+  gridLayout_->setHorizontalSpacing(14);
+  gridLayout_->setVerticalSpacing(16);
   for (int c = 0; c < 12; ++c)
-    grid->setColumnStretch(c, 1);
-  grid->setRowStretch(0, 0); // EMULATORS label
-  grid->setRowStretch(1, 4); // Emulator tiles
-  grid->setRowStretch(2, 0); // STREAMING label
-  grid->setRowStretch(3, 4); // Streaming tiles
-  grid->setRowStretch(4, 0); // UTILITIES label
-  grid->setRowStretch(5, 3); // Utility tiles
-
-  // --- Section header: Emulators ---
-  {
-    auto *lbl = new QLabel(QStringLiteral("EMULATORS"), gridHost);
-    lbl->setStyleSheet(QStringLiteral(
-        "color: rgba(255,255,255,130); font-family: 'Noto Sans'; "
-        "font-size: 13px; font-weight: 600; letter-spacing: 2px;"));
-    lbl->setFixedHeight(22);
-    grid->addWidget(lbl, 0, 0, 1, 12);
-  }
-
-  // --- Row 1: Emulators (3 tiles x 4 columns each) ---
-  {
-    const HomeTileKind kinds[] = {
-        HomeTileKind::GBA,
-        HomeTileKind::PS1,
-        HomeTileKind::Switch,
-    };
-
-    QVector<HomeTile *> rowTiles;
-    int col = 0;
-    for (auto k : kinds) {
-      auto *tile = new HomeTile(k, gridHost);
-      connect(tile, &HomeTile::clicked, this, [this, k]() {
-        switch (k) {
-        case HomeTileKind::GBA:
-          emit gbaRequested();
-          break;
-        case HomeTileKind::PS1:
-          emit ps1Requested();
-          break;
-        case HomeTileKind::Switch:
-          emit switchRequested();
-          break;
-        default:
-          break;
-        }
-      });
-      grid->addWidget(tile, 1, col, 1, 4);
-      col += 4;
-      rowTiles.append(tile);
-    }
-    rows_.append(rowTiles);
-  }
-
-  // --- Section header: Streaming ---
-  {
-    auto *lbl = new QLabel(QStringLiteral("STREAMING"), gridHost);
-    lbl->setStyleSheet(QStringLiteral(
-        "color: rgba(255,255,255,130); font-family: 'Noto Sans'; "
-        "font-size: 13px; font-weight: 600; letter-spacing: 2px;"));
-    lbl->setFixedHeight(22);
-    grid->addWidget(lbl, 2, 0, 1, 12);
-  }
-
-  // --- Row 3: Streaming Apps (4 tiles x 3 columns each) ---
-  {
-    struct AppEntry {
-      HomeTileKind kind;
-      StreamingApp app;
-    };
-    const AppEntry apps[] = {
-        {HomeTileKind::YouTube, StreamingApp::YouTube},
-        {HomeTileKind::Netflix, StreamingApp::Netflix},
-        {HomeTileKind::DisneyPlus, StreamingApp::DisneyPlus},
-        {HomeTileKind::Hulu, StreamingApp::Hulu},
-    };
-
-    QVector<HomeTile *> rowTiles;
-    int col = 0;
-    for (const auto &entry : apps) {
-      auto *tile = new HomeTile(entry.kind, gridHost);
-      connect(tile, &HomeTile::clicked, this,
-              [this, sApp = entry.app]() { emit streamingAppRequested(sApp); });
-      grid->addWidget(tile, 3, col, 1, 3);
-      col += 3;
-      rowTiles.append(tile);
-    }
-    rows_.append(rowTiles);
-  }
-
-  // --- Section header: Utilities ---
-  {
-    auto *lbl = new QLabel(QStringLiteral("UTILITIES"), gridHost);
-    lbl->setStyleSheet(QStringLiteral(
-        "color: rgba(255,255,255,130); font-family: 'Noto Sans'; "
-        "font-size: 13px; font-weight: 600; letter-spacing: 2px;"));
-    lbl->setFixedHeight(22);
-    grid->addWidget(lbl, 4, 0, 1, 12);
-  }
-
-  // --- Row 5: Utilities (2 tiles x 6 columns each) ---
-  {
-    const HomeTileKind kinds[] = {
-        HomeTileKind::MediaServer,
-        HomeTileKind::Settings,
-    };
-
-    QVector<HomeTile *> rowTiles;
-    int col = 0;
-    for (auto k : kinds) {
-      auto *tile = new HomeTile(k, gridHost);
-      connect(tile, &HomeTile::clicked, this, [this, k]() {
-        switch (k) {
-        case HomeTileKind::MediaServer:
-          emit nasRequested();
-          break;
-        case HomeTileKind::Settings:
-          emit settingsRequested();
-          break;
-        default:
-          break;
-        }
-      });
-      grid->addWidget(tile, 5, col, 1, 6);
-      col += 6;
-      rowTiles.append(tile);
-    }
-    rows_.append(rowTiles);
-  }
-
-  // --- Blank rows (only when HOMESCREEN_BLANKS is set) ---
-  if (blanksEnabled) {
-    for (int rowIdx = 0; rowIdx < 3; ++rowIdx) {
-      grid->setRowStretch(6 + rowIdx, 1);
-      QVector<HomeTile *> rowTiles;
-      int col = 0;
-      for (int c = 0; c < 4; ++c) {
-        auto *tile = new HomeTile(HomeTileKind::Blank, scrollContent_);
-        tile->setMinimumHeight(140);
-        grid->addWidget(tile, 6 + rowIdx, col, 1, 3);
-        col += 3;
-        rowTiles.append(tile);
-      }
-      rows_.append(rowTiles);
-    }
-
+    gridLayout_->setColumnStretch(c, 1);
+  if (blanksEnabled)
     scrollArea_->setWidget(scrollContent_);
+  loadTileOrder();
+  rebuildGrid();
+}
+
+void HomeScreen::loadTileOrder() {
+  QSettings s;
+  const QString orderStr  = s.value(QStringLiteral("home/tileOrder")).toString();
+  const QString hiddenStr = s.value(QStringLiteral("home/hiddenTiles")).toString();
+  tileOrder_.clear();
+  hiddenTiles_.clear();
+  if (!orderStr.isEmpty()) {
+    for (const auto &tok : orderStr.split(QLatin1Char(','))) {
+      bool ok = false;
+      const int v = tok.trimmed().toInt(&ok);
+      if (ok) tileOrder_.append(static_cast<HomeTileKind>(v));
+    }
   }
+  if (tileOrder_.isEmpty()) {
+    tileOrder_ = {
+        HomeTileKind::YouTube,     HomeTileKind::Netflix,
+        HomeTileKind::DisneyPlus,  HomeTileKind::Hulu,
+        HomeTileKind::MediaServer, HomeTileKind::ScreenMirror,
+        HomeTileKind::Store,       HomeTileKind::Library,
+        HomeTileKind::GBA,         HomeTileKind::PS1,
+        HomeTileKind::Switch,      HomeTileKind::Settings
+    };
+  }
+  if (!hiddenStr.isEmpty()) {
+    for (const auto &tok : hiddenStr.split(QLatin1Char(','))) {
+      bool ok = false;
+      const int v = tok.trimmed().toInt(&ok);
+      if (ok) hiddenTiles_.append(static_cast<HomeTileKind>(v));
+    }
+  }
+}
+
+void HomeScreen::saveTileOrder() const {
+  QSettings s;
+  QStringList orderList, hiddenList;
+  for (auto k : tileOrder_)
+    orderList << QString::number(static_cast<int>(k));
+  for (auto k : hiddenTiles_)
+    hiddenList << QString::number(static_cast<int>(k));
+  s.setValue(QStringLiteral("home/tileOrder"),  orderList.join(QLatin1Char(',')));
+  s.setValue(QStringLiteral("home/hiddenTiles"), hiddenList.join(QLatin1Char(',')));
+}
+
+void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
+  // 1. Delete existing tile widgets
+  for (auto &row : rows_)
+    for (auto *t : row)
+      delete t;
+  rows_.clear();
+
+  // 2. Drain layout items
+  while (gridLayout_->count() > 0) {
+    QLayoutItem *item = gridLayout_->takeAt(0);
+    delete item;
+  }
+
+  // 3. Delete section header labels
+  const QObjectList kids = gridHost_->children();
+  for (QObject *child : kids) {
+    QLabel *lbl = qobject_cast<QLabel *>(child);
+    if (lbl && lbl->objectName() == QLatin1String("aioHomeSectionHeader"))
+      delete lbl;
+  }
+
+  // 4. Row stretches
+  gridLayout_->setRowStretch(0, 0);
+  gridLayout_->setRowStretch(1, 4);
+  gridLayout_->setRowMinimumHeight(1, 186);
+  gridLayout_->setRowStretch(2, 0);
+  gridLayout_->setRowStretch(3, 4);
+  gridLayout_->setRowMinimumHeight(3, 186);
+  gridLayout_->setRowStretch(4, 0);
+  gridLayout_->setRowStretch(5, 4);
+  gridLayout_->setRowMinimumHeight(5, 186);
+
+  // 5. Section header labels
+  const char *sectionNames[]    = {"STREAMING", "APPS & MEDIA", "GAMES & SYSTEM"};
+  const int   sectionGridRows[] = {0, 2, 4};
+  for (int i = 0; i < 3; ++i) {
+    auto *lbl = new QLabel(QString::fromLatin1(sectionNames[i]), gridHost_);
+    lbl->setObjectName(QStringLiteral("aioHomeSectionHeader"));
+    lbl->setFixedHeight(30);
+    gridLayout_->addWidget(lbl, sectionGridRows[i], 0, 1, 12);
+  }
+
+  // 6. Lay visible tiles: 4-per-logical-row in a 12-column grid
+  QVector<HomeTile *> currentRow;
+  int visibleIndex = 0;
+  for (HomeTileKind k : tileOrder_) {
+    if (hiddenTiles_.contains(k))
+      continue;
+    const int tileLogicalRow = visibleIndex / 4;
+    const int tileCol        = visibleIndex % 4;
+    auto *tile = new HomeTile(k, gridHost_);
+    tile->setMinimumHeight(184);
+    connect(tile, &HomeTile::clicked, this, [this, k]() { activateTileKind(k); });
+    gridLayout_->addWidget(tile, tileLogicalRow * 2 + 1, tileCol * 3, 1, 3);
+    currentRow.append(tile);
+    if (tileCol == 3) {
+      rows_.append(currentRow);
+      currentRow.clear();
+    }
+    ++visibleIndex;
+  }
+  if (!currentRow.isEmpty())
+    rows_.append(currentRow);
+
+  // Restore preferred focus
+  if (preferredKind != HomeTileKind::Blank)
+    findTile(preferredKind, focusRow_, focusCol_);
+
+  // Clamp focus to valid range
+  if (rows_.isEmpty()) {
+    focusRow_ = 0;
+    focusCol_ = 0;
+  } else {
+    focusRow_ = qBound(0, focusRow_, rows_.size() - 1);
+    focusCol_ = qBound(0, focusCol_, rows_[focusRow_].size() - 1);
+  }
+
+  updateFocus();
+}
+
+void HomeScreen::activateTileKind(HomeTileKind kind) {
+  switch (kind) {
+  case HomeTileKind::GBA:          emit gbaRequested(); break;
+  case HomeTileKind::PS1:          emit ps1Requested(); break;
+  case HomeTileKind::Switch:       emit switchRequested(); break;
+  case HomeTileKind::MediaServer:  emit nasRequested(); break;
+  case HomeTileKind::ScreenMirror: emit screenMirrorRequested(); break;
+  case HomeTileKind::Settings:     emit settingsRequested(); break;
+  case HomeTileKind::YouTube:      emit streamingAppRequested(StreamingApp::YouTube); break;
+  case HomeTileKind::Netflix:      emit streamingAppRequested(StreamingApp::Netflix); break;
+  case HomeTileKind::DisneyPlus:   emit streamingAppRequested(StreamingApp::DisneyPlus); break;
+  case HomeTileKind::Hulu:         emit streamingAppRequested(StreamingApp::Hulu); break;
+  case HomeTileKind::Store:        emit storeRequested(); break;
+  case HomeTileKind::Library:      emit libraryRequested(); break;
+  case HomeTileKind::Blank: break;
+  }
+}
+
+void HomeScreen::toggleOrganizeMode() {
+  organizeMode_ = !organizeMode_;
+  updateHero();
+  if (!organizeMode_ && addAppsOverlay_)
+    hideAddAppsOverlay();
+}
+
+void HomeScreen::resetLayout() {
+  rebuildGrid();
+}
+
+void HomeScreen::moveFocusedTile(int rowDelta, int colDelta) {
+  const int tilesPerRow = 4;
+  const int fromLinear  = focusRow_ * tilesPerRow + focusCol_;
+  const int toLinear    = (focusRow_ + rowDelta) * tilesPerRow + (focusCol_ + colDelta);
+
+  QVector<HomeTileKind> visible;
+  for (auto k : tileOrder_)
+    if (!hiddenTiles_.contains(k)) visible.append(k);
+
+  if (fromLinear < 0 || fromLinear >= visible.size()) return;
+  if (toLinear   < 0 || toLinear   >= visible.size()) return;
+
+  const HomeTileKind fromKind = visible[fromLinear];
+  const HomeTileKind toKind   = visible[toLinear];
+  const int realFrom = tileOrder_.indexOf(fromKind);
+  const int realTo   = tileOrder_.indexOf(toKind);
+  if (realFrom < 0 || realTo < 0) return;
+  std::swap(tileOrder_[realFrom], tileOrder_[realTo]);
+
+  saveTileOrder();
+  rebuildGrid(fromKind);
+}
+
+void HomeScreen::hideFocusedTile() {
+  HomeTile *tile = currentFocusedTile();
+  if (!tile || tile->kind() == HomeTileKind::Blank) return;
+  const HomeTileKind k = tile->kind();
+  tileOrder_.removeAll(k);
+  hiddenTiles_.append(k);
+  focusCol_ = qMin(focusCol_, qMax(0,
+      (rows_.isEmpty() ? 0 : static_cast<int>(rows_[focusRow_].size())) - 1));
+  saveTileOrder();
+  rebuildGrid();
+}
+
+void HomeScreen::showAddAppsOverlay() {
+  if (hiddenTiles_.isEmpty()) return;
+  if (addAppsOverlay_) hideAddAppsOverlay();
+
+  addAppsOverlay_ = new QWidget(this);
+  addAppsOverlay_->setObjectName(QStringLiteral("aioAddAppsOverlay"));
+  addAppsOverlay_->setFixedSize(480,
+      qMin(600, 120 + static_cast<int>(hiddenTiles_.size()) * 64));
+
+  addAppsLayout_ = new QVBoxLayout(addAppsOverlay_);
+  addAppsLayout_->setContentsMargins(32, 32, 32, 32);
+  addAppsLayout_->setSpacing(12);
+
+  auto *title = new QLabel(QStringLiteral("Restore App"), addAppsOverlay_);
+  title->setObjectName(QStringLiteral("aioAddAppsTitle"));
+  addAppsLayout_->addWidget(title);
+
+  auto *hint = new QLabel(
+      QStringLiteral("D-pad select  \u00b7  Enter restore  \u00b7  Back cancel"),
+      addAppsOverlay_);
+  hint->setObjectName(QStringLiteral("aioAddAppsHint"));
+  addAppsLayout_->addWidget(hint);
+
+  addAppsFocus_ = 0;
+  for (int i = 0; i < hiddenTiles_.size(); ++i) {
+    auto *item = new QLabel(QString::fromLatin1(labelFor(hiddenTiles_[i])), addAppsOverlay_);
+    item->setObjectName(QStringLiteral("aioAddAppsItem"));
+    item->setProperty("aio_selected", i == addAppsFocus_);
+    addAppsLayout_->addWidget(item);
+  }
+
+  addAppsOverlay_->move((width()  - addAppsOverlay_->width())  / 2,
+                        (height() - addAppsOverlay_->height()) / 2);
+  addAppsOverlay_->show();
+  addAppsOverlay_->raise();
+}
+
+void HomeScreen::hideAddAppsOverlay() {
+  if (addAppsOverlay_) {
+    addAppsOverlay_->deleteLater();
+    addAppsOverlay_ = nullptr;
+    addAppsLayout_  = nullptr;
+  }
+}
+
+void HomeScreen::unhideTile(HomeTileKind kind) {
+  hiddenTiles_.removeAll(kind);
+  if (!tileOrder_.contains(kind))
+    tileOrder_.append(kind);
+  saveTileOrder();
+  hideAddAppsOverlay();
+  rebuildGrid();
+}
+
+int HomeScreen::currentColumnCount() const { return 4; }
+
+HomeTile *HomeScreen::tileForKind(HomeTileKind kind) const {
+  for (const auto &row : rows_)
+    for (auto *t : row)
+      if (t->kind() == kind) return t;
+  return nullptr;
+}
+
+bool HomeScreen::findTile(HomeTileKind kind, int &row, int &col) const {
+  for (int r = 0; r < rows_.size(); ++r)
+    for (int c = 0; c < rows_[r].size(); ++c)
+      if (rows_[r][c]->kind() == kind) { row = r; col = c; return true; }
+  return false;
 }
 
 int HomeScreen::colsInRow(int row) const {
   if (row < 0 || row >= rows_.size())
     return 0;
   return rows_[row].size();
+}
+
+HomeTile *HomeScreen::currentFocusedTile() const {
+  if (focusRow_ < 0 || focusRow_ >= rows_.size())
+    return nullptr;
+  if (focusCol_ < 0 || focusCol_ >= rows_[focusRow_].size())
+    return nullptr;
+  return rows_[focusRow_][focusCol_];
+}
+
+void HomeScreen::updateHero() {
+  if (!titleLabel_ || !subtitleLabel_ || !eyebrowLabel_ || !modeChipLabel_ ||
+      !hintLabel_) {
+    return;
+  }
+
+  HomeTile *tile = currentFocusedTile();
+  if (!tile) {
+    eyebrowLabel_->setText(QStringLiteral("HOME"));
+    titleLabel_->setText(QStringLiteral("Welcome Back"));
+    subtitleLabel_->setText(QString());
+    modeChipLabel_->setVisible(false);
+    hintLabel_->setVisible(false);
+    return;
+  }
+
+  const char *sectionNames[] = {"STREAMING", "APPS & MEDIA", "GAMES & SYSTEM"};
+  const int sectionIdx = qBound(0, focusRow_, 2);
+  eyebrowLabel_->setText(QString::fromLatin1(sectionNames[sectionIdx]));
+
+  const QString focusedTitle = QString::fromLatin1(labelFor(tile->kind()));
+  titleLabel_->setText(QStringLiteral("Open %1").arg(focusedTitle));
+  subtitleLabel_->setText(QString::fromLatin1(subtitleFor(tile->kind())));
+
+  modeChipLabel_->setVisible(organizeMode_);
+  if (organizeMode_) {
+    modeChipLabel_->setText(QStringLiteral("ORGANIZE MODE"));
+    modeChipLabel_->setProperty("mode", "organize");
+    modeChipLabel_->style()->unpolish(modeChipLabel_);
+    modeChipLabel_->style()->polish(modeChipLabel_);
+  }
+
+  hintLabel_->setVisible(organizeMode_);
+  if (organizeMode_) {
+    hintLabel_->setText(QStringLiteral(
+        "Move: D-pad  \u00b7  Hide: Delete  \u00b7  Add: A  \u00b7  Exit: Esc"));
+  }
 }
 
 void HomeScreen::updateFocus() {
@@ -1020,7 +1311,6 @@ void HomeScreen::updateFocus() {
       auto *tile = rows_[r][c];
       tile->setProperty("aio_selected", selected);
 
-      // Animate focus via focusProgress (0→1 with spring easing)
       const qreal target = selected ? 1.0 : 0.0;
       auto *anim =
           tile->findChild<QPropertyAnimation *>(QStringLiteral("focusAnim"));
@@ -1036,11 +1326,9 @@ void HomeScreen::updateFocus() {
       anim->setEndValue(target);
       anim->start();
 
-      // Raise focused tile above siblings for glow Z-order
       if (selected)
         tile->raise();
 
-      // Drop shadow — dark for physical elevation, reuse existing effect
       if (tile->kind() != HomeTileKind::Blank) {
         auto *shadow =
             qobject_cast<QGraphicsDropShadowEffect *>(tile->graphicsEffect());
@@ -1062,7 +1350,7 @@ void HomeScreen::updateFocus() {
       }
     }
   }
-  // Repaint HomeScreen background (glow halo follows focused tile)
+  updateHero();
   update();
 }
 
@@ -1071,50 +1359,15 @@ void HomeScreen::ensureFocusVisible() {
     return;
   if (focusCol_ < 0 || focusCol_ >= rows_[focusRow_].size())
     return;
-
   QWidget *tile = rows_[focusRow_][focusCol_];
   if (scrollArea_)
     scrollArea_->ensureWidgetVisible(tile, 20, 20);
 }
 
 void HomeScreen::activateFocusedTile() {
-  if (focusRow_ < 0 || focusRow_ >= rows_.size())
-    return;
-  if (focusCol_ < 0 || focusCol_ >= rows_[focusRow_].size())
-    return;
-
-  HomeTile *tile = rows_[focusRow_][focusCol_];
-  switch (tile->kind()) {
-  case HomeTileKind::GBA:
-    emit gbaRequested();
-    break;
-  case HomeTileKind::PS1:
-    emit ps1Requested();
-    break;
-  case HomeTileKind::Switch:
-    emit switchRequested();
-    break;
-  case HomeTileKind::MediaServer:
-    emit nasRequested();
-    break;
-  case HomeTileKind::Settings:
-    emit settingsRequested();
-    break;
-  case HomeTileKind::YouTube:
-    emit streamingAppRequested(StreamingApp::YouTube);
-    break;
-  case HomeTileKind::Netflix:
-    emit streamingAppRequested(StreamingApp::Netflix);
-    break;
-  case HomeTileKind::DisneyPlus:
-    emit streamingAppRequested(StreamingApp::DisneyPlus);
-    break;
-  case HomeTileKind::Hulu:
-    emit streamingAppRequested(StreamingApp::Hulu);
-    break;
-  case HomeTileKind::Blank:
-    break; // Do nothing
-  }
+  HomeTile *tile = currentFocusedTile();
+  if (!tile) return;
+  activateTileKind(tile->kind());
 }
 
 void HomeScreen::paintEvent(QPaintEvent *) {
@@ -1122,14 +1375,23 @@ void HomeScreen::paintEvent(QPaintEvent *) {
   p.setRenderHint(QPainter::Antialiasing, true);
   const QRectF r(rect());
 
-  // Background: radial gradient — rich dark atmosphere
   QRadialGradient rg(r.center(), r.width() * 0.75);
-  rg.setColorAt(0.0, QColor(22, 26, 48));
+  rg.setColorAt(0.0,  QColor(22, 26, 48));
   rg.setColorAt(0.40, QColor(12, 15, 30));
-  rg.setColorAt(1.0, QColor(4, 5, 10));
+  rg.setColorAt(1.0,  QColor(4,  5,  10));
   p.fillRect(r, rg);
 
-  // Paint glow halo behind the focused tile (in parent coordinates)
+  if (focusRow_ >= 0 && focusRow_ < rows_.size() && focusCol_ >= 0 &&
+      focusCol_ < rows_[focusRow_].size()) {
+    HomeTile *tile = rows_[focusRow_][focusCol_];
+    QColor glow = ambientGlowFor(tile->kind());
+    glow.setAlpha(22);
+    QLinearGradient wash(0, 0, width() * 0.55, 0);
+    wash.setColorAt(0.0, glow);
+    wash.setColorAt(1.0, QColor(0, 0, 0, 0));
+    p.fillRect(r, wash);
+  }
+
   if (focusRow_ >= 0 && focusRow_ < rows_.size() && focusCol_ >= 0 &&
       focusCol_ < rows_[focusRow_].size()) {
     HomeTile *tile = rows_[focusRow_][focusCol_];
@@ -1137,22 +1399,18 @@ void HomeScreen::paintEvent(QPaintEvent *) {
       const qreal fp = tile->focusProgress();
       if (fp > 0.01) {
         const QColor gc = ambientGlowFor(tile->kind());
-        const QRectF tg(tile->geometry());
+        const QPoint tileOrigin = tile->mapTo(this, QPoint(0, 0));
+        const QRectF tg(tileOrigin, tile->size());
         const qreal gp = qBound(0.0, fp, 1.0);
-
-        // Ambient glow — tight colored atmosphere behind focused tile
         {
-          const qreal expand = 30.0 * gp;
+          const qreal expand   = 40.0 * gp;
           const QRectF glowRect = tg.adjusted(-expand, -expand, expand, expand);
-          QRadialGradient rGlow(tg.center(),
-                                qMax(tg.width(), tg.height()) * 0.75);
-          rGlow.setColorAt(0.0, QColor(gc.red(), gc.green(), gc.blue(),
-                                       static_cast<int>(50 * gp)));
-          rGlow.setColorAt(0.55, QColor(gc.red(), gc.green(), gc.blue(),
-                                        static_cast<int>(15 * gp)));
-          rGlow.setColorAt(1.0, QColor(gc.red(), gc.green(), gc.blue(), 0));
+          QRadialGradient rGlow(tg.center(), qMax(tg.width(), tg.height()) * 0.85);
+          rGlow.setColorAt(0.0,  QColor(gc.red(), gc.green(), gc.blue(), static_cast<int>(80 * gp)));
+          rGlow.setColorAt(0.45, QColor(gc.red(), gc.green(), gc.blue(), static_cast<int>(28 * gp)));
+          rGlow.setColorAt(1.0,  QColor(gc.red(), gc.green(), gc.blue(), 0));
           QPainterPath glowPath;
-          glowPath.addRoundedRect(glowRect, 30, 30);
+          glowPath.addRoundedRect(glowRect, 36, 36);
           p.fillPath(glowPath, rGlow);
         }
       }
@@ -1161,59 +1419,120 @@ void HomeScreen::paintEvent(QPaintEvent *) {
 }
 
 void HomeScreen::keyPressEvent(QKeyEvent *event) {
+  // --- Add-apps overlay navigation takes full priority ---
+  if (addAppsOverlay_) {
+    const int itemOffset = 2; // title + hint labels precede item entries
+    const int numItems   = addAppsLayout_->count() - itemOffset;
+
+    auto refreshOverlaySelection = [&]() {
+      for (int i = 0; i < numItems; ++i) {
+        QLayoutItem *li = addAppsLayout_->itemAt(itemOffset + i);
+        if (!li) continue;
+        auto *item = qobject_cast<QLabel *>(li->widget());
+        if (item) {
+          item->setProperty("aio_selected", i == addAppsFocus_);
+          item->style()->unpolish(item);
+          item->style()->polish(item);
+        }
+      }
+    };
+
+    switch (event->key()) {
+    case Qt::Key_Up:
+      if (addAppsFocus_ > 0) { --addAppsFocus_; refreshOverlaySelection(); }
+      event->accept(); return;
+    case Qt::Key_Down:
+      if (addAppsFocus_ < numItems - 1) { ++addAppsFocus_; refreshOverlaySelection(); }
+      event->accept(); return;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+    case Qt::Key_Space:
+      if (addAppsFocus_ >= 0 && addAppsFocus_ < hiddenTiles_.size())
+        unhideTile(hiddenTiles_[addAppsFocus_]);
+      event->accept(); return;
+    case Qt::Key_Escape:
+    case Qt::Key_Back:
+      hideAddAppsOverlay();
+      event->accept(); return;
+    default:
+      event->accept(); return;
+    }
+  }
+
+  // --- Normal / Organize grid navigation ---
   const int maxCol = colsInRow(focusRow_) - 1;
   const int maxRow = rows_.size() - 1;
 
   switch (event->key()) {
   case Qt::Key_Left:
-    if (focusCol_ > 0) {
-      --focusCol_;
-      updateFocus();
+    if (organizeMode_) {
+      if (focusCol_ > 0) moveFocusedTile(0, -1);
+    } else {
+      if (focusCol_ > 0) { --focusCol_; updateFocus(); }
     }
-    event->accept();
-    return;
+    event->accept(); return;
 
   case Qt::Key_Right:
-    if (focusCol_ < maxCol) {
-      ++focusCol_;
-      updateFocus();
+    if (organizeMode_) {
+      if (focusCol_ < maxCol) moveFocusedTile(0, 1);
+    } else {
+      if (focusCol_ < maxCol) { ++focusCol_; updateFocus(); }
     }
-    event->accept();
-    return;
+    event->accept(); return;
 
   case Qt::Key_Up:
-    if (focusRow_ > 0) {
-      --focusRow_;
-      const int newMax = colsInRow(focusRow_) - 1;
-      if (focusCol_ > newMax)
-        focusCol_ = newMax;
-      updateFocus();
-      ensureFocusVisible();
+    if (organizeMode_) {
+      if (focusRow_ > 0) moveFocusedTile(-1, 0);
+    } else {
+      if (focusRow_ > 0) {
+        --focusRow_;
+        const int newMax = colsInRow(focusRow_) - 1;
+        if (focusCol_ > newMax) focusCol_ = newMax;
+        updateFocus(); ensureFocusVisible();
+      }
     }
-    event->accept();
-    return;
+    event->accept(); return;
 
   case Qt::Key_Down:
-    if (focusRow_ < maxRow) {
-      ++focusRow_;
-      const int newMax = colsInRow(focusRow_) - 1;
-      if (focusCol_ > newMax)
-        focusCol_ = newMax;
-      updateFocus();
-      ensureFocusVisible();
+    if (organizeMode_) {
+      if (focusRow_ < maxRow) moveFocusedTile(1, 0);
+    } else {
+      if (focusRow_ < maxRow) {
+        ++focusRow_;
+        const int newMax = colsInRow(focusRow_) - 1;
+        if (focusCol_ > newMax) focusCol_ = newMax;
+        updateFocus(); ensureFocusVisible();
+      }
     }
-    event->accept();
-    return;
+    event->accept(); return;
 
   case Qt::Key_Return:
   case Qt::Key_Enter:
   case Qt::Key_Space:
-    activateFocusedTile();
-    event->accept();
-    return;
+    activateFocusedTile(); event->accept(); return;
 
-  default:
+  case Qt::Key_O:
+    toggleOrganizeMode(); event->accept(); return;
+
+  case Qt::Key_Escape:
+  case Qt::Key_Back:
+    if (organizeMode_) { toggleOrganizeMode(); event->accept(); return; }
     break;
+
+  case Qt::Key_Delete:
+  case Qt::Key_Backspace:
+    if (organizeMode_) { hideFocusedTile(); event->accept(); return; }
+    break;
+
+  case Qt::Key_A:
+    if (organizeMode_) {
+      if (addAppsOverlay_) hideAddAppsOverlay();
+      else                  showAddAppsOverlay();
+      event->accept(); return;
+    }
+    break;
+
+  default: break;
   }
 
   QWidget::keyPressEvent(event);
@@ -1225,8 +1544,6 @@ void HomeScreen::resizeEvent(QResizeEvent *event) {
 
 void HomeScreen::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
-  // Refresh glow, drop-shadow, and animation state when returning from
-  // another page so visuals are never stale.
   updateFocus();
 }
 
