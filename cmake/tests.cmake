@@ -538,3 +538,41 @@ gtest_discover_tests(GenesisCartridgeTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ─── SNES Emulator Tests ──────────────────────────────────────────────────
+
+add_executable(SNESCPUTests ${PROJECT_ROOT}/tests/SNESCPUTests.cpp)
+set_target_properties(SNESCPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SNESCPUTests"
+)
+target_link_libraries(SNESCPUTests PRIVATE GTest::gtest_main SNESEmulator)
+gtest_discover_tests(SNESCPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(SNESPPUTests ${PROJECT_ROOT}/tests/SNESPPUTests.cpp)
+set_target_properties(SNESPPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SNESPPUTests"
+)
+target_link_libraries(SNESPPUTests PRIVATE GTest::gtest_main SNESEmulator)
+gtest_discover_tests(SNESPPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(SNESCartridgeTests ${PROJECT_ROOT}/tests/SNESCartridgeTests.cpp)
+set_target_properties(SNESCartridgeTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SNESCartridgeTests"
+)
+target_link_libraries(SNESCartridgeTests PRIVATE GTest::gtest_main SNESEmulator)
+gtest_discover_tests(SNESCartridgeTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

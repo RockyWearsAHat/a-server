@@ -112,6 +112,27 @@ set_target_properties(GenesisEmulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GenesisEmulator"
 )
 
+# ─── SNES Emulator ───────────────────────────────────────────────────────
+add_library(SNESEmulator STATIC
+    ${PROJECT_ROOT}/src/emulator/snes/SNESCartridge.cpp
+    ${PROJECT_ROOT}/src/emulator/snes/SNESMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/snes/W65C816.cpp
+    ${PROJECT_ROOT}/src/emulator/snes/SPC700.cpp
+    ${PROJECT_ROOT}/src/emulator/snes/SNESPPU.cpp
+    ${PROJECT_ROOT}/src/emulator/snes/SNES.cpp
+)
+
+target_include_directories(SNESEmulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(SNESEmulator PUBLIC EmulatorCommon)
+
+set_target_properties(SNESEmulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SNESEmulator"
+)
+
 add_library(SwitchEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/switch/SwitchEmulator.cpp
     ${PROJECT_ROOT}/src/emulator/switch/MemoryManager.cpp
@@ -248,7 +269,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator GenesisEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SNESEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>
