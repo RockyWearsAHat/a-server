@@ -416,6 +416,8 @@ int main(int argc, char *argv[]) {
                  romStr.find(".fig") != std::string::npos ||
                  romStr.find(".swc") != std::string::npos) {
         window.SetEmulatorType(7); // SNES
+      } else if (romStr.find(".gba") != std::string::npos) {
+        window.SetEmulatorType(0); // GBA (must check before .gb to avoid substring match)
       } else if (romStr.find(".gb") != std::string::npos ||
                  romStr.find(".gbc") != std::string::npos) {
         window.SetEmulatorType(8); // Game Boy
