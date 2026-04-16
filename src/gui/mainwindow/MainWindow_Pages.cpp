@@ -195,6 +195,32 @@ void MainWindow::launchInstalledGame(const QString &path) {
     startGame(path);
     return;
   }
+  if (lower.endsWith(QStringLiteral(".gb")) ||
+      lower.endsWith(QStringLiteral(".gbc"))) {
+    currentEmulator = EmulatorType::GameBoy;
+    startGame(path);
+    return;
+  }
+  if (lower.endsWith(QStringLiteral(".nes"))) {
+    currentEmulator = EmulatorType::NES;
+    startGame(path);
+    return;
+  }
+  if (lower.endsWith(QStringLiteral(".md")) ||
+      lower.endsWith(QStringLiteral(".gen")) ||
+      lower.endsWith(QStringLiteral(".smd"))) {
+    currentEmulator = EmulatorType::Genesis;
+    startGame(path);
+    return;
+  }
+  if (lower.endsWith(QStringLiteral(".smc")) ||
+      lower.endsWith(QStringLiteral(".sfc")) ||
+      lower.endsWith(QStringLiteral(".fig")) ||
+      lower.endsWith(QStringLiteral(".swc"))) {
+    currentEmulator = EmulatorType::SNES;
+    startGame(path);
+    return;
+  }
   if (lower.endsWith(QStringLiteral(".bin")) ||
       lower.endsWith(QStringLiteral(".cue")) ||
       lower.endsWith(QStringLiteral(".iso")) ||
@@ -822,7 +848,7 @@ void MainWindow::refreshGameList() {
 
   QStringList filters;
   if (currentEmulator == EmulatorType::GBA) {
-    filters << "*.gba" << "*.gb" << "*.gbc";
+    filters << "*.gba";
   } else if (currentEmulator == EmulatorType::PS1) {
     filters << "*.bin" << "*.cue" << "*.iso" << "*.img";
   } else if (currentEmulator == EmulatorType::Switch) {
@@ -865,10 +891,26 @@ void MainWindow::refreshGameList() {
       brandPrimary = QColor(124, 140, 255);
       brandDark = QColor(44, 52, 120);
       sysName = "GBA";
+    } else if (currentEmulator == EmulatorType::GameBoy) {
+      brandPrimary = QColor(154, 214, 108);
+      brandDark = QColor(49, 84, 39);
+      sysName = "GB";
     } else if (currentEmulator == EmulatorType::PS1) {
       brandPrimary = QColor(77, 196, 255);
       brandDark = QColor(20, 68, 110);
       sysName = "PS1";
+    } else if (currentEmulator == EmulatorType::NES) {
+      brandPrimary = QColor(231, 83, 72);
+      brandDark = QColor(101, 28, 25);
+      sysName = "NES";
+    } else if (currentEmulator == EmulatorType::Genesis) {
+      brandPrimary = QColor(123, 214, 255);
+      brandDark = QColor(26, 67, 89);
+      sysName = "GEN";
+    } else if (currentEmulator == EmulatorType::SNES) {
+      brandPrimary = QColor(180, 143, 255);
+      brandDark = QColor(66, 49, 109);
+      sysName = "SNES";
     } else if (currentEmulator == EmulatorType::Atari2600) {
       brandPrimary = QColor(255, 176, 61);
       brandDark = QColor(110, 58, 12);

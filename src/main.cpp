@@ -403,6 +403,22 @@ int main(int argc, char *argv[]) {
       if (romStr.find(".nro") != std::string::npos ||
           romStr.find(".nso") != std::string::npos) {
         window.SetEmulatorType(1); // Switch
+      } else if (romStr.find(".a26") != std::string::npos) {
+        window.SetEmulatorType(4); // Atari 2600
+      } else if (romStr.find(".nes") != std::string::npos) {
+        window.SetEmulatorType(5); // NES
+      } else if (romStr.find(".md") != std::string::npos ||
+                 romStr.find(".gen") != std::string::npos ||
+                 romStr.find(".smd") != std::string::npos) {
+        window.SetEmulatorType(6); // Genesis
+      } else if (romStr.find(".smc") != std::string::npos ||
+                 romStr.find(".sfc") != std::string::npos ||
+                 romStr.find(".fig") != std::string::npos ||
+                 romStr.find(".swc") != std::string::npos) {
+        window.SetEmulatorType(7); // SNES
+      } else if (romStr.find(".gb") != std::string::npos ||
+                 romStr.find(".gbc") != std::string::npos) {
+        window.SetEmulatorType(8); // Game Boy
       } else if (romStr.find(".bin") != std::string::npos ||
                  romStr.find(".cue") != std::string::npos ||
                  romStr.find(".iso") != std::string::npos ||
