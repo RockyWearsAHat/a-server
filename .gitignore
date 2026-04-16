@@ -14,6 +14,7 @@ coverage.lcov
 # Testing artifacts
 Testing/
 test_save_read/
+test_output/
 
 # VS Code and editor junk
 .vscode/
@@ -24,12 +25,18 @@ debug.log
 *.log
 *log*.txt
 *log*.md
+core
+core.*
+*.core
 
 # Diagnostics outputs (regeneratable)
 dumps*/
 *.ppm
 screenshot_*.png
-test_output/
+visual_snapshot_*.png
+visual_snapshot_*.png.json
+visual_state_*.png
+visual_state_*.png.json
 
 # Local environment secrets
 .env
@@ -43,6 +50,11 @@ server/data/
 __pycache__/
 *.pyc
 
+# Local server install output
+server/node_modules/
+server/dist/
+server/debug.log
+
 # Emulator runtime files
 *.sav
 *.sav.*
@@ -55,6 +67,12 @@ __pycache__/
 *.gbc
 *.nro
 *.nso
+test_roms/*.bin
+test_roms/*.cue
+test_roms/*.iso
+test_roms/*.img
+test_roms/*.mdf
+test_roms/*.chd
 
 # But allow test_roms directory structure
 !test_roms/.gitkeep
@@ -73,7 +91,6 @@ visual_*.png.json
 _worktrees/
 
 # Core dumps from development (configred to output ./core on my machine)
-core
 
 # System cache file so copilot gets less confused about what commands are available
 .github/SYSTEM.md
