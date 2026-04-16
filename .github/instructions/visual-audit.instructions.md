@@ -143,6 +143,22 @@ Issues (prioritized):
 Verdict: [Matches AAA quality / Below AAA standards]
 ```
 
+## Fix Mapping
+
+When a scoring category is below 8/10, check these specific QSS/C++ properties against the design token tables in `design-system.instructions.md`:
+
+| Category            | QSS Properties to Check                                             | Token Table         |
+| ------------------- | ------------------------------------------------------------------- | ------------------- |
+| Layout & Alignment  | `margin`, `padding`, `min-height`, `max-width`, `qproperty-*`       | Spacing Scale       |
+| Typography          | `font-size`, `font-weight`, `font-family`                           | Typography Scale    |
+| Spacing & Rhythm    | `padding`, `margin`, `spacing`, `gap` (C++ layout `setSpacing`)     | Spacing Scale       |
+| Visual Hierarchy    | `font-size`, `font-weight`, `color`, `opacity`                      | Typography + Colors |
+| Color & Contrast    | `color`, `background-color`, `border-color`                         | Color Palette       |
+| Component Quality   | `border-radius`, `border`, `padding`, `min-height`                  | Radii + Spacing     |
+| Professional Polish | All of the above — look for inconsistencies across similar elements | All token tables    |
+
+For each issue, generate a fix instruction in the format: `file → selector → property → current value → target value`.
+
 ## Benchmark References
 
 Compare against: Nintendo Switch home, Xbox Series X dashboard, Amazon Fire TV, Android TV, Apple TV. The UI must feel like it could have been shipped by one of these companies.

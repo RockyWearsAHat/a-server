@@ -101,29 +101,21 @@ Main Agent (coordinator — delegates only, context reserved for user iteration)
 
 ## Visual Loop Tooling
 
-- `tools/aioserver-vision-tool` — workspace-local VS Code extension exposing the `aioserver-vision/*` MCP tool namespace and `@aioserver-vision` chat participant for image analysis.
-- Install: `make install-vision-tool` — Refresh: `make reinstall-vision-tool`
 - `python3 scripts/visual_dev_loop.py` — host-driven boot, capture, session automation.
+- Vision tools (`take_screenshot`, `analyze_images`) are provided globally by the `gsh` MCP server.
 
 ## Research Tooling
 
-- `tools/aioserver-research-tool` — workspace-local MCP server exposing `aioserver-research/*` for web research plus repo-local knowledge-cache search.
-- `search_web` is the default no-credential search path. `google_search` is optional legacy support for existing Google Programmable Search Engine setups.
-- `search_knowledge_cache` searches `.github/knowledge/` so agents can pull durable repo facts without repeating broad codebase search.
-- `read_knowledge_note` reads a specific cached knowledge note by relative path.
-- `write_knowledge_note` creates or overwrites a knowledge note directly (no Explore delegation needed).
-- `update_knowledge_note` replaces a specific section by heading in an existing note.
-- `append_to_knowledge_note` appends content to an existing note.
-- `GOOGLE_CUSTOM_SEARCH_API_KEY` and `GOOGLE_CUSTOM_SEARCH_ENGINE_ID` are required only for `google_search`.
-- `make research-tool-check` verifies that the server starts and lists its tools.
+All research and knowledge tools are provided globally by the `gsh` MCP server:
 
-### Google credential setup
-
-- The search API key comes from Google Cloud Console: `APIs & Services` -> `Credentials` -> `Create credentials` -> `API key`. Put that value in `GOOGLE_CUSTOM_SEARCH_API_KEY`.
-- The search engine ID comes from Google Programmable Search Engine at `programmablesearchengine.google.com`. Create or open your search engine and copy the `Search engine ID`. Put that value in `GOOGLE_CUSTOM_SEARCH_ENGINE_ID`.
-- You also need the `Custom Search API` enabled for the same Google Cloud project that owns the API key.
-- If you want broad web search rather than a single-site engine, configure the Programmable Search Engine to search the entire web and then use `site_filter` per query when you want narrower results.
-- Google currently documents the `Custom Search JSON API` as closed to new customers, so for most new setups you should use `search_web` instead of trying to provision `google_search` from scratch.
+- `search_web` — web search via local SearXNG instance
+- `scrape_webpage` — fetch and extract text from a URL
+- `search_knowledge_cache` — search `.github/knowledge/` for durable repo notes
+- `read_knowledge_note` — read a specific knowledge note by relative path
+- `write_knowledge_note` — create or overwrite a knowledge note
+- `update_knowledge_note` — replace a specific section by heading in an existing note
+- `append_to_knowledge_note` — append content to an existing note
+- `checkpoint` — create a local git commit
 
 ## Knowledge Maintenance
 

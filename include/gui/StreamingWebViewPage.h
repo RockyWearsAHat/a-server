@@ -25,6 +25,7 @@ public:
   explicit StreamingWebViewPage(QWidget *parent = nullptr);
 
   void openApp(AIO::GUI::StreamingApp app);
+  void openSteamStore(const QString &steamAppId);
 
 signals:
   void homeRequested();
@@ -70,6 +71,7 @@ private:
   QTimer *hintHideTimer_ = nullptr;
   int dotsCount_ = 0;
   bool loadingVisible_ = false;
+  QString steamStoreHomeUrl_;
 
   std::array<QWebEngineView *, 5> appViews_{};
   std::array<QWebEngineProfile *, 5> appProfiles_{};

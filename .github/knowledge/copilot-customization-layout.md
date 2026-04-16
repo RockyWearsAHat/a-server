@@ -18,9 +18,7 @@ Durable facts about the AIO Server repo-local Copilot customization layout, rout
 - `.github/` control-surface files (`copilot-instructions.md`, agents, instructions, prompts, skills, hooks, `.github/README.md`) are protected by hooks and should only be edited when the user explicitly asked for customization work.
 - Mutable product or implementation status should live in `.github/knowledge/` or other human-facing docs, not in `copilot-instructions.md`.
 - Worker agents that must be callable as subagents use `user-invocable: false` and must not use `disable-model-invocation: true`.
-- The local `aioserver-research` Node server can search `.github/knowledge/`, but it cannot directly read `/memories/repo` as a normal filesystem path.
-- `aioserver-research/*` is the research tool namespace. Default external-doc flow is `search_web`, then `fetch_pages`. `google_search` is optional legacy support.
-- Durable internal retrieval flow is `search_knowledge_cache`, then `read_knowledge_note`.
+- The `aioserver-research` MCP server is globally registered (not workspace-local). Its tool namespace `aioserver-research/*` provides `search_web`, `fetch_pages`, `search_knowledge_cache`, `read_knowledge_note`, `write_knowledge_note`, `update_knowledge_note`, and `append_to_knowledge_note`.
 
 ## Retrieval Hints
 
@@ -32,4 +30,3 @@ Durable facts about the AIO Server repo-local Copilot customization layout, rout
 - `.github/copilot-instructions.md`
 - `.github/README.md`
 - `.github/agents/*.agent.md`
-- `tools/aioserver-research-tool/`

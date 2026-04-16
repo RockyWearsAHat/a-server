@@ -102,5 +102,4 @@ Main Agent (coordinator)
 
 ## MCP Tools
 
-- **aioserver-vision-tool**: Image analysis for visual testing
-- **aioserver-research-tool**: Web search + knowledge cache
+All MCP tools (search, knowledge cache, vision, checkpoint) are provided globally by the `gsh` MCP server. No workspace-local tool servers are needed.

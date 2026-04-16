@@ -10,17 +10,15 @@ Ownership:
 
 What belongs here:
 
-- Reusable subsystem notes that future agents are likely to need again.
-- Verified workflow facts, routing rules, and implementation constraints that are too specific to keep re-discovering.
-- Concise summaries of external research after the evidence has been checked.
-- Source tier annotations (official docs, spec, source code, community) so readers know how much to trust each claim.
+- Architecture docs for AIO Server subsystems (emulators, GUI, build, streaming).
+- Project-specific design decisions, token references, and source maps.
+- Verified subsystem facts that agents need when implementing or reviewing code in this repo.
 
 What does not belong here:
 
+- Generic industry knowledge (C++ best practices, Qt patterns, CMake tips) — these belong in the community cache or user-level memory.
+- Meta-AI-workflow docs about how agents should operate — these belong in skills and instructions.
 - One-off chat summaries.
-- Speculation, guesses, or low-confidence findings.
-- Large copied source dumps.
-- Claims derived from code comments rather than code behavior. A comment saying "handles X" is not evidence that X works — only the code body is evidence.
 
 Preferred note shape:
 
@@ -47,7 +45,7 @@ When documenting what a subsystem does or whether a feature works:
 - **Never describe stubs, placeholders, or scaffolding as functional**. If the code path ends at a TODO, an empty handler, or a hardcoded stub response, document it as "not yet implemented" — not "working".
 - **Comments are documentation aids, not truth**. Good comments help explain working code. Bad comments make false claims about non-working code. When comments and code disagree, the code is the truth and the comment is a bug.
 
-Use the research MCP tools to query this cache:
+Use the globally registered `aioserver-research` MCP tools to query this cache:
 
 - `search_knowledge_cache`
 - `read_knowledge_note`

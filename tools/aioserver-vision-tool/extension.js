@@ -442,12 +442,14 @@ function getIpcState(workspaceRoot) {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "workspace";
 
+  const globalCacheDir = path.join(os.homedir(), ".cache", "gsh");
+
   return {
     socketPath: path.join(
       os.tmpdir(),
       `aioserver-vision-${workspaceName}.sock`,
     ),
-    infoPath: path.join(workspaceRoot, ".vscode", "aioserver-vision-ipc.json"),
+    infoPath: path.join(globalCacheDir, "aioserver-vision-ipc.json"),
   };
 }
 

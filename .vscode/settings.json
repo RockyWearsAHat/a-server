@@ -36,5 +36,7 @@
         "copilot/claude-haiku-4.5"
       ]
     }
-  }
+  },
+  "editor.formatOnSave": false,
+  "editor.codeActionsOnSave": {}
 }

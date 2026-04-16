@@ -8,7 +8,6 @@
 #include <QDesktopServices>
 #include <QEvent>
 #include <QFrame>
-#include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QGuiApplication>
@@ -157,23 +156,6 @@ QRect expandedRectFor(const QRect &baseRect) {
                            kTileFocusGrow);
 }
 
-QGraphicsDropShadowEffect *ensureShadowEffect(QWidget *widget) {
-  if (!widget) {
-    return nullptr;
-  }
-
-  auto *shadow =
-      qobject_cast<QGraphicsDropShadowEffect *>(widget->graphicsEffect());
-  if (!shadow) {
-    shadow = new QGraphicsDropShadowEffect(widget);
-    shadow->setBlurRadius(0.0);
-    shadow->setOffset(0.0, 0.0);
-    shadow->setColor(Qt::transparent);
-    widget->setGraphicsEffect(shadow);
-  }
-  return shadow;
-}
-
 void setThumbMissingState(
     ThumbnailFillLabel *label, bool missing,
     const QString &fallbackText = QStringLiteral("YouTube")) {
@@ -224,34 +206,6 @@ void animateRect(QWidget *widget, const QRect &targetRect, int duration) {
   animation->setEndValue(targetRect);
   animation->setEasingCurve(QEasingCurve::OutCubic);
   animation->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-void animateShadow(QGraphicsDropShadowEffect *shadow, qreal blurRadius,
-                   const QPointF &offset, const QColor &color, int duration) {
-  if (!shadow) {
-    return;
-  }
-
-  auto restartAnimation = [&](const QString &name, const QByteArray &property,
-                              const QVariant &endValue) {
-    if (auto *existing = shadow->findChild<QPropertyAnimation *>(name)) {
-      existing->stop();
-      existing->deleteLater();
-    }
-
-    auto *animation = new QPropertyAnimation(shadow, property, shadow);
-    animation->setObjectName(name);
-    animation->setDuration(duration);
-    animation->setEndValue(endValue);
-    animation->setEasingCurve(QEasingCurve::OutCubic);
-    animation->start(QAbstractAnimation::DeleteWhenStopped);
-  };
-
-  restartAnimation(QStringLiteral("aioTileShadowBlurAnimation"), "blurRadius",
-                   blurRadius);
-  restartAnimation(QStringLiteral("aioTileShadowOffsetAnimation"), "offset",
-                   offset);
-  shadow->setColor(color);
 }
 
 int railIndexForObject(QObject *object) {
@@ -575,7 +529,7 @@ void YouTubeBrowsePage::setupUi() {
   heroEyebrowLabel_ = new QLabel("DISCOVER", heroCard_);
   heroEyebrowLabel_->setObjectName("aioYouTubeHeroEyebrow");
 
-  heroTitleLabel_ = new QLabel("Popular on YouTube", heroCard_);
+  heroTitleLabel_ = new QLabel("Trending Now", heroCard_);
   heroTitleLabel_->setObjectName("aioYouTubeHeroTitle");
   heroTitleLabel_->setWordWrap(true);
 
@@ -1852,11 +1806,10 @@ void YouTubeBrowsePage::updateHeroSpotlight() {
     heroPrimaryChip_->setVisible(false);
     heroSecondaryChip_->setVisible(false);
     heroTertiaryChip_->setVisible(false);
-    title = QStringLiteral("Popular on YouTube");
-    body =
-        signedIn
-            ? QStringLiteral("Continue watching and subscriptions are ready.")
-            : QStringLiteral("Browse public picks instantly.");
+    title = QStringLiteral("Trending Now");
+    body = signedIn
+               ? QStringLiteral("Your feed and subscriptions, ready to go.")
+               : QStringLiteral("Dive into trending videos and top picks.");
   }
 
   if (accountContext) {
@@ -1968,12 +1921,14 @@ void YouTubeBrowsePage::updateSidebarState(bool animated) {
             widthAnim->setStartValue(textClip->maximumWidth());
             widthAnim->setEndValue(targetTextWidth);
             widthAnim->setEasingCurve(QEasingCurve::OutCubic);
-            QObject::connect(widthAnim, &QVariantAnimation::valueChanged, this,
+            QObject::connect(widthAnim, &QAbstractAnimation::finished, this,
                              [this]() {
                                if (sidebar_) {
                                  sidebar_->updateGeometry();
                                }
-                               layout()->activate();
+                               if (layout()) {
+                                 layout()->activate();
+                               }
                              });
             widthAnim->start(QAbstractAnimation::DeleteWhenStopped);
 
@@ -2002,7 +1957,7 @@ void YouTubeBrowsePage::updateSidebarState(bool animated) {
       animation->setStartValue(start);
       animation->setEndValue(end);
       animation->setEasingCurve(QEasingCurve::OutCubic);
-      QObject::connect(animation, &QVariantAnimation::valueChanged, this,
+      QObject::connect(animation, &QAbstractAnimation::finished, this,
                        [this]() {
                          if (sidebar_) {
                            sidebar_->updateGeometry();
@@ -2540,17 +2495,6 @@ void YouTubeBrowsePage::updateFocusStyle() {
       authCard_->style()->unpolish(authCard_);
       authCard_->style()->polish(authCard_);
       authCard_->update();
-
-      auto *shadow = ensureShadowEffect(authCard_);
-      if (selected) {
-        animateShadow(shadow, 34.0, QPointF(0.0, 12.0),
-                      QColor(255, 108, 96, 104), 170);
-      } else if (hovered) {
-        animateShadow(shadow, 20.0, QPointF(0.0, 8.0),
-                      QColor(255, 255, 255, 38), 140);
-      } else {
-        animateShadow(shadow, 0.0, QPointF(0.0, 0.0), Qt::transparent, 120);
-      }
     }
   }
 
@@ -2604,17 +2548,6 @@ void YouTubeBrowsePage::updateFocusStyle() {
       }
 
       animateRect(tile, targetRect, selected ? 170 : 140);
-
-      auto *shadow = ensureShadowEffect(tile);
-      if (selected) {
-        animateShadow(shadow, 36.0, QPointF(0.0, 10.0),
-                      QColor(255, 255, 255, 120), 170);
-      } else if (hovered) {
-        animateShadow(shadow, 22.0, QPointF(0.0, 10.0),
-                      QColor(255, 255, 255, 32), 150);
-      } else {
-        animateShadow(shadow, 0.0, QPointF(0.0, 0.0), Qt::transparent, 120);
-      }
     }
   }
 }

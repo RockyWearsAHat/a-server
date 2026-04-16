@@ -4,24 +4,24 @@ Canonical token reference for AIO Server TV shell. Source of truth: `assets/qss/
 
 ## Color Palette
 
-| Token     | Value                    | Usage                     |
-| --------- | ------------------------ | ------------------------- |
-| bg        | `#0a0a0a`                | Page / window background  |
-| surface-1 | `#121212`                | Cards, lists, inputs      |
-| surface-2 | `#1a1a1a`                | Buttons (default)         |
-| surface-3 | `#222222`                | Hover state surfaces      |
-| elevated  | `#2a2a2a`                | Elevated surfaces         |
-| border    | `rgba(255,255,255,0.06)` | Default borders           |
-| text      | `#f0f0f0`                | Primary text              |
-| text-2    | `#999999`                | Secondary / subtitle text |
-| text-3    | `#666666`                | Tertiary / metadata text  |
-| accent    | `#64b5f6`                | Primary accent (blue)     |
-| store-accent    | `#d4a820` | Game Store tabs, install/play CTAs           |
-| organize-accent | `#ffb74d` | Home Screen organize-mode highlight           |
-| youtube-brand   | `#ff0000` | YouTube logo and active controls (youtube.qss only) |
-| store-accent    | `#d4a820` | Game Store tabs, install/play CTAs           |
-| organize-accent | `#ffb74d` | Home Screen organize-mode highlight           |
-| youtube-brand   | `#ff0000` | YouTube logo and active controls (youtube.qss only) |
+| Token           | Value                    | Usage                                               |
+| --------------- | ------------------------ | --------------------------------------------------- |
+| bg              | `#0a0a0a`                | Page / window background                            |
+| surface-1       | `#121212`                | Cards, lists, inputs                                |
+| surface-2       | `#1a1a1a`                | Buttons (default)                                   |
+| surface-3       | `#222222`                | Hover state surfaces                                |
+| elevated        | `#2a2a2a`                | Elevated surfaces                                   |
+| border          | `rgba(255,255,255,0.06)` | Default borders                                     |
+| text            | `#f0f0f0`                | Primary text                                        |
+| text-2          | `#999999`                | Secondary / subtitle text                           |
+| text-3          | `#666666`                | Tertiary / metadata text                            |
+| accent          | `#64b5f6`                | Primary accent (blue)                               |
+| store-accent    | `#d4a820`                | Game Store tabs, install/play CTAs                  |
+| organize-accent | `#ffb74d`                | Home Screen organize-mode highlight                 |
+| youtube-brand   | `#ff0000`                | YouTube logo and active controls (youtube.qss only) |
+| store-accent    | `#d4a820`                | Game Store tabs, install/play CTAs                  |
+| organize-accent | `#ffb74d`                | Home Screen organize-mode highlight                 |
+| youtube-brand   | `#ff0000`                | YouTube logo and active controls (youtube.qss only) |
 
 Additional semantic colors used in tv.qss:
 
@@ -68,3 +68,34 @@ No intermediate values. Deviations require explicit justification in code commen
 | button / input | 12px  | QPushButton, QLineEdit, QComboBox |
 | card           | 16px  | Game cards, content containers    |
 | chip           | 20px  | Filter chips, tag pills           |
+
+## Animation Tokens
+
+All state-driven motion uses these values. Implemented via `QPropertyAnimation`
+in C++ (QSS has no transition support in Qt Widgets).
+
+| Token       | Duration | Easing   | Usage                     |
+| ----------- | -------- | -------- | ------------------------- |
+| focus-in    | 200ms    | OutCubic | Card/button gains focus   |
+| focus-out   | 150ms    | OutQuad  | Card/button loses focus   |
+| press       | 100ms    | OutQuad  | Confirm button press-down |
+| release     | 150ms    | OutCubic | Confirm button release    |
+| page-enter  | 250ms    | OutCubic | Page slide/fade in        |
+| page-exit   | 200ms    | OutQuad  | Page slide/fade out       |
+| scroll-snap | 250ms    | OutCubic | Shelf horizontal scroll   |
+
+### Focus Scale
+
+Focused elements scale up **5-8%** (1.05-1.08) from resting size. Combined
+with drop shadow (painted manually, not `QGraphicsEffect`) and a 2px accent
+ring.
+
+### Rule
+
+Exit animations are always faster than enter animations. The user should
+never perceive waiting.
+
+## Cross-References
+
+- Layout grid, shelf dimensions, typography at distance: `tv-ui-design-patterns.md`
+- Premium polish checklist: `.github/skills/tv-ui-premium-polish/SKILL.md`

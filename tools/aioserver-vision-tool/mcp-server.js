@@ -2,13 +2,14 @@
 
 const fs = require("fs");
 const net = require("net");
+const os = require("os");
 const path = require("path");
 const readline = require("readline");
 
 const MCP_VERSION = "2024-11-05";
 const IPC_INFO_PATH =
   process.env.AIOSERVER_VISION_IPC_INFO_PATH ||
-  path.join(process.cwd(), ".vscode", "aioserver-vision-ipc.json");
+  path.join(os.homedir(), ".cache", "gsh", "aioserver-vision-ipc.json");
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);

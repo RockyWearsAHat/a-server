@@ -80,11 +80,17 @@ void ThumbnailCache::request(const QString& url) {
     auto* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
         inFlight_.remove(url);
+        if (reply->error() != QNetworkReply::NoError) {
+            reply->deleteLater();
+            emit thumbnailFailed(url);
+            return;
+        }
         const QByteArray data = reply->readAll();
         reply->deleteLater();
 
         QPixmap px;
         if (!px.loadFromData(data)) {
+            emit thumbnailFailed(url);
             return;
         }
 

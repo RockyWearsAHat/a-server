@@ -3,6 +3,7 @@
 #include "gui/StreamingApp.h"
 
 #include <QApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QEvent>
 #include <QFrame>
@@ -19,6 +20,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <functional>
+
 #include <QWebEngineHistory>
 #include <QWebEnginePage>
 #include <QWebEngineView>
@@ -30,6 +33,46 @@ namespace AIO {
 namespace GUI {
 
 namespace {
+
+class EmbeddedWebPage final : public QWebEnginePage {
+public:
+  using ExternalUrlHandler = std::function<bool(const QUrl &)>;
+  using PopupTargetFactory = std::function<QWebEnginePage *()>;
+
+  EmbeddedWebPage(QWebEngineProfile *profile, QObject *parent,
+                  ExternalUrlHandler externalUrlHandler,
+                  PopupTargetFactory popupTargetFactory)
+      : QWebEnginePage(profile, parent),
+        externalUrlHandler_(std::move(externalUrlHandler)),
+        popupTargetFactory_(std::move(popupTargetFactory)) {}
+
+protected:
+  bool acceptNavigationRequest(const QUrl &url, NavigationType type,
+                               bool isMainFrame) override {
+    Q_UNUSED(type);
+    Q_UNUSED(isMainFrame);
+    if (url.scheme().compare(QStringLiteral("steam"), Qt::CaseInsensitive) ==
+        0) {
+      if (externalUrlHandler_)
+        externalUrlHandler_(url);
+      return false;
+    }
+    return QWebEnginePage::acceptNavigationRequest(url, type, isMainFrame);
+  }
+
+  QWebEnginePage *createWindow(WebWindowType type) override {
+    Q_UNUSED(type);
+    if (popupTargetFactory_) {
+      if (QWebEnginePage *target = popupTargetFactory_())
+        return target;
+    }
+    return QWebEnginePage::createWindow(type);
+  }
+
+private:
+  ExternalUrlHandler externalUrlHandler_;
+  PopupTargetFactory popupTargetFactory_;
+};
 
 int appIndex(AIO::GUI::StreamingApp app) { return static_cast<int>(app); }
 
@@ -43,6 +86,8 @@ QColor brandAccentForApp(AIO::GUI::StreamingApp app) {
     return QColor(30, 80, 240);
   case AIO::GUI::StreamingApp::Hulu:
     return QColor(28, 231, 131);
+  case AIO::GUI::StreamingApp::Steam:
+    return QColor(32, 112, 190);
   }
   return QColor(100, 181, 246);
 }
@@ -66,58 +111,53 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget *parent) : QWidget(parent) {
   root->setSpacing(0);
 
   topBar_ = new QWidget(this);
-  topBar_->setObjectName("aioTopBar");
+  topBar_->setObjectName("aioStreamingTopBar");
 
   auto *barLayout = new QHBoxLayout(topBar_);
-  barLayout->setContentsMargins(24, 16, 24, 16);
-  barLayout->setSpacing(16);
+  barLayout->setContentsMargins(32, 12, 32, 12);
+  barLayout->setSpacing(12);
 
   backButton_ = new QToolButton(topBar_);
   backButton_->setText("\u25C0  Back");
   backButton_->setAutoRaise(true);
   backButton_->setFocusPolicy(Qt::StrongFocus);
   backButton_->setObjectName("aioStreamingBarBtn");
-  backButton_->setProperty("variant", "secondary");
 
   forwardButton_ = new QToolButton(topBar_);
   forwardButton_->setText("Forward  \u25B6");
   forwardButton_->setAutoRaise(true);
   forwardButton_->setFocusPolicy(Qt::StrongFocus);
   forwardButton_->setObjectName("aioStreamingBarBtn");
-  forwardButton_->setProperty("variant", "secondary");
   forwardButton_->hide();
 
   appHomeButton_ = new QToolButton(topBar_);
-  appHomeButton_->setText("\u2302  App Home");
+  appHomeButton_->setText("\u2302  Home");
   appHomeButton_->setAutoRaise(true);
   appHomeButton_->setFocusPolicy(Qt::StrongFocus);
   appHomeButton_->setObjectName("aioStreamingBarBtn");
-  appHomeButton_->setProperty("variant", "secondary");
 
   reloadButton_ = new QToolButton(topBar_);
   reloadButton_->setText("\u21BB  Reload");
   reloadButton_->setAutoRaise(true);
   reloadButton_->setFocusPolicy(Qt::StrongFocus);
   reloadButton_->setObjectName("aioStreamingBarBtn");
-  reloadButton_->setProperty("variant", "secondary");
 
   homeButton_ = new QToolButton(topBar_);
-  homeButton_->setText("\u2190  Apps");
+  homeButton_->setText("\u2190  Exit");
   homeButton_->setAutoRaise(true);
   homeButton_->setFocusPolicy(Qt::StrongFocus);
   homeButton_->setObjectName("aioStreamingBarBtn");
-  homeButton_->setProperty("variant", "secondary");
 
   titleLabel_ = new QLabel("", topBar_);
-  titleLabel_->setProperty("role", "subtitle");
+  titleLabel_->setObjectName("aioStreamingBarTitle");
 
   barLayout->addWidget(backButton_);
   barLayout->addWidget(forwardButton_);
   barLayout->addWidget(appHomeButton_);
   barLayout->addWidget(reloadButton_);
   barLayout->addWidget(homeButton_);
-  barLayout->addSpacing(8);
-  barLayout->addWidget(titleLabel_);
+  barLayout->addSpacing(16);
+  barLayout->addWidget(titleLabel_, 1);
   barLayout->addStretch();
 
   statusLabel_ = new QLabel(this);
@@ -180,9 +220,9 @@ StreamingWebViewPage::StreamingWebViewPage(QWidget *parent) : QWidget(parent) {
   hintLabel_ = new QLabel(this);
   hintLabel_->setObjectName("aioStreamingNavHint");
   hintLabel_->setText(
-      "D-pad  .  navigate    Back  .  return    Home  .  exit streaming");
+      "\u25C0 Back   \u25B2\u25BC\u25C0\u25B6 Navigate   Home \u2192 Exit");
   hintLabel_->setAlignment(Qt::AlignCenter);
-  hintLabel_->setContentsMargins(18, 6, 18, 6);
+  hintLabel_->setContentsMargins(18, 8, 18, 8);
 
   hintHideTimer_ = new QTimer(this);
   hintHideTimer_->setSingleShot(true);
@@ -275,6 +315,8 @@ QString StreamingWebViewPage::titleForApp(AIO::GUI::StreamingApp app) const {
     return "Disney+";
   case StreamingApp::Hulu:
     return "Hulu";
+  case StreamingApp::Steam:
+    return "Steam";
   }
   return "Streaming";
 }
@@ -289,6 +331,10 @@ QString StreamingWebViewPage::urlForApp(AIO::GUI::StreamingApp app) const {
     return "https://www.disneyplus.com/home";
   case StreamingApp::Hulu:
     return "https://www.hulu.com/hub/home";
+  case StreamingApp::Steam:
+    return steamStoreHomeUrl_.isEmpty()
+               ? QStringLiteral("https://store.steampowered.com/")
+               : steamStoreHomeUrl_;
   }
   return "https://www.youtube.com";
 }
@@ -304,6 +350,8 @@ StreamingWebViewPage::profileKeyForApp(AIO::GUI::StreamingApp app) const {
     return "disneyplus";
   case StreamingApp::Hulu:
     return "hulu";
+  case StreamingApp::Steam:
+    return "steam-store";
   }
   return "streaming";
 }
@@ -330,7 +378,36 @@ QWebEngineView *StreamingWebViewPage::ensureView(AIO::GUI::StreamingApp app) {
       QWebEngineProfile::ForcePersistentCookies);
 
   auto *view = new QWebEngineView(viewStack_);
-  auto *page = new QWebEnginePage(profile, view);
+  auto *page = new EmbeddedWebPage(
+      profile, view,
+      [this, app](const QUrl &url) {
+        const bool opened = QDesktopServices::openUrl(url);
+        if (opened) {
+          clearLoadFailure();
+          if (app == AIO::GUI::StreamingApp::Steam) {
+            const QString actionText =
+                url.toString().contains(QStringLiteral("/run/"))
+                    ? QStringLiteral("Launching through the Steam client...")
+                    : QStringLiteral(
+                          "Handing this Steam action to the Steam client...");
+            updateStatusText(actionText);
+          }
+          return true;
+        }
+
+        if (app == AIO::GUI::StreamingApp::Steam) {
+          showLoadFailure(QStringLiteral(
+              "Steam could not handle this request. Make sure the Steam "
+              "client is installed and running, then try again."));
+          updateStatusText(QStringLiteral("Steam handoff failed"));
+        }
+        return false;
+      },
+      [this]() -> QWebEnginePage * {
+        if (QWebEngineView *currentView = activeView())
+          return currentView->page();
+        return nullptr;
+      });
   view->setPage(page);
   view->setFocusPolicy(Qt::StrongFocus);
   view->page()->setBackgroundColor(
@@ -497,6 +574,9 @@ void StreamingWebViewPage::openApp(AIO::GUI::StreamingApp app) {
 
   viewStack_->setCurrentWidget(view);
   setTopBarText(titleForApp(app));
+  topBar_->setProperty("brand", profileKeyForApp(app));
+  topBar_->style()->unpolish(topBar_);
+  topBar_->style()->polish(topBar_);
   clearLoadFailure();
   updateStatusText(QStringLiteral("Opening %1...").arg(titleForApp(app)));
 
@@ -522,6 +602,43 @@ void StreamingWebViewPage::openApp(AIO::GUI::StreamingApp app) {
     loadingVisible_ = false;
   }
 
+  view->setFocus();
+  hintLabel_->show();
+  if (hintHideTimer_) {
+    hintHideTimer_->start();
+  }
+  updateButtonState();
+}
+
+void StreamingWebViewPage::openSteamStore(const QString &steamAppId) {
+  steamStoreHomeUrl_ =
+      QStringLiteral("https://store.steampowered.com/app/%1/").arg(steamAppId);
+
+  const auto app = AIO::GUI::StreamingApp::Steam;
+  currentAppIndex_ = appIndex(app);
+  QSettings settings("AIOServer", "GBAEmulator");
+  settings.setValue(QStringLiteral("streaming/lastApp"), currentAppIndex_);
+  settings.setValue(
+      QStringLiteral("streaming/%1/lastUrl").arg(profileKeyForApp(app)),
+      steamStoreHomeUrl_);
+
+  auto *view = ensureView(app);
+  if (!view) {
+    return;
+  }
+
+  viewStack_->setCurrentWidget(loadingPage_);
+  setTopBarText(QStringLiteral("Steam Store"));
+  clearLoadFailure();
+  updateStatusText(QStringLiteral("Opening Steam Store..."));
+  loadingServiceName_->setText(QStringLiteral("Steam Store"));
+  loadingAccent_->setStyleSheet(
+      QStringLiteral("background-color: %1; border-radius: 2px;")
+          .arg(brandAccentForApp(app).name()));
+  dotsCount_ = 0;
+  dotsTimer_->start();
+  loadingVisible_ = true;
+  view->setUrl(QUrl(steamStoreHomeUrl_));
   view->setFocus();
   hintLabel_->show();
   if (hintHideTimer_) {

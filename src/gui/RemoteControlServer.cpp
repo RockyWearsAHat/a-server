@@ -112,6 +112,24 @@ QString RemoteControlServer::keyTextForQt(int qtKey) {
   return QString();
 }
 
+static QWidget *resolveKeyEventTarget(AIO::GUI::MainWindow *window) {
+  QWidget *target = QApplication::focusWidget();
+  if (target && target->isVisible()) {
+    if (target->focusProxy())
+      target = target->focusProxy();
+    return target;
+  }
+
+  if (window) {
+    if (auto *stacked = window->findChild<QStackedWidget *>()) {
+      if (QWidget *current = stacked->currentWidget())
+        return current;
+    }
+  }
+
+  return window;
+}
+
 // ─── HTTP helpers ────────────────────────────────────────────────────────
 
 QByteArray RemoteControlServer::statusText(int status) {
@@ -718,14 +736,17 @@ RemoteControlServer::handleKeyInput(const HttpRequest &req) {
     return errorResponse(400, "Unknown key: " + keyName);
 
   const QString text = keyTextForQt(qtKey);
+  QWidget *target = resolveKeyEventTarget(window_);
+  if (!target)
+    return errorResponse(500, "No input target available");
 
   if (eventType == "press" || eventType == "down") {
     QKeyEvent pressEvent(QEvent::KeyPress, qtKey, Qt::NoModifier, text);
-    QCoreApplication::sendEvent(window_, &pressEvent);
+    QCoreApplication::sendEvent(target, &pressEvent);
   }
   if (eventType == "press" || eventType == "up") {
     QKeyEvent releaseEvent(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
-    QCoreApplication::sendEvent(window_, &releaseEvent);
+    QCoreApplication::sendEvent(target, &releaseEvent);
   }
 
   QJsonObject evData;
@@ -772,10 +793,13 @@ RemoteControlServer::handleKeySequence(const HttpRequest &req) {
     const int qtKey = qtKeys[i];
     QTimer::singleShot(i * delayMs, window_, [this, qtKey]() {
       const QString text = keyTextForQt(qtKey);
+      QWidget *target = resolveKeyEventTarget(window_);
+      if (!target)
+        return;
       QKeyEvent press(QEvent::KeyPress, qtKey, Qt::NoModifier, text);
-      QCoreApplication::sendEvent(window_, &press);
+      QCoreApplication::sendEvent(target, &press);
       QKeyEvent release(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
-      QCoreApplication::sendEvent(window_, &release);
+      QCoreApplication::sendEvent(target, &release);
     });
   }
 
@@ -807,10 +831,13 @@ RemoteControlServer::handleTypeInput(const HttpRequest &req) {
     QTimer::singleShot(i * delayMs, window_, [this, ch]() {
       const int qtKey = ch.toUpper().unicode();
       const QString charText(ch);
+      QWidget *target = resolveKeyEventTarget(window_);
+      if (!target)
+        return;
       QKeyEvent press(QEvent::KeyPress, qtKey, Qt::NoModifier, charText);
-      QCoreApplication::sendEvent(window_, &press);
+      QCoreApplication::sendEvent(target, &press);
       QKeyEvent release(QEvent::KeyRelease, qtKey, Qt::NoModifier, charText);
-      QCoreApplication::sendEvent(window_, &release);
+      QCoreApplication::sendEvent(target, &release);
     });
   }
 
@@ -1311,17 +1338,26 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
 
     if (auto *storePage = qobject_cast<AIO::GUI::GameStorePage *>(current)) {
       QJsonObject s;
-      const char *focusAreaNames[] = {"Tabs", "Grid", "Detail"};
+      const char *focusAreaNames[] = {"Tabs", "LibraryFilters", "Grid",
+                                      "Detail"};
       int faIdx = static_cast<int>(storePage->focusArea_);
       s["focusArea"] =
-          (faIdx >= 0 && faIdx < 3) ? focusAreaNames[faIdx] : "unknown";
+          (faIdx >= 0 && faIdx < 4) ? focusAreaNames[faIdx] : "unknown";
       s["tabFocus"] = storePage->tabFocus_;
+      s["libraryFilterFocus"] = storePage->libraryFilterFocus_;
       s["gridFocusRow"] = storePage->gridFocusRow_;
       s["gridFocusCol"] = storePage->gridFocusCol_;
       s["totalGames"] = storePage->allGames_.size();
       s["filteredGames"] = storePage->filteredGames_.size();
       s["steamGames"] = storePage->steamGames_.size();
       s["detailVisible"] = storePage->detailVisible_;
+      s["libraryMode"] = storePage->libraryModeActive_;
+      s["searchQuery"] = storePage->searchQuery_;
+      const char *libraryFilterNames[] = {"All", "Steam", "Local",
+                                          "Unsupported"};
+      int lfIdx = static_cast<int>(storePage->libraryFilter_);
+      s["libraryFilter"] =
+          (lfIdx >= 0 && lfIdx < 4) ? libraryFilterNames[lfIdx] : "unknown";
       if (storePage->activeCategoryIndex_ >= 0 &&
           storePage->activeCategoryIndex_ < storePage->categories_.size())
         s["activeCategory"] =
@@ -1383,9 +1419,12 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
 
   // ── navigate ──────────────────────────────────────────────────────
   if (action == "navigate") {
-    const QString target = params["page"].toString().toLower().trimmed();
+    const QString target = params["page"]
+                               .toString(params["target"].toString())
+                               .toLower()
+                               .trimmed();
     if (target.isEmpty())
-      return errorResponse(400, "navigate: missing 'page' param");
+      return errorResponse(400, "navigate: missing 'page' or 'target' param");
 
     const auto it = navTable_.constFind(target);
     if (it == navTable_.constEnd()) {
@@ -1468,10 +1507,13 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     for (int i = 0; i < count; ++i) {
       QTimer::singleShot(i * delay, window_, [this, qtKey]() {
         const QString text = keyTextForQt(qtKey);
+        QWidget *target = resolveKeyEventTarget(window_);
+        if (!target)
+          return;
         QKeyEvent press(QEvent::KeyPress, qtKey, Qt::NoModifier, text);
-        QCoreApplication::sendEvent(window_, &press);
+        QCoreApplication::sendEvent(target, &press);
         QKeyEvent release(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
-        QCoreApplication::sendEvent(window_, &release);
+        QCoreApplication::sendEvent(target, &release);
       });
     }
 

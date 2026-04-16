@@ -1,9 +1,11 @@
 #pragma once
+#include <QListWidget>
 #include <QString>
 #include <QVector>
 #include <QWidget>
 
 class QKeyEvent;
+class QPushButton;
 class QLabel;
 
 namespace AIO::GUI {
@@ -37,15 +39,21 @@ private:
   void rebuildGrid();
   void updateFilterChips();
   void updateGridFocus();
+  void updateHeroPanel();
   void activateFocused();
+  void openDetailsDialog();
+  int selectedIndex() const;
   int colCount() const { return kCols; }
 
   enum class FilterMode { All, GBA, PS1, Switch };
+  enum class FocusArea { Filters, Titles, Actions };
   FilterMode filter_ = FilterMode::All;
+  FocusArea focusArea_ = FocusArea::Titles;
   int chipFocus_ = 0;
   bool inChips_ = false;
   int gridRow_ = 0;
   int gridCol_ = 0;
+  int actionFocus_ = 0;
 
   QVector<LibraryGame> allGames_;
   QVector<LibraryGame> displayGames_;
@@ -53,11 +61,20 @@ private:
   QLabel *subtitleLabel_ = nullptr;
   QWidget *filterBar_ = nullptr;
   QVector<QLabel *> chips_;
-  QWidget *gridHost_ = nullptr;
-  QVector<QWidget *> gameTiles_;
+  QListWidget *titleList_ = nullptr;
+  QLabel *heroArt_ = nullptr;
+  QLabel *heroBadge_ = nullptr;
+  QLabel *heroTitle_ = nullptr;
+  QLabel *heroSubtitle_ = nullptr;
+  QLabel *heroDescription_ = nullptr;
+  QLabel *platformValueLabel_ = nullptr;
+  QLabel *statusValueLabel_ = nullptr;
+  QLabel *formatValueLabel_ = nullptr;
+  QPushButton *launchButton_ = nullptr;
+  QPushButton *infoButton_ = nullptr;
   QLabel *emptyLabel_ = nullptr;
 
-  static constexpr int kCols = 2;
+  static constexpr int kCols = 1;
 
   friend class AIO::GUI::RemoteControlServer;
 };

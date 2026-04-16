@@ -51,6 +51,22 @@ Quick-lookup table of the best known documentation for each system/subsystem. R&
 | PS1 CDROM documentation (psx-spx)  | Martin Korth          | https://problemkaputt.de/psx-spx.htm#cdromdrive                      |
 | PS1 Timers documentation (psx-spx) | Martin Korth          | https://problemkaputt.de/psx-spx.htm#timers                          |
 
+## Copilot Customization & Context Engineering
+
+| Topic                               | Source           | URL / Location                                                                                                  |
+| ----------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| VS Code Copilot custom instructions | GitHub official  | https://code.visualstudio.com/docs/copilot/copilot-customization                                                |
+| Copilot agent mode                  | GitHub official  | https://code.visualstudio.com/docs/copilot/chat/chat-agent-mode                                                 |
+| MCP in VS Code                      | GitHub official  | https://code.visualstudio.com/docs/copilot/chat/mcp-servers                                                     |
+| Custom instructions file spec       | GitHub official  | https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot |
+| Reusable prompt files               | GitHub official  | https://docs.github.com/en/copilot/customizing-copilot/adding-reusable-prompts-for-copilot                      |
+| Custom chat modes / agents          | GitHub official  | https://docs.github.com/en/copilot/customizing-copilot/adding-custom-chat-modes                                 |
+| Agent Skills in VS Code             | GitHub / VS Code | https://code.visualstudio.com/docs/copilot/copilot-extensibility-overview                                       |
+| Context Engineering Bootcamp        | AI Hippocampus   | Community cache: video-transcripts + visual-knowledge packs                                                     |
+| Context Rot paper (2025)            | Academic         | Referenced in bootcamp — impacts of increasing input tokens on performance                                      |
+| Lost in the Middle paper            | Stanford/Meta    | Nelson Liu et al. — U-shaped context position performance                                                       |
+| Awesome Copilot community repo      | Community        | VS Code extension + GitHub repo — curated agents, prompts, skills                                               |
+
 ## YouTube / Streaming
 
 | Topic                     | Source           | URL                                                        |

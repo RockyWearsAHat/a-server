@@ -2,7 +2,7 @@
 name: Project Lead
 description: "Head planner and approval authority — researches, plans, dispatches Senior Engineers, runs final review."
 argument-hint: "Describe the goal, domain, and whether you need implementation, research, testing, or visual verification."
-tools: ["agent", "read", "search", "memory", "todo"]
+tools: ["agent", "read", "search", "vscode/memory", "todo"]
 agents: ["Senior Engineer", "R&D Lead", "Quality Auditor", "Explore"]
 ---
 

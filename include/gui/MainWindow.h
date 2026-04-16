@@ -223,6 +223,7 @@ private:
   void loadSettings();
   void saveSettings();
   void refreshGameList();
+  void openSteamStorePage(const QString &steamAppId);
 
   // Global navigation (state-driven)
   void setupNavigation();

@@ -15,6 +15,8 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <QUrlQuery>
+#include <QXmlStreamReader>
 
 namespace AIO {
 namespace GUI {
@@ -61,6 +63,31 @@ static QString steamProxyUrl() {
   return base + QStringLiteral("/api/steam/apps");
 }
 
+static void appendUniqueCoverUrl(QStringList &urls, const QString &candidate) {
+  if (candidate.isEmpty() || urls.contains(candidate))
+    return;
+  urls.append(candidate);
+}
+
+static QStringList guessedSteamCoverArtUrls(int appId) {
+  const QString appBase =
+      QStringLiteral("https://shared.fastly.steamstatic.com/store_item_assets/"
+                     "steam/apps/%1/")
+          .arg(appId);
+  const QString subBase =
+      QStringLiteral("https://shared.fastly.steamstatic.com/store_item_assets/"
+                     "steam/subs/%1/")
+          .arg(appId);
+  return {appBase + QStringLiteral("library_600x900_2x.jpg"),
+          appBase + QStringLiteral("library_600x900.jpg"),
+          appBase + QStringLiteral("header.jpg"),
+          appBase + QStringLiteral("capsule_616x353.jpg"),
+          appBase + QStringLiteral("capsule_231x87.jpg"),
+          subBase + QStringLiteral("header.jpg"),
+          subBase + QStringLiteral("capsule_616x353.jpg"),
+          subBase + QStringLiteral("capsule_231x87.jpg")};
+}
+
 static QStringList steamRootCandidates() {
   const QString home =
       QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
@@ -99,14 +126,38 @@ static QStringList steamAppsCandidates() {
 }
 
 static constexpr int kMaxApps = 500;
+static constexpr int kDefaultPageSize = 48;
 static constexpr const char *kCacheTimestampKey = "SteamService/lastFetchTs";
 static constexpr const char *kCacheSchemaVersionKey =
     "SteamService/cacheSchemaVersion";
-static constexpr int kCacheSchemaVersion = 2;
+static constexpr int kCacheSchemaVersion = 6;
 static const qint64 kCacheTtlSecs = 86400;
 
 SteamService::SteamService(QObject *parent)
-    : QObject(parent), nam_(new QNetworkAccessManager(this)) {}
+    : QObject(parent), nam_(new QNetworkAccessManager(this)) {
+  QSettings settings;
+  apiKey_ = settings.value("steam/apiKey").toString();
+  steamId64_ = settings.value("steam/steamId64").toString();
+}
+
+QString SteamService::buildCatalogUrl(const QString &category,
+                                      const QString &query, int start,
+                                      int count) const {
+  QUrl url(steamProxyUrl());
+  QUrlQuery urlQuery;
+  urlQuery.addQueryItem(QStringLiteral("category"),
+                        category.trimmed().isEmpty()
+                            ? QStringLiteral("all")
+                            : category.trimmed().toLower());
+  urlQuery.addQueryItem(QStringLiteral("q"), query.trimmed());
+  urlQuery.addQueryItem(QStringLiteral("start"),
+                        QString::number(qMax(0, start)));
+  urlQuery.addQueryItem(
+      QStringLiteral("count"),
+      QString::number(qBound(1, count <= 0 ? kDefaultPageSize : count, 100)));
+  url.setQuery(urlQuery);
+  return url.toString();
+}
 
 bool SteamService::isSteamInstalled() const {
   for (const QString &root : steamRootCandidates()) {
@@ -181,6 +232,15 @@ bool SteamService::loadFromCache(QList<SteamGame> &games) {
     g.appId = obj.value("appId").toInt();
     g.name = obj.value("name").toString();
     g.category = obj.value("category").toString("Other");
+    g.coverArtUrl = obj.value("coverArtUrl").toString();
+    const QJsonArray coverArtUrls = obj.value("coverArtUrls").toArray();
+    for (const QJsonValue &coverVal : coverArtUrls) {
+      const QString coverUrl = coverVal.toString();
+      if (!coverUrl.isEmpty())
+        g.coverArtUrls.append(coverUrl);
+    }
+    if (g.coverArtUrls.isEmpty() && !g.coverArtUrl.isEmpty())
+      g.coverArtUrls.append(g.coverArtUrl);
     g.priceUsdCents = obj.value("priceUsdCents").toInt(0);
     g.discountPercent = obj.value("discountPercent").toInt(0);
     g.isOnSale = obj.value("isOnSale").toBool(false);
@@ -201,6 +261,11 @@ void SteamService::saveToCache(const QList<SteamGame> &games) {
     obj["appId"] = g.appId;
     obj["name"] = g.name;
     obj["category"] = g.category;
+    obj["coverArtUrl"] = g.coverArtUrl;
+    QJsonArray coverArtUrls;
+    for (const QString &coverUrl : g.coverArtUrls)
+      coverArtUrls.append(coverUrl);
+    obj["coverArtUrls"] = coverArtUrls;
     obj["priceUsdCents"] = g.priceUsdCents;
     obj["discountPercent"] = g.discountPercent;
     obj["isOnSale"] = g.isOnSale;
@@ -227,105 +292,356 @@ void SteamService::fetchTopGames() {
       g.isInstalled = installedAppIds_.contains(g.appId);
     }
     emit gamesReady(cached);
+    emit gamesPageReady(cached, 0, cached.size(), cached.size() >= kMaxApps,
+                        QStringLiteral("all"), QString());
     return;
   }
 
-  // Fetch via local server proxy (plain HTTP, no SSL issues)
-  QNetworkRequest req{QUrl(steamProxyUrl())};
+  fetchCatalogPage(QStringLiteral("all"), QString(), 0, kDefaultPageSize);
+}
+
+void SteamService::fetchCatalogPage(const QString &category,
+                                    const QString &query, int start,
+                                    int count) {
+  refreshInstalledGames();
+
+  QNetworkRequest req{QUrl(buildCatalogUrl(category, query, start, count))};
   req.setHeader(QNetworkRequest::UserAgentHeader, "AIOServer/1.0");
 
   auto *reply = nam_->get(req);
 
+  connect(
+      reply, &QNetworkReply::finished, this,
+      [this, reply, category, query, start, count]() {
+        const QByteArray data = reply->readAll();
+        const int httpStatus =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString errorStr = reply->errorString();
+        const bool hasNetworkError = reply->error() != QNetworkReply::NoError;
+
+        reply->deleteLater();
+
+        if (hasNetworkError) {
+          qWarning() << "[Steam] Server proxy error:" << errorStr;
+          emit fetchError(QString("Server unavailable: %1").arg(errorStr));
+          return;
+        }
+
+        if (httpStatus != 200 && httpStatus != 0) {
+          qWarning() << "[Steam] Server proxy HTTP" << httpStatus;
+          const QJsonDocument errDoc = QJsonDocument::fromJson(data);
+          const QString errMsg =
+              errDoc.isObject()
+                  ? errDoc.object().value("error").toString(errorStr)
+                  : errorStr;
+          emit fetchError(QString("Steam proxy error: %1").arg(errMsg));
+          return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (!doc.isObject()) {
+          qWarning() << "Steam API response is not a JSON object";
+          emit fetchError("Invalid Steam API response format");
+          return;
+        }
+
+        const QJsonObject root = doc.object();
+        const QJsonObject applist = root.value("applist").toObject();
+        const QJsonArray apps = applist.value("apps").toArray();
+        const QJsonObject meta = root.value("meta").toObject();
+        const int totalCount = meta.value("total_count").toInt(apps.size());
+        const bool hasMore =
+            meta.value("has_more").toBool(start + apps.size() < totalCount);
+
+        QList<SteamGame> games;
+        games.reserve(apps.size());
+
+        for (const QJsonValue &appValue : apps) {
+          const QJsonObject obj = appValue.toObject();
+          SteamGame g;
+          g.appId = obj.value("appid").toInt();
+          g.name = obj.value("name").toString();
+          g.category = obj.value("category").toString("Other");
+          g.coverArtUrl = obj.value("cover_art_url").toString();
+          const QJsonArray coverArtUrls = obj.value("cover_art_urls").toArray();
+          for (const QJsonValue &coverVal : coverArtUrls) {
+            const QString coverUrl = coverVal.toString();
+            if (!coverUrl.isEmpty())
+              g.coverArtUrls.append(coverUrl);
+          }
+          if (g.coverArtUrls.isEmpty() && !g.coverArtUrl.isEmpty())
+            g.coverArtUrls.append(g.coverArtUrl);
+          for (const QString &guessedUrl : guessedSteamCoverArtUrls(g.appId))
+            appendUniqueCoverUrl(g.coverArtUrls, guessedUrl);
+          g.coverArtUrl = g.coverArtUrls.value(0);
+          g.priceUsdCents = obj.value("final_price").toInt(0);
+          g.discountPercent = obj.value("discount_percent").toInt(0);
+          g.isOnSale = obj.value("discounted").toBool(false);
+          g.isInstalled = installedAppIds_.contains(g.appId);
+
+          if (!g.name.isEmpty() && g.appId > 0)
+            games.append(g);
+        }
+
+        if (games.isEmpty() && totalCount > 0) {
+          emit gamesPageReady(games, start, totalCount, false, category, query);
+          return;
+        }
+
+        enrichWithGenres(games);
+        if (start == 0 && query.trimmed().isEmpty() &&
+            category.trimmed().compare(QStringLiteral("all"),
+                                       Qt::CaseInsensitive) == 0) {
+          saveToCache(games);
+          emit gamesReady(games);
+        }
+
+        emit gamesPageReady(games, start, totalCount, hasMore, category, query);
+      });
+}
+
+void SteamService::setSteamId(const QString &steamId64) {
+  steamId64_ = steamId64.trimmed();
+  QSettings settings;
+  settings.setValue("steam/steamId64", steamId64_);
+}
+
+bool SteamService::hasSteamId() const {
+  return !steamId64_.trimmed().isEmpty();
+}
+
+void SteamService::setApiCredentials(const QString &apiKey,
+                                     const QString &steamId64) {
+  apiKey_ = apiKey.trimmed();
+  steamId64_ = steamId64.trimmed();
+  QSettings settings;
+  settings.setValue("steam/apiKey", apiKey_);
+  settings.setValue("steam/steamId64", steamId64_);
+}
+
+bool SteamService::hasApiCredentials() const {
+  return !apiKey_.trimmed().isEmpty() && !steamId64_.trimmed().isEmpty();
+}
+
+QString SteamService::apiKey() const { return apiKey_; }
+QString SteamService::steamId64() const { return steamId64_; }
+
+void SteamService::clearApiCredentials() {
+  apiKey_.clear();
+  steamId64_.clear();
+  ownedAppIds_.clear();
+  QSettings settings;
+  settings.remove("steam/apiKey");
+  settings.remove("steam/steamId64");
+}
+
+bool SteamService::isOwned(int appId) const {
+  return ownedAppIds_.contains(appId);
+}
+
+void SteamService::fetchOwnedLibrary() {
+  if (!hasApiCredentials()) {
+    emit authError("Steam ID and API key are required. Open the Sign In panel "
+                   "to set them.");
+    return;
+  }
+
+  const int port = resolveLocalServerPort();
+  QUrl url(QStringLiteral("http://127.0.0.1:%1/api/steam/library").arg(port));
+  QUrlQuery query;
+  query.addQueryItem(QStringLiteral("apikey"), apiKey_);
+  query.addQueryItem(QStringLiteral("steamid"), steamId64_);
+  url.setQuery(query);
+
+  QNetworkRequest req{url};
+  req.setHeader(QNetworkRequest::UserAgentHeader, "AIOServer/1.0");
+
+  auto *reply = nam_->get(req);
   connect(reply, &QNetworkReply::finished, this, [this, reply]() {
     const QByteArray data = reply->readAll();
     const int httpStatus =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QString errorStr = reply->errorString();
     const bool hasNetworkError = reply->error() != QNetworkReply::NoError;
-
+    const QString errorStr = reply->errorString();
     reply->deleteLater();
 
     if (hasNetworkError) {
-      qWarning() << "[Steam] Server proxy error:" << errorStr;
-      emit fetchError(QString("Server unavailable: %1").arg(errorStr));
+      emit authError(
+          QStringLiteral("Network error fetching library: %1").arg(errorStr));
+      return;
+    }
+
+    if (httpStatus == 401) {
+      const QJsonDocument errDoc = QJsonDocument::fromJson(data);
+      const QString msg =
+          errDoc.isObject()
+              ? errDoc.object().value("error").toString()
+              : QStringLiteral(
+                    "Invalid API key or private Steam profile. Enable "
+                    "\"Game Details\" in your Steam Privacy Settings.");
+      emit authError(msg);
       return;
     }
 
     if (httpStatus != 200 && httpStatus != 0) {
-      qWarning() << "[Steam] Server proxy HTTP" << httpStatus;
-      // Try to extract a human-readable error from the JSON body
       const QJsonDocument errDoc = QJsonDocument::fromJson(data);
-      const QString errMsg =
-          errDoc.isObject() ? errDoc.object().value("error").toString(errorStr)
-                            : errorStr;
-      emit fetchError(QString("Steam proxy error: %1").arg(errMsg));
+      const QString msg =
+          errDoc.isObject()
+              ? errDoc.object().value("error").toString(errorStr)
+              : QStringLiteral("Steam API error (HTTP %1)").arg(httpStatus);
+      emit authError(msg);
       return;
     }
 
-    // Parse JSON response
     const QJsonDocument doc = QJsonDocument::fromJson(data);
-    if (doc.isNull()) {
-      qWarning() << "Steam API returned invalid JSON";
-      emit fetchError("Steam API returned invalid JSON");
-      return;
-    }
-
     if (!doc.isObject()) {
-      qWarning() << "Steam API response is not a JSON object";
-      emit fetchError("Invalid Steam API response format");
+      emit authError("Invalid response from Steam library API.");
       return;
     }
 
-    const QJsonObject root = doc.object();
-    const QJsonObject applist = root.value("applist").toObject();
-    const QJsonArray apps = applist.value("apps").toArray();
+    const QJsonArray games =
+        doc.object().value("response").toObject().value("games").toArray();
 
-    if (apps.isEmpty()) {
-      qWarning() << "Steam API returned empty app list";
-      emit fetchError("No games found in Steam API response");
-      return;
-    }
+    QSet<int> ownedIds;
+    QList<SteamGame> ownedGames;
+    ownedIds.reserve(games.size());
+    ownedGames.reserve(games.size());
 
-    qDebug() << "Steam API returned" << apps.size() << "games";
+    refreshInstalledGames();
 
-    QList<SteamGame> games;
-    games.reserve(qMin(kMaxApps, apps.size()));
+    for (const QJsonValue &val : games) {
+      const QJsonObject obj = val.toObject();
+      const int appId = obj.value("appid").toInt();
+      if (appId <= 0)
+        continue;
 
-    // Map raw category keys to human-readable labels.
-    static const QHash<QString, QString> kCategoryLabels = {
-        {QStringLiteral("top_sellers"), QStringLiteral("Top Sellers")},
-        {QStringLiteral("new_releases"), QStringLiteral("New Releases")},
-        {QStringLiteral("specials"), QStringLiteral("On Sale")},
-        {QStringLiteral("coming_soon"), QStringLiteral("Coming Soon")},
-    };
+      ownedIds.insert(appId);
 
-    for (int i = 0; i < apps.size() && i < kMaxApps; ++i) {
-      const QJsonObject obj = apps.at(i).toObject();
       SteamGame g;
-      g.appId = obj.value("appid").toInt();
+      g.appId = appId;
       g.name = obj.value("name").toString();
-      const QString rawCat = obj.value("category").toString();
-      g.category = kCategoryLabels.value(rawCat, QStringLiteral("Other"));
-      g.isInstalled = installedAppIds_.contains(g.appId);
-      g.priceUsdCents = obj.value("final_price").toInt(0);
-      g.discountPercent = obj.value("discount_percent").toInt(0);
-      g.isOnSale = obj.value("discounted").toBool(false);
+      g.isInstalled = installedAppIds_.contains(appId);
+      for (const QString &u : guessedSteamCoverArtUrls(appId))
+        appendUniqueCoverUrl(g.coverArtUrls, u);
+      g.coverArtUrl = g.coverArtUrls.value(0);
+      ownedGames.append(g);
+    }
 
-      if (!g.name.isEmpty() && g.appId > 0) {
-        games.append(g);
+    ownedAppIds_ = ownedIds;
+    emit ownedLibraryReady(ownedIds, ownedGames);
+  });
+}
+
+void SteamService::fetchOwnedLibraryXml() {
+  if (!hasSteamId()) {
+    emit authError("Sign in with Steam first to load your library.");
+    return;
+  }
+
+  const int port = resolveLocalServerPort();
+  QUrl url(QStringLiteral("http://127.0.0.1:%1/api/steam/games-xml").arg(port));
+  QUrlQuery q;
+  q.addQueryItem(QStringLiteral("steamid"), steamId64_);
+  url.setQuery(q);
+
+  QNetworkRequest req{url};
+  req.setHeader(QNetworkRequest::UserAgentHeader, "AIOServer/1.0");
+
+  auto *reply = nam_->get(req);
+  connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    const QByteArray data = reply->readAll();
+    const int httpStatus =
+        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const bool hasNetworkError = reply->error() != QNetworkReply::NoError;
+    const QString errorStr = reply->errorString();
+    reply->deleteLater();
+
+    if (hasNetworkError) {
+      emit authError(
+          QStringLiteral("Network error fetching library: %1").arg(errorStr));
+      return;
+    }
+
+    if (httpStatus == 403) {
+      const QJsonDocument errDoc = QJsonDocument::fromJson(data);
+      const QString msg =
+          errDoc.isObject()
+              ? errDoc.object().value("error").toString()
+              : QStringLiteral(
+                    "Steam profile is private. Set \"Game Details\" to "
+                    "Public in Steam Privacy Settings.");
+      emit authError(msg);
+      return;
+    }
+
+    if (httpStatus != 200 && httpStatus != 0) {
+      emit authError(
+          QStringLiteral("Steam games XML error (HTTP %1)").arg(httpStatus));
+      return;
+    }
+
+    // Parse the Steam community games XML feed.
+    // <gamesList><games><game><appID>...</appID><name>...</name></game></games>
+    // Use readNext() directly to avoid the readNextStartElement() + readNext()
+    // double-advance bug where sibling elements get skipped after
+    // readElementText().
+    QXmlStreamReader xml(data);
+    QSet<int> ownedIds;
+    QList<SteamGame> ownedGames;
+    bool inGame = false;
+    int appId = 0;
+    QString gameName;
+
+    refreshInstalledGames();
+
+    while (!xml.atEnd() && !xml.hasError()) {
+      const auto token = xml.readNext();
+
+      if (token == QXmlStreamReader::StartElement) {
+        const QStringView name = xml.name();
+        if (name == QLatin1String("game")) {
+          inGame = true;
+          appId = 0;
+          gameName.clear();
+        } else if (inGame && name == QLatin1String("appID")) {
+          appId = xml.readElementText().trimmed().toInt();
+        } else if (inGame && name == QLatin1String("name")) {
+          gameName = xml.readElementText().trimmed();
+        } else if (name == QLatin1String("error")) {
+          const QString errText = xml.readElementText().trimmed();
+          emit authError(
+              errText.isEmpty()
+                  ? QStringLiteral("Steam returned an error. Set your profile "
+                                   "Game Details to Public.")
+                  : errText);
+          return;
+        }
+      } else if (token == QXmlStreamReader::EndElement) {
+        if (xml.name() == QLatin1String("game") && inGame) {
+          inGame = false;
+          if (appId > 0) {
+            ownedIds.insert(appId);
+            SteamGame g;
+            g.appId = appId;
+            g.name = gameName;
+            g.isInstalled = installedAppIds_.contains(appId);
+            for (const QString &u : guessedSteamCoverArtUrls(appId))
+              appendUniqueCoverUrl(g.coverArtUrls, u);
+            g.coverArtUrl = g.coverArtUrls.value(0);
+            ownedGames.append(g);
+          }
+        }
       }
     }
 
-    if (games.isEmpty()) {
-      qWarning() << "No valid games parsed from Steam API";
-      emit fetchError("Failed to parse games from Steam API");
+    if (xml.hasError()) {
+      emit authError(QStringLiteral("Failed to parse Steam games feed: %1")
+                         .arg(xml.errorString()));
       return;
     }
 
-    qDebug() << "Parsed" << games.size() << "games from Steam API";
-    enrichWithGenres(games);
-    saveToCache(games);
-    emit gamesReady(games);
+    ownedAppIds_ = ownedIds;
+    emit ownedLibraryReady(ownedIds, ownedGames);
   });
 }
 

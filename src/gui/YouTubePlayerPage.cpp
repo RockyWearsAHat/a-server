@@ -1030,30 +1030,22 @@ void YouTubePlayerPage::applyVideoBlur(bool enabled) {
 
 void YouTubePlayerPage::refreshChromeStateProperties(bool recommendationsActive,
                                                      bool compactChrome) {
-  if (videoStage_) {
-    videoStage_->setProperty("recommendations_active", recommendationsActive);
-    videoStage_->setProperty("compact_chrome", compactChrome);
-    videoStage_->style()->unpolish(videoStage_);
-    videoStage_->style()->polish(videoStage_);
-    videoStage_->update();
-  }
-
-  if (chromeOverlay_) {
-    chromeOverlay_->setProperty("recommendations_active",
-                                recommendationsActive);
-    chromeOverlay_->setProperty("compact_chrome", compactChrome);
-    chromeOverlay_->style()->unpolish(chromeOverlay_);
-    chromeOverlay_->style()->polish(chromeOverlay_);
-    chromeOverlay_->update();
-  }
-
-  if (overlayPanel_) {
-    overlayPanel_->setProperty("recommendations_active", recommendationsActive);
-    overlayPanel_->setProperty("compact_chrome", compactChrome);
-    overlayPanel_->style()->unpolish(overlayPanel_);
-    overlayPanel_->style()->polish(overlayPanel_);
-    overlayPanel_->update();
-  }
+  auto repolishIfChanged = [&](QWidget *w) {
+    if (!w)
+      return;
+    if (w->property("recommendations_active").toBool() ==
+            recommendationsActive &&
+        w->property("compact_chrome").toBool() == compactChrome)
+      return;
+    w->setProperty("recommendations_active", recommendationsActive);
+    w->setProperty("compact_chrome", compactChrome);
+    w->style()->unpolish(w);
+    w->style()->polish(w);
+    w->update();
+  };
+  repolishIfChanged(videoStage_);
+  repolishIfChanged(chromeOverlay_);
+  repolishIfChanged(overlayPanel_);
 }
 
 void YouTubePlayerPage::injectPlayerBridge() {

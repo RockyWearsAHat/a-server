@@ -149,7 +149,7 @@ QPushButton#aioYouTubeAccountButton:pressed {
 
 #aioYouTubeHeroCard {
   background-color: #141414;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid transparent;
   border-radius: 16px;
 }
 
@@ -335,7 +335,7 @@ QLabel[role="guideText"] {
   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
     stop:0 rgba(255, 255, 255, 0.07),
     stop:1 rgba(255, 255, 255, 0.03));
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid transparent;
   border-radius: 16px;
   min-height: 132px;
 }

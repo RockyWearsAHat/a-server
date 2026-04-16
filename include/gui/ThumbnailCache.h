@@ -25,6 +25,7 @@ public:
 
 signals:
     void thumbnailReady(const QString& url);
+    void thumbnailFailed(const QString& url);
 
 private:
     explicit ThumbnailCache(QObject* parent = nullptr);

@@ -14,7 +14,7 @@ Use this skill only as a lightweight dispatch layer.
 
 ## Reporting Format
 
-Every visual test result must use this structure:
+Every visual test result must use the structure defined in `visual-audit.instructions.md`. The 7 weighted categories and output format below are authoritative.
 
 ### Result: [PASS | FAIL | NEEDS_WORK]
 
@@ -24,27 +24,27 @@ Every visual test result must use this structure:
 - Deductions: [total, or 0]
 - Score ceiling applied: [Yes (max 70) | No]
 
-**Stage 1 — Critical Failures:** [score/20 or "n/a"]
+**Category Scores** (each 0–10, final = Σ(category × weight × 10)):
 
-- [list issues, or "None"]
+| Category            | Weight | Score | Issues                   |
+| ------------------- | ------ | ----- | ------------------------ |
+| Layout & Alignment  | 20%    | X/10  | [list issues, or "None"] |
+| Typography          | 15%    | X/10  | [list issues, or "None"] |
+| Spacing & Rhythm    | 15%    | X/10  | [list issues, or "None"] |
+| Visual Hierarchy    | 15%    | X/10  | [list issues, or "None"] |
+| Color & Contrast    | 10%    | X/10  | [list issues, or "None"] |
+| Component Quality   | 15%    | X/10  | [list issues, or "None"] |
+| Professional Polish | 10%    | X/10  | [list issues, or "None"] |
 
-**Stage 2 — Composition:** [score/20 or "n/a"]
-
-- [list issues, or "None"]
-
-**Stage 3 — Typography:** [score/15 or "n/a"]
-
-- [list issues, or "None"]
-
-**Stage 4 — Polish:** [score/15 or "n/a"]
-
-- [list issues, or "None"]
-
-**Stage 5 — Motion/Interaction:** [score/10 or "n/a"]
-
-- [list issues, or "None"]
+**Critical Failures:** [none | list — any trigger caps score at 75]
+**Design System:** [strong | moderate | weak]
+**Focus Navigation:** [clear | unclear | N/A]
 
 **Final Score:** [total]/100
+**Rating:** [AAA Production | Professional | Semi-Professional | Fail]
 **Gate:** [PASS ≥ 90 | FAIL < 90]
 
-**Recommended fixes (if FAIL):** [ordered list of highest-impact fixes]
+**Issues (prioritized, if FAIL):**
+
+1. [element] — [what's wrong] — [exact fix: file → selector → property → target value]
+2. ...

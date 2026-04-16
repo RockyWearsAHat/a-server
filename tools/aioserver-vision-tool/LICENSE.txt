@@ -1,3 +1,0 @@
-UNLICENSED
-
-This workspace-local extension is intended for local development and internal use within the AIO Server workspace.

@@ -265,7 +265,7 @@ QCheckBox {
 
 QGroupBox {
   background-color: rgba(18, 18, 18, 0.80);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
   border-radius: 16px;
   margin-top: 16px;
   padding: 24px 16px 16px 16px;
@@ -303,57 +303,82 @@ QGroupBox::title {
 }
 
 #aioStreamingWebErrorStrip {
-  background-color: rgba(220, 50, 50, 0.12);
-  border-top: 1px solid rgba(220, 50, 50, 0.24);
-  border-bottom: 1px solid rgba(220, 50, 50, 0.24);
-  padding: 12px 0;
+  background-color: rgba(220, 50, 50, 0.08);
+  border-top: 1px solid rgba(220, 50, 50, 0.20);
+  border-bottom: 1px solid rgba(220, 50, 50, 0.20);
+  padding: 14px 0;
 }
 
 #aioStreamingWebErrorLabel {
   color: #f0a0a0;
   font-size: 18px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* ──────────────────── Streaming Bar Buttons ──────────────────── */
 
+#aioStreamingTopBar {
+  background-color: rgba(10, 10, 10, 0.96);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.06);
+  padding: 0;
+}
+
+#aioStreamingTopBar[brand="netflix"] {
+  border-bottom: 2px solid rgba(229, 9, 20, 0.50);
+}
+#aioStreamingTopBar[brand="disneyplus"] {
+  border-bottom: 2px solid rgba(30, 80, 240, 0.50);
+}
+#aioStreamingTopBar[brand="hulu"] {
+  border-bottom: 2px solid rgba(28, 231, 131, 0.50);
+}
+#aioStreamingTopBar[brand="steam-store"] {
+  border-bottom: 2px solid rgba(32, 112, 190, 0.50);
+}
+
+#aioStreamingBarTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: #e0e0e0;
+  letter-spacing: 0.3px;
+}
+
 #aioStreamingBarBtn {
-  min-height: 40px;
-  padding: 8px 16px;
-  font-size: 14px;
+  min-height: 48px;
+  padding: 10px 20px;
+  font-size: 16px;
   font-weight: 600;
   border-radius: 12px;
-  background-color: #1a1a1a;
-  color: #f0f0f0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background-color: rgba(255, 255, 255, 0.06);
+  color: #d0d0d0;
+  border: 1px solid transparent;
 }
 
 #aioStreamingBarBtn:focus {
   border: 2px solid rgba(255, 255, 255, 0.88);
-  background-color: rgba(100, 181, 246, 0.12);
+  background-color: rgba(255, 255, 255, 0.12);
   color: #ffffff;
 }
 
 #aioStreamingBarBtn:hover {
-  background-color: #222222;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-color: rgba(255, 255, 255, 0.10);
+  color: #f0f0f0;
 }
 
 #aioStreamingBarBtn:pressed {
-  background-color: #2a2a2a;
-  border: 2px solid rgba(100, 181, 246, 0.48);
+  background-color: rgba(255, 255, 255, 0.16);
+  border: 2px solid rgba(255, 255, 255, 0.48);
 }
 
 #aioStreamingBarBtn:disabled {
-  color: rgba(153, 153, 153, 0.36);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  background-color: rgba(18, 18, 18, 0.60);
+  color: rgba(153, 153, 153, 0.28);
+  background-color: rgba(255, 255, 255, 0.02);
 }
 
 #aioStreamingRetryBtn {
-  min-height: 44px;
-  padding: 12px 24px;
-  font-size: 14px;
+  min-height: 48px;
+  padding: 12px 28px;
+  font-size: 16px;
   font-weight: 600;
   border-radius: 12px;
   border: 1px solid rgba(220, 50, 50, 0.32);
@@ -393,13 +418,13 @@ QGroupBox::title {
 /* ──────────────────── Navigation Hint Strip ──────────────────── */
 
 #aioStreamingNavHint {
-  font-size: 14px;
-  font-weight: 600;
-  color: rgba(170, 170, 170, 0.85);
-  background-color: rgba(10, 10, 10, 0.64);
+  font-size: 15px;
+  font-weight: 500;
+  color: rgba(200, 200, 200, 0.60);
+  background-color: rgba(10, 10, 10, 0.80);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  padding: 4px 16px;
-  letter-spacing: 0.4px;
+  padding: 6px 24px;
+  letter-spacing: 0.8px;
 }
 
 /* ──────────────────── NAS Preview ──────────────────── */
@@ -408,7 +433,7 @@ QGroupBox::title {
 #nasImage,
 #nasText {
   background-color: #121212;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
   border-radius: 16px;
 }
 
@@ -460,7 +485,7 @@ QGroupBox::title {
 /* ──────────────────── Streaming Tiles ──────────────────── */
 
 #aioStreamingTile {
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
   border-radius: 16px;
   min-width: 220px;
   min-height: 300px;
@@ -565,7 +590,7 @@ QScrollBar::sub-page:horizontal {
   color: rgba(240,240,240,0.85);
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: 2.0px;
+  letter-spacing: 1.2px;
   padding: 8px 4px 8px 8px;
   background: transparent;
 }
@@ -574,7 +599,7 @@ QScrollBar::sub-page:horizontal {
   color: rgba(240,240,240,0.80);
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: 1.8px;
+  letter-spacing: 1.2px;
 }
 
 #aioHomeClock {
@@ -585,14 +610,14 @@ QScrollBar::sub-page:horizontal {
 
 #aioHomeHero {
   background-color: rgba(255, 255, 255, 0.015);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
 }
 
 #aioHomeHeroEyebrow {
   color: #64b5f6;
   font-size: 16px;
   font-weight: 700;
-  letter-spacing: 2.2px;
+  letter-spacing: 1.4px;
 }
 
 #aioHomeHeroTitle {
@@ -951,32 +976,48 @@ QLabel[role="footer"] {
 }
 
 #aioGamesLibraryHeader {
-  padding: 16px 32px 8px 32px;
+  padding: 24px 32px 16px 32px;
   background: transparent;
 }
 
 #aioGamesLibraryTitle {
-  color: #ffffff;
+  color: #f0f0f0;
   font-size: 32px;
   font-weight: 700;
 }
 
 #aioGamesLibrarySubtitle {
-  color: rgba(255, 255, 255, 0.48);
-  font-size: 14px;
+  color: #999999;
+  font-size: 16px;
   font-weight: 500;
 }
 
+#aioGamesLibraryBody {
+  background: transparent;
+}
+
+#aioGamesRailPanel {
+  background: #121212;
+  border: 1px solid transparent;
+  border-radius: 16px;
+}
+
+#aioGamesRailHeading {
+  color: #f0f0f0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
 #aioGamesFilterBar {
-  padding: 0 32px 12px 32px;
+  padding: 0;
   background: transparent;
 }
 
 #aioGamesFilterChip {
-  color: rgba(240, 240, 240, 0.50);
-  font-size: 16px;
+  color: #999999;
+  font-size: 14px;
   font-weight: 600;
-  padding: 10px 22px;
+  padding: 12px 16px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -989,19 +1030,165 @@ QLabel[role="footer"] {
   border: 2px solid rgba(100, 181, 246, 0.70);
 }
 
-#aioGameLibraryTile {
-  background: transparent;
-  border-radius: 12px;
-  border: none;
+#aioGamesTitleRail {
+  background: #0a0a0a;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  padding: 12px;
 }
 
-/* QSS border is overridden by custom paintEvent — focus state is handled
-   entirely in GamesLibraryPage.cpp :: GameTile::paintEvent for pixel accuracy.
-   The shadow effect is also applied programmatically in updateGridFocus(). */
+#aioGamesTitleRail::item {
+  min-height: 64px;
+  padding: 12px 16px;
+  margin: 4px 0;
+  border-radius: 12px;
+  color: #f0f0f0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+#aioGamesTitleRail::item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#aioGamesTitleRail::item:selected {
+  background: rgba(212, 168, 32, 0.16);
+  border: 2px solid rgba(212, 168, 32, 0.56);
+  color: #ffffff;
+}
+
+#aioGamesRailHint {
+  color: #999999;
+  font-size: 13px;
+}
+
+#aioGamesDetailsPane {
+  background: transparent;
+}
+
+#aioGamesHeroCard {
+  background: #121212;
+  border: 1px solid transparent;
+  border-radius: 16px;
+}
+
+#aioGamesHeroArt {
+  background: transparent;
+  border-radius: 16px;
+}
+
+#aioGamesHeroBadge {
+  color: #64b5f6;
+  background: rgba(100, 181, 246, 0.16);
+  border: 1px solid rgba(100, 181, 246, 0.30);
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#aioGamesHeroTitle {
+  color: #f0f0f0;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+#aioGamesHeroSubtitle {
+  color: #64b5f6;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+#aioGamesHeroDescription {
+  color: #999999;
+  font-size: 16px;
+}
+
+#aioGamesStatCard {
+  background: #121212;
+  border: 1px solid transparent;
+  border-radius: 16px;
+}
+
+#aioGamesStatEyebrow {
+  color: #666666;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#aioGamesStatValue {
+  color: #f0f0f0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+#aioGamesPrimaryAction {
+  background-color: #d4a820;
+  color: #0a0a0a;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 700;
+  min-height: 52px;
+}
+
+#aioGamesPrimaryAction:hover,
+#aioGamesPrimaryAction:focus,
+#aioGamesPrimaryAction[aio_selected="true"] {
+  background-color: rgba(212, 168, 32, 0.88);
+}
+
+#aioGamesSecondaryAction {
+  background-color: #1a1a1a;
+  color: #f0f0f0;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  min-height: 52px;
+}
+
+#aioGamesSecondaryAction:hover,
+#aioGamesSecondaryAction:focus,
+#aioGamesSecondaryAction[aio_selected="true"] {
+  background-color: #222222;
+  border: 2px solid rgba(255, 255, 255, 0.42);
+}
 
 #aioGamesEmptyLabel {
-  color: rgba(240, 240, 240, 0.45);
+  color: #999999;
   font-size: 16px;
+}
+
+#aioGamesInfoDialog {
+  background: #121212;
+}
+
+#aioGamesDialogArt {
+  background: transparent;
+  border-radius: 16px;
+}
+
+#aioGamesDialogTitle {
+  color: #f0f0f0;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+#aioGamesDialogMeta {
+  color: #64b5f6;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+#aioGamesDialogBody {
+  color: #999999;
+  font-size: 16px;
+}
+
+#aioGamesDialogPath {
+  color: #666666;
+  font-size: 13px;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1009,6 +1196,10 @@ QLabel[role="footer"] {
    ══════════════════════════════════════════════════════════════ */
 
 #aioGameStorePage {
+  background-color: #0a0a0a;
+}
+
+#aioStoreGridHost {
   background-color: #0a0a0a;
 }
 
@@ -1082,6 +1273,36 @@ QLabel[role="footer"] {
   font-size: 16px;
 }
 
+#aioStoreControlsBar {
+  background: transparent;
+}
+
+#aioStoreSearchPanel {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 20px;
+}
+
+#aioStoreSearchLabel {
+  color: #d4a820;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#aioStoreSearchValue {
+  color: rgba(240, 240, 240, 0.58);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+#aioStoreSearchValue[aio_active="true"] {
+  color: #f0f0f0;
+}
+
+#aioStoreDetailOverlay {
+  background: rgba(0, 0, 0, 0.78);
+}
+
 #aioGameCard {
   background: transparent;
   border-radius: 16px;
@@ -1090,12 +1311,18 @@ QLabel[role="footer"] {
 
 #aioStoreCardTitle {
   color: #f0f0f0;
-  padding: 4px 12px 4px 12px;
+  padding: 8px 12px 4px 12px;
+  background: rgba(10, 10, 10, 0.56);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
 }
 
 #aioStoreCardMeta {
-  color: #999999;
-  padding: 0 12px 8px 12px;
+  color: #f0f0f0;
+  padding: 0 12px 12px 12px;
+  background: rgba(10, 10, 10, 0.72);
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
 }
 
 #aioStoreCardMeta[aio_tone="library"] {
@@ -1110,14 +1337,26 @@ QLabel[role="footer"] {
    paintEvent for crisp sub-pixel accuracy. */
 
 #aioStoreDetailPanel {
-  background: #121212;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 8px;
+  background: #141414;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  padding: 12px;
+}
+
+#aioStoreDetailArt {
+  background: transparent;
+  border-radius: 12px;
+}
+
+#aioStoreSkeletonThumb {
+  background-color: #353535;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
 }
 
 #aioStoreDetailTitle {
   color: #ffffff;
-  font-size: 20px;
+  font-size: 32px;
   font-weight: 700;
   padding: 4px 0;
 }
@@ -1144,15 +1383,15 @@ QLabel[role="footer"] {
 }
 
 #aioStoreDetailDesc {
-  color: #f0f0f0;
-  font-size: 14px;
+  color: #cccccc;
+  font-size: 15px;
   line-height: 1.4;
 }
 
 
 #aioStoreStateCard {
   background: #121212;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid transparent;
   border-radius: 16px;
 }
 
@@ -1229,4 +1468,160 @@ QLabel[role="footer"] {
 #aioStoreErrorCard QLabel {
     color: #f0f0f0;
     font-size: 16px;
+}
+
+/* ── Account Settings Page ─────────────────────────────────────────────── */
+
+#aioStoreAccountPage {
+  background: transparent;
+}
+
+#aioStoreAccountCard {
+  background: #141414;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+#aioStoreAccountCardTitle {
+  color: #f0f0f0;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+#aioStoreAccountCardInfo {
+  color: #888888;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+#aioStoreAccountDivider {
+  background: rgba(255, 255, 255, 0.07);
+  max-height: 1px;
+  border: none;
+}
+
+#aioStoreAccountMsg {
+  color: #ef9a9a;
+  font-size: 13px;
+}
+
+#aioStoreAccountMsg[aio_tone="success"] {
+  color: #a5d6a7;
+}
+
+/* Primary CTA — Sign in with Steam */
+#aioStoreAccountBtn[aio_role="primary"] {
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 700;
+  background: #1a9fff;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  padding: 16px 24px;
+  min-height: 56px;
+  text-align: center;
+}
+
+#aioStoreAccountBtn[aio_role="primary"][aio_focused="true"],
+#aioStoreAccountBtn[aio_role="primary"]:hover {
+  background: #3ab0ff;
+  border: 2px solid rgba(255, 255, 255, 0.30);
+}
+
+#aioStoreAccountBtn[aio_role="primary"]:pressed {
+  background: #0d8fe0;
+}
+
+/* Secondary — Disconnect */
+#aioStoreAccountBtn[aio_role="secondary"] {
+  color: rgba(240, 240, 240, 0.40);
+  font-size: 14px;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 8px;
+  padding: 12px 24px;
+  min-height: 44px;
+  text-align: center;
+}
+
+#aioStoreAccountBtn[aio_role="secondary"][aio_focused="true"],
+#aioStoreAccountBtn[aio_role="secondary"]:hover {
+  color: #ef9a9a;
+  border: 1px solid rgba(239, 154, 154, 0.40);
+  background: rgba(239, 154, 154, 0.07);
+}
+
+#aioStoreAccountBtn[aio_role="secondary"]:pressed {
+  background: rgba(239, 154, 154, 0.12);
+}
+
+#aioStoreAccountHint {
+  color: #3a3a3a;
+  font-size: 12px;
+}
+
+#aioStoreAccountStatus {
+  color: #555555;
+  font-size: 13px;
+}
+
+#aioStoreAccountStatus[aio_auth_state="signed-in"] {
+  color: #a5d6a7;
+}
+
+#aioStoreAccountStatus[aio_auth_state="signed-out"] {
+  color: #555555;
+}
+
+/* ── Steam Sign-In Dialog ──────────────────────────────────────────────── */
+
+#aioSteamDialog {
+  background: #161616;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+#aioSteamDialogTitleBar {
+  background: #1a1a1a;
+}
+
+#aioSteamDialogSep {
+  background: rgba(255, 255, 255, 0.07);
+  max-height: 1px;
+  border: none;
+}
+
+#aioSteamDialogTitle {
+  color: #e8e8e8;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+#aioSteamDialogClose {
+  color: #555555;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  padding: 0px;
+}
+
+#aioSteamDialogClose:hover {
+  color: #cccccc;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#aioSteamDialogClose:pressed {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+#aioSteamDialogLoading {
+  background: #161616;
+}
+
+#aioSteamDialogLoadingText {
+  color: #555555;
+  font-size: 15px;
+  font-weight: 500;
 }

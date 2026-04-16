@@ -234,28 +234,40 @@ void MainWindow::launchSteamGame(const QString &steamAppId) {
   const int appId = steamAppId.toInt();
   if (appId <= 0)
     return;
-  const bool isInstalled = steamService_->isInstalled(appId);
-  const QString scheme = isInstalled ? QStringLiteral("steam://run/")
-                                     : QStringLiteral("steam://install/");
-  const QString steamUrl = scheme + steamAppId;
 
+  const bool isInstalled = steamService_->isInstalled(appId);
+  const bool isOwned = steamService_->isOwned(appId);
+
+  // Not installed and not known-owned → open store page to browse/purchase
+  if (!isInstalled && !isOwned) {
+    openSteamStorePage(steamAppId);
+    return;
+  }
+
+  // Owned but not installed → trigger install via Steam client
+  if (!isInstalled && isOwned) {
+    const QString installUrl = QStringLiteral("steam://install/") + steamAppId;
+    if (!QDesktopServices::openUrl(QUrl(installUrl))) {
+      openSteamStorePage(steamAppId);
+    }
+    return;
+  }
+
+  // Installed → launch via Steam client
+  const QString steamUrl = QStringLiteral("steam://run/") + steamAppId;
   if (!QDesktopServices::openUrl(QUrl(steamUrl))) {
-    // Steam not running — fall back to opening the store page in the browser
-    const QUrl browserUrl(
-        QStringLiteral("https://store.steampowered.com/app/") + steamAppId +
-        QStringLiteral("/"));
-    if (QDesktopServices::openUrl(browserUrl))
-      return;
-    // Show error overlay if browser also failed
+    openSteamStorePage(steamAppId);
+
     if (!nowPlayingOverlay_) {
       nowPlayingOverlay_ = new QWidget(this);
       nowPlayingOverlay_->setStyleSheet(
           QStringLiteral("background-color: rgba(0, 0, 0, 0.72);"));
       auto *lay = new QVBoxLayout(nowPlayingOverlay_);
       lay->setAlignment(Qt::AlignCenter);
-      auto *msg = new QLabel(
-          QStringLiteral("Could not connect to Steam.\nIs Steam running?"),
-          nowPlayingOverlay_);
+      auto *msg =
+          new QLabel(QStringLiteral("Steam launch is unavailable right now.\n"
+                                    "Opened the in-app store page instead."),
+                     nowPlayingOverlay_);
       msg->setAlignment(Qt::AlignCenter);
       msg->setStyleSheet(
           QStringLiteral("color: #f0f0f0; font-size: 16px; font-weight: 500;"));
@@ -264,7 +276,6 @@ void MainWindow::launchSteamGame(const QString &steamAppId) {
     nowPlayingOverlay_->setGeometry(this->rect());
     nowPlayingOverlay_->raise();
     nowPlayingOverlay_->show();
-    // Auto-dismiss in 3 seconds
     QTimer::singleShot(3000, nowPlayingOverlay_, &QWidget::hide);
     return;
   }
@@ -277,7 +288,6 @@ void MainWindow::launchSteamGame(const QString &steamAppId) {
     nowPlayingOverlay_->installEventFilter(this);
   }
 
-  // Populate the overlay with game info
   auto *existingLay = nowPlayingOverlay_->layout();
   if (existingLay) {
     QLayoutItem *item;
@@ -325,8 +335,17 @@ void MainWindow::launchSteamGame(const QString &steamAppId) {
   nowPlayingOverlay_->raise();
   nowPlayingOverlay_->show();
 
-  // Auto-dismiss in 5 seconds
   QTimer::singleShot(5000, nowPlayingOverlay_, &QWidget::hide);
+}
+
+void MainWindow::openSteamStorePage(const QString &steamAppId) {
+  auto *web = qobject_cast<StreamingWebViewPage *>(streamingWebPage);
+  if (!web)
+    return;
+
+  stackedWidget->setCurrentWidget(streamingWebPage);
+  web->openSteamStore(steamAppId);
+  streamingWebPage->setFocus();
 }
 
 void MainWindow::openStreaming() { goToMainMenu(); }

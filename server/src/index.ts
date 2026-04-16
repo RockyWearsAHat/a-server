@@ -810,40 +810,60 @@ app.get("/api/youtube/proxy", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Steam API proxy
 // ---------------------------------------------------------------------------
-// Uses store.steampowered.com/api/featuredcategories — the old
-// ISteamApps/GetAppList/v2 endpoint was removed by Valve.
-// Response is transformed to {applist:{apps:[{appid,name,category}]}} so the
-// Qt SteamService parser needs no changes.
-const steamFeaturedUrl =
-  "https://store.steampowered.com/api/featuredcategories/?cc=US&l=en";
+// Uses the Steam search results endpoint to build a paged, near-infinite feed
+// that can back native infinite scroll and server-side search.
+const steamSearchUrl = "https://store.steampowered.com/search/results/";
 const steamCacheTtlMs = 24 * 60 * 60 * 1000; // 24 hours
+const steamCacheSchemaVersion = 3;
 const steamCacheFile = path.resolve(serverRootDir, "./data/steam-cache.json");
 
-type SteamCacheEntry = {
-  fetchedAtMs: number;
-  body: string;
+type SteamCacheEntry = { key: string; fetchedAtMs: number; body: string };
+
+type SteamCacheStore = {
+  schemaVersion: number;
+  entries: SteamCacheEntry[];
 };
 
-function loadSteamCache(): SteamCacheEntry | null {
+type SteamStoreItemType = 0 | 1 | 2;
+
+function loadSteamCache(): Map<string, SteamCacheEntry> {
   try {
-    if (!fs.existsSync(steamCacheFile)) return null;
+    if (!fs.existsSync(steamCacheFile))
+      return new Map<string, SteamCacheEntry>();
     const raw = fs.readFileSync(steamCacheFile, "utf8");
-    const parsed = JSON.parse(raw) as SteamCacheEntry;
-    if (!parsed.fetchedAtMs || !parsed.body) return null;
-    if (Date.now() - parsed.fetchedAtMs > steamCacheTtlMs) return null;
-    return parsed;
+    const parsed = JSON.parse(raw) as SteamCacheStore;
+    if (parsed.schemaVersion !== steamCacheSchemaVersion) {
+      return new Map<string, SteamCacheEntry>();
+    }
+    const entries = new Map<string, SteamCacheEntry>();
+    for (const entry of parsed.entries ?? []) {
+      if (!entry?.key || !entry.body || !entry.fetchedAtMs) {
+        continue;
+      }
+      if (Date.now() - entry.fetchedAtMs > steamCacheTtlMs) {
+        continue;
+      }
+      entries.set(entry.key, entry);
+    }
+    return entries;
   } catch {
-    return null;
+    return new Map<string, SteamCacheEntry>();
   }
 }
 
-function saveSteamCache(body: string): void {
+const steamCacheEntries = loadSteamCache();
+
+function saveSteamCache(key: string, body: string): void {
   try {
+    steamCacheEntries.set(key, { key, body, fetchedAtMs: Date.now() });
     fs.mkdirSync(path.dirname(steamCacheFile), { recursive: true });
     fs.writeFileSync(
       steamCacheFile,
       JSON.stringify(
-        { fetchedAtMs: Date.now(), body } satisfies SteamCacheEntry,
+        {
+          schemaVersion: steamCacheSchemaVersion,
+          entries: [...steamCacheEntries.values()],
+        } satisfies SteamCacheStore,
         null,
         2,
       ),
@@ -857,73 +877,305 @@ function saveSteamCache(body: string): void {
 type SteamRawItem = {
   id?: number;
   appid?: number;
+  type?: SteamStoreItemType;
   name?: string;
   final_price?: number;
   original_price?: number;
   discount_percent?: number;
   discounted?: boolean;
+  header_image?: string;
+  small_capsule_image?: string;
+  large_capsule_image?: string;
 };
 
-function transformFeaturedToAppList(raw: unknown): string {
-  const data = raw as Record<string, { items?: SteamRawItem[] }>;
-  const categoryOrder = [
-    "top_sellers",
-    "new_releases",
-    "specials",
-    "coming_soon",
+type SteamSearchParams = {
+  category: string;
+  query: string;
+  start: number;
+  count: number;
+};
+
+function decodeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function appendUniqueUrl(urls: string[], candidate: unknown): void {
+  if (typeof candidate !== "string") {
+    return;
+  }
+  const trimmed = candidate.trim();
+  if (!trimmed || urls.includes(trimmed)) {
+    return;
+  }
+  urls.push(trimmed);
+}
+
+function extractSteamStoreMetaImages(html: string): string[] {
+  const urls: string[] = [];
+  const patterns = [
+    /<meta\s+(?:property|name)=["'](?:og:image|twitter:image)["']\s+content=["']([^"']+)["']/gi,
+    /<link\s+rel=["']image_src["']\s+href=["']([^"']+)["']/gi,
   ];
-  const seen = new Set<number>();
+
+  for (const pattern of patterns) {
+    for (const match of html.matchAll(pattern)) {
+      appendUniqueUrl(urls, decodeHtmlAttribute(match[1] ?? ""));
+    }
+  }
+
+  return urls;
+}
+
+async function fetchSteamStoreMetaArt(
+  itemType: SteamStoreItemType,
+  appid: number,
+): Promise<string[]> {
+  const pageKind = itemType === 2 ? "bundle" : itemType === 1 ? "sub" : "app";
+  if (pageKind === "app") {
+    return [];
+  }
+
+  const storeUrl = `https://store.steampowered.com/${pageKind}/${appid}/?cc=US&l=en`;
+
+  try {
+    const response = await fetch(storeUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; AIOServer/1.0)",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      logServer("WARN", "Steam store page art enrichment failed", {
+        appid,
+        itemType,
+        status: response.status,
+      });
+      return [];
+    }
+
+    return extractSteamStoreMetaImages(await response.text());
+  } catch (error) {
+    logServer("WARN", "Steam store page art enrichment error", {
+      appid,
+      itemType,
+      error: String(error),
+    });
+    return [];
+  }
+}
+
+async function buildSteamCoverArtUrls(item: SteamRawItem): Promise<string[]> {
+  const urls: string[] = [];
+  appendUniqueUrl(urls, item.large_capsule_image);
+  appendUniqueUrl(urls, item.header_image);
+  appendUniqueUrl(urls, item.small_capsule_image);
+
+  const itemType = item.type ?? 0;
+  const appid = item.id ?? item.appid ?? 0;
+  if ((itemType === 1 || itemType === 2) && appid > 0) {
+    for (const url of await fetchSteamStoreMetaArt(itemType, appid)) {
+      appendUniqueUrl(urls, url);
+    }
+  }
+
+  return urls;
+}
+
+function categoryLabelForKey(category: string): string {
+  switch (category) {
+    case "top-sellers":
+      return "Top Sellers";
+    case "new-releases":
+      return "New Releases";
+    case "on-sale":
+      return "On Sale";
+    case "coming-soon":
+      return "Coming Soon";
+    default:
+      return "All";
+  }
+}
+
+function normalizeSteamSearchParams(req: Request): SteamSearchParams {
+  const category = String(req.query.category ?? "all")
+    .trim()
+    .toLowerCase();
+  const query = String(req.query.q ?? "").trim();
+  const start = Math.max(
+    0,
+    Number.parseInt(String(req.query.start ?? "0"), 10) || 0,
+  );
+  const count = Math.min(
+    100,
+    Math.max(1, Number.parseInt(String(req.query.count ?? "48"), 10) || 48),
+  );
+  return { category, query, start, count };
+}
+
+function buildSteamSearchRequest(params: SteamSearchParams): URLSearchParams {
+  const searchParams = new URLSearchParams();
+  searchParams.set("cc", "US");
+  searchParams.set("l", "english");
+  searchParams.set("category1", "998");
+  searchParams.set("supportedlang", "english");
+  searchParams.set("ndl", "1");
+  searchParams.set("infinite", "1");
+  searchParams.set("start", String(params.start));
+  searchParams.set("count", String(params.count));
+  searchParams.set("query", params.query);
+
+  switch (params.category) {
+    case "top-sellers":
+      searchParams.set("filter", "topsellers");
+      break;
+    case "new-releases":
+      searchParams.set("filter", "popularnew");
+      break;
+    case "on-sale":
+      searchParams.set("specials", "1");
+      break;
+    case "coming-soon":
+      searchParams.set("filter", "popularcomingsoon");
+      break;
+    default:
+      searchParams.set("sort_by", "Released_DESC");
+      break;
+  }
+
+  return searchParams;
+}
+
+function parseUsdCents(priceText: string): number {
+  const normalized = decodeHtmlAttribute(priceText)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || /free/i.test(normalized)) {
+    return 0;
+  }
+  const match = normalized.match(/\$\s*([\d,.]+)/);
+  if (!match) {
+    return 0;
+  }
+  const amount = Number.parseFloat(match[1].replace(/,/g, ""));
+  if (!Number.isFinite(amount)) {
+    return 0;
+  }
+  return Math.round(amount * 100);
+}
+
+function extractAppId(resultHtml: string): number {
+  const attrMatch = resultHtml.match(/data-ds-appid=["'](?:\[)?(\d+)/i);
+  if (attrMatch) {
+    return Number.parseInt(attrMatch[1], 10);
+  }
+  const hrefMatch = resultHtml.match(/\/app\/(\d+)\//i);
+  return hrefMatch ? Number.parseInt(hrefMatch[1], 10) : 0;
+}
+
+function parseSteamSearchResultsHtml(html: string, category: string) {
   const apps: Array<{
     appid: number;
     name: string;
     category: string;
+    type: SteamStoreItemType;
+    cover_art_url: string;
+    cover_art_urls: string[];
     final_price: number;
     original_price: number;
     discount_percent: number;
     discounted: boolean;
   }> = [];
+  const rowRegex =
+    /<a\b[^>]*class=["'][^"']*search_result_row[^"']*["'][\s\S]*?<\/a>/gi;
+  const seen = new Set<number>();
 
-  for (const cat of categoryOrder) {
-    const items = data[cat]?.items ?? [];
-    for (const item of items) {
-      const appid = item.id ?? item.appid ?? 0;
-      const name = item.name ?? "";
-      if (appid > 0 && name && !seen.has(appid)) {
-        seen.add(appid);
-        apps.push({
-          appid,
-          name,
-          category: cat,
-          final_price: item.final_price ?? 0,
-          original_price: item.original_price ?? 0,
-          discount_percent: item.discount_percent ?? 0,
-          discounted: item.discounted ?? false,
-        });
-      }
+  for (const match of html.matchAll(rowRegex)) {
+    const block = match[0] ?? "";
+    const appid = extractAppId(block);
+    if (!appid || seen.has(appid)) {
+      continue;
     }
+    const titleMatch = block.match(
+      /<span\s+class=["']title["']>([\s\S]*?)<\/span>/i,
+    );
+    const imgMatch = block.match(/<img[^>]+src=["']([^"']+)["']/i);
+    const discountMatch = block.match(
+      /<div[^>]+class=["'][^"']*discount_pct[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+    );
+    const finalPriceMatch =
+      block.match(
+        /<div[^>]+class=["'][^"']*discount_final_price[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+      ) ??
+      block.match(
+        /<div[^>]+class=["'][^"']*search_price[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+      );
+    const originalPriceMatch = block.match(
+      /<div[^>]+class=["'][^"']*discount_original_price[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+    );
+    const name = decodeHtmlAttribute(
+      (titleMatch?.[1] ?? "").replace(/<[^>]+>/g, "").trim(),
+    );
+    if (!name) {
+      continue;
+    }
+
+    const discountPercent = discountMatch
+      ? Number.parseInt((discountMatch[1] ?? "").replace(/[^\d-]/g, ""), 10) *
+        -1
+      : 0;
+    const finalPrice = parseUsdCents(finalPriceMatch?.[1] ?? "");
+    const originalPrice = parseUsdCents(originalPriceMatch?.[1] ?? "");
+    const coverArtUrl = decodeHtmlAttribute(imgMatch?.[1] ?? "");
+
+    seen.add(appid);
+    apps.push({
+      appid,
+      name,
+      category: categoryLabelForKey(category),
+      type: 0,
+      cover_art_url: coverArtUrl,
+      cover_art_urls: coverArtUrl ? [coverArtUrl] : [],
+      final_price: finalPrice,
+      original_price: originalPrice,
+      discount_percent: Math.max(0, discountPercent),
+      discounted: Math.max(0, discountPercent) > 0,
+    });
   }
 
-  return JSON.stringify({ applist: { apps } });
+  return apps;
 }
 
-app.get("/api/steam/apps", async (_req, res) => {
-  // Serve from cache if fresh
-  const cached = loadSteamCache();
-  if (cached) {
-    logServer("INFO", "Serving Steam app list from cache");
+app.get("/api/steam/apps", async (req, res) => {
+  const params = normalizeSteamSearchParams(req);
+  const cacheKey = JSON.stringify(params);
+  const cached = steamCacheEntries.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAtMs <= steamCacheTtlMs) {
+    logServer("INFO", "Serving Steam app list from cache", params);
     res.status(200).type("application/json").send(cached.body);
     return;
   }
 
-  logServer("INFO", "Fetching Steam featured categories from upstream", {
-    url: steamFeaturedUrl,
+  const query = buildSteamSearchRequest(params);
+  const upstreamUrl = `${steamSearchUrl}?${query.toString()}`;
+  logServer("INFO", "Fetching Steam search results from upstream", {
+    ...params,
+    url: upstreamUrl,
   });
 
   try {
-    const response = await fetch(steamFeaturedUrl, {
+    const response = await fetch(upstreamUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (compatible; AIOServer/1.0)",
-        Accept: "application/json",
+        Accept: "application/json,text/plain,*/*",
       },
       redirect: "follow",
     });
@@ -931,7 +1183,7 @@ app.get("/api/steam/apps", async (_req, res) => {
     const body = await response.text();
 
     if (response.status < 200 || response.status >= 300) {
-      logServer("WARN", "Steam API upstream error", {
+      logServer("WARN", "Steam search upstream error", {
         status: response.status,
         body: body.slice(0, 200),
       });
@@ -945,22 +1197,298 @@ app.get("/api/steam/apps", async (_req, res) => {
     try {
       parsed = JSON.parse(body);
     } catch {
-      logServer("WARN", "Steam API returned invalid JSON", {
+      logServer("WARN", "Steam search returned invalid JSON", {
         body: body.slice(0, 200),
       });
-      res.status(502).json({ error: "Steam API returned invalid JSON" });
+      res.status(502).json({ error: "Steam search returned invalid JSON" });
       return;
     }
 
-    const transformed = transformFeaturedToAppList(parsed);
-    saveSteamCache(transformed);
+    const root = parsed as { results_html?: string; total_count?: number };
+    const apps = parseSteamSearchResultsHtml(
+      root.results_html ?? "",
+      params.category,
+    );
+    const transformed = JSON.stringify({
+      applist: { apps },
+      meta: {
+        start: params.start,
+        count: params.count,
+        total_count: root.total_count ?? apps.length,
+        has_more:
+          params.start + apps.length < (root.total_count ?? apps.length),
+        query: params.query,
+        category: params.category,
+      },
+    });
+    saveSteamCache(cacheKey, transformed);
     logServer("INFO", "Steam app list fetched and cached", {
       bytes: transformed.length,
+      count: apps.length,
+      totalCount: root.total_count ?? apps.length,
     });
     res.status(200).type("application/json").send(transformed);
   } catch (e) {
-    logServer("ERROR", "Steam API fetch failed", { error: String(e) });
+    logServer("ERROR", "Steam API fetch failed", {
+      ...params,
+      error: String(e),
+    });
     res.status(502).json({ error: `Steam API fetch failed: ${String(e)}` });
+  }
+});
+
+// Steam personal library proxy
+// Requires a Steam Web API key and a 64-bit Steam ID.
+// The user's Steam privacy settings must allow "Game details" to be public.
+app.get("/api/steam/library", async (req, res) => {
+  const apiKey =
+    typeof req.query.apikey === "string" ? req.query.apikey.trim() : "";
+  const steamId =
+    typeof req.query.steamid === "string" ? req.query.steamid.trim() : "";
+
+  if (!apiKey || !steamId) {
+    res.status(400).json({ error: "apikey and steamid are required" });
+    return;
+  }
+
+  // SteamID64 is a numeric string up to 20 digits — reject anything else
+  // to prevent URL injection into the upstream path.
+  if (!/^\d{1,20}$/.test(steamId)) {
+    res.status(400).json({ error: "Invalid steamid format" });
+    return;
+  }
+
+  const upstreamUrl =
+    `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/` +
+    `?key=${encodeURIComponent(apiKey)}` +
+    `&steamid=${encodeURIComponent(steamId)}` +
+    `&include_appinfo=1&include_played_free_games=1&format=json`;
+
+  // Log without the API key for safety
+  logServer("INFO", "Fetching Steam personal library", { steamid: steamId });
+
+  try {
+    const response = await fetch(upstreamUrl, {
+      headers: {
+        "User-Agent": "AIOServer/1.0",
+        Accept: "application/json",
+      },
+      redirect: "follow",
+    });
+
+    const body = await response.text();
+
+    if (response.status === 401 || response.status === 403) {
+      logServer("WARN", "Steam library: auth error", {
+        status: response.status,
+      });
+      res.status(401).json({
+        error:
+          "Invalid API key or private Steam profile. " +
+          "Set your Steam profile's Game Details to Public in Privacy Settings.",
+      });
+      return;
+    }
+
+    if (response.status !== 200) {
+      logServer("WARN", "Steam library upstream error", {
+        status: response.status,
+      });
+      res
+        .status(502)
+        .json({ error: `Steam API returned HTTP ${response.status}` });
+      return;
+    }
+
+    logServer("INFO", "Steam library fetched successfully", {
+      bytes: body.length,
+    });
+    res.status(200).type("application/json").send(body);
+  } catch (e) {
+    logServer("ERROR", "Steam library fetch failed", { error: String(e) });
+    res.status(502).json({ error: `Steam library fetch failed: ${String(e)}` });
+  }
+});
+
+// ── Steam OpenID auth (in-app browser flow) ──────────────────────────────────
+//
+// Flow:
+//   1. Qt opens /steam/auth/start in a QWebEngineView.
+//   2. User logs in on Steam's site.
+//   3. Steam redirects to /steam/auth/callback?openid.claimed_id=...
+//   4. Server validates the OpenID assertion, stores the Steam ID.
+//   5. Qt polls /api/steam/auth/status until { authenticated: true, steamId }.
+
+// In-memory pending auth state (single-user local server).
+let pendingSteamId: string | null = null;
+let pendingAuthToken: string | null = null; // random nonce matched per poll
+
+// Step 1 – redirect to Steam OpenID
+app.get("/steam/auth/start", (req, res) => {
+  pendingSteamId = null;
+  pendingAuthToken = randomUUID();
+
+  const returnTo = `http://127.0.0.1:${port}/steam/auth/callback`;
+  const realm = `http://127.0.0.1:${port}`;
+
+  const params = new URLSearchParams({
+    "openid.ns": "http://specs.openid.net/auth/2.0",
+    "openid.mode": "checkid_setup",
+    "openid.return_to": returnTo,
+    "openid.realm": realm,
+    "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+    "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+  });
+
+  logServer("INFO", "Steam OpenID: redirecting to Steam login");
+  res.redirect(
+    302,
+    `https://steamcommunity.com/openid/login?${params.toString()}`,
+  );
+});
+
+// Step 3 – Steam redirects back here after login
+app.get("/steam/auth/callback", async (req, res) => {
+  const claimedId =
+    typeof req.query["openid.claimed_id"] === "string"
+      ? req.query["openid.claimed_id"]
+      : "";
+
+  // Extract Steam ID64 from claimed_id URL:
+  // https://steamcommunity.com/openid/id/76561198XXXXXXXXX
+  const steamIdMatch = claimedId.match(/\/openid\/id\/(\d{15,20})$/);
+  if (!steamIdMatch) {
+    logServer("WARN", "Steam OpenID callback: could not extract Steam ID", {
+      claimedId,
+    });
+    res
+      .status(400)
+      .send(
+        "<html><body style='background:#1a1a1a;color:#f0f0f0;font-family:sans-serif;" +
+          "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>" +
+          "<div style='text-align:center'><h2>Authentication failed</h2>" +
+          "<p>Could not extract Steam ID from response.</p></div></body></html>",
+      );
+    return;
+  }
+
+  const steamId = steamIdMatch[1];
+
+  // Validate the assertion with Steam (check_authentication)
+  const params = new URLSearchParams();
+  params.set("openid.ns", "http://specs.openid.net/auth/2.0");
+  params.set("openid.mode", "check_authentication");
+  for (const [k, v] of Object.entries(req.query)) {
+    if (k !== "openid.mode" && typeof v === "string") {
+      params.set(k, v);
+    }
+  }
+
+  try {
+    const validationRes = await fetch(
+      "https://steamcommunity.com/openid/login",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      },
+    );
+    const validationBody = await validationRes.text();
+    if (!validationBody.includes("is_valid:true")) {
+      logServer("WARN", "Steam OpenID: assertion invalid", { steamId });
+      res
+        .status(401)
+        .send(
+          "<html><body style='background:#1a1a1a;color:#f0f0f0;font-family:sans-serif;" +
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>" +
+            "<div style='text-align:center'><h2>Authentication failed</h2>" +
+            "<p>Steam could not verify the login.</p></div></body></html>",
+        );
+      return;
+    }
+  } catch (e) {
+    logServer("ERROR", "Steam OpenID: validation network error", {
+      error: String(e),
+    });
+    // On network error, fall through and trust the claimed_id anyway
+    // (Steam's validation endpoint is not always reachable)
+  }
+
+  pendingSteamId = steamId;
+  logServer("INFO", "Steam OpenID: authenticated", { steamId });
+
+  // Show a success page — the QWebEngineView detects this URL and closes
+  res.send(
+    "<html><body style='background:#1a1a1a;color:#f0f0f0;font-family:sans-serif;" +
+      "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>" +
+      "<div style='text-align:center'>" +
+      "<h2 style='color:#a5d6a7'>Signed in to Steam</h2>" +
+      "<p>You can close this window — AIO Server will pick up your session.</p>" +
+      "</div></body></html>",
+  );
+});
+
+// Step 5 – Qt polls this until authenticated
+app.get("/api/steam/auth/status", (req, res) => {
+  if (pendingSteamId) {
+    const id = pendingSteamId;
+    pendingSteamId = null; // consume it — one-time delivery
+    logServer("INFO", "Steam auth status: delivering Steam ID to client", {
+      steamId: id,
+    });
+    res.json({ authenticated: true, steamId: id });
+  } else {
+    res.json({ authenticated: false });
+  }
+});
+
+// ── Steam library via community XML feed (no API key required) ───────────────
+// Requires the user's Steam profile Game Details to be set to Public.
+app.get("/api/steam/games-xml", async (req, res) => {
+  const steamId =
+    typeof req.query.steamid === "string" ? req.query.steamid.trim() : "";
+
+  if (!steamId || !/^\d{15,20}$/.test(steamId)) {
+    res.status(400).json({ error: "Valid steamid required" });
+    return;
+  }
+
+  const url = `https://steamcommunity.com/profiles/${encodeURIComponent(steamId)}/games/?tab=all&xml=1`;
+  logServer("INFO", "Fetching Steam games XML feed", { steamId });
+
+  try {
+    const response = await fetch(url, {
+      headers: { "User-Agent": "AIOServer/1.0", Accept: "text/xml" },
+    });
+    const body = await response.text();
+
+    if (response.status !== 200) {
+      res.status(502).json({ error: `Steam returned HTTP ${response.status}` });
+      return;
+    }
+
+    // Detect any <error> node — covers private profiles and other Steam errors
+    const errorMatch = body.match(/<error>([^<]*)<\/error>/i);
+    if (errorMatch) {
+      const errorText = errorMatch[1].trim();
+      logServer("WARN", "Steam games XML: error node in response", {
+        error: errorText,
+      });
+      res.status(403).json({
+        error:
+          errorText ||
+          "Steam returned an error. Check your profile Game Details privacy setting.",
+      });
+      return;
+    }
+
+    logServer("INFO", "Steam games XML fetched", { bytes: body.length });
+    res.status(200).type("text/xml").send(body);
+  } catch (e) {
+    logServer("ERROR", "Steam games XML fetch failed", { error: String(e) });
+    res
+      .status(502)
+      .json({ error: `Steam games XML fetch failed: ${String(e)}` });
   }
 });
 

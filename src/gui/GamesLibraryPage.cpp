@@ -1,123 +1,225 @@
 #include "gui/GamesLibraryPage.h"
 
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QFrame>
-#include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QListWidget>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPen>
-#include <QScrollArea>
+#include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
+
 #include <algorithm>
 
 namespace AIO::GUI {
 
 namespace {
+
 QColor badgeColorFor(const QString &consoleBadge) {
   if (consoleBadge == QStringLiteral("GBA"))
-    return QColor(156, 89, 230);
+    return QColor(QStringLiteral("#9c8cff"));
   if (consoleBadge == QStringLiteral("PS1"))
-    return QColor(100, 181, 246);
-  return QColor(38, 198, 218);
+    return QColor(QStringLiteral("#64b5f6"));
+  return QColor(QStringLiteral("#ff6b6b"));
 }
-} // namespace
 
-class GameTile final : public QFrame {
-public:
-  explicit GameTile(const LibraryGame &g, QWidget *parent = nullptr)
-      : QFrame(parent), game(g) {
-    setObjectName("aioGameLibraryTile");
-    setProperty("aio_selected", false);
-    setFixedSize(246, 214);
+int extensionRank(const QString &path) {
+  const QString ext = QFileInfo(path).suffix().toLower();
+  if (ext == QStringLiteral("cue"))
+    return 5;
+  if (ext == QStringLiteral("iso"))
+    return 4;
+  if (ext == QStringLiteral("img"))
+    return 3;
+  if (ext == QStringLiteral("bin"))
+    return 2;
+  return 1;
+}
+
+QString platformSummary(const LibraryGame &game) {
+  if (game.consoleBadge == QStringLiteral("GBA"))
+    return QStringLiteral("Game Boy Advance ROM ready to launch");
+  if (game.consoleBadge == QStringLiteral("PS1"))
+    return QStringLiteral("PlayStation ROM ready to launch");
+  return QStringLiteral("Nintendo Switch library entry detected");
+}
+
+QString supportSummary(const LibraryGame &game) {
+  if (game.unsupported) {
+    return QStringLiteral(
+        "This title is indexed so your library stays organized, but Switch "
+        "launch is intentionally unavailable in the production shell.");
+  }
+  return QStringLiteral(
+      "Open the game card for a clean launch flow and metadata summary.");
+}
+
+QString formatSummary(const LibraryGame &game) {
+  return QFileInfo(game.path).suffix().toUpper();
+}
+
+QString displayTitleFor(const QString &title) {
+  QString normalized = title;
+  normalized.replace(QChar('_'), QChar(' '));
+  normalized.replace(QChar('-'), QChar(' '));
+  normalized.replace(QRegularExpression(QStringLiteral("([a-z0-9])([A-Z])")),
+                     QStringLiteral("\\1 \\2"));
+  normalized.replace(QRegularExpression(QStringLiteral("\\s+")),
+                     QStringLiteral(" "));
+  return normalized.trimmed();
+}
+
+QPixmap renderLibraryArtwork(const LibraryGame &game, const QSize &size) {
+  QPixmap pixmap(size);
+  pixmap.fill(Qt::transparent);
+
+  const QColor accent = badgeColorFor(game.consoleBadge);
+  QPainter painter(&pixmap);
+  painter.setRenderHint(QPainter::Antialiasing);
+
+  QPainterPath cardPath;
+  cardPath.addRoundedRect(QRectF(pixmap.rect()), 16.0, 16.0);
+  QLinearGradient gradient(0.0, 0.0, static_cast<qreal>(size.width()),
+                           static_cast<qreal>(size.height()));
+  gradient.setColorAt(0.0, accent.darker(210));
+  gradient.setColorAt(0.6, QColor(QStringLiteral("#1a1a1a")));
+  gradient.setColorAt(1.0, QColor(QStringLiteral("#0a0a0a")));
+  painter.fillPath(cardPath, gradient);
+
+  QLinearGradient sheen(0.0, 0.0, 0.0, static_cast<qreal>(size.height()));
+  sheen.setColorAt(0.0, QColor(255, 255, 255, 28));
+  sheen.setColorAt(0.45, QColor(255, 255, 255, 0));
+  sheen.setColorAt(1.0, QColor(0, 0, 0, 72));
+  painter.fillPath(cardPath, sheen);
+
+  painter.setPen(QPen(QColor(255, 255, 255, 10), 1.0));
+  painter.drawPath(cardPath);
+
+  QFont badgeFont(QStringLiteral("Noto Sans"));
+  badgeFont.setPixelSize(12);
+  badgeFont.setWeight(QFont::DemiBold);
+  painter.setFont(badgeFont);
+
+  const QRectF badgeRect(24.0, 24.0, 88.0, 28.0);
+  QPainterPath badgePath;
+  badgePath.addRoundedRect(badgeRect, 6.0, 6.0);
+  painter.fillPath(badgePath,
+                   QColor(accent.red(), accent.green(), accent.blue(), 60));
+  painter.setPen(accent.lighter(135));
+  painter.drawText(badgeRect, Qt::AlignCenter, game.consoleBadge);
+
+  if (game.unsupported) {
+    const QRectF unsupportedRect(size.width() - 152.0, 24.0, 128.0, 28.0);
+    QPainterPath unsupportedPath;
+    unsupportedPath.addRoundedRect(unsupportedRect, 6.0, 6.0);
+    painter.fillPath(unsupportedPath, QColor(255, 107, 107, 210));
+    painter.setPen(QColor(QStringLiteral("#0a0a0a")));
+    painter.drawText(unsupportedRect, Qt::AlignCenter,
+                     QStringLiteral("Unsupported"));
   }
 
-  LibraryGame game;
+  const QRectF artRect(pixmap.rect());
+  const QRectF titlePlate(artRect.left() + 24.0, artRect.top() + 88.0,
+                          artRect.width() - 48.0, artRect.height() - 152.0);
+  QPainterPath titlePlatePath;
+  titlePlatePath.addRoundedRect(titlePlate, 16.0, 16.0);
+  painter.fillPath(titlePlatePath, QColor(10, 10, 10, 86));
 
-protected:
-  void paintEvent(QPaintEvent *) override {
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setClipRect(rect());
+  QFont titleFont(QStringLiteral("Noto Sans"));
+  titleFont.setPixelSize(32);
+  titleFont.setWeight(QFont::Bold);
+  painter.setFont(titleFont);
+  painter.setPen(QColor(QStringLiteral("#f0f0f0")));
+  painter.drawText(titlePlate.toRect().adjusted(24, 24, -24, -56),
+                   Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                   displayTitleFor(game.title));
 
-    const bool selected = property("aio_selected").toBool();
-    QPainterPath cardPath;
-    cardPath.addRoundedRect(rect(), 12, 12);
+  QFont metaFont(QStringLiteral("Noto Sans"));
+  metaFont.setPixelSize(13);
+  painter.setFont(metaFont);
+  painter.setPen(QColor(QStringLiteral("#999999")));
+  painter.drawText(
+      QRect(24, size.height() - 48, size.width() - 48, 20),
+      Qt::AlignLeft | Qt::AlignVCenter,
+      QStringLiteral("Local library  •  %1").arg(formatSummary(game)));
 
-    p.fillPath(cardPath,
-               selected ? QColor(40, 40, 52, 255) : QColor(30, 30, 40, 255));
+  return pixmap;
+}
 
-    const QColor stroke =
-        selected ? QColor(255, 255, 255, 236) : QColor(255, 255, 255, 34);
-    p.setPen(QPen(stroke, selected ? 3.0 : 1.0));
-    p.drawPath(cardPath);
+class LibraryInfoDialog final : public QDialog {
+public:
+  explicit LibraryInfoDialog(const LibraryGame &game, QWidget *parent = nullptr)
+      : QDialog(parent) {
+    setModal(true);
+    setObjectName(QStringLiteral("aioGamesInfoDialog"));
+    resize(720, 640);
 
-    const QColor badgeColor = badgeColorFor(game.consoleBadge);
-    p.setPen(Qt::NoPen);
-    QPainterPath badgePath;
-    badgePath.addRoundedRect(QRectF(10, 10, 62, 20), 10, 10);
-    p.fillPath(badgePath, QColor(badgeColor.red(), badgeColor.green(),
-                                 badgeColor.blue(), 48));
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(32, 32, 32, 32);
+    layout->setSpacing(24);
 
-    QFont badgeFont = p.font();
-    badgeFont.setPixelSize(12);
-    badgeFont.setWeight(QFont::DemiBold);
-    p.setFont(badgeFont);
-    p.setPen(badgeColor);
-    p.drawText(QRectF(10, 10, 62, 20), Qt::AlignCenter, game.consoleBadge);
+    auto *art = new QLabel(this);
+    art->setObjectName(QStringLiteral("aioGamesDialogArt"));
+    art->setPixmap(renderLibraryArtwork(game, QSize(656, 264)));
+    art->setFixedHeight(264);
+    art->setAlignment(Qt::AlignCenter);
+    layout->addWidget(art);
 
-    QLinearGradient hero(0, 28, 0, height() - 52);
-    hero.setColorAt(0.0, QColor(255, 255, 255, 14));
-    hero.setColorAt(1.0, QColor(0, 0, 0, 26));
-    QPainterPath heroPath;
-    heroPath.addRoundedRect(QRectF(10, 34, width() - 20, height() - 84), 10,
-                            10);
-    p.fillPath(heroPath, hero);
+    auto *title = new QLabel(displayTitleFor(game.title), this);
+    title->setObjectName(QStringLiteral("aioGamesDialogTitle"));
+    title->setWordWrap(true);
+    layout->addWidget(title);
 
-    QFont initialFont = p.font();
-    initialFont.setPixelSize(48);
-    initialFont.setWeight(QFont::Bold);
-    p.setFont(initialFont);
-    const QString initial =
-        game.title.isEmpty() ? QStringLiteral("?") : game.title.left(1);
-    QRect initialRect(10, 34, width() - 20, height() - 84);
-    p.setPen(QColor(0, 0, 0, 40));
-    p.drawText(initialRect.translated(1, 1), Qt::AlignCenter,
-               initial.toUpper());
-    p.setPen(QColor(255, 255, 255, 200));
-    p.drawText(initialRect, Qt::AlignCenter, initial.toUpper());
+    auto *meta = new QLabel(QStringLiteral("%1  •  %2  •  %3")
+                                .arg(game.consoleBadge, formatSummary(game),
+                                     game.unsupported
+                                         ? QStringLiteral("Unavailable")
+                                         : QStringLiteral("Ready to launch")),
+                            this);
+    meta->setObjectName(QStringLiteral("aioGamesDialogMeta"));
+    layout->addWidget(meta);
 
-    QFont titleFont = p.font();
-    titleFont.setPixelSize(12);
-    titleFont.setWeight(QFont::DemiBold);
-    p.setFont(titleFont);
-    p.setPen(QColor(228, 228, 228, 220));
-    p.drawText(QRect(10, height() - 44, width() - 20, 34),
-               Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, game.title);
+    auto *body = new QLabel(supportSummary(game), this);
+    body->setObjectName(QStringLiteral("aioGamesDialogBody"));
+    body->setWordWrap(true);
+    layout->addWidget(body);
 
-    if (game.unsupported) {
-      // Keep the game art readable and place unsupported as a semantic badge.
-      p.fillPath(cardPath, QColor(0, 0, 0, 74));
-      const QRectF badgeRect(width() - 102.0, 10.0, 92.0, 22.0);
-      QPainterPath badgePath;
-      badgePath.addRoundedRect(badgeRect, 11, 11);
-      p.fillPath(badgePath, QColor(255, 140, 70, 220));
-      QFont unsupportedFont = p.font();
-      unsupportedFont.setPixelSize(12);
-      unsupportedFont.setWeight(QFont::Bold);
-      p.setFont(unsupportedFont);
-      p.setPen(QColor(24, 24, 24, 220));
-      p.drawText(badgeRect, Qt::AlignCenter, QStringLiteral("Unsupported"));
-    }
+    auto *pathLabel = new QLabel(game.path, this);
+    pathLabel->setObjectName(QStringLiteral("aioGamesDialogPath"));
+    pathLabel->setWordWrap(true);
+    layout->addWidget(pathLabel);
+    layout->addStretch();
+
+    auto *buttons = new QDialogButtonBox(this);
+    buttons->setCenterButtons(false);
+    auto *closeButton = buttons->addButton(QStringLiteral("Close"),
+                                           QDialogButtonBox::RejectRole);
+    closeButton->setObjectName(QStringLiteral("aioGamesSecondaryAction"));
+    auto *launchButton =
+        buttons->addButton(game.unsupported ? QStringLiteral("Unavailable")
+                                            : QStringLiteral("Launch Game"),
+                           QDialogButtonBox::AcceptRole);
+    launchButton->setObjectName(QStringLiteral("aioGamesPrimaryAction"));
+    launchButton->setEnabled(!game.unsupported);
+
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(buttons);
   }
 };
+
+} // namespace
 
 GamesLibraryPage::GamesLibraryPage(QWidget *parent) : QWidget(parent) {
   setupUi();
@@ -125,7 +227,7 @@ GamesLibraryPage::GamesLibraryPage(QWidget *parent) : QWidget(parent) {
 }
 
 void GamesLibraryPage::setupUi() {
-  setObjectName("aioGamesLibraryPage");
+  setObjectName(QStringLiteral("aioGamesLibraryPage"));
   setFocusPolicy(Qt::StrongFocus);
 
   auto *root = new QVBoxLayout(this);
@@ -133,54 +235,183 @@ void GamesLibraryPage::setupUi() {
   root->setSpacing(0);
 
   auto *header = new QWidget(this);
-  header->setObjectName("aioGamesLibraryHeader");
+  header->setObjectName(QStringLiteral("aioGamesLibraryHeader"));
   auto *headerLayout = new QVBoxLayout(header);
-  headerLayout->setContentsMargins(32, 16, 32, 8);
-  headerLayout->setSpacing(2);
+  headerLayout->setContentsMargins(32, 24, 32, 16);
+  headerLayout->setSpacing(8);
 
-  auto *titleLabel = new QLabel("Games Library", header);
-  titleLabel->setObjectName("aioGamesLibraryTitle");
+  auto *titleLabel = new QLabel(QStringLiteral("Games Library"), header);
+  titleLabel->setObjectName(QStringLiteral("aioGamesLibraryTitle"));
   headerLayout->addWidget(titleLabel);
 
-  subtitleLabel_ = new QLabel(header);
-  subtitleLabel_->setObjectName("aioGamesLibrarySubtitle");
+  subtitleLabel_ = new QLabel(
+      QStringLiteral("Browse your installed titles from a clean, fast rail."),
+      header);
+  subtitleLabel_->setObjectName(QStringLiteral("aioGamesLibrarySubtitle"));
   headerLayout->addWidget(subtitleLabel_);
   root->addWidget(header);
 
-  filterBar_ = new QWidget(this);
-  filterBar_->setObjectName("aioGamesFilterBar");
-  auto *chipRow = new QHBoxLayout(filterBar_);
-  chipRow->setContentsMargins(32, 0, 32, 12);
-  chipRow->setSpacing(8);
+  auto *body = new QWidget(this);
+  body->setObjectName(QStringLiteral("aioGamesLibraryBody"));
+  auto *bodyLayout = new QHBoxLayout(body);
+  bodyLayout->setContentsMargins(32, 0, 32, 32);
+  bodyLayout->setSpacing(24);
 
-  const QVector<QString> labels = {"All", "GBA", "PS1", "Switch"};
-  for (const auto &labelText : labels) {
-    auto *chip = new QLabel(labelText, filterBar_);
-    chip->setObjectName("aioGamesFilterChip");
+  auto *railPanel = new QFrame(body);
+  railPanel->setObjectName(QStringLiteral("aioGamesRailPanel"));
+  railPanel->setFixedWidth(320);
+  auto *railLayout = new QVBoxLayout(railPanel);
+  railLayout->setContentsMargins(24, 24, 24, 24);
+  railLayout->setSpacing(16);
+
+  auto *railHeading = new QLabel(QStringLiteral("Installed Titles"), railPanel);
+  railHeading->setObjectName(QStringLiteral("aioGamesRailHeading"));
+  railLayout->addWidget(railHeading);
+
+  filterBar_ = new QWidget(railPanel);
+  filterBar_->setObjectName(QStringLiteral("aioGamesFilterBar"));
+  auto *chipGrid = new QGridLayout(filterBar_);
+  chipGrid->setContentsMargins(0, 0, 0, 0);
+  chipGrid->setHorizontalSpacing(8);
+  chipGrid->setVerticalSpacing(8);
+  chipGrid->setColumnStretch(0, 1);
+  chipGrid->setColumnStretch(1, 1);
+
+  const QVector<QString> labels = {QStringLiteral("All"), QStringLiteral("GBA"),
+                                   QStringLiteral("PS1"),
+                                   QStringLiteral("Switch")};
+  for (int i = 0; i < labels.size(); ++i) {
+    auto *chip = new QLabel(labels[i], filterBar_);
+    chip->setObjectName(QStringLiteral("aioGamesFilterChip"));
     chip->setAlignment(Qt::AlignCenter);
     chips_.append(chip);
-    chipRow->addWidget(chip);
+    chipGrid->addWidget(chip, i / 2, i % 2);
   }
-  chipRow->addStretch();
-  root->addWidget(filterBar_);
+  railLayout->addWidget(filterBar_);
 
-  auto *scroll = new QScrollArea(this);
-  scroll->setWidgetResizable(true);
-  scroll->setFrameShape(QFrame::NoFrame);
-  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  scroll->setObjectName("aioGamesScrollArea");
+  titleList_ = new QListWidget(railPanel);
+  titleList_->setObjectName(QStringLiteral("aioGamesTitleRail"));
+  titleList_->setFrameShape(QFrame::NoFrame);
+  titleList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  titleList_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  titleList_->setSelectionMode(QAbstractItemView::SingleSelection);
+  titleList_->setFocusPolicy(Qt::NoFocus);
+  titleList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+  railLayout->addWidget(titleList_, 1);
 
-  gridHost_ = new QWidget(scroll);
-  gridHost_->setObjectName("aioGamesGrid");
-  scroll->setWidget(gridHost_);
+  auto *hintLabel = new QLabel(
+      QStringLiteral("Enter opens details  •  Right moves to actions"),
+      railPanel);
+  hintLabel->setObjectName(QStringLiteral("aioGamesRailHint"));
+  hintLabel->setWordWrap(true);
+  railLayout->addWidget(hintLabel);
+  bodyLayout->addWidget(railPanel);
 
-  emptyLabel_ = new QLabel("No games found. Add ROMs in Settings.", gridHost_);
-  emptyLabel_->setObjectName("aioGamesEmptyLabel");
+  auto *detailPanel = new QWidget(body);
+  detailPanel->setObjectName(QStringLiteral("aioGamesDetailsPane"));
+  auto *detailLayout = new QVBoxLayout(detailPanel);
+  detailLayout->setContentsMargins(0, 16, 0, 0);
+  detailLayout->setSpacing(24);
+
+  auto *heroCard = new QFrame(detailPanel);
+  heroCard->setObjectName(QStringLiteral("aioGamesHeroCard"));
+  auto *heroLayout = new QVBoxLayout(heroCard);
+  heroLayout->setContentsMargins(24, 24, 24, 24);
+  heroLayout->setSpacing(16);
+
+  heroArt_ = new QLabel(heroCard);
+  heroArt_->setObjectName(QStringLiteral("aioGamesHeroArt"));
+  heroArt_->setAlignment(Qt::AlignCenter);
+  heroArt_->setFixedHeight(320);
+  heroLayout->addWidget(heroArt_);
+
+  heroBadge_ = new QLabel(heroCard);
+  heroBadge_->setObjectName(QStringLiteral("aioGamesHeroBadge"));
+  heroBadge_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  heroLayout->addWidget(heroBadge_);
+
+  heroTitle_ = new QLabel(heroCard);
+  heroTitle_->setObjectName(QStringLiteral("aioGamesHeroTitle"));
+  heroTitle_->setWordWrap(true);
+  heroLayout->addWidget(heroTitle_);
+
+  heroSubtitle_ = new QLabel(heroCard);
+  heroSubtitle_->setObjectName(QStringLiteral("aioGamesHeroSubtitle"));
+  heroSubtitle_->setWordWrap(true);
+  heroLayout->addWidget(heroSubtitle_);
+
+  heroDescription_ = new QLabel(heroCard);
+  heroDescription_->setObjectName(QStringLiteral("aioGamesHeroDescription"));
+  heroDescription_->setWordWrap(true);
+  heroLayout->addWidget(heroDescription_);
+  detailLayout->addWidget(heroCard);
+
+  auto *statsRow = new QHBoxLayout();
+  statsRow->setSpacing(16);
+  const struct {
+    const char *title;
+    QLabel **valueLabel;
+  } statDefs[] = {{"Platform", &platformValueLabel_},
+                  {"Status", &statusValueLabel_},
+                  {"Format", &formatValueLabel_}};
+  for (const auto &statDef : statDefs) {
+    auto *card = new QFrame(detailPanel);
+    card->setObjectName(QStringLiteral("aioGamesStatCard"));
+    auto *cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(16, 16, 16, 16);
+    cardLayout->setSpacing(8);
+    auto *eyebrow = new QLabel(QString::fromUtf8(statDef.title), card);
+    eyebrow->setObjectName(QStringLiteral("aioGamesStatEyebrow"));
+    auto *value = new QLabel(card);
+    value->setObjectName(QStringLiteral("aioGamesStatValue"));
+    value->setWordWrap(true);
+    cardLayout->addWidget(eyebrow);
+    cardLayout->addWidget(value);
+    statsRow->addWidget(card, 1);
+    *statDef.valueLabel = value;
+  }
+  detailLayout->addLayout(statsRow);
+
+  auto *actionsRow = new QHBoxLayout();
+  actionsRow->setSpacing(16);
+  launchButton_ = new QPushButton(QStringLiteral("Launch Game"), detailPanel);
+  launchButton_->setObjectName(QStringLiteral("aioGamesPrimaryAction"));
+  launchButton_->setFocusPolicy(Qt::NoFocus);
+  actionsRow->addWidget(launchButton_, 1);
+
+  infoButton_ = new QPushButton(QStringLiteral("View Details"), detailPanel);
+  infoButton_->setObjectName(QStringLiteral("aioGamesSecondaryAction"));
+  infoButton_->setFocusPolicy(Qt::NoFocus);
+  actionsRow->addWidget(infoButton_, 1);
+  detailLayout->addLayout(actionsRow);
+
+  emptyLabel_ = new QLabel(
+      QStringLiteral("No games found. Add ROMs in Settings to populate your "
+                     "library."),
+      detailPanel);
+  emptyLabel_->setObjectName(QStringLiteral("aioGamesEmptyLabel"));
   emptyLabel_->setAlignment(Qt::AlignCenter);
-  emptyLabel_->hide();
+  emptyLabel_->setWordWrap(true);
+  detailLayout->addWidget(emptyLabel_);
+  detailLayout->addStretch();
+  bodyLayout->addWidget(detailPanel, 1);
+  root->addWidget(body, 1);
 
-  root->addWidget(scroll, 1);
+  connect(titleList_, &QListWidget::currentRowChanged, this, [this](int row) {
+    if (row < 0 || row >= displayGames_.size())
+      return;
+    gridRow_ = row;
+    updateGridFocus();
+  });
+  connect(titleList_, &QListWidget::itemClicked, this,
+          [this](QListWidgetItem *) { openDetailsDialog(); });
+  connect(launchButton_, &QPushButton::clicked, this,
+          [this]() { activateFocused(); });
+  connect(infoButton_, &QPushButton::clicked, this,
+          [this]() { openDetailsDialog(); });
+
   updateFilterChips();
+  updateGridFocus();
 }
 
 void GamesLibraryPage::showEvent(QShowEvent *event) {
@@ -196,15 +427,21 @@ void GamesLibraryPage::refresh() {
 void GamesLibraryPage::scanROMs() {
   allGames_.clear();
 
-  QSettings settings("AIOServer", "GBAEmulator");
+  QSettings settings(QStringLiteral("AIOServer"),
+                     QStringLiteral("GBAEmulator"));
   const QString romDir =
-      settings.value("romDirectory", QDir::homePath()).toString();
+      settings.value(QStringLiteral("romDirectory"), QDir::homePath())
+          .toString();
   const QDir dir(romDir);
   if (!dir.exists())
     return;
 
-  const QStringList filters = {"*.gba", "*.bin", "*.cue", "*.iso", "*.img",
-                               "*.xci", "*.nsp", "*.nso", "*.nro"};
+  QMap<QString, LibraryGame> uniqueGames;
+  const QStringList filters = {QStringLiteral("*.gba"), QStringLiteral("*.bin"),
+                               QStringLiteral("*.cue"), QStringLiteral("*.iso"),
+                               QStringLiteral("*.img"), QStringLiteral("*.xci"),
+                               QStringLiteral("*.nsp"), QStringLiteral("*.nso"),
+                               QStringLiteral("*.nro")};
   QDirIterator it(romDir, filters, QDir::Files, QDirIterator::Subdirectories);
   while (it.hasNext()) {
     it.next();
@@ -215,20 +452,29 @@ void GamesLibraryPage::scanROMs() {
     game.path = fi.absoluteFilePath();
     game.title = fi.completeBaseName();
 
-    if (ext == "gba") {
-      game.consoleBadge = "GBA";
-    } else if (ext == "bin" || ext == "cue" || ext == "iso" || ext == "img") {
-      game.consoleBadge = "PS1";
-    } else if (ext == "xci" || ext == "nsp" || ext == "nso" || ext == "nro") {
-      game.consoleBadge = "Switch";
+    if (ext == QStringLiteral("gba")) {
+      game.consoleBadge = QStringLiteral("GBA");
+    } else if (ext == QStringLiteral("bin") || ext == QStringLiteral("cue") ||
+               ext == QStringLiteral("iso") || ext == QStringLiteral("img")) {
+      game.consoleBadge = QStringLiteral("PS1");
+    } else if (ext == QStringLiteral("xci") || ext == QStringLiteral("nsp") ||
+               ext == QStringLiteral("nso") || ext == QStringLiteral("nro")) {
+      game.consoleBadge = QStringLiteral("Switch");
       game.unsupported = true;
     } else {
       continue;
     }
 
-    allGames_.append(game);
+    const QString key = QStringLiteral("%1::%2").arg(
+        game.consoleBadge, game.title.trimmed().toLower());
+    const auto existing = uniqueGames.constFind(key);
+    if (existing == uniqueGames.cend() ||
+        extensionRank(existing->path) < extensionRank(game.path)) {
+      uniqueGames.insert(key, game);
+    }
   }
 
+  allGames_ = uniqueGames.values().toVector();
   std::sort(allGames_.begin(), allGames_.end(),
             [](const LibraryGame &a, const LibraryGame &b) {
               return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
@@ -237,18 +483,17 @@ void GamesLibraryPage::scanROMs() {
 
 void GamesLibraryPage::rebuildGrid() {
   displayGames_.clear();
-  gameTiles_.clear();
 
-  auto matchesFilter = [this](const LibraryGame &g) {
+  auto matchesFilter = [this](const LibraryGame &game) {
     switch (filter_) {
     case FilterMode::All:
       return true;
     case FilterMode::GBA:
-      return g.consoleBadge == "GBA";
+      return game.consoleBadge == QStringLiteral("GBA");
     case FilterMode::PS1:
-      return g.consoleBadge == "PS1";
+      return game.consoleBadge == QStringLiteral("PS1");
     case FilterMode::Switch:
-      return g.consoleBadge == "Switch";
+      return game.consoleBadge == QStringLiteral("Switch");
     }
     return true;
   };
@@ -258,104 +503,186 @@ void GamesLibraryPage::rebuildGrid() {
       displayGames_.append(game);
   }
 
-  delete gridHost_->layout();
-  auto *grid = new QGridLayout(gridHost_);
-  grid->setContentsMargins(32, 8, 32, 24);
-  grid->setHorizontalSpacing(12);
-  grid->setVerticalSpacing(12);
-
-  for (int i = 0; i < displayGames_.size(); ++i) {
-    auto *tile = new GameTile(displayGames_[i], gridHost_);
-    grid->addWidget(tile, i / kCols, i % kCols);
-    gameTiles_.append(tile);
+  if (titleList_) {
+    QSignalBlocker blocker(titleList_);
+    titleList_->clear();
+    for (const auto &game : displayGames_) {
+      auto *item = new QListWidgetItem(displayTitleFor(game.title), titleList_);
+      item->setIcon(QIcon(renderLibraryArtwork(game, QSize(80, 80))));
+      item->setData(Qt::UserRole, game.consoleBadge);
+      item->setData(Qt::UserRole + 1, game.unsupported);
+      item->setToolTip(game.path);
+    }
   }
 
+  subtitleLabel_->setText(
+      QStringLiteral("%1 titles ready to browse").arg(displayGames_.size()));
+
   if (displayGames_.isEmpty()) {
-    grid->addWidget(emptyLabel_, 0, 0, 1, kCols, Qt::AlignCenter);
+    gridRow_ = 0;
+    gridCol_ = 0;
+    focusArea_ = FocusArea::Filters;
+    inChips_ = true;
     emptyLabel_->show();
   } else {
+    const int clampedIndex = qBound(0, gridRow_, displayGames_.size() - 1);
+    gridRow_ = clampedIndex;
+    if (titleList_)
+      titleList_->setCurrentRow(clampedIndex);
+    if (focusArea_ == FocusArea::Filters)
+      focusArea_ = FocusArea::Titles;
+    inChips_ = false;
     emptyLabel_->hide();
   }
 
-  subtitleLabel_->setText(QString("%1 games").arg(displayGames_.size()));
-  gridRow_ = 0;
-  gridCol_ = 0;
-  inChips_ = displayGames_.isEmpty();
   updateFilterChips();
   updateGridFocus();
 }
 
 void GamesLibraryPage::updateFilterChips() {
   const int active = static_cast<int>(filter_);
+  inChips_ = focusArea_ == FocusArea::Filters;
   for (int i = 0; i < chips_.size(); ++i) {
-    chips_[i]->setProperty("active", i == active ? "true" : "false");
-    chips_[i]->setProperty("focused",
-                           (inChips_ && i == chipFocus_) ? "true" : "false");
+    const char *activeVal = (i == active) ? "true" : "false";
+    const char *focusedVal =
+        (focusArea_ == FocusArea::Filters && i == chipFocus_) ? "true"
+                                                              : "false";
+    if (chips_[i]->property("active").toString() == QLatin1String(activeVal) &&
+        chips_[i]->property("focused").toString() == QLatin1String(focusedVal))
+      continue;
+    chips_[i]->setProperty("active", activeVal);
+    chips_[i]->setProperty("focused", focusedVal);
     chips_[i]->style()->unpolish(chips_[i]);
     chips_[i]->style()->polish(chips_[i]);
   }
 }
 
 void GamesLibraryPage::updateGridFocus() {
-  for (int i = 0; i < gameTiles_.size(); ++i) {
-    auto *tile = gameTiles_[i];
-    const int row = i / kCols;
-    const int col = i % kCols;
-    const bool selected = !inChips_ && (row == gridRow_) && (col == gridCol_);
-    tile->setProperty("aio_selected", selected);
-    tile->style()->unpolish(tile);
-    tile->style()->polish(tile);
-
-    // Elevation shadow — focused tile lifts off the surface (tvOS/PS5 style)
-    auto *shadow =
-        qobject_cast<QGraphicsDropShadowEffect *>(tile->graphicsEffect());
-    if (selected) {
-      if (!shadow) {
-        shadow = new QGraphicsDropShadowEffect(tile);
-        tile->setGraphicsEffect(shadow);
-      }
-      shadow->setBlurRadius(32.0);
-      shadow->setOffset(0.0, 10.0);
-      shadow->setColor(QColor(0, 0, 0, 150));
-      tile->raise();
-    } else {
-      if (shadow)
-        tile->setGraphicsEffect(nullptr);
-    }
-
-    tile->update();
+  if (titleList_ && !displayGames_.isEmpty()) {
+    const QSignalBlocker blocker(titleList_);
+    titleList_->setCurrentRow(selectedIndex());
+    titleList_->scrollToItem(titleList_->currentItem(),
+                             QAbstractItemView::PositionAtCenter);
   }
+
+  const bool actionsFocused = focusArea_ == FocusArea::Actions;
+  gridCol_ = actionsFocused ? actionFocus_ : 0;
+
+  if (launchButton_) {
+    const char *launchVal =
+        (actionsFocused && actionFocus_ == 0) ? "true" : "false";
+    if (launchButton_->property("aio_selected").toString() !=
+        QLatin1String(launchVal)) {
+      launchButton_->setProperty("aio_selected", launchVal);
+      launchButton_->style()->unpolish(launchButton_);
+      launchButton_->style()->polish(launchButton_);
+    }
+  }
+  if (infoButton_) {
+    const char *infoVal =
+        (actionsFocused && actionFocus_ == 1) ? "true" : "false";
+    if (infoButton_->property("aio_selected").toString() !=
+        QLatin1String(infoVal)) {
+      infoButton_->setProperty("aio_selected", infoVal);
+      infoButton_->style()->unpolish(infoButton_);
+      infoButton_->style()->polish(infoButton_);
+    }
+  }
+
+  updateHeroPanel();
+}
+
+void GamesLibraryPage::updateHeroPanel() {
+  const bool hasSelection = !displayGames_.isEmpty();
+  const LibraryGame game =
+      hasSelection ? displayGames_.at(selectedIndex()) : LibraryGame{};
+
+  if (!hasSelection) {
+    heroArt_->setPixmap(QPixmap());
+    heroBadge_->setText(QStringLiteral("Library Empty"));
+    heroTitle_->setText(QStringLiteral("Add ROMs to start browsing"));
+    heroSubtitle_->setText(
+        QStringLiteral("Your title rail will populate here."));
+    heroDescription_->setText(
+        QStringLiteral("Point the ROM directory at your local collection, and "
+                       "the library will group everything into a faster Steam-"
+                       "style navigation flow."));
+    platformValueLabel_->setText(QStringLiteral("None"));
+    statusValueLabel_->setText(QStringLiteral("Waiting"));
+    formatValueLabel_->setText(QStringLiteral("N/A"));
+    launchButton_->setEnabled(false);
+    infoButton_->setEnabled(false);
+    return;
+  }
+
+  heroArt_->setPixmap(renderLibraryArtwork(game, QSize(820, 320)));
+  heroBadge_->hide();
+  heroTitle_->setText(displayTitleFor(game.title));
+  heroSubtitle_->setText(
+      game.unsupported
+          ? QStringLiteral("Indexed but unavailable to launch")
+          : QStringLiteral("Ready to launch from your local library"));
+  heroDescription_->setText(supportSummary(game));
+  platformValueLabel_->setText(game.consoleBadge);
+  statusValueLabel_->setText(game.unsupported ? QStringLiteral("Unavailable")
+                                              : QStringLiteral("Installed"));
+  formatValueLabel_->setText(formatSummary(game));
+  launchButton_->setEnabled(!game.unsupported);
+  launchButton_->setText(game.unsupported ? QStringLiteral("Unavailable")
+                                          : QStringLiteral("Launch Game"));
+  infoButton_->setEnabled(true);
+}
+
+int GamesLibraryPage::selectedIndex() const {
+  if (displayGames_.isEmpty())
+    return 0;
+  return qBound(0, gridRow_, displayGames_.size() - 1);
 }
 
 void GamesLibraryPage::activateFocused() {
-  const int idx = gridRow_ * kCols + gridCol_;
-  if (idx < 0 || idx >= displayGames_.size())
+  if (displayGames_.isEmpty())
     return;
-  const auto &game = displayGames_[idx];
+  const auto &game = displayGames_.at(selectedIndex());
   if (game.unsupported)
     return;
   emit gameSelected(game.path);
 }
 
+void GamesLibraryPage::openDetailsDialog() {
+  if (displayGames_.isEmpty())
+    return;
+
+  const auto &game = displayGames_.at(selectedIndex());
+  LibraryInfoDialog dialog(game, this);
+  if (dialog.exec() == QDialog::Accepted && !game.unsupported)
+    emit gameSelected(game.path);
+}
+
 void GamesLibraryPage::keyPressEvent(QKeyEvent *event) {
   const int key = event->key();
   const int size = displayGames_.size();
-  const int lastIndex = qMax(0, size - 1);
 
   if (key == Qt::Key_Escape || key == Qt::Key_Backspace) {
     emit backRequested();
     return;
   }
 
-  if (inChips_) {
-    if (key == Qt::Key_Left) {
-      chipFocus_ = qMax(0, chipFocus_ - 1);
+  switch (focusArea_) {
+  case FocusArea::Filters:
+    if (key == Qt::Key_Left && chipFocus_ > 0) {
+      --chipFocus_;
       updateFilterChips();
       return;
     }
-    if (key == Qt::Key_Right) {
-      chipFocus_ = qMin(chips_.size() - 1, chipFocus_ + 1);
+    if (key == Qt::Key_Right && chipFocus_ + 1 < chips_.size()) {
+      ++chipFocus_;
       updateFilterChips();
+      return;
+    }
+    if (key == Qt::Key_Down && size > 0) {
+      focusArea_ = FocusArea::Titles;
+      updateFilterChips();
+      updateGridFocus();
       return;
     }
     if (key == Qt::Key_Return || key == Qt::Key_Enter) {
@@ -363,68 +690,64 @@ void GamesLibraryPage::keyPressEvent(QKeyEvent *event) {
       rebuildGrid();
       return;
     }
-    if (key == Qt::Key_Down && size > 0) {
-      inChips_ = false;
+    break;
+  case FocusArea::Titles:
+    if (size == 0) {
+      focusArea_ = FocusArea::Filters;
       updateFilterChips();
+      return;
+    }
+    if (key == Qt::Key_Up) {
+      if (gridRow_ == 0) {
+        focusArea_ = FocusArea::Filters;
+        chipFocus_ = static_cast<int>(filter_);
+        updateFilterChips();
+      } else {
+        --gridRow_;
+        updateGridFocus();
+      }
+      return;
+    }
+    if (key == Qt::Key_Down && gridRow_ + 1 < size) {
+      ++gridRow_;
       updateGridFocus();
       return;
     }
-    QWidget::keyPressEvent(event);
-    return;
-  }
-
-  if (size == 0) {
-    inChips_ = true;
-    updateFilterChips();
-    return;
-  }
-
-  if (key == Qt::Key_Left) {
-    if (gridCol_ > 0)
-      --gridCol_;
-    updateGridFocus();
-    return;
-  }
-
-  if (key == Qt::Key_Right) {
-    const int maxCol =
-        (gridRow_ == lastIndex / kCols) ? (lastIndex % kCols) : (kCols - 1);
-    if (gridCol_ < maxCol)
-      ++gridCol_;
-    updateGridFocus();
-    return;
-  }
-
-  if (key == Qt::Key_Up) {
-    if (gridRow_ == 0) {
-      inChips_ = true;
-      chipFocus_ = static_cast<int>(filter_);
-      updateFilterChips();
-    } else {
-      --gridRow_;
-      const int maxCol =
-          (gridRow_ == lastIndex / kCols) ? (lastIndex % kCols) : (kCols - 1);
-      gridCol_ = qMin(gridCol_, maxCol);
+    if (key == Qt::Key_Right) {
+      focusArea_ = FocusArea::Actions;
+      actionFocus_ = 0;
       updateGridFocus();
+      return;
     }
-    return;
-  }
-
-  if (key == Qt::Key_Down) {
-    const int maxRow = lastIndex / kCols;
-    if (gridRow_ < maxRow) {
-      ++gridRow_;
-      const int maxCol =
-          (gridRow_ == maxRow) ? (lastIndex % kCols) : (kCols - 1);
-      gridCol_ = qMin(gridCol_, maxCol);
+    if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+      openDetailsDialog();
+      return;
+    }
+    break;
+  case FocusArea::Actions:
+    if (key == Qt::Key_Left) {
+      focusArea_ = FocusArea::Titles;
       updateGridFocus();
+      return;
     }
-    return;
-  }
-
-  if (key == Qt::Key_Return || key == Qt::Key_Enter) {
-    activateFocused();
-    return;
+    if (key == Qt::Key_Right || key == Qt::Key_Down) {
+      actionFocus_ = qMin(1, actionFocus_ + 1);
+      updateGridFocus();
+      return;
+    }
+    if (key == Qt::Key_Up) {
+      actionFocus_ = qMax(0, actionFocus_ - 1);
+      updateGridFocus();
+      return;
+    }
+    if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+      if (actionFocus_ == 0)
+        activateFocused();
+      else
+        openDetailsDialog();
+      return;
+    }
+    break;
   }
 
   QWidget::keyPressEvent(event);

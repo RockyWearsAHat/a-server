@@ -63,8 +63,9 @@ Use `boot --no-focus` to launch without stealing focus from the user's current w
 3. If a one-shot capture is enough, use `snapshot`.
 4. If interaction is required, `boot`, navigate, `screenshot`, judge immediately, and continue only if the evidence is still inconclusive.
 5. After every screenshot, judge it before taking another one.
-6. Stop after a definitive pass or fail, or after three navigation attempts.
-7. `kill` the app at the end of an interactive session.
+6. **Fix Feedback** — If judgment is FAIL, produce a structured fix list before handing off to implementation. For each deviation: `file → selector → property → current value → target value`. Reference the token tables in `design-system.instructions.md` for target values and the fix mapping in `visual-audit.instructions.md` for which properties to check per category. This list becomes the fix brief for the next implementation cycle.
+7. Stop after a definitive pass, or after the fix-feedback list is delivered for a fail.
+8. `kill` the app at the end of an interactive session.
 
 ## Fast Rules
 

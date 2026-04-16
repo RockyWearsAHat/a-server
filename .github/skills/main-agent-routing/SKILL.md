@@ -58,7 +58,7 @@ Every brief MUST include:
 
 1. **Action type** — `implement` or `research-only` (first field — controls everything downstream)
 2. **Goal** — User-facing outcome in concrete terms
-3. **Current state** — What exists now, what's working, what's broken (from the product overview)
+3. **Context** — Relevant background for the domain. Verify claims from code or Explore results — do not recite assumptions from memory.
 4. **Domain scope** — Which product area this covers and its boundaries
 5. **Constraints** — Quality bar, non-goals, user restrictions VERBATIM. Don't list unrelated domains as negative scope.
 6. **Expected outcome** — What "done" looks like

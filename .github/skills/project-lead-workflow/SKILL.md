@@ -48,7 +48,7 @@ You MUST complete thorough research before creating any implementation plan.
   - High: Qt ownership, threading, shared navigation, build graph changes
   - Medium: page or feature behavior inside an existing subsystem
   - Low: tests, docs, narrow refactors
-- Delegate to Senior Engineer with: what exists now, what needs to change, which files, and specific acceptance criteria.
+- Delegate to Senior Engineer with: what Phase 1 research confirmed, what needs to change, which files, and specific acceptance criteria.
 - Senior Engineer owns implementation AND verification. It loops internally until verified.
 - You do NOT separately dispatch Test Engineer or Visual Engineer — Senior Engineer has them.
 - For native C++/Qt/CMake work, tell Senior Engineer to load `native-cpp-workflow` and the matching scoped instruction files.

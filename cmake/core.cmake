@@ -113,6 +113,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/src/gui/NASAdapter.cpp
     ${PROJECT_ROOT}/src/gui/ScreenMirrorPage.cpp
     ${PROJECT_ROOT}/src/gui/GameStorePage.cpp
+    ${PROJECT_ROOT}/src/gui/SteamAuthDialog.cpp
     ${PROJECT_ROOT}/src/gui/SteamService.cpp
     ${PROJECT_ROOT}/src/gui/GamesLibraryPage.cpp
     ${PROJECT_ROOT}/src/screenmirror/AirPlayReceiver.cpp
@@ -149,6 +150,7 @@ add_executable(AIOServer
     ${PROJECT_ROOT}/include/gui/NASAdapter.h
     ${PROJECT_ROOT}/include/gui/ScreenMirrorPage.h
     ${PROJECT_ROOT}/include/gui/GameStorePage.h
+    ${PROJECT_ROOT}/include/gui/SteamAuthDialog.h
     ${PROJECT_ROOT}/include/gui/SteamService.h
     ${PROJECT_ROOT}/include/gui/GamesLibraryPage.h
     ${PROJECT_ROOT}/include/screenmirror/AirPlayReceiver.h

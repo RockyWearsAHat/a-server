@@ -130,10 +130,11 @@ stopGame() → StopEmulatorThread → displayTimer→stop()
 
 ### Architecture
 
-- `SteamService` (`include/gui/SteamService.h`, `src/gui/SteamService.cpp`): fetches Steam app list via local Node.js proxy (`/api/steam/apps`), caches to `~/.local/share/AIOServer/steam_catalog.json` (24h TTL), and resolves installed Steam app manifests across macOS, Linux, and Windows library locations.
-- `GameStorePage` (`include/gui/GameStorePage.h`, `src/gui/GameStorePage.cpp`): Qt widget page showing Steam catalog with tab-filtered 4-column card grid. Receives `SteamService::gamesReady` signal.
+- `SteamService` (`include/gui/SteamService.h`, `src/gui/SteamService.cpp`): fetches Steam app pages via the local Node.js proxy (`/api/steam/apps`) using `category`, `q`, `start`, and `count`, caches the default catalog page to `~/.local/share/AIOServer/steam_catalog.json` (24h TTL), and resolves installed Steam app manifests across macOS, Linux, and Windows library locations.
+- `GameStorePage` (`include/gui/GameStorePage.h`, `src/gui/GameStorePage.cpp`): Qt widget page showing a paged Steam catalog with large curated cards plus a `My Library` view that includes only installed Steam titles and local ROM entries. It now drives server-side store tabs/search and appends additional catalog pages via `SteamService::gamesPageReady` as the user nears the end of the grid.
+- `GamesLibraryPage` (`include/gui/GamesLibraryPage.h`, `src/gui/GamesLibraryPage.cpp`): Dedicated Steam-inspired local library surface with a left title rail, large hero/details panel, and modal info dialog for selected games.
 - `MainWindow_Pages.cpp`: wires `setupGameStorePage()` and `goToGameStore()`.
-- `MainWindow::launchSteamGame()` now uses `steam://run/<appId>` for installed titles and `steam://install/<appId>` for titles that are not installed, so the store can initiate installs directly from the app.
+- `MainWindow::launchSteamGame()` keeps unowned Steam titles inside the app by opening the Steam web store in `StreamingWebViewPage`; installed titles still attempt `steam://run/<appId>`, but now fall back to the embedded Steam page instead of leaving the shell.
 - `server/src/index.ts`: `/api/steam/apps` route — proxies Steam GetAppList/v2, caches body, slices to 500 entries.
 
 ### Known bugs fixed (2026-03-23)
@@ -142,3 +143,4 @@ stopGame() → StopEmulatorThread → displayTimer→stop()
 2. `QLayoutItem*` from `tabLay->takeAt(0)` was discarded (leak) — changed to `delete tabLay->takeAt(0)`.
 3. `showSteamError` was non-idempotent — added `errorShown_` bool flag guard; reset in `onSteamGamesReady`.
 4. `launchSteamGame` passed appId=0 for invalid/empty steamAppId strings — added `if (appId <= 0) return;` guard.
+5. Library-oriented views previously mixed the full public Steam catalog into owned/local browsing. `scanLibrary()` now limits `My Library` to installed Steam entries plus deduplicated ROMs, which also removes duplicate `.bin`/`.cue` PS1 rows.

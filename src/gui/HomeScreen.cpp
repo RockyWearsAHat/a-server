@@ -1,6 +1,6 @@
 #include "gui/HomeScreen.h"
 
-#include <QGraphicsDropShadowEffect>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -13,11 +13,10 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QTime>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QGridLayout>
-#include <QSettings>
 #include <algorithm>
 #include <cstdlib>
 
@@ -152,27 +151,27 @@ const char *subtitleFor(HomeTileKind kind) {
   case HomeTileKind::GBA:
     return "Handheld classics";
   case HomeTileKind::PS1:
-    return "32-bit era";
+    return "Relive the 32-bit era";
   case HomeTileKind::Switch:
-    return "Modern titles";
+    return "Your modern library";
   case HomeTileKind::MediaServer:
-    return "Browse your library";
+    return "Your personal collection";
   case HomeTileKind::ScreenMirror:
-    return "Cast from devices";
+    return "Cast from any device";
   case HomeTileKind::Settings:
-    return "Preferences";
+    return "Make it yours";
   case HomeTileKind::YouTube:
-    return "Watch videos";
+    return "Endless video";
   case HomeTileKind::Netflix:
-    return "Stream movies & TV";
+    return "Movies, series & more";
   case HomeTileKind::DisneyPlus:
-    return "Movies & shows";
+    return "Stories you love";
   case HomeTileKind::Hulu:
-    return "Stream live & on demand";
+    return "Live & on demand";
   case HomeTileKind::Store:
-    return "Discover new games";
+    return "Something new to play";
   case HomeTileKind::Library:
-    return "Installed apps & games";
+    return "Ready to launch";
   case HomeTileKind::Blank:
     return "";
   }
@@ -384,8 +383,8 @@ void HomeTile::paintEvent(QPaintEvent *) {
   // scale or skew — it sits at a fixed position outside the card artwork.
   {
     const qreal ringAlpha =
-        focused ? (180.0 + 75.0 * qBound(0.0, fp, 1.0)) : 14.0;
-    const qreal ringWidth = focused ? 3.0 : 1.0;
+        focused ? (180.0 + 75.0 * qBound(0.0, fp, 1.0)) : 0.0;
+    const qreal ringWidth = focused ? 3.0 : 0.0;
     QPainterPath ring;
     ring.addRoundedRect(r.adjusted(1.5, 1.5, -1.5, -1.5), radius, radius);
     p.setPen(
@@ -919,17 +918,20 @@ void HomeScreen::setupUi() {
     hdr->setFixedHeight(52);
     auto *hdrLay = new QHBoxLayout(hdr);
     hdrLay->setContentsMargins(40, 10, 40, 0);
-    auto *appTitle = new QLabel(QStringLiteral("AIO ENTERTAINMENT SYSTEM"), hdr);
+    auto *appTitle =
+        new QLabel(QStringLiteral("AIO ENTERTAINMENT SYSTEM"), hdr);
     appTitle->setObjectName(QStringLiteral("aioHomeBrand"));
     hdrLay->addWidget(appTitle);
     hdrLay->addStretch();
     auto *clockLabel = new QLabel(hdr);
     clockLabel->setObjectName(QStringLiteral("aioHomeClock"));
-    clockLabel->setText(QTime::currentTime().toString(QStringLiteral("h:mm AP")));
+    clockLabel->setText(
+        QTime::currentTime().toString(QStringLiteral("h:mm AP")));
     hdrLay->addWidget(clockLabel);
     auto *clockTimer = new QTimer(this);
     connect(clockTimer, &QTimer::timeout, clockLabel, [clockLabel]() {
-      clockLabel->setText(QTime::currentTime().toString(QStringLiteral("h:mm AP")));
+      clockLabel->setText(
+          QTime::currentTime().toString(QStringLiteral("h:mm AP")));
     });
     clockTimer->start(60000);
     outerLayout->addWidget(hdr);
@@ -946,7 +948,8 @@ void HomeScreen::setupUi() {
     titleLabel_ = new QLabel(QStringLiteral("Welcome Back"), hero);
     titleLabel_->setObjectName(QStringLiteral("aioHomeHeroTitle"));
     heroLay->addWidget(titleLabel_);
-    subtitleLabel_ = new QLabel(QStringLiteral("Pick a tile and press Select to launch."), hero);
+    subtitleLabel_ = new QLabel(
+        QStringLiteral("Pick a tile and press Select to launch."), hero);
     subtitleLabel_->setObjectName(QStringLiteral("aioHomeHeroSubtitle"));
     subtitleLabel_->setWordWrap(true);
     heroLay->addWidget(subtitleLabel_);
@@ -956,7 +959,10 @@ void HomeScreen::setupUi() {
     modeChipLabel_ = new QLabel(QStringLiteral("BROWSE MODE"), hero);
     modeChipLabel_->setObjectName(QStringLiteral("aioHomeModeChip"));
     chipRow->addWidget(modeChipLabel_);
-    hintLabel_ = new QLabel(QStringLiteral("D-pad navigate  \u00b7  Select launch  \u00b7  Home returns here"), hero);
+    hintLabel_ = new QLabel(
+        QStringLiteral(
+            "D-pad navigate  \u00b7  Select launch  \u00b7  Home returns here"),
+        hero);
     hintLabel_->setObjectName(QStringLiteral("aioHomeHint"));
     chipRow->addWidget(hintLabel_);
     chipRow->addStretch();
@@ -969,10 +975,12 @@ void HomeScreen::setupUi() {
     scrollArea_->setFrameShape(QFrame::NoFrame);
     scrollArea_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scrollArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scrollArea_->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
+    scrollArea_->setStyleSheet(QStringLiteral(
+        "QScrollArea { background: transparent; border: none; }"));
     scrollContent_ = new QWidget();
     scrollContent_->setObjectName(QStringLiteral("aioHomeScrollContent"));
-    scrollContent_->setStyleSheet(QStringLiteral("#aioHomeScrollContent { background: transparent; }"));
+    scrollContent_->setStyleSheet(
+        QStringLiteral("#aioHomeScrollContent { background: transparent; }"));
     gridHost_ = scrollContent_;
     outerLayout->addWidget(scrollArea_, 1);
   } else {
@@ -996,32 +1004,33 @@ void HomeScreen::setupUi() {
 
 void HomeScreen::loadTileOrder() {
   QSettings s;
-  const QString orderStr  = s.value(QStringLiteral("home/tileOrder")).toString();
-  const QString hiddenStr = s.value(QStringLiteral("home/hiddenTiles")).toString();
+  const QString orderStr = s.value(QStringLiteral("home/tileOrder")).toString();
+  const QString hiddenStr =
+      s.value(QStringLiteral("home/hiddenTiles")).toString();
   tileOrder_.clear();
   hiddenTiles_.clear();
   if (!orderStr.isEmpty()) {
     for (const auto &tok : orderStr.split(QLatin1Char(','))) {
       bool ok = false;
       const int v = tok.trimmed().toInt(&ok);
-      if (ok) tileOrder_.append(static_cast<HomeTileKind>(v));
+      if (ok)
+        tileOrder_.append(static_cast<HomeTileKind>(v));
     }
   }
   if (tileOrder_.isEmpty()) {
-    tileOrder_ = {
-        HomeTileKind::YouTube,     HomeTileKind::Netflix,
-        HomeTileKind::DisneyPlus,  HomeTileKind::Hulu,
-        HomeTileKind::MediaServer, HomeTileKind::ScreenMirror,
-        HomeTileKind::Store,       HomeTileKind::Library,
-        HomeTileKind::GBA,         HomeTileKind::PS1,
-        HomeTileKind::Switch,      HomeTileKind::Settings
-    };
+    tileOrder_ = {HomeTileKind::YouTube,     HomeTileKind::Netflix,
+                  HomeTileKind::DisneyPlus,  HomeTileKind::Hulu,
+                  HomeTileKind::MediaServer, HomeTileKind::ScreenMirror,
+                  HomeTileKind::Store,       HomeTileKind::Library,
+                  HomeTileKind::GBA,         HomeTileKind::PS1,
+                  HomeTileKind::Switch,      HomeTileKind::Settings};
   }
   if (!hiddenStr.isEmpty()) {
     for (const auto &tok : hiddenStr.split(QLatin1Char(','))) {
       bool ok = false;
       const int v = tok.trimmed().toInt(&ok);
-      if (ok) hiddenTiles_.append(static_cast<HomeTileKind>(v));
+      if (ok)
+        hiddenTiles_.append(static_cast<HomeTileKind>(v));
     }
   }
 }
@@ -1033,8 +1042,10 @@ void HomeScreen::saveTileOrder() const {
     orderList << QString::number(static_cast<int>(k));
   for (auto k : hiddenTiles_)
     hiddenList << QString::number(static_cast<int>(k));
-  s.setValue(QStringLiteral("home/tileOrder"),  orderList.join(QLatin1Char(',')));
-  s.setValue(QStringLiteral("home/hiddenTiles"), hiddenList.join(QLatin1Char(',')));
+  s.setValue(QStringLiteral("home/tileOrder"),
+             orderList.join(QLatin1Char(',')));
+  s.setValue(QStringLiteral("home/hiddenTiles"),
+             hiddenList.join(QLatin1Char(',')));
 }
 
 void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
@@ -1070,8 +1081,8 @@ void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
   gridLayout_->setRowMinimumHeight(5, 186);
 
   // 5. Section header labels
-  const char *sectionNames[]    = {"STREAMING", "APPS & MEDIA", "GAMES & SYSTEM"};
-  const int   sectionGridRows[] = {0, 2, 4};
+  const char *sectionNames[] = {"Watch Now", "Apps & Media", "Play"};
+  const int sectionGridRows[] = {0, 2, 4};
   for (int i = 0; i < 3; ++i) {
     auto *lbl = new QLabel(QString::fromLatin1(sectionNames[i]), gridHost_);
     lbl->setObjectName(QStringLiteral("aioHomeSectionHeader"));
@@ -1086,10 +1097,11 @@ void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
     if (hiddenTiles_.contains(k))
       continue;
     const int tileLogicalRow = visibleIndex / 4;
-    const int tileCol        = visibleIndex % 4;
+    const int tileCol = visibleIndex % 4;
     auto *tile = new HomeTile(k, gridHost_);
     tile->setMinimumHeight(184);
-    connect(tile, &HomeTile::clicked, this, [this, k]() { activateTileKind(k); });
+    connect(tile, &HomeTile::clicked, this,
+            [this, k]() { activateTileKind(k); });
     gridLayout_->addWidget(tile, tileLogicalRow * 2 + 1, tileCol * 3, 1, 3);
     currentRow.append(tile);
     if (tileCol == 3) {
@@ -1119,19 +1131,44 @@ void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
 
 void HomeScreen::activateTileKind(HomeTileKind kind) {
   switch (kind) {
-  case HomeTileKind::GBA:          emit gbaRequested(); break;
-  case HomeTileKind::PS1:          emit ps1Requested(); break;
-  case HomeTileKind::Switch:       emit switchRequested(); break;
-  case HomeTileKind::MediaServer:  emit nasRequested(); break;
-  case HomeTileKind::ScreenMirror: emit screenMirrorRequested(); break;
-  case HomeTileKind::Settings:     emit settingsRequested(); break;
-  case HomeTileKind::YouTube:      emit streamingAppRequested(StreamingApp::YouTube); break;
-  case HomeTileKind::Netflix:      emit streamingAppRequested(StreamingApp::Netflix); break;
-  case HomeTileKind::DisneyPlus:   emit streamingAppRequested(StreamingApp::DisneyPlus); break;
-  case HomeTileKind::Hulu:         emit streamingAppRequested(StreamingApp::Hulu); break;
-  case HomeTileKind::Store:        emit storeRequested(); break;
-  case HomeTileKind::Library:      emit libraryRequested(); break;
-  case HomeTileKind::Blank: break;
+  case HomeTileKind::GBA:
+    emit gbaRequested();
+    break;
+  case HomeTileKind::PS1:
+    emit ps1Requested();
+    break;
+  case HomeTileKind::Switch:
+    emit switchRequested();
+    break;
+  case HomeTileKind::MediaServer:
+    emit nasRequested();
+    break;
+  case HomeTileKind::ScreenMirror:
+    emit screenMirrorRequested();
+    break;
+  case HomeTileKind::Settings:
+    emit settingsRequested();
+    break;
+  case HomeTileKind::YouTube:
+    emit streamingAppRequested(StreamingApp::YouTube);
+    break;
+  case HomeTileKind::Netflix:
+    emit streamingAppRequested(StreamingApp::Netflix);
+    break;
+  case HomeTileKind::DisneyPlus:
+    emit streamingAppRequested(StreamingApp::DisneyPlus);
+    break;
+  case HomeTileKind::Hulu:
+    emit streamingAppRequested(StreamingApp::Hulu);
+    break;
+  case HomeTileKind::Store:
+    emit storeRequested();
+    break;
+  case HomeTileKind::Library:
+    emit libraryRequested();
+    break;
+  case HomeTileKind::Blank:
+    break;
   }
 }
 
@@ -1142,27 +1179,30 @@ void HomeScreen::toggleOrganizeMode() {
     hideAddAppsOverlay();
 }
 
-void HomeScreen::resetLayout() {
-  rebuildGrid();
-}
+void HomeScreen::resetLayout() { rebuildGrid(); }
 
 void HomeScreen::moveFocusedTile(int rowDelta, int colDelta) {
   const int tilesPerRow = 4;
-  const int fromLinear  = focusRow_ * tilesPerRow + focusCol_;
-  const int toLinear    = (focusRow_ + rowDelta) * tilesPerRow + (focusCol_ + colDelta);
+  const int fromLinear = focusRow_ * tilesPerRow + focusCol_;
+  const int toLinear =
+      (focusRow_ + rowDelta) * tilesPerRow + (focusCol_ + colDelta);
 
   QVector<HomeTileKind> visible;
   for (auto k : tileOrder_)
-    if (!hiddenTiles_.contains(k)) visible.append(k);
+    if (!hiddenTiles_.contains(k))
+      visible.append(k);
 
-  if (fromLinear < 0 || fromLinear >= visible.size()) return;
-  if (toLinear   < 0 || toLinear   >= visible.size()) return;
+  if (fromLinear < 0 || fromLinear >= visible.size())
+    return;
+  if (toLinear < 0 || toLinear >= visible.size())
+    return;
 
   const HomeTileKind fromKind = visible[fromLinear];
-  const HomeTileKind toKind   = visible[toLinear];
+  const HomeTileKind toKind = visible[toLinear];
   const int realFrom = tileOrder_.indexOf(fromKind);
-  const int realTo   = tileOrder_.indexOf(toKind);
-  if (realFrom < 0 || realTo < 0) return;
+  const int realTo = tileOrder_.indexOf(toKind);
+  if (realFrom < 0 || realTo < 0)
+    return;
   std::swap(tileOrder_[realFrom], tileOrder_[realTo]);
 
   saveTileOrder();
@@ -1171,24 +1211,30 @@ void HomeScreen::moveFocusedTile(int rowDelta, int colDelta) {
 
 void HomeScreen::hideFocusedTile() {
   HomeTile *tile = currentFocusedTile();
-  if (!tile || tile->kind() == HomeTileKind::Blank) return;
+  if (!tile || tile->kind() == HomeTileKind::Blank)
+    return;
   const HomeTileKind k = tile->kind();
   tileOrder_.removeAll(k);
   hiddenTiles_.append(k);
-  focusCol_ = qMin(focusCol_, qMax(0,
-      (rows_.isEmpty() ? 0 : static_cast<int>(rows_[focusRow_].size())) - 1));
+  focusCol_ = qMin(
+      focusCol_,
+      qMax(0,
+           (rows_.isEmpty() ? 0 : static_cast<int>(rows_[focusRow_].size())) -
+               1));
   saveTileOrder();
   rebuildGrid();
 }
 
 void HomeScreen::showAddAppsOverlay() {
-  if (hiddenTiles_.isEmpty()) return;
-  if (addAppsOverlay_) hideAddAppsOverlay();
+  if (hiddenTiles_.isEmpty())
+    return;
+  if (addAppsOverlay_)
+    hideAddAppsOverlay();
 
   addAppsOverlay_ = new QWidget(this);
   addAppsOverlay_->setObjectName(QStringLiteral("aioAddAppsOverlay"));
-  addAppsOverlay_->setFixedSize(480,
-      qMin(600, 120 + static_cast<int>(hiddenTiles_.size()) * 64));
+  addAppsOverlay_->setFixedSize(
+      480, qMin(600, 120 + static_cast<int>(hiddenTiles_.size()) * 64));
 
   addAppsLayout_ = new QVBoxLayout(addAppsOverlay_);
   addAppsLayout_->setContentsMargins(32, 32, 32, 32);
@@ -1199,20 +1245,22 @@ void HomeScreen::showAddAppsOverlay() {
   addAppsLayout_->addWidget(title);
 
   auto *hint = new QLabel(
-      QStringLiteral("D-pad select  \u00b7  Enter restore  \u00b7  Back cancel"),
+      QStringLiteral(
+          "D-pad select  \u00b7  Enter restore  \u00b7  Back cancel"),
       addAppsOverlay_);
   hint->setObjectName(QStringLiteral("aioAddAppsHint"));
   addAppsLayout_->addWidget(hint);
 
   addAppsFocus_ = 0;
   for (int i = 0; i < hiddenTiles_.size(); ++i) {
-    auto *item = new QLabel(QString::fromLatin1(labelFor(hiddenTiles_[i])), addAppsOverlay_);
+    auto *item = new QLabel(QString::fromLatin1(labelFor(hiddenTiles_[i])),
+                            addAppsOverlay_);
     item->setObjectName(QStringLiteral("aioAddAppsItem"));
     item->setProperty("aio_selected", i == addAppsFocus_);
     addAppsLayout_->addWidget(item);
   }
 
-  addAppsOverlay_->move((width()  - addAppsOverlay_->width())  / 2,
+  addAppsOverlay_->move((width() - addAppsOverlay_->width()) / 2,
                         (height() - addAppsOverlay_->height()) / 2);
   addAppsOverlay_->show();
   addAppsOverlay_->raise();
@@ -1222,7 +1270,7 @@ void HomeScreen::hideAddAppsOverlay() {
   if (addAppsOverlay_) {
     addAppsOverlay_->deleteLater();
     addAppsOverlay_ = nullptr;
-    addAppsLayout_  = nullptr;
+    addAppsLayout_ = nullptr;
   }
 }
 
@@ -1240,14 +1288,19 @@ int HomeScreen::currentColumnCount() const { return 4; }
 HomeTile *HomeScreen::tileForKind(HomeTileKind kind) const {
   for (const auto &row : rows_)
     for (auto *t : row)
-      if (t->kind() == kind) return t;
+      if (t->kind() == kind)
+        return t;
   return nullptr;
 }
 
 bool HomeScreen::findTile(HomeTileKind kind, int &row, int &col) const {
   for (int r = 0; r < rows_.size(); ++r)
     for (int c = 0; c < rows_[r].size(); ++c)
-      if (rows_[r][c]->kind() == kind) { row = r; col = c; return true; }
+      if (rows_[r][c]->kind() == kind) {
+        row = r;
+        col = c;
+        return true;
+      }
   return false;
 }
 
@@ -1281,12 +1334,12 @@ void HomeScreen::updateHero() {
     return;
   }
 
-  const char *sectionNames[] = {"STREAMING", "APPS & MEDIA", "GAMES & SYSTEM"};
+  const char *sectionNames[] = {"Watch Now", "Apps & Media", "Play"};
   const int sectionIdx = qBound(0, focusRow_, 2);
   eyebrowLabel_->setText(QString::fromLatin1(sectionNames[sectionIdx]));
 
   const QString focusedTitle = QString::fromLatin1(labelFor(tile->kind()));
-  titleLabel_->setText(QStringLiteral("Open %1").arg(focusedTitle));
+  titleLabel_->setText(focusedTitle);
   subtitleLabel_->setText(QString::fromLatin1(subtitleFor(tile->kind())));
 
   modeChipLabel_->setVisible(organizeMode_);
@@ -1299,8 +1352,8 @@ void HomeScreen::updateHero() {
 
   hintLabel_->setVisible(organizeMode_);
   if (organizeMode_) {
-    hintLabel_->setText(QStringLiteral(
-        "Move: D-pad  \u00b7  Hide: Delete  \u00b7  Add: A  \u00b7  Exit: Esc"));
+    hintLabel_->setText(QStringLiteral("Move: D-pad  \u00b7  Hide: Delete  "
+                                       "\u00b7  Add: A  \u00b7  Exit: Esc"));
   }
 }
 
@@ -1309,9 +1362,16 @@ void HomeScreen::updateFocus() {
     for (int c = 0; c < rows_[r].size(); ++c) {
       const bool selected = (focusRow_ == r && focusCol_ == c);
       auto *tile = rows_[r][c];
-      tile->setProperty("aio_selected", selected);
 
       const qreal target = selected ? 1.0 : 0.0;
+
+      // Skip tiles whose state hasn't changed.
+      if (tile->property("aio_selected").toBool() == selected &&
+          qFuzzyCompare(tile->focusProgress(), target))
+        continue;
+
+      tile->setProperty("aio_selected", selected);
+
       auto *anim =
           tile->findChild<QPropertyAnimation *>(QStringLiteral("focusAnim"));
       if (!anim) {
@@ -1328,26 +1388,6 @@ void HomeScreen::updateFocus() {
 
       if (selected)
         tile->raise();
-
-      if (tile->kind() != HomeTileKind::Blank) {
-        auto *shadow =
-            qobject_cast<QGraphicsDropShadowEffect *>(tile->graphicsEffect());
-        if (!shadow) {
-          shadow = new QGraphicsDropShadowEffect(tile);
-          tile->setGraphicsEffect(shadow);
-        }
-        if (selected) {
-          shadow->setBlurRadius(40.0);
-          shadow->setOffset(0.0, 12.0);
-          shadow->setColor(QColor(0, 0, 0, 160));
-        } else {
-          shadow->setBlurRadius(8.0);
-          shadow->setOffset(0.0, 3.0);
-          shadow->setColor(QColor(0, 0, 0, 40));
-        }
-      } else if (tile->graphicsEffect()) {
-        tile->setGraphicsEffect(nullptr);
-      }
     }
   }
   updateHero();
@@ -1366,7 +1406,8 @@ void HomeScreen::ensureFocusVisible() {
 
 void HomeScreen::activateFocusedTile() {
   HomeTile *tile = currentFocusedTile();
-  if (!tile) return;
+  if (!tile)
+    return;
   activateTileKind(tile->kind());
 }
 
@@ -1376,9 +1417,9 @@ void HomeScreen::paintEvent(QPaintEvent *) {
   const QRectF r(rect());
 
   QRadialGradient rg(r.center(), r.width() * 0.75);
-  rg.setColorAt(0.0,  QColor(22, 26, 48));
+  rg.setColorAt(0.0, QColor(22, 26, 48));
   rg.setColorAt(0.40, QColor(12, 15, 30));
-  rg.setColorAt(1.0,  QColor(4,  5,  10));
+  rg.setColorAt(1.0, QColor(4, 5, 10));
   p.fillRect(r, rg);
 
   if (focusRow_ >= 0 && focusRow_ < rows_.size() && focusCol_ >= 0 &&
@@ -1403,12 +1444,15 @@ void HomeScreen::paintEvent(QPaintEvent *) {
         const QRectF tg(tileOrigin, tile->size());
         const qreal gp = qBound(0.0, fp, 1.0);
         {
-          const qreal expand   = 40.0 * gp;
+          const qreal expand = 40.0 * gp;
           const QRectF glowRect = tg.adjusted(-expand, -expand, expand, expand);
-          QRadialGradient rGlow(tg.center(), qMax(tg.width(), tg.height()) * 0.85);
-          rGlow.setColorAt(0.0,  QColor(gc.red(), gc.green(), gc.blue(), static_cast<int>(80 * gp)));
-          rGlow.setColorAt(0.45, QColor(gc.red(), gc.green(), gc.blue(), static_cast<int>(28 * gp)));
-          rGlow.setColorAt(1.0,  QColor(gc.red(), gc.green(), gc.blue(), 0));
+          QRadialGradient rGlow(tg.center(),
+                                qMax(tg.width(), tg.height()) * 0.85);
+          rGlow.setColorAt(0.0, QColor(gc.red(), gc.green(), gc.blue(),
+                                       static_cast<int>(80 * gp)));
+          rGlow.setColorAt(0.45, QColor(gc.red(), gc.green(), gc.blue(),
+                                        static_cast<int>(28 * gp)));
+          rGlow.setColorAt(1.0, QColor(gc.red(), gc.green(), gc.blue(), 0));
           QPainterPath glowPath;
           glowPath.addRoundedRect(glowRect, 36, 36);
           p.fillPath(glowPath, rGlow);
@@ -1422,12 +1466,13 @@ void HomeScreen::keyPressEvent(QKeyEvent *event) {
   // --- Add-apps overlay navigation takes full priority ---
   if (addAppsOverlay_) {
     const int itemOffset = 2; // title + hint labels precede item entries
-    const int numItems   = addAppsLayout_->count() - itemOffset;
+    const int numItems = addAppsLayout_->count() - itemOffset;
 
     auto refreshOverlaySelection = [&]() {
       for (int i = 0; i < numItems; ++i) {
         QLayoutItem *li = addAppsLayout_->itemAt(itemOffset + i);
-        if (!li) continue;
+        if (!li)
+          continue;
         auto *item = qobject_cast<QLabel *>(li->widget());
         if (item) {
           item->setProperty("aio_selected", i == addAppsFocus_);
@@ -1439,23 +1484,34 @@ void HomeScreen::keyPressEvent(QKeyEvent *event) {
 
     switch (event->key()) {
     case Qt::Key_Up:
-      if (addAppsFocus_ > 0) { --addAppsFocus_; refreshOverlaySelection(); }
-      event->accept(); return;
+      if (addAppsFocus_ > 0) {
+        --addAppsFocus_;
+        refreshOverlaySelection();
+      }
+      event->accept();
+      return;
     case Qt::Key_Down:
-      if (addAppsFocus_ < numItems - 1) { ++addAppsFocus_; refreshOverlaySelection(); }
-      event->accept(); return;
+      if (addAppsFocus_ < numItems - 1) {
+        ++addAppsFocus_;
+        refreshOverlaySelection();
+      }
+      event->accept();
+      return;
     case Qt::Key_Return:
     case Qt::Key_Enter:
     case Qt::Key_Space:
       if (addAppsFocus_ >= 0 && addAppsFocus_ < hiddenTiles_.size())
         unhideTile(hiddenTiles_[addAppsFocus_]);
-      event->accept(); return;
+      event->accept();
+      return;
     case Qt::Key_Escape:
     case Qt::Key_Back:
       hideAddAppsOverlay();
-      event->accept(); return;
+      event->accept();
+      return;
     default:
-      event->accept(); return;
+      event->accept();
+      return;
     }
   }
 
@@ -1466,73 +1522,107 @@ void HomeScreen::keyPressEvent(QKeyEvent *event) {
   switch (event->key()) {
   case Qt::Key_Left:
     if (organizeMode_) {
-      if (focusCol_ > 0) moveFocusedTile(0, -1);
+      if (focusCol_ > 0)
+        moveFocusedTile(0, -1);
     } else {
-      if (focusCol_ > 0) { --focusCol_; updateFocus(); }
+      if (focusCol_ > 0) {
+        --focusCol_;
+        updateFocus();
+      }
     }
-    event->accept(); return;
+    event->accept();
+    return;
 
   case Qt::Key_Right:
     if (organizeMode_) {
-      if (focusCol_ < maxCol) moveFocusedTile(0, 1);
+      if (focusCol_ < maxCol)
+        moveFocusedTile(0, 1);
     } else {
-      if (focusCol_ < maxCol) { ++focusCol_; updateFocus(); }
+      if (focusCol_ < maxCol) {
+        ++focusCol_;
+        updateFocus();
+      }
     }
-    event->accept(); return;
+    event->accept();
+    return;
 
   case Qt::Key_Up:
     if (organizeMode_) {
-      if (focusRow_ > 0) moveFocusedTile(-1, 0);
+      if (focusRow_ > 0)
+        moveFocusedTile(-1, 0);
     } else {
       if (focusRow_ > 0) {
         --focusRow_;
         const int newMax = colsInRow(focusRow_) - 1;
-        if (focusCol_ > newMax) focusCol_ = newMax;
-        updateFocus(); ensureFocusVisible();
+        if (focusCol_ > newMax)
+          focusCol_ = newMax;
+        updateFocus();
+        ensureFocusVisible();
       }
     }
-    event->accept(); return;
+    event->accept();
+    return;
 
   case Qt::Key_Down:
     if (organizeMode_) {
-      if (focusRow_ < maxRow) moveFocusedTile(1, 0);
+      if (focusRow_ < maxRow)
+        moveFocusedTile(1, 0);
     } else {
       if (focusRow_ < maxRow) {
         ++focusRow_;
         const int newMax = colsInRow(focusRow_) - 1;
-        if (focusCol_ > newMax) focusCol_ = newMax;
-        updateFocus(); ensureFocusVisible();
+        if (focusCol_ > newMax)
+          focusCol_ = newMax;
+        updateFocus();
+        ensureFocusVisible();
       }
     }
-    event->accept(); return;
+    event->accept();
+    return;
 
   case Qt::Key_Return:
   case Qt::Key_Enter:
   case Qt::Key_Space:
-    activateFocusedTile(); event->accept(); return;
+    activateFocusedTile();
+    event->accept();
+    return;
 
   case Qt::Key_O:
-    toggleOrganizeMode(); event->accept(); return;
+    toggleOrganizeMode();
+    event->accept();
+    return;
 
   case Qt::Key_Escape:
   case Qt::Key_Back:
-    if (organizeMode_) { toggleOrganizeMode(); event->accept(); return; }
+    if (organizeMode_) {
+      toggleOrganizeMode();
+      event->accept();
+      return;
+    }
     break;
 
   case Qt::Key_Delete:
   case Qt::Key_Backspace:
-    if (organizeMode_) { hideFocusedTile(); event->accept(); return; }
+    if (organizeMode_) {
+      hideFocusedTile();
+      event->accept();
+      return;
+    }
     break;
 
   case Qt::Key_A:
     if (organizeMode_) {
-      if (addAppsOverlay_) hideAddAppsOverlay();
-      else                  showAddAppsOverlay();
-      event->accept(); return;
+      if (addAppsOverlay_)
+        hideAddAppsOverlay();
+      else
+        showAddAppsOverlay();
+      event->accept();
+      return;
     }
     break;
 
-  default: break;
+  default:
+    break;
   }
 
   QWidget::keyPressEvent(event);
