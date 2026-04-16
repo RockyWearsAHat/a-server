@@ -405,7 +405,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator DreamcastEmulator PS2Emulator GameCubeEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SNESEmulator GBEmulator NESEmulator N64Emulator SaturnEmulator DreamcastEmulator PS2Emulator GameCubeEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     Atari2600Emulator
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>

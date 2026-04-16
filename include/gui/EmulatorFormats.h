@@ -24,14 +24,15 @@ struct EmulatorFormat {
 inline const QVector<EmulatorFormat> &emulatorFormats() {
   static const QVector<EmulatorFormat> kFormats = {
       // ── Fully launchable ──────────────────────────────────────────────
-      {"GBA", "Game Boy Advance", {"gba", "gb", "gbc"}, true},
+      {"GBA", "Game Boy Advance", {"gba"}, true},
       {"PS1", "PlayStation", {"bin", "cue", "iso", "img", "chd", "pbp"}, true},
       {"Atari2600", "Atari 2600", {"a26"}, true},
+      {"NES", "Nintendo", {"nes"}, true},
+      {"Genesis", "Sega Genesis", {"md", "gen", "smd"}, true},
+      {"SNES", "Super Nintendo", {"smc", "sfc", "fig", "swc"}, true},
+      {"GameBoy", "Game Boy / Color", {"gb", "gbc"}, true},
 
       // ── Emulation cores present, GUI launch not yet wired ────────────
-      {"SNES", "Super Nintendo", {"smc", "sfc", "fig", "swc"}, false},
-      {"NES", "Nintendo", {"nes"}, false},
-      {"Genesis", "Sega Genesis", {"md", "gen", "smd"}, false},
       {"N64", "Nintendo 64", {"z64", "v64", "n64"}, false},
 
       // ── Indexed only — intentionally unavailable in production ────────

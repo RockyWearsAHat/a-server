@@ -5,6 +5,10 @@
 #include "emulator/ps1/PS1.h"
 #include "emulator/switch/SwitchEmulator.h"
 #include "emulator/windows/WindowsEmulator.h"
+#include "emulator/nes/NES.h"
+#include "emulator/genesis/Genesis.h"
+#include "emulator/snes/SNES.h"
+#include "emulator/gb/GB.h"
 
 #include "emulator/switch/GpuCore.h"
 
@@ -484,6 +488,95 @@ void MainWindow::LoadROM(const std::string &path) {
         displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
       }
     }
+  } else if (currentEmulator == EmulatorType::NES) {
+    nesConsole = std::make_unique<AIO::Emulator::NES::NES>();
+    try {
+      std::ifstream file(path, std::ios::binary);
+      if (file.is_open()) {
+        file.seekg(0, std::ios::end);
+        std::vector<uint8_t> data(file.tellg());
+        file.seekg(0, std::ios::beg);
+        file.read((char*)data.data(), data.size());
+        nesConsole->Load(std::span<const uint8_t>(data));
+        success = true;
+      }
+    } catch (...) {
+      success = false;
+    }
+    if (success) {
+      displayImage = QImage(256, 240, QImage::Format_ARGB32);
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::Genesis) {
+    genesisConsole = std::make_unique<AIO::Emulator::Genesis::Genesis>();
+    try {
+      std::ifstream file(path, std::ios::binary);
+      if (file.is_open()) {
+        file.seekg(0, std::ios::end);
+        std::vector<uint8_t> data(file.tellg());
+        file.seekg(0, std::ios::beg);
+        file.read((char*)data.data(), data.size());
+        genesisConsole->Load(std::span<const uint8_t>(data));
+        success = true;
+      }
+    } catch (...) {
+      success = false;
+    }
+    if (success) {
+      displayImage = QImage(320, 240, QImage::Format_ARGB32);
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::SNES) {
+    snesConsole = std::make_unique<AIO::Emulator::SNES::SNES>();
+    try {
+      std::ifstream file(path, std::ios::binary);
+      if (file.is_open()) {
+        file.seekg(0, std::ios::end);
+        std::vector<uint8_t> data(file.tellg());
+        file.seekg(0, std::ios::beg);
+        file.read((char*)data.data(), data.size());
+        snesConsole->Load(std::span<const uint8_t>(data));
+        success = true;
+      }
+    } catch (...) {
+      success = false;
+    }
+    if (success) {
+      displayImage = QImage(256, 224, QImage::Format_ARGB32);
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::GameBoy) {
+    gameboyConsole = std::make_unique<GBEmulator::GB>();
+    success = true;
+    try {
+      gameboyConsole->Load(path);
+    } catch (...) {
+      success = false;
+    }
+    if (success) {
+      displayImage = QImage(160, 144, QImage::Format_ARGB32);
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
   }
 
   if (success) {
@@ -801,6 +894,14 @@ void MainWindow::EmulatorThreadMain() {
       atari2600Console->SetJoystick(
           0, AtariJoystickStateFromLogical(inputSnap.logical));
       atari2600Console->RunFrame();
+    } else if (currentEmulator == EmulatorType::NES) {
+      nesConsole->RunFrame();
+    } else if (currentEmulator == EmulatorType::Genesis) {
+      genesisConsole->RunFrame();
+    } else if (currentEmulator == EmulatorType::SNES) {
+      snesConsole->RunFrame();
+    } else if (currentEmulator == EmulatorType::GameBoy) {
+      gameboyConsole->RunFrame();
     }
 
     // Always save frame snapshot for step-back capability (BEFORE incrementing
@@ -1152,6 +1253,97 @@ void MainWindow::UpdateDisplay() {
     }
 
     const uint32_t *fb = atari2600Console->GetFramebuffer();
+    if (fb) {
+      for (int y = 0; y < fbHeight; ++y) {
+        std::memcpy(displayImage.scanLine(y),
+                    fb + static_cast<size_t>(y) * fbWidth,
+                    static_cast<size_t>(fbWidth) * sizeof(uint32_t));
+      }
+
+      if (avRecorder_.IsRecording()) {
+        std::vector<uint32_t> frame(
+            fb, fb + static_cast<size_t>(fbWidth) * fbHeight);
+        avRecorder_.RecordVideoFrame(frame);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::NES) {
+    const int fbWidth = 256;
+    const int fbHeight = 240;
+    if (displayImage.width() != fbWidth || displayImage.height() != fbHeight) {
+      displayImage = QImage(fbWidth, fbHeight, QImage::Format_ARGB32);
+    }
+
+    const uint32_t *fb = nesConsole->GetPPU().GetFramebuffer();
+    if (fb) {
+      for (int y = 0; y < fbHeight; ++y) {
+        std::memcpy(displayImage.scanLine(y),
+                    fb + static_cast<size_t>(y) * fbWidth,
+                    static_cast<size_t>(fbWidth) * sizeof(uint32_t));
+      }
+
+      if (avRecorder_.IsRecording()) {
+        std::vector<uint32_t> frame(
+            fb, fb + static_cast<size_t>(fbWidth) * fbHeight);
+        avRecorder_.RecordVideoFrame(frame);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::Genesis) {
+    const int fbWidth = 320;
+    const int fbHeight = 240;
+    if (displayImage.width() != fbWidth || displayImage.height() != fbHeight) {
+      displayImage = QImage(fbWidth, fbHeight, QImage::Format_ARGB32);
+    }
+
+    const uint8_t *fb = genesisConsole->GetVDP().GetFramebuffer();
+    if (fb) {
+      // Genesis VDP framebuffer is in a different format, need to convert it
+      // For now, just copy the raw data (implementation may need format conversion)
+      for (int y = 0; y < fbHeight; ++y) {
+        std::memcpy(displayImage.scanLine(y),
+                    fb + static_cast<size_t>(y) * fbWidth * 4,
+                    static_cast<size_t>(fbWidth) * 4);
+      }
+
+      if (avRecorder_.IsRecording()) {
+        std::vector<uint32_t> frame(fbWidth * fbHeight);
+        for (size_t i = 0; i < frame.size(); ++i) {
+          frame[i] = reinterpret_cast<const uint32_t*>(fb)[i];
+        }
+        avRecorder_.RecordVideoFrame(frame);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::SNES) {
+    const int fbWidth = 256;
+    const int fbHeight = 224;
+    if (displayImage.width() != fbWidth || displayImage.height() != fbHeight) {
+      displayImage = QImage(fbWidth, fbHeight, QImage::Format_ARGB32);
+    }
+
+    const uint8_t *fb = snesConsole->GetPPU().GetFramebuffer();
+    if (fb) {
+      // SNES PPU framebuffer format handling
+      for (int y = 0; y < fbHeight; ++y) {
+        std::memcpy(displayImage.scanLine(y),
+                    fb + static_cast<size_t>(y) * fbWidth * 4,
+                    static_cast<size_t>(fbWidth) * 4);
+      }
+
+      if (avRecorder_.IsRecording()) {
+        std::vector<uint32_t> frame(fbWidth * fbHeight);
+        for (size_t i = 0; i < frame.size(); ++i) {
+          frame[i] = reinterpret_cast<const uint32_t*>(fb)[i];
+        }
+        avRecorder_.RecordVideoFrame(frame);
+      }
+    }
+  } else if (currentEmulator == EmulatorType::GameBoy) {
+    const int fbWidth = 160;
+    const int fbHeight = 144;
+    if (displayImage.width() != fbWidth || displayImage.height() != fbHeight) {
+      displayImage = QImage(fbWidth, fbHeight, QImage::Format_ARGB32);
+    }
+
+    const uint32_t *fb = gameboyConsole->GetFramebuffer();
     if (fb) {
       for (int y = 0; y < fbHeight; ++y) {
         std::memcpy(displayImage.scanLine(y),
