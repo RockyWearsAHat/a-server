@@ -1121,9 +1121,10 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStateEmulator() {
   obj["frameNumber"] = static_cast<qint64>(window_->emulatorFrameNumber.load());
 
   // Emulator type
-  const char *emuTypes[] = {"none", "GBA", "Switch", "PS1"};
+  const char *emuTypes[] = {"none", "GBA", "Switch", "PS1", "Windows",
+                            "Atari2600"};
   int emuIdx = static_cast<int>(window_->currentEmulator);
-  obj["type"] = (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
+  obj["type"] = (emuIdx >= 0 && emuIdx < 6) ? emuTypes[emuIdx] : "unknown";
 
   if (window_->emulatorRunning.load()) {
     obj["emulatedMs"] = static_cast<qint64>(window_->GetEmulatedMilliseconds());
