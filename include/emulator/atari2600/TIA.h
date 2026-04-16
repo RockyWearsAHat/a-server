@@ -28,6 +28,8 @@ public:
 
     const uint32_t* GetFramebuffer() const noexcept { return framebuffer_.data(); }
 
+    void SetTrigger(int port, bool pressed) noexcept;
+
     void Reset()  noexcept;
 
     // CPU-facing register interface (addr 0x00–0x3F write; 0x00–0x0D read)

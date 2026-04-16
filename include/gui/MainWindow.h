@@ -59,6 +59,9 @@ class SwitchEmulator;
 namespace AIO::Emulator::Windows {
 class WindowsEmulator;
 }
+namespace Atari2600 {
+class Atari2600Console;
+}
 
 namespace AIO {
 namespace GUI {
@@ -87,7 +90,7 @@ public:
   ~MainWindow();
 
   void LoadROM(const std::string &path);
-  void SetEmulatorType(int type); // 0=GBA, 1=Switch, 2=PS1, 3=Windows
+  void SetEmulatorType(int type); // 0=GBA, 1=Switch, 2=PS1, 3=Windows, 4=Atari2600
   // Debugger controls via GUI/CLI
   void EnableDebugger(bool enabled);
   void AddBreakpoint(uint32_t addr);
@@ -274,13 +277,14 @@ private:
   QLabel *devPanelLabel;
   QCheckBox *devPanelCheckbox;
 
-  enum class EmulatorType { None, GBA, Switch, PS1, Windows };
+  enum class EmulatorType { None, GBA, Switch, PS1, Windows, Atari2600 };
   EmulatorType currentEmulator = EmulatorType::None;
 
   std::unique_ptr<AIO::Emulator::GBA::GBA> gba;
   std::unique_ptr<AIO::Emulator::Switch::SwitchEmulator> switchEmulator;
   std::unique_ptr<AIO::Emulator::PS1::PS1> ps1Emulator;
   std::unique_ptr<AIO::Emulator::Windows::WindowsEmulator> windowsEmulator;
+  std::unique_ptr<Atari2600::Atari2600Console> atari2600Console;
 
   QTimer *displayTimer; // UI update timer (60 Hz)
   QImage displayImage;

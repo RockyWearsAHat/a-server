@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "emulator/atari2600/Atari2600Console.h"
 #include "emulator/gba/GBA.h"
 #include "emulator/ps1/PS1.h"
 
@@ -115,6 +116,10 @@ bool MainWindow::StartAVRecording(const std::string &path) {
   } else if (currentEmulator == EmulatorType::PS1) {
     cfg.videoWidth = 512;
     cfg.videoHeight = 240;
+    cfg.videoFps = 60;
+  } else if (currentEmulator == EmulatorType::Atari2600) {
+    cfg.videoWidth = Atari2600::Atari2600Console::kWidth;
+    cfg.videoHeight = Atari2600::Atari2600Console::kHeight;
     cfg.videoFps = 60;
   } else if (currentEmulator == EmulatorType::Switch) {
     cfg.videoWidth = 1280;

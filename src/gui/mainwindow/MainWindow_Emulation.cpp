@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "emulator/atari2600/Atari2600Console.h"
 #include "emulator/gba/GBA.h"
 #include "emulator/ps1/PS1.h"
 #include "emulator/switch/SwitchEmulator.h"
@@ -40,6 +41,28 @@ namespace AIO {
 namespace GUI {
 
 namespace {
+
+uint8_t AtariJoystickStateFromLogical(uint32_t logical) {
+  uint8_t state = 0;
+  auto isPressed = [&](AIO::Input::LogicalButton button) {
+    const uint32_t mask = 1u << static_cast<uint32_t>(button);
+    return (logical & mask) == 0;
+  };
+
+  if (isPressed(AIO::Input::LogicalButton::Up))
+    state |= 0x01;
+  if (isPressed(AIO::Input::LogicalButton::Down))
+    state |= 0x02;
+  if (isPressed(AIO::Input::LogicalButton::Left))
+    state |= 0x04;
+  if (isPressed(AIO::Input::LogicalButton::Right))
+    state |= 0x08;
+  if (isPressed(AIO::Input::LogicalButton::Confirm) ||
+      isPressed(AIO::Input::LogicalButton::Aux1))
+    state |= 0x10;
+
+  return state;
+}
 
 std::string ReplaceExtension(const std::string &path,
                              const std::string &suffix) {
@@ -192,6 +215,7 @@ uint64_t MainWindow::GetEmulatedMilliseconds() const {
     break;
   case EmulatorType::Switch:
   case EmulatorType::Windows:
+  case EmulatorType::Atari2600:
   case EmulatorType::None:
     break;
   }
@@ -446,6 +470,20 @@ void MainWindow::LoadROM(const std::string &path) {
         displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
       }
     }
+  } else if (currentEmulator == EmulatorType::Atari2600) {
+    success = atari2600Console->LoadROM(path);
+    if (success) {
+      displayImage =
+          QImage(Atari2600::Atari2600Console::kWidth,
+                 Atari2600::Atari2600Console::kHeight,
+                 QImage::Format_ARGB32);
+      if (displayLabel) {
+        displayLabel->setSizePolicy(QSizePolicy::Expanding,
+                                    QSizePolicy::Expanding);
+        displayLabel->setMinimumSize(0, 0);
+        displayLabel->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+      }
+    }
   }
 
   if (success) {
@@ -521,6 +559,9 @@ void MainWindow::SetEmulatorType(int type) {
   } else if (type == 3) {
     currentEmulator = EmulatorType::Windows;
     std::cout << "[MainWindow] Set emulator type to Windows" << std::endl;
+  } else if (type == 4) {
+    currentEmulator = EmulatorType::Atari2600;
+    std::cout << "[MainWindow] Set emulator type to Atari 2600" << std::endl;
   }
 }
 
@@ -566,18 +607,23 @@ void MainWindow::EmulatorThreadMain() {
   // Executes CPU cycles independent of Qt event processing
   using Clock = std::chrono::steady_clock;
 
-  const double nativeFps = static_cast<double>(gba->GetNominalCpuHz()) /
-                           static_cast<double>(gba->GetCyclesPerFrame());
+  auto frameDuration = std::chrono::duration<double>(1.0 / 60.0);
+  if (currentEmulator == EmulatorType::GBA) {
+    const double nativeFps = static_cast<double>(gba->GetNominalCpuHz()) /
+                             static_cast<double>(gba->GetCyclesPerFrame());
 
-  double targetFps = nativeFps;
-  if (const char *v = std::getenv("AIO_GBA_TARGET_FPS")) {
-    const double parsed = std::atof(v);
-    if (parsed >= 1.0 && parsed <= 240.0) {
-      targetFps = parsed;
+    double targetFps = nativeFps;
+    if (const char *v = std::getenv("AIO_GBA_TARGET_FPS")) {
+      const double parsed = std::atof(v);
+      if (parsed >= 1.0 && parsed <= 240.0) {
+        targetFps = parsed;
+      }
     }
-  }
 
-  const auto gbaFrameDuration = std::chrono::duration<double>(1.0 / targetFps);
+    frameDuration = std::chrono::duration<double>(1.0 / targetFps);
+  } else if (currentEmulator == EmulatorType::PS1) {
+    frameDuration = std::chrono::duration<double>(1.0 / 59.94);
+  }
 
   // Use a deadline-based scheduler so occasional sleep overshoot doesn't
   // permanently slow emulation.
@@ -750,6 +796,11 @@ void MainWindow::EmulatorThreadMain() {
       switchEmulator->RunFrame();
     } else if (currentEmulator == EmulatorType::Windows) {
       windowsEmulator->RunFrame();
+    } else if (currentEmulator == EmulatorType::Atari2600) {
+      const auto inputSnap = AIO::Input::InputManager::instance().snapshot();
+      atari2600Console->SetJoystick(
+          0, AtariJoystickStateFromLogical(inputSnap.logical));
+      atari2600Console->RunFrame();
     }
 
     // Always save frame snapshot for step-back capability (BEFORE incrementing
@@ -791,12 +842,7 @@ void MainWindow::EmulatorThreadMain() {
 
     // Advance deadline (pick duration based on active emulator).
     const auto frameDur =
-        (currentEmulator == EmulatorType::GBA)
-            ? std::chrono::duration_cast<Clock::duration>(gbaFrameDuration)
-        : (currentEmulator == EmulatorType::PS1)
-            ? std::chrono::duration_cast<Clock::duration>(
-                  std::chrono::duration<double>(1.0 / 59.94))
-            : std::chrono::milliseconds(16);
+      std::chrono::duration_cast<Clock::duration>(frameDuration);
 
     // Maintain an absolute "next frame" deadline so we self-correct after
     // oversleep.
@@ -1098,6 +1144,27 @@ void MainWindow::UpdateDisplay() {
         }
       }
     }
+  } else if (currentEmulator == EmulatorType::Atari2600) {
+    const int fbWidth = Atari2600::Atari2600Console::kWidth;
+    const int fbHeight = Atari2600::Atari2600Console::kHeight;
+    if (displayImage.width() != fbWidth || displayImage.height() != fbHeight) {
+      displayImage = QImage(fbWidth, fbHeight, QImage::Format_ARGB32);
+    }
+
+    const uint32_t *fb = atari2600Console->GetFramebuffer();
+    if (fb) {
+      for (int y = 0; y < fbHeight; ++y) {
+        std::memcpy(displayImage.scanLine(y),
+                    fb + static_cast<size_t>(y) * fbWidth,
+                    static_cast<size_t>(fbWidth) * sizeof(uint32_t));
+      }
+
+      if (avRecorder_.IsRecording()) {
+        std::vector<uint32_t> frame(
+            fb, fb + static_cast<size_t>(fbWidth) * fbHeight);
+        avRecorder_.RecordVideoFrame(frame);
+      }
+    }
   } else if (currentEmulator == EmulatorType::Windows) {
     const QImage &fb = windowsEmulator->GetFramebuffer();
     if (!fb.isNull()) {
@@ -1202,6 +1269,9 @@ void MainWindow::UpdateDisplay() {
         ss << "<b>Mode:</b> GB/GBC family<br>";
         ss << "<b>Resolution:</b> 160x144";
       }
+    } else if (currentEmulator == EmulatorType::Atari2600) {
+      ss << "<b>Resolution:</b> 160x192<br>";
+      ss << "<b>Input:</b> Atari joystick mapped from controller";
     } else if (currentEmulator == EmulatorType::Switch) {
       ss << switchEmulator->GetDebugInfo();
     }

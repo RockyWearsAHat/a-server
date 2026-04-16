@@ -335,6 +335,16 @@ void RemoteControlServer::buildNavTable() {
         Qt::QueuedConnection);
   });
   addLambda("nintendo-switch", navTable_["switch"]);
+  addLambda("atari", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::Atari2600;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("atari2600", navTable_["atari"]);
   addLambda("youtube", [w = window_]() { w->launchStreamingApp(0); });
   addLambda("netflix", [w = window_]() { w->launchStreamingApp(1); });
   addLambda("disney+", [w = window_]() { w->launchStreamingApp(2); });
@@ -1863,12 +1873,14 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     if (lower.endsWith(".gba") || lower.endsWith(".gb") ||
       lower.endsWith(".gbc"))
       emuType = MainWindow::EmulatorType::GBA;
+    else if (lower.endsWith(".a26"))
+      emuType = MainWindow::EmulatorType::Atari2600;
     else if (lower.endsWith(".bin") || lower.endsWith(".cue") ||
              lower.endsWith(".iso") || lower.endsWith(".img"))
       emuType = MainWindow::EmulatorType::PS1;
     else
       return errorResponse(400, "launch-rom: unrecognized extension "
-                "(supported: .gba .gb .gbc .bin .cue .iso .img)");
+                "(supported: .gba .gb .gbc .a26 .bin .cue .iso .img)");
 
     // Stop any currently-running emulator cleanly.
     if (window_->emulatorRunning.load()) {
@@ -1881,7 +1893,8 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
         window_, [w = window_, path = resolved]() { w->startGame(path); },
         Qt::QueuedConnection);
 
-    const char *emuNames[] = {"none", "GBA", "Switch", "PS1"};
+    const char *emuNames[] = {"none", "GBA", "Switch", "PS1", "Windows",
+                  "Atari2600"};
     int emuIdx = static_cast<int>(emuType);
 
     QJsonObject evData;

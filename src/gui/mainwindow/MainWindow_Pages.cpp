@@ -217,6 +217,11 @@ void MainWindow::launchInstalledGame(const QString &path) {
     startGame(path);
     return;
   }
+  if (lower.endsWith(QStringLiteral(".a26"))) {
+    currentEmulator = EmulatorType::Atari2600;
+    startGame(path);
+    return;
+  }
 
   qWarning() << "Unsupported installed game or app launch path:" << path;
 }
@@ -740,6 +745,16 @@ void MainWindow::setupEmulatorSelect() {
   });
   layout->addWidget(switchBtn);
 
+  QPushButton *atariBtn = new QPushButton("Atari 2600", emulatorSelectPage);
+  atariBtn->setCursor(Qt::PointingHandCursor);
+  atariBtn->setFocusPolicy(Qt::StrongFocus);
+  atariBtn->setProperty("system", "atari2600");
+  connect(atariBtn, &QPushButton::clicked, this, [this]() {
+    currentEmulator = EmulatorType::Atari2600;
+    goToGameSelect();
+  });
+  layout->addWidget(atariBtn);
+
   layout->addStretch();
 
   QPushButton *backBtn = new QPushButton("\u2190  Back", emulatorSelectPage);
@@ -752,7 +767,8 @@ void MainWindow::setupEmulatorSelect() {
   // Create adapter for emulator selection with all buttons including back
   emulatorSelectAdapter = std::make_unique<EmulatorSelectAdapter>(
       emulatorSelectPage,
-      std::vector<QPushButton *>{gbaBtn, ps1Btn, switchBtn, backBtn}, this);
+      std::vector<QPushButton *>{gbaBtn, ps1Btn, switchBtn, atariBtn, backBtn},
+      this);
 }
 
 void MainWindow::refreshGameList() {
@@ -771,6 +787,8 @@ void MainWindow::refreshGameList() {
     filters << "*.bin" << "*.cue" << "*.iso" << "*.img";
   } else if (currentEmulator == EmulatorType::Switch) {
     filters << "*.nso" << "*.nro" << "*.xci" << "*.nsp";
+  } else if (currentEmulator == EmulatorType::Atari2600) {
+    filters << "*.a26" << "*.bin";
   }
 
   QDirIterator it(romDirectory, filters, QDir::Files,
@@ -803,6 +821,10 @@ void MainWindow::refreshGameList() {
       brandPrimary = QColor(77, 196, 255);
       brandDark = QColor(20, 68, 110);
       sysName = "PS1";
+    } else if (currentEmulator == EmulatorType::Atari2600) {
+      brandPrimary = QColor(255, 176, 61);
+      brandDark = QColor(110, 58, 12);
+      sysName = "2600";
     } else {
       brandPrimary = QColor(255, 118, 112);
       brandDark = QColor(120, 38, 35);

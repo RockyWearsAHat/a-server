@@ -74,12 +74,14 @@ void Atari2600Console::SetJoystick(int port, uint8_t state) noexcept {
     // Atari 2600: joystick 1 = Port A bits [3:0], joystick 2 = bits [7:4].
     // Active-low: 0 = pressed, 1 = released.
     const uint8_t invNibble = static_cast<uint8_t>((~state) & 0x0F);
+    const bool firePressed = (state & 0x10u) != 0;
     if (port == 0) {
         portA_ = static_cast<uint8_t>((portA_ & 0xF0u) | invNibble);
     } else {
         portA_ = static_cast<uint8_t>((portA_ & 0x0Fu) | (invNibble << 4u));
     }
     pia_->SetPortA(portA_);
+    tia_->SetTrigger(port, firePressed);
 }
 
 } // namespace Atari2600
