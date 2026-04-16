@@ -1,4 +1,5 @@
 #include "gui/GamesLibraryPage.h"
+#include "gui/EmulatorFormats.h"
 
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -27,11 +28,14 @@ namespace AIO::GUI {
 namespace {
 
 QColor badgeColorFor(const QString &consoleBadge) {
-  if (consoleBadge == QStringLiteral("GBA"))
-    return QColor(QStringLiteral("#9c8cff"));
-  if (consoleBadge == QStringLiteral("PS1"))
-    return QColor(QStringLiteral("#64b5f6"));
-  return QColor(QStringLiteral("#ff6b6b"));
+  if (consoleBadge == QStringLiteral("GBA"))     return QColor(QStringLiteral("#9c8cff"));
+  if (consoleBadge == QStringLiteral("PS1"))     return QColor(QStringLiteral("#64b5f6"));
+  if (consoleBadge == QStringLiteral("SNES"))    return QColor(QStringLiteral("#e0a060"));
+  if (consoleBadge == QStringLiteral("NES"))     return QColor(QStringLiteral("#e06868"));
+  if (consoleBadge == QStringLiteral("GB"))      return QColor(QStringLiteral("#88b888"));
+  if (consoleBadge == QStringLiteral("Genesis")) return QColor(QStringLiteral("#60c0b0"));
+  if (consoleBadge == QStringLiteral("N64"))     return QColor(QStringLiteral("#d4a820"));
+  return QColor(QStringLiteral("#ff6b6b")); // Switch / unknown
 }
 
 int extensionRank(const QString &path) {
@@ -52,18 +56,24 @@ int extensionRank(const QString &path) {
 }
 
 QString platformSummary(const LibraryGame &game) {
-  if (game.consoleBadge == QStringLiteral("GBA"))
-    return QStringLiteral("Game Boy Advance ROM ready to launch");
-  if (game.consoleBadge == QStringLiteral("PS1"))
-    return QStringLiteral("PlayStation ROM ready to launch");
-  return QStringLiteral("Nintendo Switch library entry detected");
+  for (const auto &fmt : AIO::GUI::emulatorFormats()) {
+    if (fmt.badge == game.consoleBadge)
+      return fmt.displayName + (fmt.launchable
+          ? QStringLiteral(" · Ready to launch")
+          : QStringLiteral(" · Indexed"));
+  }
+  return QStringLiteral("Unknown platform");
 }
 
 QString supportSummary(const LibraryGame &game) {
   if (game.unsupported) {
-    return QStringLiteral(
-        "This title is indexed so your library stays organized, but Switch "
-        "launch is intentionally unavailable in the production shell.");
+    for (const auto &fmt : AIO::GUI::emulatorFormats()) {
+      if (fmt.badge == game.consoleBadge)
+        return fmt.displayName +
+               QStringLiteral(" launch is not yet available in the production shell. "
+                               "Titles are indexed so your library stays organized.");
+    }
+    return QStringLiteral("Launch is not available for this title.");
   }
   return QStringLiteral(
       "Open the game card for a clean launch flow and metadata summary.");
@@ -281,11 +291,12 @@ void GamesLibraryPage::setupUi() {
   chipGrid->setColumnStretch(0, 1);
   chipGrid->setColumnStretch(1, 1);
 
-  const QVector<QString> labels = {QStringLiteral("All"), QStringLiteral("GBA"),
-                                   QStringLiteral("PS1"),
-                                   QStringLiteral("Switch")};
-  for (int i = 0; i < labels.size(); ++i) {
-    auto *chip = new QLabel(labels[i], filterBar_);
+  // Chip 0 = "All", chips 1..N = one per format in the registry.
+  QStringList chipLabels = {QStringLiteral("All")};
+  for (const auto &fmt : AIO::GUI::emulatorFormats())
+    chipLabels << fmt.badge;
+  for (int i = 0; i < chipLabels.size(); ++i) {
+    auto *chip = new QLabel(chipLabels[i], filterBar_);
     chip->setObjectName(QStringLiteral("aioGamesFilterChip"));
     chip->setAlignment(Qt::AlignCenter);
     chips_.append(chip);
@@ -441,35 +452,35 @@ void GamesLibraryPage::scanROMs() {
     return;
 
   QMap<QString, LibraryGame> uniqueGames;
-  const QStringList filters = {QStringLiteral("*.gba"), QStringLiteral("*.bin"),
-                               QStringLiteral("*.cue"), QStringLiteral("*.iso"),
-                               QStringLiteral("*.img"), QStringLiteral("*.chd"),
-                               QStringLiteral("*.pbp"), QStringLiteral("*.xci"),
-                               QStringLiteral("*.nsp"), QStringLiteral("*.nso"),
-                               QStringLiteral("*.nro")};
+  // Build extension → format index map from the registry (first match wins).
+  QMap<QString, int> extToFormat;
+  QStringList filters;
+  const auto &formats = AIO::GUI::emulatorFormats();
+  for (int fi = 0; fi < formats.size(); ++fi) {
+    for (const QString &ext : formats[fi].extensions) {
+      if (!extToFormat.contains(ext))
+        extToFormat.insert(ext, fi);
+      filters << QStringLiteral("*.") + ext;
+    }
+  }
+  filters.removeDuplicates();
+
   QDirIterator it(romDir, filters, QDir::Files, QDirIterator::Subdirectories);
   while (it.hasNext()) {
     it.next();
     const QFileInfo fi = it.fileInfo();
     const QString ext = fi.suffix().toLower();
 
+    const auto formatIt = extToFormat.constFind(ext);
+    if (formatIt == extToFormat.cend())
+      continue;
+    const auto &fmt = formats[formatIt.value()];
+
     LibraryGame game;
     game.path = fi.absoluteFilePath();
     game.title = fi.completeBaseName();
-
-    if (ext == QStringLiteral("gba")) {
-      game.consoleBadge = QStringLiteral("GBA");
-    } else if (ext == QStringLiteral("bin") || ext == QStringLiteral("cue") ||
-           ext == QStringLiteral("iso") || ext == QStringLiteral("img") ||
-           ext == QStringLiteral("chd") || ext == QStringLiteral("pbp")) {
-      game.consoleBadge = QStringLiteral("PS1");
-    } else if (ext == QStringLiteral("xci") || ext == QStringLiteral("nsp") ||
-               ext == QStringLiteral("nso") || ext == QStringLiteral("nro")) {
-      game.consoleBadge = QStringLiteral("Switch");
-      game.unsupported = true;
-    } else {
-      continue;
-    }
+    game.consoleBadge = fmt.badge;
+    game.unsupported = !fmt.launchable;
 
     const QString key = QStringLiteral("%1::%2").arg(
         game.consoleBadge, game.title.trimmed().toLower());
@@ -491,17 +502,13 @@ void GamesLibraryPage::rebuildGrid() {
   displayGames_.clear();
 
   auto matchesFilter = [this](const LibraryGame &game) {
-    switch (filter_) {
-    case FilterMode::All:
+    if (filterIndex_ == 0)
+      return true; // All
+    const auto &formats = AIO::GUI::emulatorFormats();
+    const int fi = filterIndex_ - 1;
+    if (fi < 0 || fi >= formats.size())
       return true;
-    case FilterMode::GBA:
-      return game.consoleBadge == QStringLiteral("GBA");
-    case FilterMode::PS1:
-      return game.consoleBadge == QStringLiteral("PS1");
-    case FilterMode::Switch:
-      return game.consoleBadge == QStringLiteral("Switch");
-    }
-    return true;
+    return game.consoleBadge == formats[fi].badge;
   };
 
   for (const auto &game : allGames_) {
@@ -546,13 +553,11 @@ void GamesLibraryPage::rebuildGrid() {
 }
 
 void GamesLibraryPage::updateFilterChips() {
-  const int active = static_cast<int>(filter_);
   inChips_ = focusArea_ == FocusArea::Filters;
   for (int i = 0; i < chips_.size(); ++i) {
-    const char *activeVal = (i == active) ? "true" : "false";
+    const char *activeVal = (i == filterIndex_) ? "true" : "false";
     const char *focusedVal =
-        (focusArea_ == FocusArea::Filters && i == chipFocus_) ? "true"
-                                                              : "false";
+        (focusArea_ == FocusArea::Filters && i == chipFocus_) ? "true" : "false";
     if (chips_[i]->property("active").toString() == QLatin1String(activeVal) &&
         chips_[i]->property("focused").toString() == QLatin1String(focusedVal))
       continue;
@@ -692,7 +697,7 @@ void GamesLibraryPage::keyPressEvent(QKeyEvent *event) {
       return;
     }
     if (key == Qt::Key_Return || key == Qt::Key_Enter) {
-      filter_ = static_cast<FilterMode>(chipFocus_);
+      filterIndex_ = chipFocus_;
       rebuildGrid();
       return;
     }
@@ -706,7 +711,7 @@ void GamesLibraryPage::keyPressEvent(QKeyEvent *event) {
     if (key == Qt::Key_Up) {
       if (gridRow_ == 0) {
         focusArea_ = FocusArea::Filters;
-        chipFocus_ = static_cast<int>(filter_);
+        chipFocus_ = filterIndex_;
         updateFilterChips();
       } else {
         --gridRow_;

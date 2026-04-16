@@ -6,7 +6,14 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <vector>
+
+namespace AIO::Emulator::GBA {
+
+} // namespace AIO::Emulator::GBA
+
+namespace GBEmulator {
+class GB;
+}
 
 namespace AIO::Emulator::GBA {
 
@@ -14,6 +21,12 @@ class ARM7TDMI;
 
 class GBA {
 public:
+  enum class LoadedSystem {
+    None,
+    GameBoy,
+    GameBoyAdvance,
+  };
+
   GBA();
   ~GBA();
 
@@ -42,6 +55,21 @@ public:
   uint32_t GetCPSR() const;                     // Debug helper
   void PatchROM(uint32_t addr, uint32_t val);
 
+  LoadedSystem GetLoadedSystem() const { return loadedSystem; }
+  bool IsGameBoyFamilyMode() const {
+    return loadedSystem == LoadedSystem::GameBoy;
+  }
+  int GetVideoWidth() const;
+  int GetVideoHeight() const;
+  int GetCyclesPerFrame() const;
+  uint64_t GetNominalCpuHz() const;
+  void CopyFramebufferTo(uint32_t *dst, size_t count) const;
+  void SetOutputSampleRate(float hz);
+  int GetAudioSamples(int16_t *buffer, int numSamples);
+  void FlushSave();
+  bool SupportsFrameHistory() const;
+  bool SupportsAdvancedDebugging() const;
+
   // Total cycles executed since last Reset(); useful for deterministic tooling.
   uint64_t GetTotalCycles() const {
     return totalCyclesExecuted.load(std::memory_order_relaxed);
@@ -64,10 +92,12 @@ private:
   std::unique_ptr<GBAMemory> memory;
   std::unique_ptr<PPU> ppu;
   std::unique_ptr<APU> apu;
+  std::unique_ptr<GBEmulator::GB> gb;
 
   bool romLoaded = false;
   std::string savePath;
   ROMMetadata romMetadata;
+  LoadedSystem loadedSystem = LoadedSystem::None;
 
   // Configure boot state based on intelligently detected ROM metadata
   void ConfigureBootStateFromMetadata(const ROMMetadata &metadata);

@@ -766,7 +766,7 @@ void MainWindow::refreshGameList() {
 
   QStringList filters;
   if (currentEmulator == EmulatorType::GBA) {
-    filters << "*.gba";
+    filters << "*.gba" << "*.gb" << "*.gbc";
   } else if (currentEmulator == EmulatorType::PS1) {
     filters << "*.bin" << "*.cue" << "*.iso" << "*.img";
   } else if (currentEmulator == EmulatorType::Switch) {

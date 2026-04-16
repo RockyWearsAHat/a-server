@@ -32,6 +32,9 @@ Command: `cd build/generated/cmake && ctest -R <pattern> --output-on-failure`
 | PS1 interrupts                        | `PS1InterruptTest`                                 |
 | PS1 memory                            | `PS1MemoryTest`                                    |
 | PS1 broad / integration               | `PS1`                                              |
+| Atari 2600                            | `Atari2600`                                        |
+| Switch core                           | `Switch`                                           |
+| Windows compatibility layer           | `WindowsCompat`                                    |
 | Logging                               | `LoggerTest`                                       |
 | Input                                 | `InputLogic`                                       |
 | ROM metadata                          | `ROMMetadata`                                      |

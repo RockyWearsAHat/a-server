@@ -1,6 +1,9 @@
 #include <algorithm>
 #include <cstdlib>
+#include <cctype>
+#include <cstring>
 #include <emulator/common/Logger.h>
+#include <emulator/gb/GB.h>
 #include <emulator/gba/APU.h>
 #include <emulator/gba/ARM7TDMI.h>
 #include <emulator/gba/GBA.h>
@@ -8,7 +11,6 @@
 #include <emulator/gba/ROMMetadataAnalyzer.h>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -16,6 +18,10 @@
 namespace AIO::Emulator::GBA {
 
 void GBA::WriteMem16(uint32_t addr, uint16_t val) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    gb->GetMemory()->Write16(static_cast<uint16_t>(addr & 0xFFFF), val);
+    return;
+  }
   if (memory)
     memory->Write16(addr, val);
 }
@@ -25,6 +31,7 @@ GBA::GBA() {
   cpu = std::make_unique<ARM7TDMI>(*memory);
   ppu = std::make_unique<PPU>(*memory);
   apu = std::make_unique<APU>(*memory);
+  gb = std::make_unique<GBEmulator::GB>();
 
   // Wire up APU to memory for timer overflow callbacks
   memory->SetAPU(apu.get());
@@ -46,6 +53,30 @@ GBA::GBA() {
 GBA::~GBA() { SaveGame(); }
 
 bool GBA::LoadROM(const std::string &path) {
+  const std::filesystem::path fsPath(path);
+  std::string extension = fsPath.extension().string();
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+  if (extension == ".gb" || extension == ".gbc") {
+    try {
+      gb->Load(path);
+      romLoaded = true;
+      loadedSystem = LoadedSystem::GameBoy;
+
+      const size_t lastDot = path.find_last_of('.');
+      savePath = (lastDot != std::string::npos) ? path.substr(0, lastDot) + ".sav"
+                                                : path + ".sav";
+      totalCyclesExecuted.store(0, std::memory_order_relaxed);
+      return true;
+    } catch (const std::exception &ex) {
+      std::cerr << "Failed to load GB/GBC ROM: " << ex.what() << std::endl;
+      romLoaded = false;
+      loadedSystem = LoadedSystem::None;
+      return false;
+    }
+  }
+
   std::cout << "[LoadROM] Attempting to load: " << path << std::endl;
 
   // Try to open the ROM file. If it doesn't exist, try common locations
@@ -157,6 +188,7 @@ bool GBA::LoadROM(const std::string &path) {
     }
 
     Reset();
+    loadedSystem = LoadedSystem::GameBoyAdvance;
 
     std::cout << "[LoadROM] CPU Reset complete. PC=0x" << std::hex
               << cpu->GetRegister(15) << " CPSR=0x" << cpu->GetCPSR()
@@ -265,6 +297,10 @@ void GBA::ConfigureBootStateFromMetadata(const ROMMetadata &metadata) {
 }
 
 void GBA::SaveGame() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
+
   if (savePath.empty() || !memory)
     return;
 
@@ -279,6 +315,12 @@ void GBA::SaveGame() {
 }
 
 void GBA::Reset() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    gb->Reset();
+    totalCyclesExecuted.store(0, std::memory_order_relaxed);
+    return;
+  }
+
   cpu->Reset();
   memory->Reset();
   apu->Reset();
@@ -293,6 +335,13 @@ void GBA::Reset() {
 int GBA::Step() {
   if (!romLoaded)
     return 0;
+
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    const int cycles = static_cast<int>(gb->Step());
+    totalCyclesExecuted.fetch_add(static_cast<uint64_t>(cycles),
+                                  std::memory_order_relaxed);
+    return cycles;
+  }
 
   uint32_t prevPc = cpu->GetRegister(15);
 
@@ -385,63 +434,133 @@ int GBA::Step() {
   return totalCycles;
 }
 
-bool GBA::IsCPUHalted() const { return cpu && cpu->IsHalted(); }
+bool GBA::IsCPUHalted() const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return false;
+  }
+  return cpu && cpu->IsHalted();
+}
 
 void GBA::UpdateInput(uint16_t keyState) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    uint8_t gbState = 0xFF;
+    if ((keyState & (1u << 4)) == 0)
+      gbState &= ~0x01; // Right
+    if ((keyState & (1u << 5)) == 0)
+      gbState &= ~0x02; // Left
+    if ((keyState & (1u << 6)) == 0)
+      gbState &= ~0x04; // Up
+    if ((keyState & (1u << 7)) == 0)
+      gbState &= ~0x08; // Down
+    if ((keyState & (1u << 0)) == 0)
+      gbState &= ~0x10; // A
+    if ((keyState & (1u << 1)) == 0)
+      gbState &= ~0x20; // B
+    if ((keyState & (1u << 2)) == 0)
+      gbState &= ~0x40; // Select
+    if ((keyState & (1u << 3)) == 0)
+      gbState &= ~0x80; // Start
+    gb->GetMemory()->SetJoypadState(gbState);
+    return;
+  }
+
   if (memory) {
     memory->SetKeyInput(keyState);
   }
 }
 
 uint32_t GBA::ReadMem(uint32_t addr) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return ReadMem32(addr);
+  }
   if (memory)
     return memory->Read32(addr);
   return 0;
 }
 
 uint16_t GBA::ReadMem16(uint32_t addr) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return gb->GetMemory()->Read16(static_cast<uint16_t>(addr & 0xFFFF));
+  }
   if (memory)
     return memory->Read16(addr);
   return 0;
 }
 
 uint32_t GBA::ReadMem32(uint32_t addr) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    const uint16_t low =
+        gb->GetMemory()->Read16(static_cast<uint16_t>(addr & 0xFFFF));
+    const uint16_t high =
+        gb->GetMemory()->Read16(static_cast<uint16_t>((addr + 2u) & 0xFFFF));
+    return static_cast<uint32_t>(low) | (static_cast<uint32_t>(high) << 16);
+  }
   if (memory)
     return memory->Read32(addr);
   return 0;
 }
 
 void GBA::WriteMem(uint32_t addr, uint32_t val) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    gb->GetMemory()->Write16(static_cast<uint16_t>(addr & 0xFFFF),
+                             static_cast<uint16_t>(val & 0xFFFF));
+    gb->GetMemory()->Write16(static_cast<uint16_t>((addr + 2u) & 0xFFFF),
+                             static_cast<uint16_t>((val >> 16) & 0xFFFF));
+    return;
+  }
   if (memory)
     memory->Write32(addr, val);
 }
 
 uint32_t GBA::GetPC() const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return gb->GetCPU()->GetPC();
+  }
   if (cpu)
     return cpu->GetRegister(15);
   return 0;
 }
 
 bool GBA::IsThumbMode() const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return false;
+  }
   if (cpu)
     return (cpu->GetCPSR() & 0x20) != 0;
   return false;
 }
 
-uint32_t GBA::GetRegister(int reg) const { return cpu->GetRegister(reg); }
+uint32_t GBA::GetRegister(int reg) const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return reg == 15 ? gb->GetCPU()->GetPC() : 0;
+  }
+  return cpu->GetRegister(reg);
+}
 
 void GBA::SetRegister(int reg, uint32_t val) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    if (reg == 15) {
+      gb->GetCPU()->SetPC(static_cast<uint16_t>(val & 0xFFFF));
+    }
+    return;
+  }
   if (cpu)
     cpu->SetRegister(reg, val);
 }
 
 uint32_t GBA::GetCPSR() const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return 0;
+  }
   if (cpu)
     return cpu->GetCPSR();
   return 0;
 }
 
 void GBA::PatchROM(uint32_t addr, uint32_t val) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   std::cout << "[PatchROM] Addr=" << std::hex << addr << " Val=" << val
             << std::dec << std::endl;
   memory->WriteROM32(addr, val);
@@ -449,37 +568,59 @@ void GBA::PatchROM(uint32_t addr, uint32_t val) {
 
 // Debugger controls
 void GBA::AddBreakpoint(uint32_t addr) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   if (cpu)
     cpu->AddBreakpoint(addr);
 }
 
 void GBA::ClearBreakpoints() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   if (cpu)
     cpu->ClearBreakpoints();
 }
 
 void GBA::SetSingleStep(bool enabled) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   if (cpu)
     cpu->SetSingleStep(enabled);
 }
 
 bool GBA::IsHalted() const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return false;
+  }
   if (!cpu)
     return false;
   return cpu->IsHalted();
 }
 
 void GBA::Continue() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   if (cpu)
     cpu->Continue();
 }
 
 void GBA::DumpCPUState(std::ostream &os) const {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    os << "GB mode PC=0x" << std::hex << gb->GetCPU()->GetPC() << std::dec;
+    return;
+  }
   if (cpu)
     cpu->DumpState(os);
 }
 
 void GBA::FlushPendingPeripheralCycles() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   if (pendingPeripheralCycles > 0) {
     memory->AdvanceCycles(pendingPeripheralCycles);
     pendingPeripheralCycles = 0;
@@ -488,8 +629,79 @@ void GBA::FlushPendingPeripheralCycles() {
 }
 
 void GBA::StepBack() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
   if (cpu)
     cpu->StepBack();
+}
+
+int GBA::GetVideoWidth() const {
+  return loadedSystem == LoadedSystem::GameBoy ? 160 : PPU::SCREEN_WIDTH;
+}
+
+int GBA::GetVideoHeight() const {
+  return loadedSystem == LoadedSystem::GameBoy ? 144 : PPU::SCREEN_HEIGHT;
+}
+
+int GBA::GetCyclesPerFrame() const {
+  return loadedSystem == LoadedSystem::GameBoy ? 456 * 154 : 1232 * 228;
+}
+
+uint64_t GBA::GetNominalCpuHz() const {
+  return loadedSystem == LoadedSystem::GameBoy ? 4194304ULL : 16777216ULL;
+}
+
+void GBA::CopyFramebufferTo(uint32_t *dst, size_t count) const {
+  if (!dst || count == 0) {
+    return;
+  }
+
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    const uint32_t *src = gb->GetFramebuffer();
+    const size_t pixels = static_cast<size_t>(GetVideoWidth()) * GetVideoHeight();
+    const size_t copyCount = std::min(count, pixels);
+    std::memcpy(dst, src, copyCount * sizeof(uint32_t));
+    if (copyCount < count) {
+      std::fill(dst + copyCount, dst + count, 0xFF000000u);
+    }
+    return;
+  }
+
+  ppu->CopyFramebufferTo(dst, count);
+}
+
+void GBA::SetOutputSampleRate(float hz) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
+  apu->SetOutputSampleRate(hz);
+}
+
+int GBA::GetAudioSamples(int16_t *buffer, int numSamples) {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    if (buffer && numSamples > 0) {
+      std::memset(buffer, 0,
+                  static_cast<size_t>(numSamples) * 2 * sizeof(int16_t));
+    }
+    return numSamples;
+  }
+  return apu->GetSamples(buffer, numSamples);
+}
+
+void GBA::FlushSave() {
+  if (loadedSystem == LoadedSystem::GameBoy) {
+    return;
+  }
+  memory->FlushSave();
+}
+
+bool GBA::SupportsFrameHistory() const {
+  return loadedSystem == LoadedSystem::GameBoyAdvance;
+}
+
+bool GBA::SupportsAdvancedDebugging() const {
+  return loadedSystem == LoadedSystem::GameBoyAdvance;
 }
 
 } // namespace AIO::Emulator::GBA

@@ -5,6 +5,11 @@
 
 namespace AIO::Emulator::Switch {
 
+    namespace {
+        constexpr uint32_t kPermRead = 0x1;
+        constexpr uint32_t kPermWrite = 0x2;
+    }
+
     MemoryManager::MemoryManager() {
     }
 
@@ -32,8 +37,29 @@ namespace AIO::Emulator::Switch {
     }
 
     bool MemoryManager::MapMemory(uint64_t address, size_t size, uint32_t permissions) {
-        // Check for overlaps (simplified)
-        if (GetRegion(address) || GetRegion(address + size - 1)) {
+        if (size == 0) {
+            return false;
+        }
+
+        const uint64_t end = address + static_cast<uint64_t>(size) - 1;
+
+        // Reject if arithmetic overflow wraps around.
+        if (end < address) {
+            return false;
+        }
+
+        // Check for any overlapping mapped region.
+        for (const auto& [base, region] : regions) {
+            const uint64_t regionStart = base;
+            const uint64_t regionEnd = regionStart + static_cast<uint64_t>(region.size) - 1;
+            const bool overlaps = !(end < regionStart || address > regionEnd);
+            if (overlaps) {
+                std::cerr << "[Memory] Failed to map memory at 0x" << std::hex << address << ": Overlap detected" << std::dec << std::endl;
+                return false;
+            }
+        }
+
+        if (GetRegion(address) || GetRegion(end)) {
             std::cerr << "[Memory] Failed to map memory at 0x" << std::hex << address << ": Overlap detected" << std::dec << std::endl;
             return false;
         }
@@ -72,7 +98,7 @@ namespace AIO::Emulator::Switch {
 
     uint8_t MemoryManager::Read8(uint64_t address) {
         MemoryRegion* region = GetRegion(address);
-        if (region) {
+        if (region && (region->permissions & kPermRead) != 0) {
             return region->data[address - region->baseAddress];
         }
         // std::cerr << "[Memory] Read8 Fault at 0x" << std::hex << address << std::dec << std::endl;
@@ -81,7 +107,7 @@ namespace AIO::Emulator::Switch {
 
     uint16_t MemoryManager::Read16(uint64_t address) {
         MemoryRegion* region = GetRegion(address);
-        if (region) {
+        if (region && (region->permissions & kPermRead) != 0) {
             uint64_t offset = address - region->baseAddress;
             if (offset + 1 < region->size) {
                 return region->data[offset] | (region->data[offset + 1] << 8);
@@ -92,7 +118,7 @@ namespace AIO::Emulator::Switch {
 
     uint32_t MemoryManager::Read32(uint64_t address) {
         MemoryRegion* region = GetRegion(address);
-        if (region) {
+        if (region && (region->permissions & kPermRead) != 0) {
             uint64_t offset = address - region->baseAddress;
             if (offset + 3 < region->size) {
                 return region->data[offset] | (region->data[offset + 1] << 8) |
@@ -110,7 +136,7 @@ namespace AIO::Emulator::Switch {
 
     void MemoryManager::Write8(uint64_t address, uint8_t value) {
         MemoryRegion* region = GetRegion(address);
-        if (region) {
+        if (region && (region->permissions & kPermWrite) != 0) {
             region->data[address - region->baseAddress] = value;
         } else {
             // std::cerr << "[Memory] Write8 Fault at 0x" << std::hex << address << std::dec << std::endl;

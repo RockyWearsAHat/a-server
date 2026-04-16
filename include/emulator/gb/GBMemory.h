@@ -27,6 +27,7 @@ class GBMemory {
   // APU RAM access (0xC000–0xDFFF in WRAM)
   uint8_t ApuRead8(uint16_t addr);
   void ApuWrite8(uint16_t addr, uint8_t val);
+  void SetJoypadState(uint8_t state) { joypad_state_ = state; }
 
   // State save/restore
   struct State {
@@ -51,6 +52,8 @@ class GBMemory {
   // Paging
   uint8_t current_rom_bank_;
   uint8_t current_ram_bank_;
+  uint8_t joyp_select_ = 0x30;
+  uint8_t joypad_state_ = 0xFF;
 
   // Peripheral pointers (unowned)
   GBCartridge* cart_;

@@ -11,7 +11,9 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 ## GUI Shell
 
 - `src/gui/` + `include/gui/`
-- `HomeScreen.cpp/.h` — unified home dashboard, app tiles, organize mode. **Target redesign: symmetric grid, rich contextual info on focus, Xbox/Wii/FireStick-quality — current functional state is far below target.**
+- `HomeScreen.cpp/.h` — unified home dashboard, app tiles, organize mode. Tiles: YouTube, Netflix, DisneyPlus, Hulu, MediaServer, ScreenMirror, Store, Library, Settings. GBA/PS1/Switch console tiles have been **removed** — games are accessed via the Library tile only.
+- `GamesLibraryPage.cpp/.h` — unified games library: scans ROM dirs, filter chips per platform (driven by `EmulatorFormats.h`), detail panel, launch button. Emulators back the content silently; no console-specific UI apps.
+- `EmulatorFormats.h` — **single source of truth** for all platform badges, display names, file extensions, and launchability. Drives scanner, filter chips, badge colours, and RemoteControlServer state reporting. Add a platform here; everything else picks it up automatically.
 - `MainWindow.cpp/.h` + `mainwindow/` partials — top-level window, page stack, navigation, input, audio
 - `YouTubeBrowsePage.cpp/.h` — YouTube browse/search with tile grid (native, not a webview)
 - `YouTubePlayerPage.cpp/.h` + `youtube/YouTubePlayerOverlay.cpp/.h` — YouTube playback + overlay
@@ -42,9 +44,14 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 ## Emulator Cores
 
 - `src/emulator/` + `include/emulator/`
-- GBA: `ARM7TDMI.cpp` (CPU), `PPU.cpp` (graphics), `APU.cpp` (audio), `GBAMemory.cpp`, `GBA.cpp` (system)
-- PS1: `R3000A.cpp` (CPU), `PS1GPU.cpp`, `PS1SPU.cpp` (audio), `PS1DMA.cpp`, `GTE.cpp`, `PS1Memory.cpp`, `PS1.cpp` (system), `CDROM.cpp`, `PS1Timer.cpp`, `PS1Controller.cpp`, `InterruptController.cpp`
-- Switch: `CpuCore.cpp`, `GpuCore.cpp`, `MemoryManager.cpp`, `SwitchEmulator.cpp` (early stage)
+- GBA: `ARM7TDMI.cpp` (CPU), `PPU.cpp` (graphics), `APU.cpp` (audio), `GBAMemory.cpp`, `GBA.cpp` (system) — **launchable**
+- PS1: `R3000A.cpp` (CPU), `PS1GPU.cpp`, `PS1SPU.cpp` (audio), `PS1DMA.cpp`, `GTE.cpp`, `PS1Memory.cpp`, `PS1.cpp` (system), `CDROM.cpp`, `PS1Timer.cpp`, `PS1Controller.cpp`, `InterruptController.cpp` — **launchable**
+- SNES: `W65C816.cpp` (CPU), `SNESPPU.cpp`, `SPC700.cpp`, `SNESMemory.cpp`, `SNESCartridge.cpp`, `SNES.cpp` — core present, GUI launch **not yet wired**
+- NES: `RP2A03.cpp` (CPU), `PPU2C02.cpp`, `APU2A03.cpp`, `NESMemory.cpp`, `NESCartridge.cpp`, `NES.cpp` — core present, GUI launch **not yet wired**
+- GB/GBC: `LR35902.cpp`, `GBPPU.cpp`, `GBAPU.cpp`, `GBMemory.cpp`, `GBCartridge.cpp`, `GB.cpp` — core present, GUI launch **not yet wired**
+- Genesis: `M68000.cpp`, `Z80.cpp`, `GenesisVDP.cpp`, `YM2612.cpp`, `SN76489.cpp`, `GenesisMemory.cpp`, `GenesisCartridge.cpp`, `Genesis.cpp` — core present, GUI launch **not yet wired**
+- N64: `R4300i.cpp`, `RSP.cpp`, `RDP.cpp`, `N64Memory.cpp`, `N64Cartridge.cpp`, `N64.cpp` — core present, GUI launch **not yet wired**
+- Switch: `CpuCore.cpp`, `GpuCore.cpp`, `MemoryManager.cpp`, `SwitchEmulator.cpp` — **indexed only, intentionally unavailable in production**
 
 ## Server
 
@@ -53,7 +60,7 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 ## Tests
 
 - `tests/` — GoogleTest, one binary per subsystem
-- 26 binaries: `APUTests`, `AudioCorruptionTests`, `BIOSTests`, `CPUTests`, `DMATests`, `DMATimingTests`, `EEPROMTests`, `GBAIntegrationTests`, `GbaTests`, `GraphicsCorruptionTests`, `InputLogicTests`, `LoggerTests`, `MemoryMapTests`, `PPUTests`, `PS1ControllerTests`, `PS1CPUTests`, `PS1DMATests`, `PS1GPUTests`, `PS1GTETests`, `PS1IntegrationTests`, `PS1InterruptTests`, `PS1MemoryTests`, `PS1SPUTests`, `PS1TimerTests`, `ROMMetadataTests`, `ScreenMirrorTests`
+- 29 binaries: `APUTests`, `Atari2600Tests`, `AudioCorruptionTests`, `BIOSTests`, `CPUTests`, `DMATests`, `DMATimingTests`, `EEPROMTests`, `GBAIntegrationTests`, `GbaTests`, `GraphicsCorruptionTests`, `InputLogicTests`, `LoggerTests`, `MemoryMapTests`, `PPUTests`, `PS1ControllerTests`, `PS1CPUTests`, `PS1DMATests`, `PS1GPUTests`, `PS1GTETests`, `PS1IntegrationTests`, `PS1InterruptTests`, `PS1MemoryTests`, `PS1SPUTests`, `PS1TimerTests`, `ROMMetadataTests`, `ScreenMirrorTests`, `SwitchCoreTests`, `WindowsCompatTests`
 - Plus `QssValidation` (build-time, not a binary)
 
 ## Scripts & Tools
@@ -63,7 +70,7 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 
 ## Build Output
 
-- `build/bin/` (AIOServer + 25 test binaries), `build/lib/`, `build/generated/`
+- `build/bin/` (AIOServer + test binaries), `build/lib/`, `build/generated/`
 
 ## Architecture Knowledge Index
 

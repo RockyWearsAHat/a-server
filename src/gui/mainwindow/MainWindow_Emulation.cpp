@@ -181,8 +181,7 @@ uint64_t MainWindow::GetEmulatedMilliseconds() const {
   switch (currentEmulator) {
   case EmulatorType::GBA:
     if (gba) {
-      constexpr uint64_t kGbaCpuHz = 16777216ULL;
-      return (gba->GetTotalCycles() * 1000ULL) / kGbaCpuHz;
+      return (gba->GetTotalCycles() * 1000ULL) / gba->GetNominalCpuHz();
     }
     break;
   case EmulatorType::PS1:
@@ -370,8 +369,8 @@ void MainWindow::LoadROM(const std::string &path) {
   if (currentEmulator == EmulatorType::GBA) {
     success = gba->LoadROM(path);
     if (success) {
-      // GBA Resolution
-      displayImage = QImage(240, 160, QImage::Format_ARGB32);
+      displayImage = QImage(gba->GetVideoWidth(), gba->GetVideoHeight(),
+                            QImage::Format_ARGB32);
 
       // Allow the emulator viewport to expand/shrink with the window.
       // (A previous fixed-size here prevented resizing and caused clipping.)
@@ -558,7 +557,7 @@ void MainWindow::StopEmulatorThread() {
   }
 
   if (currentEmulator == EmulatorType::GBA) {
-    gba->GetMemory().FlushSave();
+    gba->FlushSave();
   }
 }
 
@@ -567,10 +566,8 @@ void MainWindow::EmulatorThreadMain() {
   // Executes CPU cycles independent of Qt event processing
   using Clock = std::chrono::steady_clock;
 
-  // GBA timing: 228 scanlines per frame * 1232 cycles/scanline.
-  static constexpr int kGbaCyclesPerFrame = 1232 * 228; // 280,896
-  static constexpr double kGbaCpuHz = 16777216.0;       // 16.777216 MHz
-  const double nativeFps = kGbaCpuHz / (double)kGbaCyclesPerFrame;
+  const double nativeFps = static_cast<double>(gba->GetNominalCpuHz()) /
+                           static_cast<double>(gba->GetCyclesPerFrame());
 
   double targetFps = nativeFps;
   if (const char *v = std::getenv("AIO_GBA_TARGET_FPS")) {
@@ -605,7 +602,8 @@ void MainWindow::EmulatorThreadMain() {
     // Handle step-back request FIRST (before pause check)
     int stepBackCount = emulatorStepBack.exchange(0, std::memory_order_relaxed);
     if (stepBackCount > 0) {
-      if (frameHistoryWritten > 0 && currentEmulator == EmulatorType::GBA) {
+        if (frameHistoryWritten > 0 && currentEmulator == EmulatorType::GBA &&
+          gba->SupportsFrameHistory()) {
         // Walk back to the most recently written slot
         size_t snapshotIdx =
             (frameHistoryIndex + MAX_FRAME_HISTORY - 1) % MAX_FRAME_HISTORY;
@@ -654,6 +652,7 @@ void MainWindow::EmulatorThreadMain() {
       static int cycleCarry = 0;
       if (emulatorFrameNumber.load(std::memory_order_relaxed) == 0)
         cycleCarry = 0;
+      const int cyclesPerFrame = gba->GetCyclesPerFrame();
       int totalCycles = cycleCarry;
 
       // Run the frame in smaller chunks to reduce worst-case input latency.
@@ -666,14 +665,14 @@ void MainWindow::EmulatorThreadMain() {
           chunksPerFrame = parsed;
         }
       }
-      const int chunkCyclesTarget = kGbaCyclesPerFrame / chunksPerFrame;
+      const int chunkCyclesTarget = cyclesPerFrame / chunksPerFrame;
 
       for (int chunk = 0; chunk < chunksPerFrame && emulatorRunning; ++chunk) {
         applyPendingKeyinput();
 
         int chunkCycles = 0;
         while (chunkCycles < chunkCyclesTarget &&
-               totalCycles < kGbaCyclesPerFrame && emulatorRunning) {
+               totalCycles < cyclesPerFrame && emulatorRunning) {
           const int stepCycles = gba->Step();
           chunkCycles += stepCycles;
           totalCycles += stepCycles;
@@ -681,12 +680,12 @@ void MainWindow::EmulatorThreadMain() {
       }
 
       // Catch any remainder cycles due to integer division.
-      while (totalCycles < kGbaCyclesPerFrame && emulatorRunning) {
+      while (totalCycles < cyclesPerFrame && emulatorRunning) {
         totalCycles += gba->Step();
       }
 
       // Carry over excess cycles to the next frame for accurate timing
-      cycleCarry = totalCycles - kGbaCyclesPerFrame;
+      cycleCarry = totalCycles - cyclesPerFrame;
 
       applyPendingKeyinput();
 
@@ -694,7 +693,7 @@ void MainWindow::EmulatorThreadMain() {
       saveFlushCounter++;
       if (saveFlushCounter >= SAVE_FLUSH_INTERVAL) {
         saveFlushCounter = 0;
-        gba->GetMemory().FlushSave();
+        gba->FlushSave();
       }
     } else if (currentEmulator == EmulatorType::PS1) {
       // PS1: 33.8688 MHz CPU, 263 scanlines × 2171 cycles/scanline ≈ 570,973
@@ -755,7 +754,7 @@ void MainWindow::EmulatorThreadMain() {
 
     // Always save frame snapshot for step-back capability (BEFORE incrementing
     // counter)
-    if (currentEmulator == EmulatorType::GBA) {
+    if (currentEmulator == EmulatorType::GBA && gba->SupportsFrameHistory()) {
       auto &snap = (*frameHistory)[frameHistoryIndex];
       snap.frameNum = emulatorFrameNumber.load();
 
@@ -956,9 +955,8 @@ void MainWindow::UpdateDisplay() {
       const QString timebase =
           qEnvironmentVariable("AIO_INPUT_SCRIPT_TIMEBASE").trimmed().toUpper();
       if (timebase == "EMU") {
-        constexpr uint64_t CYCLES_PER_SECOND = 16780000ULL;
-        nowMs =
-            (int64_t)((gba->GetTotalCycles() * 1000ULL) / CYCLES_PER_SECOND);
+        nowMs = (int64_t)((gba->GetTotalCycles() * 1000ULL) /
+                          gba->GetNominalCpuHz());
       } else {
         nowMs = (int64_t)scriptTimer_.elapsed();
       }
@@ -971,22 +969,25 @@ void MainWindow::UpdateDisplay() {
           scriptKeyState_ = (uint16_t)(scriptKeyState_ | ev.mask);
         }
 
-        const uint16_t dispcnt = gba->ReadMem16(0x04000000);
-        const uint16_t winin = gba->ReadMem16(0x04000048);
-        const uint16_t winout = gba->ReadMem16(0x0400004A);
-        const uint16_t bldcnt = gba->ReadMem16(0x04000050);
-        const uint16_t bldalpha = gba->ReadMem16(0x04000052);
-        const uint16_t win0h = gba->ReadMem16(0x04000040);
-        const uint16_t win0v = gba->ReadMem16(0x04000044);
         std::cout << "[SCRIPT] t_ms=" << nowMs << " event_ms=" << ev.ms
                   << " key=" << ScriptNameFromMask(ev.mask)
                   << " action=" << (ev.down ? "DOWN" : "UP") << " keyState=0x"
                   << std::hex << scriptKeyState_ << std::dec << " pc=0x"
-                  << std::hex << gba->GetPC() << std::dec << " DISPCNT=0x"
-                  << std::hex << dispcnt << " WININ=0x" << winin << " WINOUT=0x"
-                  << winout << " WIN0H=0x" << win0h << " WIN0V=0x" << win0v
-                  << " BLDCNT=0x" << bldcnt << " BLDALPHA=0x" << bldalpha
-                  << std::dec << std::endl;
+                  << std::hex << gba->GetPC() << std::dec;
+        if (!gba->IsGameBoyFamilyMode()) {
+          const uint16_t dispcnt = gba->ReadMem16(0x04000000);
+          const uint16_t winin = gba->ReadMem16(0x04000048);
+          const uint16_t winout = gba->ReadMem16(0x0400004A);
+          const uint16_t bldcnt = gba->ReadMem16(0x04000050);
+          const uint16_t bldalpha = gba->ReadMem16(0x04000052);
+          const uint16_t win0h = gba->ReadMem16(0x04000040);
+          const uint16_t win0v = gba->ReadMem16(0x04000044);
+          std::cout << " DISPCNT=0x" << std::hex << dispcnt << " WININ=0x"
+                    << winin << " WINOUT=0x" << winout << " WIN0H=0x" << win0h
+                    << " WIN0V=0x" << win0v << " BLDCNT=0x" << bldcnt
+                    << " BLDALPHA=0x" << bldalpha;
+        }
+        std::cout << std::dec << std::endl;
         nextScriptEvent_++;
       }
       inputState = scriptKeyState_;
@@ -1002,12 +1003,17 @@ void MainWindow::UpdateDisplay() {
 
     // Copy framebuffer atomically under lock to prevent tearing from
     // SwapBuffers race
-    constexpr size_t FB_PIXELS = 240 * 160;
-    uint32_t localFb[FB_PIXELS];
-    gba->GetPPU().CopyFramebufferTo(localFb, FB_PIXELS);
-    for (int y = 0; y < 160; ++y) {
-      memcpy(displayImage.scanLine(y), &localFb[y * 240],
-             240 * sizeof(uint32_t));
+    const int fbWidth = gba->GetVideoWidth();
+    const int fbHeight = gba->GetVideoHeight();
+    const size_t fbPixels = static_cast<size_t>(fbWidth) * fbHeight;
+    if (displayImage.width() != fbWidth || displayImage.height() != fbHeight) {
+      displayImage = QImage(fbWidth, fbHeight, QImage::Format_ARGB32);
+    }
+    std::vector<uint32_t> localFb(fbPixels);
+    gba->CopyFramebufferTo(localFb.data(), localFb.size());
+    for (int y = 0; y < fbHeight; ++y) {
+      memcpy(displayImage.scanLine(y), &localFb[static_cast<size_t>(y) * fbWidth],
+             static_cast<size_t>(fbWidth) * sizeof(uint32_t));
     }
     avRecorder_.RecordVideoFrame(localFb);
   } else if (currentEmulator == EmulatorType::Switch) {
@@ -1180,17 +1186,22 @@ void MainWindow::UpdateDisplay() {
        << "<br>";
 
     if (currentEmulator == EmulatorType::GBA) {
-      uint16_t gameKeyInput = gba->ReadMem16(0x04000130);
       ss << "<b>PC:</b> 0x" << ::std::hex << ::std::setfill('0')
          << ::std::setw(8) << gba->GetPC() << "<br>";
       ss << "<b>Input:</b> " << formatInputState(inputState).toStdString()
          << "<br>";
-      ss << "<b>KEYINPUT:</b> 0x" << ::std::hex << ::std::setw(4)
-         << gameKeyInput << "<br>";
-      ss << "<b>VCount:</b> " << ::std::dec << gba->ReadMem16(0x04000006)
-         << "<br>";
-      ss << "<b>DISPCNT:</b> 0x" << ::std::hex << ::std::setw(4)
-         << gba->ReadMem16(0x04000000);
+      if (!gba->IsGameBoyFamilyMode()) {
+        uint16_t gameKeyInput = gba->ReadMem16(0x04000130);
+        ss << "<b>KEYINPUT:</b> 0x" << ::std::hex << ::std::setw(4)
+          << gameKeyInput << "<br>";
+        ss << "<b>VCount:</b> " << ::std::dec << gba->ReadMem16(0x04000006)
+          << "<br>";
+        ss << "<b>DISPCNT:</b> 0x" << ::std::hex << ::std::setw(4)
+          << gba->ReadMem16(0x04000000);
+      } else {
+        ss << "<b>Mode:</b> GB/GBC family<br>";
+        ss << "<b>Resolution:</b> 160x144";
+      }
     } else if (currentEmulator == EmulatorType::Switch) {
       ss << switchEmulator->GetDebugInfo();
     }

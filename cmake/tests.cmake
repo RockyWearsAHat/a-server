@@ -800,3 +800,42 @@ gtest_discover_tests(GameCubeMemoryTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ─── Atari 2600 Emulator Tests ─────────────────────────────────────────────
+add_executable(Atari2600Tests ${PROJECT_ROOT}/tests/Atari2600Tests.cpp)
+set_target_properties(Atari2600Tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/Atari2600Tests"
+)
+target_link_libraries(Atari2600Tests PRIVATE GTest::gtest_main Atari2600Emulator)
+gtest_discover_tests(Atari2600Tests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+# ─── Switch Core Tests ─────────────────────────────────────────────────────
+add_executable(SwitchCoreTests ${PROJECT_ROOT}/tests/SwitchCoreTests.cpp)
+set_target_properties(SwitchCoreTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SwitchCoreTests"
+)
+target_link_libraries(SwitchCoreTests PRIVATE GTest::gtest_main SwitchEmulator)
+gtest_discover_tests(SwitchCoreTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+# ─── Windows Compatibility Layer Tests ─────────────────────────────────────
+add_executable(WindowsCompatTests ${PROJECT_ROOT}/tests/WindowsCompatTests.cpp)
+set_target_properties(WindowsCompatTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/WindowsCompatTests"
+)
+target_link_libraries(WindowsCompatTests PRIVATE GTest::gtest_main WindowsCompatLayer)
+gtest_discover_tests(WindowsCompatTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

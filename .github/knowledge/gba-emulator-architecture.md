@@ -21,6 +21,15 @@ Per-instruction emulator using C++ and Qt 6. The main orchestrator class (`GBA` 
 - **PPU** (Picture Processing Unit) — Graphics rendering with 6 display modes
 - **APU** (Audio Processing Unit) — PSG channels, FIFO DMA audio, M4A engine
 
+### GBA Family Frontend Routing
+
+The user-facing `GBA` product surface is also the shell's handheld-family entry point for `.gb` and `.gbc` ROMs.
+
+- `.gba` continues to run through the native GBA stack (`ARM7TDMI`, `GBAMemory`, `PPU`, `APU`).
+- `.gb` and `.gbc` are routed by the `GBA` wrapper to the separate `GBEmulator::GB` backend so the UI can treat classic Game Boy, Game Boy Color, and Game Boy Advance as one console family.
+- The wrapper exposes family-level helpers such as framebuffer copy, nominal CPU rate, cycles-per-frame, and audio/sample-rate configuration so Qt frontend code does not need separate page stacks for GB vs GBA.
+- GBA-only debugger and rewind paths remain intentionally disabled when the wrapper is hosting the GB backend.
+
 ### DirectBoot Mode
 
 When no LLE BIOS is provided, the system jumps directly to ROM at 0x08000000 with hardware initialized to match BIOS-set defaults. An HLE BIOS layer provides system calls and IRQ dispatch.

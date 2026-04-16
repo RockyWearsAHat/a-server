@@ -34,7 +34,9 @@ MainWindow (QMainWindow)
     ├── 9: youTubePlayerPage (YouTubePlayerPage)
     ├── 10: streamingWebPage (StreamingWebViewPage, QtWebEngine)
     ├── 11: nasPage (NASPage / NASAdapter)
-    └── 12: screenMirrorPage (ScreenMirrorPage)
+    ├── 12: screenMirrorPage (ScreenMirrorPage)
+    ├── 13: gamesLibraryPage (GamesLibraryPage — unified ROM library, filter by platform)
+    └── 14: gameStorePage (GameStorePage)
 ```
 
 `onPageChanged()`: Resets nav hover, clears UIActionMapper edge state, releases emulator keys, rebinds adapter.
@@ -61,7 +63,9 @@ NavigationAdapter (abstract: itemCount, setHoveredIndex, activateIndex, back)
 | `src/gui/MainWindow_Pages.cpp`      | Page setup/teardown                       |
 | `src/gui/MainWindow_Emulation.cpp`  | Frame capture, emulator thread            |
 | `src/gui/MainWindow_InputAudio.cpp` | SDL audio, key translation                |
-| `src/gui/HomeScreen.cpp`            | Tile launcher, organize mode, hero panel  |
+| `src/gui/HomeScreen.cpp`            | Tile launcher, organize mode, hero panel. Tiles: streaming apps, Library, Store, Settings. No per-console tiles. |
+| `src/gui/GamesLibraryPage.cpp`      | Unified ROM library. Data-driven filter chips from EmulatorFormats.h. |
+| `include/gui/EmulatorFormats.h`     | Registry of all emulator platforms: badge, display name, extensions, launchable flag. Single source of truth for scanner and filter UI. |
 | `src/gui/HomeTile.cpp`              | Individual tile widget                    |
 | `src/gui/NavigationController.cpp`  | Stateful D-pad navigator                  |
 | `src/gui/UIActionMapper.cpp`        | InputSnapshot → UIActionFrame             |

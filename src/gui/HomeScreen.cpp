@@ -991,9 +991,9 @@ void HomeScreen::setupUi() {
     outerLayout->addWidget(gridWidget, 1);
   }
   gridLayout_ = new QGridLayout(gridHost_);
-  gridLayout_->setContentsMargins(52, 18, 52, 52);
-  gridLayout_->setHorizontalSpacing(14);
-  gridLayout_->setVerticalSpacing(16);
+  gridLayout_->setContentsMargins(52, 22, 52, 56);
+  gridLayout_->setHorizontalSpacing(18);
+  gridLayout_->setVerticalSpacing(22);
   for (int c = 0; c < 12; ++c)
     gridLayout_->setColumnStretch(c, 1);
   if (blanksEnabled)
@@ -1022,8 +1022,7 @@ void HomeScreen::loadTileOrder() {
                   HomeTileKind::DisneyPlus,  HomeTileKind::Hulu,
                   HomeTileKind::MediaServer, HomeTileKind::ScreenMirror,
                   HomeTileKind::Store,       HomeTileKind::Library,
-                  HomeTileKind::GBA,         HomeTileKind::PS1,
-                  HomeTileKind::Switch,      HomeTileKind::Settings};
+                  HomeTileKind::Settings};
   }
   if (!hiddenStr.isEmpty()) {
     for (const auto &tok : hiddenStr.split(QLatin1Char(','))) {
@@ -1071,22 +1070,25 @@ void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
 
   // 4. Row stretches
   gridLayout_->setRowStretch(0, 0);
+  gridLayout_->setRowMinimumHeight(0, 36);
   gridLayout_->setRowStretch(1, 4);
-  gridLayout_->setRowMinimumHeight(1, 186);
+  gridLayout_->setRowMinimumHeight(1, 176);
   gridLayout_->setRowStretch(2, 0);
+  gridLayout_->setRowMinimumHeight(2, 36);
   gridLayout_->setRowStretch(3, 4);
-  gridLayout_->setRowMinimumHeight(3, 186);
+  gridLayout_->setRowMinimumHeight(3, 176);
   gridLayout_->setRowStretch(4, 0);
+  gridLayout_->setRowMinimumHeight(4, 36);
   gridLayout_->setRowStretch(5, 4);
-  gridLayout_->setRowMinimumHeight(5, 186);
+  gridLayout_->setRowMinimumHeight(5, 176);
 
   // 5. Section header labels
-  const char *sectionNames[] = {"Watch Now", "Apps & Media", "Play"};
+  const char *sectionNames[] = {"Watch Now", "Apps & Media", "System"};
   const int sectionGridRows[] = {0, 2, 4};
   for (int i = 0; i < 3; ++i) {
     auto *lbl = new QLabel(QString::fromLatin1(sectionNames[i]), gridHost_);
     lbl->setObjectName(QStringLiteral("aioHomeSectionHeader"));
-    lbl->setFixedHeight(30);
+    lbl->setFixedHeight(34);
     gridLayout_->addWidget(lbl, sectionGridRows[i], 0, 1, 12);
   }
 
@@ -1099,7 +1101,7 @@ void HomeScreen::rebuildGrid(HomeTileKind preferredKind) {
     const int tileLogicalRow = visibleIndex / 4;
     const int tileCol = visibleIndex % 4;
     auto *tile = new HomeTile(k, gridHost_);
-    tile->setMinimumHeight(184);
+    tile->setMinimumHeight(176);
     connect(tile, &HomeTile::clicked, this,
             [this, k]() { activateTileKind(k); });
     gridLayout_->addWidget(tile, tileLogicalRow * 2 + 1, tileCol * 3, 1, 3);
@@ -1334,7 +1336,7 @@ void HomeScreen::updateHero() {
     return;
   }
 
-  const char *sectionNames[] = {"Watch Now", "Apps & Media", "Play"};
+  const char *sectionNames[] = {"Watch Now", "Apps & Media", "System"};
   const int sectionIdx = qBound(0, focusRow_, 2);
   eyebrowLabel_->setText(QString::fromLatin1(sectionNames[sectionIdx]));
 
@@ -1426,7 +1428,7 @@ void HomeScreen::paintEvent(QPaintEvent *) {
       focusCol_ < rows_[focusRow_].size()) {
     HomeTile *tile = rows_[focusRow_][focusCol_];
     QColor glow = ambientGlowFor(tile->kind());
-    glow.setAlpha(22);
+    glow.setAlpha(6);
     QLinearGradient wash(0, 0, width() * 0.55, 0);
     wash.setColorAt(0.0, glow);
     wash.setColorAt(1.0, QColor(0, 0, 0, 0));
@@ -1444,14 +1446,14 @@ void HomeScreen::paintEvent(QPaintEvent *) {
         const QRectF tg(tileOrigin, tile->size());
         const qreal gp = qBound(0.0, fp, 1.0);
         {
-          const qreal expand = 40.0 * gp;
+          const qreal expand = 14.0 * gp;
           const QRectF glowRect = tg.adjusted(-expand, -expand, expand, expand);
           QRadialGradient rGlow(tg.center(),
                                 qMax(tg.width(), tg.height()) * 0.85);
           rGlow.setColorAt(0.0, QColor(gc.red(), gc.green(), gc.blue(),
-                                       static_cast<int>(80 * gp)));
+                                       static_cast<int>(24 * gp)));
           rGlow.setColorAt(0.45, QColor(gc.red(), gc.green(), gc.blue(),
-                                        static_cast<int>(28 * gp)));
+                                        static_cast<int>(9 * gp)));
           rGlow.setColorAt(1.0, QColor(gc.red(), gc.green(), gc.blue(), 0));
           QPainterPath glowPath;
           glowPath.addRoundedRect(glowRect, 36, 36);

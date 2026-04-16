@@ -816,7 +816,7 @@ void GameStorePage::scanLibrary() {
   const QDir dir(romDir);
   if (dir.exists()) {
     QMap<QString, StoreGame> uniqueGames;
-    const QStringList filters = {"*.gba", "*.bin", "*.cue", "*.iso", "*.img",
+    const QStringList filters = {"*.gba", "*.gb", "*.gbc", "*.bin", "*.cue", "*.iso", "*.img",
                    "*.chd", "*.pbp", "*.xci", "*.nsp", "*.nso",
                    "*.nro"};
     QDirIterator it(romDir, filters, QDir::Files, QDirIterator::Subdirectories);
@@ -834,7 +834,7 @@ void GameStorePage::scanLibrary() {
       g.isInstalled = true;
       g.isRomGame = true;
       g.coverColor = palette[idx % palette.size()];
-      if (ext == "gba") {
+      if (ext == "gba" || ext == "gb" || ext == "gbc") {
         g.category = QStringLiteral("GBA");
       } else if (ext == "bin" || ext == "cue" || ext == "iso" ||
                  ext == "img" || ext == "chd" || ext == "pbp") {

@@ -59,7 +59,7 @@ void MainWindow::initAudio() {
   // prefers 48000Hz). Keep the emulator's audio resampler aligned to the
   // actual device rate.
   if (have.freq > 0) {
-    gba->GetAPU().SetOutputSampleRate(have.freq);
+    gba->SetOutputSampleRate(have.freq);
     audioRecorder_.SetSampleRate(have.freq);
   }
   audioInstance.store(this, std::memory_order_release);
@@ -109,8 +109,8 @@ bool MainWindow::StartAVRecording(const std::string &path) {
   // Configure based on current emulator
   AIO::Common::AVRecorder::Config cfg;
   if (currentEmulator == EmulatorType::GBA) {
-    cfg.videoWidth = 240;
-    cfg.videoHeight = 160;
+    cfg.videoWidth = gba->GetVideoWidth();
+    cfg.videoHeight = gba->GetVideoHeight();
     cfg.videoFps = 60;
   } else if (currentEmulator == EmulatorType::PS1) {
     cfg.videoWidth = 512;
@@ -143,7 +143,7 @@ void MainWindow::audioCallback(void *userdata, Uint8 *stream, int len) {
   }
 
   if (self->currentEmulator == EmulatorType::GBA) {
-    self->gba->GetAPU().GetSamples(buffer, numSamples);
+    self->gba->GetAudioSamples(buffer, numSamples);
   } else if (self->currentEmulator == EmulatorType::PS1) {
     self->ps1Emulator->GetSPU().GetSamples(buffer, numSamples);
   } else {

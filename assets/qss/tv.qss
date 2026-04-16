@@ -587,11 +587,11 @@ QScrollBar::sub-page:horizontal {
 
 /* Section headers */
 #aioHomeSectionHeader {
-  color: rgba(240,240,240,0.85);
-  font-size: 14px;
+  color: rgba(240,240,240,0.92);
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: 1.2px;
-  padding: 8px 4px 8px 8px;
+  letter-spacing: 1.0px;
+  padding: 10px 4px 8px 8px;
   background: transparent;
 }
 
@@ -615,21 +615,21 @@ QScrollBar::sub-page:horizontal {
 
 #aioHomeHeroEyebrow {
   color: #64b5f6;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: 1.4px;
+  letter-spacing: 1.1px;
 }
 
 #aioHomeHeroTitle {
   color: #f0f0f0;
-  font-size: 48px;
+  font-size: 52px;
   font-weight: 800;
-  letter-spacing: -0.4px;
+  letter-spacing: -0.6px;
 }
 
 #aioHomeHeroSubtitle {
-  color: rgba(240, 240, 240, 0.78);
-  font-size: 20px;
+  color: rgba(240, 240, 240, 0.74);
+  font-size: 18px;
 }
 
 #aioHomeModeChip {
@@ -1264,12 +1264,12 @@ QLabel[role="footer"] {
 
 #aioStoreShelfTitle {
   color: #f0f0f0;
-  font-size: 32px;
+  font-size: 36px;
   font-weight: 700;
 }
 
 #aioStoreShelfSummary {
-  color: #999999;
+  color: #b3b3b3;
   font-size: 16px;
 }
 
@@ -1312,7 +1312,7 @@ QLabel[role="footer"] {
 #aioStoreCardTitle {
   color: #f0f0f0;
   padding: 8px 12px 4px 12px;
-  background: rgba(10, 10, 10, 0.56);
+  background: rgba(8, 8, 8, 0.72);
   border-top-left-radius: 12px;
   border-top-right-radius: 12px;
 }
@@ -1320,7 +1320,7 @@ QLabel[role="footer"] {
 #aioStoreCardMeta {
   color: #f0f0f0;
   padding: 0 12px 12px 12px;
-  background: rgba(10, 10, 10, 0.72);
+  background: rgba(8, 8, 8, 0.86);
   border-bottom-left-radius: 12px;
   border-bottom-right-radius: 12px;
 }

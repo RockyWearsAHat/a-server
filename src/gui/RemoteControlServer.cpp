@@ -1,6 +1,7 @@
 #include "gui/RemoteControlServer.h"
 #include "gui/GameStorePage.h"
 #include "gui/GamesLibraryPage.h"
+#include "gui/EmulatorFormats.h"
 #include "gui/HomeScreen.h"
 #include "gui/MainWindow.h"
 #include "input/InputManager.h"
@@ -1369,9 +1370,15 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
 
     if (auto *libPage = qobject_cast<AIO::GUI::GamesLibraryPage *>(current)) {
       QJsonObject s;
-      const char *filterNames[] = {"All", "GBA", "PS1", "Switch"};
-      int fIdx = static_cast<int>(libPage->filter_);
-      s["filter"] = (fIdx >= 0 && fIdx < 4) ? filterNames[fIdx] : "unknown";
+      const auto &formats = AIO::GUI::emulatorFormats();
+      int fIdx = libPage->filterIndex_;
+      if (fIdx == 0) {
+        s["filter"] = QStringLiteral("All");
+      } else {
+        const int fi = fIdx - 1;
+        s["filter"] = (fi >= 0 && fi < formats.size()) ? formats[fi].badge
+                                                        : QStringLiteral("unknown");
+      }
       s["chipFocus"] = libPage->chipFocus_;
       s["inChips"] = libPage->inChips_;
       s["gridRow"] = libPage->gridRow_;
@@ -1853,14 +1860,15 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     // Detect emulator type from extension.
     const QString lower = resolved.toLower();
     MainWindow::EmulatorType emuType = MainWindow::EmulatorType::None;
-    if (lower.endsWith(".gba"))
+    if (lower.endsWith(".gba") || lower.endsWith(".gb") ||
+      lower.endsWith(".gbc"))
       emuType = MainWindow::EmulatorType::GBA;
     else if (lower.endsWith(".bin") || lower.endsWith(".cue") ||
              lower.endsWith(".iso") || lower.endsWith(".img"))
       emuType = MainWindow::EmulatorType::PS1;
     else
       return errorResponse(400, "launch-rom: unrecognized extension "
-                                "(supported: .gba .bin .cue .iso .img)");
+                "(supported: .gba .gb .gbc .bin .cue .iso .img)");
 
     // Stop any currently-running emulator cleanly.
     if (window_->emulatorRunning.load()) {

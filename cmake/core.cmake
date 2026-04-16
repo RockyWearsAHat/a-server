@@ -287,6 +287,26 @@ set_target_properties(WindowsCompatLayer PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/WindowsCompatLayer"
 )
 
+# ─── Atari 2600 Emulator ─────────────────────────────────────────────────────
+add_library(Atari2600Emulator STATIC
+    ${PROJECT_ROOT}/src/emulator/atari2600/MOS6507.cpp
+    ${PROJECT_ROOT}/src/emulator/atari2600/TIA.cpp
+    ${PROJECT_ROOT}/src/emulator/atari2600/PIA6532.cpp
+    ${PROJECT_ROOT}/src/emulator/atari2600/Atari2600Memory.cpp
+    ${PROJECT_ROOT}/src/emulator/atari2600/Atari2600Console.cpp
+)
+
+target_include_directories(Atari2600Emulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(Atari2600Emulator PUBLIC EmulatorCommon)
+
+set_target_properties(Atari2600Emulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/Atari2600Emulator"
+)
+
 add_executable(AIOServer 
     ${PROJECT_ROOT}/src/main.cpp
     ${PROJECT_ROOT}/assets/fonts.qrc
@@ -386,6 +406,7 @@ target_include_directories(AIOServer PRIVATE
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
     GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator DreamcastEmulator PS2Emulator GameCubeEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    Atari2600Emulator
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

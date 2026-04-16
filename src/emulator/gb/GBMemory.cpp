@@ -49,6 +49,16 @@ uint8_t GBMemory::Read8(uint16_t addr) {
     return 0xFF;
   } else if (addr < 0xFF80) {
     // I/O registers (PPU, APU, etc.)
+    if (addr == 0xFF00) {
+      uint8_t result = static_cast<uint8_t>(0xC0 | joyp_select_ | 0x0F);
+      if ((joyp_select_ & 0x10) == 0) {
+        result = static_cast<uint8_t>((result & 0xF0) | (joypad_state_ & 0x0F));
+      }
+      if ((joyp_select_ & 0x20) == 0) {
+        result = static_cast<uint8_t>((result & 0xF0) | ((joypad_state_ >> 4) & 0x0F));
+      }
+      return result;
+    }
     if (addr >= 0xFF40 && addr < 0xFF50 && ppu_) {
       return ppu_->ReadReg(addr - 0xFF40);
     } else if (addr >= 0xFF10 && addr < 0xFF40 && apu_) {
@@ -85,6 +95,10 @@ void GBMemory::Write8(uint16_t addr, uint8_t val) {
     return;
   } else if (addr < 0xFF80) {
     // I/O registers
+    if (addr == 0xFF00) {
+      joyp_select_ = static_cast<uint8_t>(val & 0x30);
+      return;
+    }
     if (addr >= 0xFF40 && addr < 0xFF50 && ppu_) {
       ppu_->WriteReg(addr - 0xFF40, val);
     } else if (addr >= 0xFF10 && addr < 0xFF40 && apu_) {

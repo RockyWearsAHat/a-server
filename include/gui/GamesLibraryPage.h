@@ -24,6 +24,7 @@ class GamesLibraryPage final : public QWidget {
 public:
   explicit GamesLibraryPage(QWidget *parent = nullptr);
   void refresh();
+  int filterIndex() const { return filterIndex_; }
 
 signals:
   void gameSelected(const QString &path);
@@ -45,9 +46,8 @@ private:
   int selectedIndex() const;
   int colCount() const { return kCols; }
 
-  enum class FilterMode { All, GBA, PS1, Switch };
   enum class FocusArea { Filters, Titles, Actions };
-  FilterMode filter_ = FilterMode::All;
+  int filterIndex_ = 0;  ///< 0 = All; 1..N = index+1 into emulatorFormats()
   FocusArea focusArea_ = FocusArea::Titles;
   int chipFocus_ = 0;
   bool inChips_ = false;
