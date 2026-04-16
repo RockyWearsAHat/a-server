@@ -4,6 +4,7 @@
 #include "gui/EmulatorFormats.h"
 #include "gui/HomeScreen.h"
 #include "gui/MainWindow.h"
+#include "emulator/atari2600/Atari2600Console.h"
 #include "input/InputManager.h"
 
 #include <QApplication>
@@ -28,6 +29,41 @@
 
 namespace AIO {
 namespace GUI {
+
+namespace {
+
+double NonBlackRatioFromArgb32(const uint32_t *pixels, size_t count) {
+  if (!pixels || count == 0) {
+    return 0.0;
+  }
+
+  size_t nonBlack = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t px = pixels[i];
+    const uint32_t rgb = px & 0x00FFFFFFu;
+    if (rgb != 0u) {
+      ++nonBlack;
+    }
+  }
+  return static_cast<double>(nonBlack) / static_cast<double>(count);
+}
+
+double NonBlackRatioFromImage(const QImage &image) {
+  if (image.isNull() || image.width() <= 0 || image.height() <= 0) {
+    return 0.0;
+  }
+
+  QImage argb = image;
+  if (argb.format() != QImage::Format_ARGB32) {
+    argb = argb.convertToFormat(QImage::Format_ARGB32);
+  }
+
+  const auto *pixels = reinterpret_cast<const uint32_t *>(argb.constBits());
+  const size_t count = static_cast<size_t>(argb.width()) * argb.height();
+  return NonBlackRatioFromArgb32(pixels, count);
+}
+
+} // namespace
 
 // ─── Key name → Qt::Key mapping ─────────────────────────────────────────
 
@@ -1130,6 +1166,18 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStateEmulator() {
     obj["emulatedMs"] = static_cast<qint64>(window_->GetEmulatedMilliseconds());
     obj["audioRecording"] = window_->IsAudioRecording();
     obj["avRecording"] = window_->IsAVRecording();
+
+    obj["displayNonBlackRatio"] = NonBlackRatioFromImage(window_->displayImage);
+
+    if (window_->currentEmulator == MainWindow::EmulatorType::Atari2600 &&
+        window_->atari2600Console) {
+      constexpr size_t kPixels =
+          static_cast<size_t>(Atari2600::Atari2600Console::kWidth) *
+          Atari2600::Atari2600Console::kHeight;
+      const uint32_t *fb = window_->atari2600Console->GetFramebuffer();
+      obj["atariFramebufferNonBlackRatio"] =
+          NonBlackRatioFromArgb32(fb, kPixels);
+    }
   }
 
   return jsonResponse(200, QJsonDocument(obj).toJson(QJsonDocument::Compact));

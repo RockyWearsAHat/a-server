@@ -68,6 +68,7 @@ server/debug.log
 *.nro
 *.nso
 test_roms/*.bin
+test_roms/*.a26
 test_roms/*.cue
 test_roms/*.iso
 test_roms/*.img
