@@ -839,3 +839,24 @@ gtest_discover_tests(WindowsCompatTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ─── Cross-System Determinism Harness ───────────────────────────────────────
+# Verifies that SaveState/LoadState round-trips are lossless and that every
+# system's execution is deterministic (same ROM → same output every run).
+add_executable(DeterminismTests ${PROJECT_ROOT}/tests/DeterminismTests.cpp)
+set_target_properties(DeterminismTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DeterminismTests"
+)
+target_link_libraries(DeterminismTests PRIVATE
+  GTest::gtest_main
+  NESEmulator
+  SNESEmulator
+  GenesisEmulator
+  GBEmulator
+)
+gtest_discover_tests(DeterminismTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

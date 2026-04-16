@@ -60,7 +60,7 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 ## Tests
 
 - `tests/` — GoogleTest, one binary per subsystem
-- 29 binaries: `APUTests`, `Atari2600Tests`, `AudioCorruptionTests`, `BIOSTests`, `CPUTests`, `DMATests`, `DMATimingTests`, `EEPROMTests`, `GBAIntegrationTests`, `GbaTests`, `GraphicsCorruptionTests`, `InputLogicTests`, `LoggerTests`, `MemoryMapTests`, `PPUTests`, `PS1ControllerTests`, `PS1CPUTests`, `PS1DMATests`, `PS1GPUTests`, `PS1GTETests`, `PS1IntegrationTests`, `PS1InterruptTests`, `PS1MemoryTests`, `PS1SPUTests`, `PS1TimerTests`, `ROMMetadataTests`, `ScreenMirrorTests`, `SwitchCoreTests`, `WindowsCompatTests`
+- 30 binaries: `APUTests`, `Atari2600Tests`, `AudioCorruptionTests`, `BIOSTests`, `CPUTests`, `DeterminismTests`, `DMATests`, `DMATimingTests`, `EEPROMTests`, `GBAIntegrationTests`, `GbaTests`, `GraphicsCorruptionTests`, `InputLogicTests`, `LoggerTests`, `MemoryMapTests`, `PPUTests`, `PS1ControllerTests`, `PS1CPUTests`, `PS1DMATests`, `PS1GPUTests`, `PS1GTETests`, `PS1IntegrationTests`, `PS1InterruptTests`, `PS1MemoryTests`, `PS1SPUTests`, `PS1TimerTests`, `ROMMetadataTests`, `ScreenMirrorTests`, `SwitchCoreTests`, `WindowsCompatTests`
 - Plus `QssValidation` (build-time, not a binary)
 
 ## Scripts & Tools

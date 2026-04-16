@@ -35,6 +35,7 @@ Command: `cd build/generated/cmake && ctest -R <pattern> --output-on-failure`
 | Atari 2600                            | `Atari2600`                                        |
 | Switch core                           | `Switch`                                           |
 | Windows compatibility layer           | `WindowsCompat`                                    |
+| Cross-system determinism / save-state | `Determinism`                                      |
 | Logging                               | `LoggerTest`                                       |
 | Input                                 | `InputLogic`                                       |
 | ROM metadata                          | `ROMMetadata`                                      |
