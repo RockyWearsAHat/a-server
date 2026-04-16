@@ -36,6 +36,10 @@ QColor badgeColorFor(const QString &consoleBadge) {
 
 int extensionRank(const QString &path) {
   const QString ext = QFileInfo(path).suffix().toLower();
+  if (ext == QStringLiteral("chd"))
+    return 7;
+  if (ext == QStringLiteral("pbp"))
+    return 6;
   if (ext == QStringLiteral("cue"))
     return 5;
   if (ext == QStringLiteral("iso"))
@@ -439,7 +443,8 @@ void GamesLibraryPage::scanROMs() {
   QMap<QString, LibraryGame> uniqueGames;
   const QStringList filters = {QStringLiteral("*.gba"), QStringLiteral("*.bin"),
                                QStringLiteral("*.cue"), QStringLiteral("*.iso"),
-                               QStringLiteral("*.img"), QStringLiteral("*.xci"),
+                               QStringLiteral("*.img"), QStringLiteral("*.chd"),
+                               QStringLiteral("*.pbp"), QStringLiteral("*.xci"),
                                QStringLiteral("*.nsp"), QStringLiteral("*.nso"),
                                QStringLiteral("*.nro")};
   QDirIterator it(romDir, filters, QDir::Files, QDirIterator::Subdirectories);
@@ -455,7 +460,8 @@ void GamesLibraryPage::scanROMs() {
     if (ext == QStringLiteral("gba")) {
       game.consoleBadge = QStringLiteral("GBA");
     } else if (ext == QStringLiteral("bin") || ext == QStringLiteral("cue") ||
-               ext == QStringLiteral("iso") || ext == QStringLiteral("img")) {
+           ext == QStringLiteral("iso") || ext == QStringLiteral("img") ||
+           ext == QStringLiteral("chd") || ext == QStringLiteral("pbp")) {
       game.consoleBadge = QStringLiteral("PS1");
     } else if (ext == QStringLiteral("xci") || ext == QStringLiteral("nsp") ||
                ext == QStringLiteral("nso") || ext == QStringLiteral("nro")) {

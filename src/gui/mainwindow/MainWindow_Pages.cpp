@@ -198,7 +198,9 @@ void MainWindow::launchInstalledGame(const QString &path) {
   if (lower.endsWith(QStringLiteral(".bin")) ||
       lower.endsWith(QStringLiteral(".cue")) ||
       lower.endsWith(QStringLiteral(".iso")) ||
-      lower.endsWith(QStringLiteral(".img"))) {
+      lower.endsWith(QStringLiteral(".img")) ||
+      lower.endsWith(QStringLiteral(".chd")) ||
+      lower.endsWith(QStringLiteral(".pbp"))) {
     currentEmulator = EmulatorType::PS1;
     startGame(path);
     return;

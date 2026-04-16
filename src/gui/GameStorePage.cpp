@@ -386,7 +386,6 @@ void GameStorePage::setSteamService(SteamService *service) {
           &GameStorePage::onOwnedLibraryReady);
   connect(steamService_, &SteamService::authError, this,
           &GameStorePage::onSteamAuthError);
-  requestCatalogIfNeeded();
   updateAccountStatus();
   // Auto-fetch owned library if credentials are already stored.
   // Do NOT set ownedLibraryFetched_ here — if the server isn't up yet the
@@ -787,6 +786,8 @@ void GameStorePage::onSteamGamesPageReady(
 void GameStorePage::showSteamError(const QString &msg) {
   catalogLoading_ = false;
   catalogRequestInFlight_ = false;
+  // Avoid immediate request storms when upstream throttles or returns errors.
+  catalogHasMore_ = false;
   errorShown_ = true;
   errorMessage_ = msg;
   scanLibrary();
@@ -816,7 +817,8 @@ void GameStorePage::scanLibrary() {
   if (dir.exists()) {
     QMap<QString, StoreGame> uniqueGames;
     const QStringList filters = {"*.gba", "*.bin", "*.cue", "*.iso", "*.img",
-                                 "*.xci", "*.nsp", "*.nso", "*.nro"};
+                   "*.chd", "*.pbp", "*.xci", "*.nsp", "*.nso",
+                   "*.nro"};
     QDirIterator it(romDir, filters, QDir::Files, QDirIterator::Subdirectories);
     const QList<QColor> palette = {QColor(100, 181, 246), QColor(156, 140, 255),
                                    QColor(255, 107, 107), QColor(63, 185, 80),
@@ -834,7 +836,8 @@ void GameStorePage::scanLibrary() {
       g.coverColor = palette[idx % palette.size()];
       if (ext == "gba") {
         g.category = QStringLiteral("GBA");
-      } else if (ext == "bin" || ext == "cue" || ext == "iso" || ext == "img") {
+      } else if (ext == "bin" || ext == "cue" || ext == "iso" ||
+                 ext == "img" || ext == "chd" || ext == "pbp") {
         g.category = QStringLiteral("PS1");
       } else if (ext == "xci" || ext == "nsp" || ext == "nso" || ext == "nro") {
         g.category = QStringLiteral("Switch");
@@ -1302,8 +1305,8 @@ void GameStorePage::updateGridFocus() {
 }
 
 void GameStorePage::maybeLoadMoreCatalog() {
-  if (libraryModeActive_ || !catalogHasMore_ || catalogRequestInFlight_ ||
-      !gridScroll_) {
+  if (!isVisible() || !isVisibleTo(window()) || libraryModeActive_ ||
+      !catalogHasMore_ || catalogRequestInFlight_ || !gridScroll_) {
     return;
   }
 
