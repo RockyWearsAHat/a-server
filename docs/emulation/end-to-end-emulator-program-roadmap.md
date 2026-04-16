@@ -1,6 +1,19 @@
 # End-to-End Emulator Program Roadmap
 
-Last updated: 2026-04-15
+Last updated: 2026-04-16
+
+## Implementation status snapshot
+
+| Console | Level | CPU completeness | GPU/Video | Notes |
+|---------|-------|-----------------|-----------|-------|
+| NES (RP2A03 / 2C02) | 1 | Full 6502 instruction set (152 opcodes, all addressing modes, cycle-accurate timing, NMI/IRQ) | Loopy scroll registers, VBlank/NMI, basic render | APU basic; undocumented opcodes minimal; DMC DMA stall missing |
+| Genesis (M68000 / VDP / YM2612) | 0–1 | 14 opcodes implemented | Partial scanline model | Z80 sub-CPU present; YM2612 partial |
+| SNES (65C816 / SPC700 / PPU) | 0 | 3 opcodes | Stub | SPC700 stub; all subsystems need full implementation |
+| GBA / PS1 | 2+ | Existing deeper implementations | Existing | See respective source files |
+| N64 / Saturn / Dreamcast / PS2 / GameCube | 0 | Scaffold (~20–40 opcodes each) | Stub framebuffers | Bring-up baselines only; not functional |
+
+**Active engineering focus: Wave 1 → Level 3 in order: NES → Genesis → SNES.**
+After Wave 1 reaches Level 3, proceed to Wave 2 (PS1 raise → N64 → Saturn).
 
 ## Objective
 
@@ -131,7 +144,7 @@ Exit criteria:
 - PS1 reaches Level 3 in CPU/GPU/DMA core paths with documented residual gaps.
 - At least two additional Wave 2 systems reach Level 2+.
 
-## Phase 4: Wave 3 consoles (Months 12-22)
+## Phase 4: Wave 3 consoles
 
 Target systems:
 - Nintendo: GameCube, Wii, DS
@@ -149,7 +162,7 @@ Exit criteria:
 - PS2, GameCube, Dreamcast each have a validated design packet and passing core bring-up tests.
 - At least one of these reaches Level 2 with reproducible regression suite.
 
-## Phase 5: Wave 4 modern systems (Months 20-36+)
+## Phase 5: Wave 4 modern systems
 
 Target systems:
 - Sony: PS3, Vita, PS4, PS5
@@ -165,10 +178,10 @@ Exit criteria:
 - Clear per-platform scope statements: what is LLE, what is HLE, what is intentionally out-of-scope.
 - Reproducible compatibility tiers with evidence-backed confidence.
 
-## Phase 6: Finalization and audit loop (continuous from Month 6 onward)
+## Phase 6: Finalization and audit loop
 
 Deliverables:
-- Accuracy audit reports per release train.
+- Accuracy audit reports per release train. WRITE AND TRACK THESE IN A DIRECTORY, ENSURE PROPER CHECKS AND RESEARCH INTO THE ORIGINAL CONSOLE TO FIND ANY ISSUES AND RESOLVE OR ENSURE LESSER KNOWN BEHAVIORS THAT MAY HAVE BEEN MISSED THAT WILL BREAK OUR EMULATIONS BUT ARE NOT IMMEDIATLEY FATAL. FIX THESE RIGHT THIS SECOND FOR EVERY CONSOLE!!!!
 - Public compatibility matrix with confidence labels.
 - Known issue registry linked to subsystem owners.
 
@@ -188,7 +201,7 @@ Score each console 1-5 across:
 - Team expertise fit
 
 Recommended near-term top 10:
-1. GBA (existing)
+1. GBA (existing, should also run GB & GBC games)
 2. PS1 (existing)
 3. NES
 4. Genesis

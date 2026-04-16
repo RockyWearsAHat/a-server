@@ -198,6 +198,54 @@ private:
     // ──────────────── Branch helper ───────────────────────────────────────
     // Returns extra cycles: 0 (not taken), 1 (taken, same page), 2 (taken, page cross).
     [[nodiscard]] int Branch(bool condition);
+
+    // ──────────────── Undocumented (illegal) opcodes ─────────────────────
+    // Sources: NESDev wiki "CPU unofficial opcodes", Visual6502, Kevtris decap.
+    // All implement the documented hardware behaviour; unstable opcodes
+    // (SHA, SHX, SHY, TAS, XAA) are intentionally omitted — they depend on
+    // board capacitance and are not reliably emulable.
+
+    /// SLO — ASL memory then ORA A (addr). Flags: N,Z,C.
+    int ExecSLO(uint16_t addr);
+    /// RLA — ROL memory then AND A (addr). Flags: N,Z,C.
+    int ExecRLA(uint16_t addr);
+    /// SRE — LSR memory then EOR A (addr). Flags: N,Z,C.
+    int ExecSRE(uint16_t addr);
+    /// RRA — ROR memory then ADC A (addr). Flags: N,Z,V,C.
+    int ExecRRA(uint16_t addr);
+    /// SAX — store A & X to memory. No flags affected.
+    int ExecSAX(uint16_t addr);
+    /// LAX — load A and X from same address. Flags: N,Z.
+    int ExecLAX(uint16_t addr);
+    /// DCP — DEC memory then CMP A with result. Flags: N,Z,C.
+    int ExecDCP(uint16_t addr);
+    /// ISC/ISB — INC memory then SBC A with result. Flags: N,Z,V,C.
+    int ExecISC(uint16_t addr);
+    /// ANC — AND A with #imm; C = N (bit 7 of result). Flags: N,Z,C.
+    int ExecANC();
+    /// ALR — AND A with #imm, then LSR A. Flags: N,Z,C.
+    int ExecALR();
+    /// ARR — AND A with #imm, then ROR A; C/V set specially. Flags: N,Z,V,C.
+    int ExecARR();
+    /// AXS/SBX — X = (A & X) - #imm; sets N, Z, C (no borrow from A). Flags: N,Z,C.
+    int ExecAXS();
+
+    // ──────────────── Cycle-steal tracking ───────────────────────────────
+    // Extra CPU stall cycles injected by OAM DMA and DMC sample fetches.
+    // NES::Step() reads and resets this after every instruction.
+    int stalledCycles_ = 0;
+
+public:
+    /// Consume and clear any accumulated stall cycles (OAM DMA / DMC).
+    [[nodiscard]] int DrainStalledCycles() noexcept {
+        int v = stalledCycles_;
+        stalledCycles_ = 0;
+        return v;
+    }
+
+    /// Inject stall cycles (called by NES when OAM DMA or DMC fetch fires).
+    void InjectStall(int cycles) noexcept { stalledCycles_ += cycles; }
+
 };
 
 } // namespace AIO::Emulator::NES

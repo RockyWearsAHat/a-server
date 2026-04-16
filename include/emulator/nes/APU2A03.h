@@ -54,6 +54,19 @@ public:
 
     // ── Audio output ──────────────────────────────────────────────────────
 
+    // ── DMC memory read callback ─────────────────────────────────────────
+    /// Called by NES to provide CPU memory read access for DMC sample fetches.
+    using DmcReadCallback = std::function<uint8_t(uint16_t addr)>;
+    void SetDmcReadCallback(DmcReadCallback cb);
+
+    /// Returns accumulated DMC-fetch CPU stall cycles since the last drain.
+    /// NES::Step() calls this after Tick() and injects them into the CPU.
+    [[nodiscard]] int DrainDmcStallCycles() noexcept {
+        int v = dmcStallCycles_;
+        dmcStallCycles_ = 0;
+        return v;
+    }
+
     void SetAudioReadyCallback(AudioReadyCallback cb);
 
     // ── ISaveStateable ────────────────────────────────────────────────────
@@ -172,6 +185,8 @@ private:
 
     AudioReadyCallback audioReady_;
     IrqCallback        onIrq_;
+        DmcReadCallback    dmcRead_;
+        int                dmcStallCycles_ = 0;
 
     void TickFrameCounter();
     void TickHalfFrame();

@@ -192,6 +192,7 @@ void APU2A03::Reset() {
 
 void APU2A03::SetIrqCallback(IrqCallback cb)          { onIrq_     = std::move(cb); }
 void APU2A03::SetAudioReadyCallback(AudioReadyCallback cb) { audioReady_ = std::move(cb); }
+void APU2A03::SetDmcReadCallback(DmcReadCallback cb)       { dmcRead_   = std::move(cb); }
 
 // ── Register I/O ──────────────────────────────────────────────────────────
 
@@ -335,14 +336,57 @@ void APU2A03::WriteRegister(uint16_t addr, uint8_t value) {
 
 void APU2A03::Tick(uint32_t cpuCycles) {
     for (uint32_t c = 0; c < cpuCycles; ++c) {
-        // Timer ticks every CPU cycle for triangle; every 2 for pulse/noise
+        // Timer ticks every CPU cycle for triangle; every 2 for pulse/noise.
         triangle_.TickTimer();
         if ((frameClock_ & 1) == 0) {
             pulse1_.TickTimer();
             pulse2_.TickTimer();
             noise_.TickTimer();
         }
-
+        // DMC: refill sample buffer (DMA-stalls CPU) and clock shift register.
+        if (dmc_.enabled) {
+            if (dmc_.sampleBufferEmpty && dmc_.bytesRemaining > 0 && dmcRead_) {
+                dmc_.sampleBuffer      = dmcRead_(dmc_.currentAddr);
+                dmc_.currentAddr       = (dmc_.currentAddr == 0xFFFF)
+                                       ? uint16_t{0x8000}
+                                       : static_cast<uint16_t>(dmc_.currentAddr + 1);
+                --dmc_.bytesRemaining;
+                dmc_.sampleBufferEmpty = false;
+                // 4-cycle CPU stall per DMA read (Mesen approximation).
+                dmcStallCycles_ += 4;
+                if (dmc_.bytesRemaining == 0) {
+                    if (dmc_.loop) {
+                        dmc_.currentAddr    = dmc_.sampleAddress;
+                        dmc_.bytesRemaining = dmc_.sampleLength;
+                    } else if (dmc_.irqEnable) {
+                        irqPending_ = true;
+                        if (onIrq_) onIrq_();
+                    }
+                }
+            }
+            if (dmc_.timer == 0) {
+                dmc_.timer = dmc_.rate > 0 ? static_cast<uint16_t>(dmc_.rate - 1u) : uint16_t{0};
+                if (!dmc_.sampleBufferEmpty) {
+                    dmc_.silence           = false;
+                    dmc_.shiftReg          = dmc_.sampleBuffer;
+                    dmc_.bitsRemaining     = 8;
+                    dmc_.sampleBufferEmpty = true;
+                } else {
+                    dmc_.silence = true;
+                }
+            } else {
+                --dmc_.timer;
+            }
+            if (!dmc_.silence && dmc_.bitsRemaining > 0) {
+                if (dmc_.shiftReg & 0x01) {
+                    if (dmc_.outputLevel <= 125) dmc_.outputLevel += 2u;
+                } else {
+                    if (dmc_.outputLevel >= 2)   dmc_.outputLevel -= 2u;
+                }
+                dmc_.shiftReg >>= 1;
+                --dmc_.bitsRemaining;
+            }
+        }
         TickFrameCounter();
         MixSample();
     }
@@ -351,9 +395,6 @@ void APU2A03::Tick(uint32_t cpuCycles) {
 void APU2A03::TickFrameCounter() {
     ++frameClock_;
 
-    // 4-step mode: ticks at CPU clocks 3728.5, 7456.5, 11185.5, 14914
-    // 5-step mode: ticks at 3728.5, 7456.5, 11185.5, 18640.5
-    // Approximated as integer clocks (half-clocks handled by 2x periods).
     static constexpr uint32_t kStep4[4] = { 7457, 14913, 22371, 29829 };
     static constexpr uint32_t kStep5[5] = { 7457, 14913, 22371, 29829, 37281 };
 

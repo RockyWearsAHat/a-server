@@ -238,6 +238,91 @@ int RP2A03::Step() {
         case 0xEA:
         case 0x1A: case 0x3A: case 0x5A: case 0x7A: case 0xDA: case 0xFA:
             cycles = 2; ExecNOP(); break;
+        // Unofficial 2-byte NOPs (skip 1 byte, 2 cycles, dummy read)
+        case 0x80: case 0x82: case 0x89: case 0xC2: case 0xE2:
+            pc_++;                          // consume the immediate byte
+            cycles = 2; break;
+        // Unofficial 3-byte NOPs — absolute (4 cycles)
+        case 0x0C:
+            pc_ += 2; cycles = 4; break;
+        // Unofficial 3-byte NOPs — absolute,X (4+1 page-cross cycles)
+        case 0x1C: case 0x3C: case 0x5C: case 0x7C: case 0xDC: case 0xFC: {
+            auto [e, x] = AddrAbsoluteX();
+            (void)e;
+            cycles = 4 + x;
+            break;
+        }
+        // KIL / JAM — halt the CPU (real hardware locks up; stub as 2-cycle NOP)
+        case 0x02: case 0x12: case 0x22: case 0x32:
+        case 0x42: case 0x52: case 0x62: case 0x72:
+        case 0x92: case 0xB2: case 0xD2: case 0xF2:
+            cycles = 2; break;
+        // ── Undocumented: SLO (ASL + ORA) ───────────────────────────────
+        case 0x07: { auto e = AddrZeroPage();                   cycles = 5; ExecSLO(e); break; }
+        case 0x17: { auto e = AddrZeroPageX();                  cycles = 6; ExecSLO(e); break; }
+        case 0x0F: { auto e = AddrAbsolute();                   cycles = 6; ExecSLO(e); break; }
+        case 0x1F: { auto [e,x] = AddrAbsoluteX(); (void)x;    cycles = 7; ExecSLO(e); break; }
+        case 0x1B: { auto [e,x] = AddrAbsoluteY(); (void)x;    cycles = 7; ExecSLO(e); break; }
+        case 0x03: { auto e = AddrIndirectX();                  cycles = 8; ExecSLO(e); break; }
+        case 0x13: { auto [e,x] = AddrIndirectY(); (void)x;    cycles = 8; ExecSLO(e); break; }
+        // ── Undocumented: RLA (ROL + AND) ───────────────────────────────
+        case 0x27: { auto e = AddrZeroPage();                   cycles = 5; ExecRLA(e); break; }
+        case 0x37: { auto e = AddrZeroPageX();                  cycles = 6; ExecRLA(e); break; }
+        case 0x2F: { auto e = AddrAbsolute();                   cycles = 6; ExecRLA(e); break; }
+        case 0x3F: { auto [e,x] = AddrAbsoluteX(); (void)x;    cycles = 7; ExecRLA(e); break; }
+        case 0x3B: { auto [e,x] = AddrAbsoluteY(); (void)x;    cycles = 7; ExecRLA(e); break; }
+        case 0x23: { auto e = AddrIndirectX();                  cycles = 8; ExecRLA(e); break; }
+        case 0x33: { auto [e,x] = AddrIndirectY(); (void)x;    cycles = 8; ExecRLA(e); break; }
+        // ── Undocumented: SRE (LSR + EOR) ───────────────────────────────
+        case 0x47: { auto e = AddrZeroPage();                   cycles = 5; ExecSRE(e); break; }
+        case 0x57: { auto e = AddrZeroPageX();                  cycles = 6; ExecSRE(e); break; }
+        case 0x4F: { auto e = AddrAbsolute();                   cycles = 6; ExecSRE(e); break; }
+        case 0x5F: { auto [e,x] = AddrAbsoluteX(); (void)x;    cycles = 7; ExecSRE(e); break; }
+        case 0x5B: { auto [e,x] = AddrAbsoluteY(); (void)x;    cycles = 7; ExecSRE(e); break; }
+        case 0x43: { auto e = AddrIndirectX();                  cycles = 8; ExecSRE(e); break; }
+        case 0x53: { auto [e,x] = AddrIndirectY(); (void)x;    cycles = 8; ExecSRE(e); break; }
+        // ── Undocumented: RRA (ROR + ADC) ───────────────────────────────
+        case 0x67: { auto e = AddrZeroPage();                   cycles = 5; ExecRRA(e); break; }
+        case 0x77: { auto e = AddrZeroPageX();                  cycles = 6; ExecRRA(e); break; }
+        case 0x6F: { auto e = AddrAbsolute();                   cycles = 6; ExecRRA(e); break; }
+        case 0x7F: { auto [e,x] = AddrAbsoluteX(); (void)x;    cycles = 7; ExecRRA(e); break; }
+        case 0x7B: { auto [e,x] = AddrAbsoluteY(); (void)x;    cycles = 7; ExecRRA(e); break; }
+        case 0x63: { auto e = AddrIndirectX();                  cycles = 8; ExecRRA(e); break; }
+        case 0x73: { auto [e,x] = AddrIndirectY(); (void)x;    cycles = 8; ExecRRA(e); break; }
+        // ── Undocumented: SAX (store A & X) ─────────────────────────────
+        case 0x87: { auto e = AddrZeroPage();                   cycles = 3; ExecSAX(e); break; }
+        case 0x97: { auto e = AddrZeroPageY();                  cycles = 4; ExecSAX(e); break; }
+        case 0x8F: { auto e = AddrAbsolute();                   cycles = 4; ExecSAX(e); break; }
+        case 0x83: { auto e = AddrIndirectX();                  cycles = 6; ExecSAX(e); break; }
+        // ── Undocumented: LAX (load A and X) ────────────────────────────
+        case 0xA7: { auto e = AddrZeroPage();                   cycles = 3; ExecLAX(e); break; }
+        case 0xB7: { auto e = AddrZeroPageY();                  cycles = 4; ExecLAX(e); break; }
+        case 0xAF: { auto e = AddrAbsolute();                   cycles = 4; ExecLAX(e); break; }
+        case 0xBF: { auto [e,x] = AddrAbsoluteY();             cycles = 4 + x; ExecLAX(e); break; }
+        case 0xA3: { auto e = AddrIndirectX();                  cycles = 6; ExecLAX(e); break; }
+        case 0xB3: { auto [e,x] = AddrIndirectY();             cycles = 5 + x; ExecLAX(e); break; }
+        // ── Undocumented: DCP (DEC + CMP) ───────────────────────────────
+        case 0xC7: { auto e = AddrZeroPage();                   cycles = 5; ExecDCP(e); break; }
+        case 0xD7: { auto e = AddrZeroPageX();                  cycles = 6; ExecDCP(e); break; }
+        case 0xCF: { auto e = AddrAbsolute();                   cycles = 6; ExecDCP(e); break; }
+        case 0xDF: { auto [e,x] = AddrAbsoluteX(); (void)x;    cycles = 7; ExecDCP(e); break; }
+        case 0xDB: { auto [e,x] = AddrAbsoluteY(); (void)x;    cycles = 7; ExecDCP(e); break; }
+        case 0xC3: { auto e = AddrIndirectX();                  cycles = 8; ExecDCP(e); break; }
+        case 0xD3: { auto [e,x] = AddrIndirectY(); (void)x;    cycles = 8; ExecDCP(e); break; }
+        // ── Undocumented: ISC/ISB (INC + SBC) ───────────────────────────
+        case 0xE7: { auto e = AddrZeroPage();                   cycles = 5; ExecISC(e); break; }
+        case 0xF7: { auto e = AddrZeroPageX();                  cycles = 6; ExecISC(e); break; }
+        case 0xEF: { auto e = AddrAbsolute();                   cycles = 6; ExecISC(e); break; }
+        case 0xFF: { auto [e,x] = AddrAbsoluteX(); (void)x;    cycles = 7; ExecISC(e); break; }
+        case 0xFB: { auto [e,x] = AddrAbsoluteY(); (void)x;    cycles = 7; ExecISC(e); break; }
+        case 0xE3: { auto e = AddrIndirectX();                  cycles = 8; ExecISC(e); break; }
+        case 0xF3: { auto [e,x] = AddrIndirectY(); (void)x;    cycles = 8; ExecISC(e); break; }
+        // ── Undocumented: one-byte immediate combiners ──────────────────
+        case 0x0B: case 0x2B: cycles = 2; ExecANC(); break;  // ANC
+        case 0x4B:             cycles = 2; ExecALR(); break;  // ALR
+        case 0x6B:             cycles = 2; ExecARR(); break;  // ARR
+        case 0xCB:             cycles = 2; ExecAXS(); break;  // AXS / SBX
+        case 0xEB:             { auto e = AddrImmediate(); cycles = 2; ExecSBC(e); break; } // SBC dup
         // ── Unknown opcode: treat as NOP(2) ──────────────────────────────
         default:
             cycles = 2;
@@ -576,6 +661,135 @@ int RP2A03::ExecBNE() { return Branch(!GetFlag(kFlagZ)); }
 int RP2A03::ExecBPL() { return Branch(!GetFlag(kFlagN)); }
 int RP2A03::ExecBVC() { return Branch(!GetFlag(kFlagV)); }
 int RP2A03::ExecBVS() { return Branch( GetFlag(kFlagV)); }
+
+// ── Undocumented instruction implementations ──────────────────────────────
+// Cycle counts are set in the switch above; these helpers only perform
+// the register / memory side-effects and flags.
+
+int RP2A03::ExecSLO(uint16_t addr) {
+    // ASL on memory, then ORA A.
+    uint8_t m = Read8(addr);
+    SetFlag(kFlagC, (m & 0x80) != 0);
+    m <<= 1;
+    mem_.Write8(addr, m);
+    a_ |= m;
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecRLA(uint16_t addr) {
+    // ROL on memory, then AND A.
+    const uint8_t old = Read8(addr);
+    const uint8_t res = static_cast<uint8_t>((old << 1) | (GetFlag(kFlagC) ? 1 : 0));
+    SetFlag(kFlagC, (old & 0x80) != 0);
+    mem_.Write8(addr, res);
+    a_ &= res;
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecSRE(uint16_t addr) {
+    // LSR on memory, then EOR A.
+    uint8_t m = Read8(addr);
+    SetFlag(kFlagC, (m & 0x01) != 0);
+    m >>= 1;
+    mem_.Write8(addr, m);
+    a_ ^= m;
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecRRA(uint16_t addr) {
+    // ROR on memory, then ADC A with result.
+    const uint8_t old = Read8(addr);
+    const uint8_t m   = static_cast<uint8_t>((old >> 1) | (GetFlag(kFlagC) ? 0x80 : 0));
+    SetFlag(kFlagC, (old & 0x01) != 0);
+    mem_.Write8(addr, m);
+    // Re-use ExecADC logic inline to keep flags accurate.
+    const uint16_t res = a_ + m + (GetFlag(kFlagC) ? 1u : 0u);
+    SetFlag(kFlagV, (~(a_ ^ m) & (a_ ^ res) & 0x80) != 0);
+    SetFlag(kFlagC, res > 0xFF);
+    a_ = static_cast<uint8_t>(res);
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecSAX(uint16_t addr) {
+    // Store A & X; no flags affected.
+    mem_.Write8(addr, a_ & x_);
+    return 0;
+}
+
+int RP2A03::ExecLAX(uint16_t addr) {
+    // Load A and X from same address.
+    a_ = x_ = Read8(addr);
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecDCP(uint16_t addr) {
+    // DEC then CMP (unsigned compare, no V flag).
+    const uint8_t m = Read8(addr) - 1u;
+    mem_.Write8(addr, m);
+    SetFlag(kFlagC, a_ >= m);
+    UpdateNZ(static_cast<uint8_t>(a_ - m));
+    return 0;
+}
+
+int RP2A03::ExecISC(uint16_t addr) {
+    // INC then SBC.
+    const uint8_t m = Read8(addr) + 1u;
+    mem_.Write8(addr, m);
+    // SBC is ADC with operand inverted.
+    const uint8_t  inv = m ^ 0xFF;
+    const uint16_t res = a_ + inv + (GetFlag(kFlagC) ? 1u : 0u);
+    SetFlag(kFlagV, (~(a_ ^ inv) & (a_ ^ res) & 0x80) != 0);
+    SetFlag(kFlagC, res > 0xFF);
+    a_ = static_cast<uint8_t>(res);
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecANC() {
+    // AND A with #imm; carry = bit 7 of result (same as N).
+    const uint8_t imm = Read8(AddrImmediate());
+    a_ &= imm;
+    UpdateNZ(a_);
+    SetFlag(kFlagC, (a_ & 0x80) != 0);
+    return 0;
+}
+
+int RP2A03::ExecALR() {
+    // AND A with #imm, then LSR A.
+    const uint8_t imm = Read8(AddrImmediate());
+    a_ &= imm;
+    SetFlag(kFlagC, (a_ & 0x01) != 0);
+    a_ >>= 1;
+    UpdateNZ(a_);
+    return 0;
+}
+
+int RP2A03::ExecARR() {
+    // AND A with #imm, then ROR A with special C and V behaviour.
+    // Bit 6 after the ROR becomes C; V = (C ^ bit 5 after ROR).
+    const uint8_t imm = Read8(AddrImmediate());
+    a_ &= imm;
+    a_ = static_cast<uint8_t>((a_ >> 1) | (GetFlag(kFlagC) ? 0x80 : 0));
+    UpdateNZ(a_);
+    SetFlag(kFlagC, (a_ & 0x40) != 0);
+    SetFlag(kFlagV, (((a_ >> 6) ^ (a_ >> 5)) & 0x01) != 0);
+    return 0;
+}
+
+int RP2A03::ExecAXS() {
+    // X = (A & X) - #imm; flags N, Z, C set (no borrow added from A).
+    const uint8_t imm = Read8(AddrImmediate());
+    const uint8_t ax  = a_ & x_;
+    SetFlag(kFlagC, ax >= imm);
+    x_ = static_cast<uint8_t>(ax - imm);
+    UpdateNZ(x_);
+    return 0;
+}
 
 // ── Save state ────────────────────────────────────────────────────────────
 

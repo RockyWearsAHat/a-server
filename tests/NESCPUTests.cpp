@@ -153,3 +153,114 @@ TEST(NESCPUTests, IRQ_MaskedByIFlag) {
         << "CPU should not have jumped to IRQ vector when I flag is set";
     (void)pcBefore;
 }
+
+    // ── Undocumented opcodes ────────────────────────────────────────────────────
+
+    // LAX $zp — loads A and X with the same zero-page value (0xA7)
+    TEST(NESCPUTests, UndocLAX_ZeroPage_LoadsAandX) {
+        // Store 0xAB at $0010, then LAX $10
+        const std::vector<uint8_t> prog = {
+            0xA9, 0xAB,  // LDA #$AB
+            0x85, 0x10,  // STA $10
+            0xA7, 0x10,  // LAX $10
+            0x4C, 0x06, 0x80
+        };
+        const auto rom = MakeNromRom(prog, 0x8000);
+        NES nes;
+        nes.Load(rom);
+        static_cast<void>(nes.Step()); // LDA
+        static_cast<void>(nes.Step()); // STA
+        static_cast<void>(nes.Step()); // LAX
+        EXPECT_EQ(nes.GetCPU().GetA(), 0xABu);
+        EXPECT_EQ(nes.GetCPU().GetX(), 0xABu);
+    }
+
+    // SAX $zp — stores A & X to zero-page (0x87)
+    TEST(NESCPUTests, UndocSAX_ZeroPage_StoresAndOfAandX) {
+        const std::vector<uint8_t> prog = {
+            0xA9, 0x0F,  // LDA #$0F
+            0xA2, 0xF0,  // LDX #$F0 — wait, A&X = $0F & $F0 = $00
+            // Use A=$CF X=$3F → A&X=$0F
+            0xA9, 0xCF,  // LDA #$CF
+            0xA2, 0x3F,  // LDX #$3F
+            0x87, 0x20,  // SAX $20   — [$20] = $CF & $3F = $0F
+            0x4C, 0x08, 0x80
+        };
+        const auto rom = MakeNromRom(prog, 0x8000);
+        NES nes;
+        nes.Load(rom);
+        static_cast<void>(nes.Step()); // LDA #$0F
+        static_cast<void>(nes.Step()); // LDX #$F0
+        static_cast<void>(nes.Step()); // LDA #$CF
+        static_cast<void>(nes.Step()); // LDX #$3F
+        static_cast<void>(nes.Step()); // SAX $20
+        EXPECT_EQ(nes.GetMemory().Read8(0x0020), 0x0Fu);
+    }
+
+    // DCP $zp — DEC mem then CMP A with result (0xC7)
+    // A=$05, mem=$06 → DEC gives $05, CMP: A-mem=0, Z=1, C=1
+    TEST(NESCPUTests, UndocDCP_ZeroPage_DecAndCompare) {
+        const std::vector<uint8_t> prog = {
+            0xA9, 0x06,  // LDA #$06
+            0x85, 0x30,  // STA $30   — [$30]=$06
+            0xA9, 0x05,  // LDA #$05
+            0xC7, 0x30,  // DCP $30   — DEC[$30]→$05, CMP A($05)–$05=0 Z=1 C=1
+            0x4C, 0x08, 0x80
+        };
+        const auto rom = MakeNromRom(prog, 0x8000);
+        NES nes;
+        nes.Load(rom);
+        static_cast<void>(nes.Step()); // LDA #$06
+        static_cast<void>(nes.Step()); // STA $30
+        static_cast<void>(nes.Step()); // LDA #$05
+        static_cast<void>(nes.Step()); // DCP $30
+        EXPECT_EQ(nes.GetMemory().Read8(0x0030), 0x05u); // decremented
+        EXPECT_TRUE((nes.GetCPU().GetP() & 0x02) != 0); // Z flag
+        EXPECT_TRUE((nes.GetCPU().GetP() & 0x01) != 0); // C flag
+    }
+
+    // ISC $zp — INC mem then SBC A with result (0xE7)
+    // A=$10, mem=$0F → INC gives $10, SBC: A=$10–$10–borrow; with C=1 result=0 Z=1
+    TEST(NESCPUTests, UndocISC_ZeroPage_IncAndSubtract) {
+        const std::vector<uint8_t> prog = {
+            0xA9, 0x0F,  // LDA #$0F
+            0x85, 0x40,  // STA $40   — [$40]=$0F
+            0x38,        // SEC
+            0xA9, 0x10,  // LDA #$10
+            0xE7, 0x40,  // ISC $40   — INC[$40]→$10, SBC A($10)–$10=0 Z=1
+            0x4C, 0x09, 0x80
+        };
+        const auto rom = MakeNromRom(prog, 0x8000);
+        NES nes;
+        nes.Load(rom);
+        static_cast<void>(nes.Step()); // LDA #$0F
+        static_cast<void>(nes.Step()); // STA $40
+        static_cast<void>(nes.Step()); // SEC
+        static_cast<void>(nes.Step()); // LDA #$10
+        static_cast<void>(nes.Step()); // ISC $40
+        EXPECT_EQ(nes.GetMemory().Read8(0x0040), 0x10u); // incremented
+        EXPECT_EQ(nes.GetCPU().GetA(), 0x00u);           // 0x10 - 0x10 = 0
+        EXPECT_TRUE((nes.GetCPU().GetP() & 0x02) != 0);  // Z flag
+    }
+
+    // SLO $zp — ASL mem then ORA A with result (0x07)
+    // A=$01, mem=$40 → ASL→$80, ORA: A=$01|$80=$81 N=1
+    TEST(NESCPUTests, UndocSLO_ZeroPage_ShiftLeftOrA) {
+        const std::vector<uint8_t> prog = {
+            0xA9, 0x40,  // LDA #$40
+            0x85, 0x50,  // STA $50   — [$50]=$40
+            0xA9, 0x01,  // LDA #$01
+            0x07, 0x50,  // SLO $50   — ASL[$50]→$80, ORA A=$01|$80=$81
+            0x4C, 0x08, 0x80
+        };
+        const auto rom = MakeNromRom(prog, 0x8000);
+        NES nes;
+        nes.Load(rom);
+        static_cast<void>(nes.Step()); // LDA #$40
+        static_cast<void>(nes.Step()); // STA $50
+        static_cast<void>(nes.Step()); // LDA #$01
+        static_cast<void>(nes.Step()); // SLO $50
+        EXPECT_EQ(nes.GetMemory().Read8(0x0050), 0x80u); // ASL result
+        EXPECT_EQ(nes.GetCPU().GetA(), 0x81u);           // ORA result
+        EXPECT_TRUE((nes.GetCPU().GetP() & 0x80) != 0);  // N flag
+    }

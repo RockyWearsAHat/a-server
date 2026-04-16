@@ -39,6 +39,10 @@ void NES::Load(std::span<const uint8_t> romData) {
 
     // APU fires IRQ into CPU via the IRQ line
     apu_->SetIrqCallback([this]() { cpu_->SetIRQ(true); });
+        // APU DMC DMA reads from CPU bus
+        apu_->SetDmcReadCallback([this](uint16_t addr) -> uint8_t {
+            return mem_->Read8(static_cast<uint32_t>(addr));
+        });
 
     Reset();
 }
@@ -75,6 +79,10 @@ int NES::Step() {
 
     // APU ticks 1:1 with CPU
     apu_->Tick(static_cast<uint32_t>(cycles));
+
+        // Drain DMC stall cycles accumulated this tick
+        const int dmcStall = apu_->DrainDmcStallCycles();
+        if (dmcStall > 0) cpu_->InjectStall(dmcStall);
 
     totalMasterCycles_ += static_cast<uint64_t>(cycles) * 12;
 
