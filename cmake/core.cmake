@@ -1,5 +1,23 @@
 # Emulator core and main app build
 
+# ─── Emulator Common (shared infrastructure) ─────────────────────────────────
+add_library(EmulatorCommon STATIC
+    ${PROJECT_ROOT}/src/emulator/common/Logger.cpp
+    ${PROJECT_ROOT}/src/emulator/common/Fuzzer.cpp
+    ${PROJECT_ROOT}/src/emulator/common/Scheduler.cpp
+    ${PROJECT_ROOT}/src/emulator/common/SaveState.cpp
+    ${PROJECT_ROOT}/src/emulator/common/TraceRecorder.cpp
+)
+
+target_include_directories(EmulatorCommon PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+set_target_properties(EmulatorCommon PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/EmulatorCommon"
+)
+
 # ─── PS1 Emulator ────────────────────────────────────────────────────────
 add_library(PS1Emulator STATIC
     ${PROJECT_ROOT}/src/emulator/ps1/PS1.cpp
@@ -15,13 +33,14 @@ add_library(PS1Emulator STATIC
     ${PROJECT_ROOT}/src/emulator/ps1/GTE.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/PS1Controller.cpp
     ${PROJECT_ROOT}/src/emulator/ps1/PS1HleBios.cpp
-    ${PROJECT_ROOT}/src/emulator/common/Logger.cpp
 )
 
 target_include_directories(PS1Emulator PUBLIC
     ${PROJECT_ROOT}/include
     ${PROJECT_ROOT}/src
 )
+
+target_link_libraries(PS1Emulator PUBLIC EmulatorCommon)
 
 set_target_properties(PS1Emulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1Emulator"
@@ -35,18 +54,62 @@ add_library(GBAEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/gba/PPU.cpp
     ${PROJECT_ROOT}/src/emulator/gba/APU.cpp
     ${PROJECT_ROOT}/src/emulator/gba/ROMMetadataAnalyzer.cpp
-    ${PROJECT_ROOT}/src/emulator/common/Logger.cpp
-    ${PROJECT_ROOT}/src/emulator/common/Fuzzer.cpp
 )
 
-target_include_directories(GBAEmulator PUBLIC 
+target_include_directories(GBAEmulator PUBLIC
     ${PROJECT_ROOT}/include
     ${PROJECT_ROOT}/src
 )
 
+target_link_libraries(GBAEmulator PUBLIC EmulatorCommon)
+
 # Set autogen directory for GBAEmulator
 set_target_properties(GBAEmulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBAEmulator"
+)
+
+# ─── NES Emulator ────────────────────────────────────────────────────────
+add_library(NESEmulator STATIC
+    ${PROJECT_ROOT}/src/emulator/nes/NESCartridge.cpp
+    ${PROJECT_ROOT}/src/emulator/nes/NESMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/nes/RP2A03.cpp
+    ${PROJECT_ROOT}/src/emulator/nes/PPU2C02.cpp
+    ${PROJECT_ROOT}/src/emulator/nes/APU2A03.cpp
+    ${PROJECT_ROOT}/src/emulator/nes/NES.cpp
+)
+
+target_include_directories(NESEmulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(NESEmulator PUBLIC EmulatorCommon)
+
+set_target_properties(NESEmulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/NESEmulator"
+)
+
+# ─── Genesis Emulator ────────────────────────────────────────────────────
+add_library(GenesisEmulator STATIC
+    ${PROJECT_ROOT}/src/emulator/genesis/GenesisCartridge.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/GenesisMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/M68000.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/Z80.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/GenesisVDP.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/YM2612.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/SN76489.cpp
+    ${PROJECT_ROOT}/src/emulator/genesis/Genesis.cpp
+)
+
+target_include_directories(GenesisEmulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(GenesisEmulator PUBLIC EmulatorCommon)
+
+set_target_properties(GenesisEmulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GenesisEmulator"
 )
 
 add_library(SwitchEmulator STATIC
@@ -185,7 +248,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

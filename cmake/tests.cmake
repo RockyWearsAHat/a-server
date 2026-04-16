@@ -449,3 +449,92 @@ gtest_discover_tests(ScreenMirrorTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+# ─── Infrastructure Tests ────────────────────────────────────────────────────
+
+add_executable(InfrastructureTests ${PROJECT_ROOT}/tests/InfrastructureTests.cpp)
+set_target_properties(InfrastructureTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/InfrastructureTests"
+)
+target_link_libraries(InfrastructureTests PRIVATE GTest::gtest_main EmulatorCommon)
+gtest_discover_tests(InfrastructureTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+# ─── NES Emulator Tests ─────────────────────────────────────────────────────
+
+add_executable(NESCPUTests ${PROJECT_ROOT}/tests/NESCPUTests.cpp)
+set_target_properties(NESCPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/NESCPUTests"
+)
+target_link_libraries(NESCPUTests PRIVATE GTest::gtest_main NESEmulator)
+gtest_discover_tests(NESCPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(NESPPUTests ${PROJECT_ROOT}/tests/NESPPUTests.cpp)
+set_target_properties(NESPPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/NESPPUTests"
+)
+target_link_libraries(NESPPUTests PRIVATE GTest::gtest_main NESEmulator)
+gtest_discover_tests(NESPPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(NESCartridgeTests ${PROJECT_ROOT}/tests/NESCartridgeTests.cpp)
+set_target_properties(NESCartridgeTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/NESCartridgeTests"
+)
+target_link_libraries(NESCartridgeTests PRIVATE GTest::gtest_main NESEmulator)
+gtest_discover_tests(NESCartridgeTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+# ─── Genesis Emulator Tests ───────────────────────────────────────────────
+
+add_executable(GenesisCPUTests ${PROJECT_ROOT}/tests/GenesisCPUTests.cpp)
+set_target_properties(GenesisCPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GenesisCPUTests"
+)
+target_link_libraries(GenesisCPUTests PRIVATE GTest::gtest_main GenesisEmulator)
+gtest_discover_tests(GenesisCPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(GenesisVDPTests ${PROJECT_ROOT}/tests/GenesisVDPTests.cpp)
+set_target_properties(GenesisVDPTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GenesisVDPTests"
+)
+target_link_libraries(GenesisVDPTests PRIVATE GTest::gtest_main GenesisEmulator)
+gtest_discover_tests(GenesisVDPTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(GenesisCartridgeTests ${PROJECT_ROOT}/tests/GenesisCartridgeTests.cpp)
+set_target_properties(GenesisCartridgeTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GenesisCartridgeTests"
+)
+target_link_libraries(GenesisCartridgeTests PRIVATE GTest::gtest_main GenesisEmulator)
+gtest_discover_tests(GenesisCartridgeTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)

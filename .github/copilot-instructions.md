@@ -3,6 +3,9 @@ AIO Server is a native TV operating shell built with Qt 6, C++, and CMake, with 
 Build: `make build`
 Targeted tests: `cd build/generated/cmake && ctest -R <pattern> --output-on-failure`
 
+## Checkpointing
+Use message: "your commit message" to commit without an AI call. The context: parameter calls a subagent, so save the subagent call when possible and please prefer usage of the message parameter if you can write your own message instead.
+
 ## Product Philosophy
 
 - No webview filler for primary app experiences. Native UI is the default requirement.
