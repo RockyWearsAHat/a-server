@@ -745,6 +745,46 @@ void MainWindow::setupEmulatorSelect() {
   });
   layout->addWidget(switchBtn);
 
+  QPushButton *nesBtn = new QPushButton("NES", emulatorSelectPage);
+  nesBtn->setCursor(Qt::PointingHandCursor);
+  nesBtn->setFocusPolicy(Qt::StrongFocus);
+  nesBtn->setProperty("system", "nes");
+  connect(nesBtn, &QPushButton::clicked, this, [this]() {
+    currentEmulator = EmulatorType::NES;
+    goToGameSelect();
+  });
+  layout->addWidget(nesBtn);
+
+  QPushButton *genesisBtn = new QPushButton("Genesis", emulatorSelectPage);
+  genesisBtn->setCursor(Qt::PointingHandCursor);
+  genesisBtn->setFocusPolicy(Qt::StrongFocus);
+  genesisBtn->setProperty("system", "genesis");
+  connect(genesisBtn, &QPushButton::clicked, this, [this]() {
+    currentEmulator = EmulatorType::Genesis;
+    goToGameSelect();
+  });
+  layout->addWidget(genesisBtn);
+
+  QPushButton *snesBtn = new QPushButton("SNES", emulatorSelectPage);
+  snesBtn->setCursor(Qt::PointingHandCursor);
+  snesBtn->setFocusPolicy(Qt::StrongFocus);
+  snesBtn->setProperty("system", "snes");
+  connect(snesBtn, &QPushButton::clicked, this, [this]() {
+    currentEmulator = EmulatorType::SNES;
+    goToGameSelect();
+  });
+  layout->addWidget(snesBtn);
+
+  QPushButton *gameboyBtn = new QPushButton("Game Boy", emulatorSelectPage);
+  gameboyBtn->setCursor(Qt::PointingHandCursor);
+  gameboyBtn->setFocusPolicy(Qt::StrongFocus);
+  gameboyBtn->setProperty("system", "gameboy");
+  connect(gameboyBtn, &QPushButton::clicked, this, [this]() {
+    currentEmulator = EmulatorType::GameBoy;
+    goToGameSelect();
+  });
+  layout->addWidget(gameboyBtn);
+
   QPushButton *atariBtn = new QPushButton("Atari 2600", emulatorSelectPage);
   atariBtn->setCursor(Qt::PointingHandCursor);
   atariBtn->setFocusPolicy(Qt::StrongFocus);
@@ -767,7 +807,7 @@ void MainWindow::setupEmulatorSelect() {
   // Create adapter for emulator selection with all buttons including back
   emulatorSelectAdapter = std::make_unique<EmulatorSelectAdapter>(
       emulatorSelectPage,
-      std::vector<QPushButton *>{gbaBtn, ps1Btn, switchBtn, atariBtn, backBtn},
+      std::vector<QPushButton *>{gbaBtn, ps1Btn, switchBtn, nesBtn, genesisBtn, snesBtn, gameboyBtn, atariBtn, backBtn},
       this);
 }
 
@@ -787,6 +827,14 @@ void MainWindow::refreshGameList() {
     filters << "*.bin" << "*.cue" << "*.iso" << "*.img";
   } else if (currentEmulator == EmulatorType::Switch) {
     filters << "*.nso" << "*.nro" << "*.xci" << "*.nsp";
+  } else if (currentEmulator == EmulatorType::NES) {
+    filters << "*.nes";
+  } else if (currentEmulator == EmulatorType::Genesis) {
+    filters << "*.md" << "*.gen" << "*.smd";
+  } else if (currentEmulator == EmulatorType::SNES) {
+    filters << "*.smc" << "*.sfc" << "*.fig" << "*.swc";
+  } else if (currentEmulator == EmulatorType::GameBoy) {
+    filters << "*.gb" << "*.gbc";
   } else if (currentEmulator == EmulatorType::Atari2600) {
     filters << "*.a26" << "*.bin";
   }

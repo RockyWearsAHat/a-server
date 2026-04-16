@@ -45,8 +45,14 @@ namespace AIO::GUI {
 class RemoteControlServer;
 }
 
-// Forward declarations break the emulator→GUI include chain.
-// Full headers are only needed in the .cpp files that call emulator methods.
+// Full headers for emulator classes held as std::unique_ptr members
+// These must be complete types for unique_ptr to work in the destructor
+#include "emulator/nes/NES.h"
+#include "emulator/genesis/Genesis.h"
+#include "emulator/snes/SNES.h"
+#include "emulator/gb/GB.h"
+
+// Forward declarations for other emulator classes
 namespace AIO::Emulator::GBA {
 class GBA;
 }
@@ -61,6 +67,9 @@ class WindowsEmulator;
 }
 namespace Atari2600 {
 class Atari2600Console;
+}
+namespace GBEmulator {
+class GB;
 }
 
 namespace AIO {
@@ -277,7 +286,7 @@ private:
   QLabel *devPanelLabel;
   QCheckBox *devPanelCheckbox;
 
-  enum class EmulatorType { None, GBA, Switch, PS1, Windows, Atari2600 };
+  enum class EmulatorType { None, GBA, Switch, PS1, Windows, Atari2600, NES, Genesis, SNES, GameBoy };
   EmulatorType currentEmulator = EmulatorType::None;
 
   std::unique_ptr<AIO::Emulator::GBA::GBA> gba;
@@ -285,6 +294,10 @@ private:
   std::unique_ptr<AIO::Emulator::PS1::PS1> ps1Emulator;
   std::unique_ptr<AIO::Emulator::Windows::WindowsEmulator> windowsEmulator;
   std::unique_ptr<Atari2600::Atari2600Console> atari2600Console;
+  std::unique_ptr<AIO::Emulator::NES::NES> nesConsole;
+  std::unique_ptr<AIO::Emulator::Genesis::Genesis> genesisConsole;
+  std::unique_ptr<AIO::Emulator::SNES::SNES> snesConsole;
+  std::unique_ptr<GBEmulator::GB> gameboyConsole;
 
   QTimer *displayTimer; // UI update timer (60 Hz)
   QImage displayImage;

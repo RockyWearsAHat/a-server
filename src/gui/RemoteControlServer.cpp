@@ -602,10 +602,10 @@ void RemoteControlServer::onMonitorTick() {
   const quint64 frame = window_->emulatorFrameNumber.load();
   const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 
-  const char *emuTypes[] = {"none", "GBA", "Switch", "PS1"};
+  const char *emuTypes[] = {"none", "GBA", "Switch", "PS1", "Windows", "Atari2600", "NES", "Genesis", "SNES", "GameBoy"};
   const int emuIdx = static_cast<int>(window_->currentEmulator);
   const QString emuType =
-      (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
+      (emuIdx >= 0 && emuIdx < 10) ? emuTypes[emuIdx] : "unknown";
 
   // Emulator started
   if (running && !prevRunning_) {
@@ -1158,9 +1158,9 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStateEmulator() {
 
   // Emulator type
   const char *emuTypes[] = {"none", "GBA", "Switch", "PS1", "Windows",
-                            "Atari2600"};
+                            "Atari2600", "NES", "Genesis", "SNES", "GameBoy"};
   int emuIdx = static_cast<int>(window_->currentEmulator);
-  obj["type"] = (emuIdx >= 0 && emuIdx < 6) ? emuTypes[emuIdx] : "unknown";
+  obj["type"] = (emuIdx >= 0 && emuIdx < 10) ? emuTypes[emuIdx] : "unknown";
 
   if (window_->emulatorRunning.load()) {
     obj["emulatedMs"] = static_cast<qint64>(window_->GetEmulatedMilliseconds());
@@ -1383,10 +1383,10 @@ RemoteControlServer::HttpResponse RemoteControlServer::handleStatePage() {
 
   if (page.contains("Emulator", Qt::CaseInsensitive) ||
       page.contains("Game", Qt::CaseInsensitive)) {
-    const char *emuTypes[] = {"none", "GBA", "Switch", "PS1"};
+    const char *emuTypes[] = {"none", "GBA", "Switch", "PS1", "Windows", "Atari2600", "NES", "Genesis", "SNES", "GameBoy"};
     int emuIdx = static_cast<int>(window_->currentEmulator);
     obj["emulatorType"] =
-        (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
+        (emuIdx >= 0 && emuIdx < 10) ? emuTypes[emuIdx] : "unknown";
     obj["emulatorRunning"] = window_->emulatorRunning.load();
     obj["emulatorPaused"] = window_->emulatorPaused.load();
     obj["emulatorFrame"] =
@@ -1794,10 +1794,10 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     if (!wasRunning)
       return errorResponse(400, "stop-game: no emulator is running");
 
-    const QString emuTypes[] = {"none", "GBA", "Switch", "PS1"};
+    const QString emuTypes[] = {"none", "GBA", "Switch", "PS1", "Windows", "Atari2600", "NES", "Genesis", "SNES", "GameBoy"};
     int emuIdx = static_cast<int>(window_->currentEmulator);
     const QString emuType =
-        (emuIdx >= 0 && emuIdx < 4) ? emuTypes[emuIdx] : "unknown";
+        (emuIdx >= 0 && emuIdx < 10) ? emuTypes[emuIdx] : "unknown";
 
     QMetaObject::invokeMethod(window_, "stopGameToHome", Qt::QueuedConnection);
 
