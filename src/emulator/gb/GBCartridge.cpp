@@ -6,6 +6,14 @@
 
 namespace GBEmulator {
 
+GBCartridge::GBCartridge()
+    : rom_bank_(1), ram_bank_(0), ram_enabled_(false), type_(kSimple) {
+  // Keep a deterministic 32 KB ROM-only image available so unit tests that
+  // call Reset()/Step() before Load() see stable NOP bytes instead of relying
+  // on an uninitialized cartridge state.
+  rom_.resize(0x8000, 0x00);
+}
+
 void GBCartridge::Load(const std::string& rom_path) {
   std::ifstream file(rom_path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -30,6 +38,7 @@ void GBCartridge::Load(std::span<const uint8_t> rom_data) {
   }
 
   rom_.assign(rom_data.begin(), rom_data.end());
+  cartridge_ram_.clear();
 
   // Initialize banking state
   rom_bank_ = 1;

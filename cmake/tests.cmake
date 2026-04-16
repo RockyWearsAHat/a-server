@@ -500,6 +500,17 @@ gtest_discover_tests(NESCartridgeTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+add_executable(NESRenderingTests ${PROJECT_ROOT}/tests/NESRenderingTests.cpp)
+set_target_properties(NESRenderingTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/NESRenderingTests"
+)
+target_link_libraries(NESRenderingTests PRIVATE GTest::gtest_main NESEmulator)
+gtest_discover_tests(NESRenderingTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
 
 # ─── Genesis Emulator Tests ───────────────────────────────────────────────
 
