@@ -1,5 +1,6 @@
 #include "emulator/gb/GBCartridge.h"
 #include "emulator/gb/GBConstants.h"
+
 #include <fstream>
 #include <stdexcept>
 
@@ -14,17 +15,21 @@ void GBCartridge::Load(const std::string& rom_path) {
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
 
-  // Validate size (between 32 KB minimum and 8 MB maximum)
-  if (size < 0x8000 || size > static_cast<std::streamsize>(kRomMaxSize)) {
-    throw std::runtime_error("Invalid ROM size: " + std::to_string(size));
-  }
-
-  rom_.resize(size);
-  if (!file.read(reinterpret_cast<char*>(rom_.data()), size)) {
+  std::vector<uint8_t> file_data(static_cast<size_t>(size));
+  if (!file.read(reinterpret_cast<char*>(file_data.data()), size)) {
     throw std::runtime_error("Failed to read ROM file");
   }
 
-  file.close();
+  Load(file_data);
+}
+
+void GBCartridge::Load(std::span<const uint8_t> rom_data) {
+  // Validate size (between 32 KB minimum and 8 MB maximum)
+  if (rom_data.size() < 0x8000 || rom_data.size() > kRomMaxSize) {
+    throw std::runtime_error("Invalid ROM size: " + std::to_string(rom_data.size()));
+  }
+
+  rom_.assign(rom_data.begin(), rom_data.end());
 
   // Initialize banking state
   rom_bank_ = 1;
@@ -75,6 +80,9 @@ void GBCartridge::DetectType() {
 uint8_t GBCartridge::Read8(uint16_t addr) {
   if (addr < 0x4000) {
     // ROM bank 0 (fixed)
+    if (rom_.empty() || addr >= rom_.size()) {
+      return 0xFF;
+    }
     return rom_[addr];
   } else if (addr < 0x8000) {
     // ROM bank N (switchable)

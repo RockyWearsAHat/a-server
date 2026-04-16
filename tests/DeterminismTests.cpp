@@ -96,6 +96,22 @@ std::vector<uint8_t> MakeGenesisRom() {
     return rom;
 }
 
+/// Minimal GB ROM: 32 KB, simple cartridge type, and a safe JP $0100 loop.
+std::vector<uint8_t> MakeGbRom() {
+    std::vector<uint8_t> rom(0x8000, 0x00); // NOP-filled 32 KB ROM
+
+    // Entry loop at 0x0100: JP 0x0100
+    rom[0x0100] = 0xC3;
+    rom[0x0101] = 0x00;
+    rom[0x0102] = 0x01;
+
+    // Header metadata used by cartridge detection.
+    rom[0x0147] = 0x00; // ROM ONLY
+    rom[0x0149] = 0x00; // No external RAM
+
+    return rom;
+}
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,45 +283,49 @@ TEST_F(GenesisDeterminism, SaveStateDeterminism) {
 
 /// GB uses its own State struct rather than ISaveStateable, so we call the
 /// GB-specific SaveState()/LoadState(const State&) API.
-///
-/// Note: GB::Load() requires a file path (no in-memory ROM API), so execution-
-/// based determinism tests would require a temp file. Instead we validate the
-/// state-struct contract: SaveState → LoadState → SaveState must produce an
-/// identical struct. This covers the round-trip fidelity without needing to
-/// execute any instructions on an unloaded cartridge (which would trigger
-/// out-of-bounds access in GBCartridge::Read8 on the empty rom_ vector).
 class GBDeterminism : public ::testing::Test {
 protected:
     GB sys_;
-    void SetUp() override { sys_.Reset(); }
+    const std::vector<uint8_t> rom_ = MakeGbRom();
+    void SetUp() override { sys_.Load(rom_); }
 };
 
-/// SaveState → LoadState → SaveState must produce identical CPU, frame counter,
-/// and running flag. This is the lossless round-trip contract for GB state.
-TEST_F(GBDeterminism, SaveStateRoundTrip) {
-    const GB::State s1 = sys_.SaveState();
+TEST_F(GBDeterminism, FrameDeterminism) {
+    GB a, b;
+    a.Load(rom_);
+    b.Load(rom_);
 
-    // Clobber the live state then restore it
-    sys_.LoadState(s1);
+    constexpr int kSteps = 20000;
+    for (int i = 0; i < kSteps; ++i) static_cast<void>(a.Step());
+    for (int i = 0; i < kSteps; ++i) static_cast<void>(b.Step());
 
-    const GB::State s2 = sys_.SaveState();
+    constexpr size_t kGBBytes =
+        GBEmulator::GBPPU::kFramebufferWidth * GBEmulator::GBPPU::kFramebufferHeight * sizeof(uint32_t);
 
-    EXPECT_EQ(s1.cpu.pc, s2.cpu.pc)   << "GB CPU PC changed across LoadState";
-    EXPECT_EQ(s1.cpu.sp, s2.cpu.sp)   << "GB CPU SP changed across LoadState";
-    EXPECT_EQ(s1.cpu.a,  s2.cpu.a)    << "GB CPU A  changed across LoadState";
-    EXPECT_EQ(s1.running, s2.running) << "GB running flag changed across LoadState";
+    const uint64_t ha = FrameHash(a.GetFramebuffer(), kGBBytes);
+    const uint64_t hb = FrameHash(b.GetFramebuffer(), kGBBytes);
+
+    EXPECT_EQ(ha, hb) << "GB framebuffer differs between two equivalent runs";
+    EXPECT_EQ(a.GetFrameCount(), b.GetFrameCount());
 }
 
-/// Two independent GB instances freshly Reset() must have identical initial
-/// state (same PC, same SP, same registers). Ensures Reset is deterministic.
-TEST_F(GBDeterminism, TwoInstancesMatchAfterReset) {
-    GB other;
-    other.Reset();
+TEST_F(GBDeterminism, SaveStateDeterminism) {
+    for (int i = 0; i < 50; ++i) static_cast<void>(sys_.Step());
 
-    const GB::State s1 = sys_.SaveState();
-    const GB::State s2 = other.SaveState();
+    const GB::State saved = sys_.SaveState();
+    const uint32_t frameAtSave = sys_.GetFrameCount();
 
-    EXPECT_EQ(s1.cpu.pc, s2.cpu.pc) << "GB: two Reset() instances differ in PC";
-    EXPECT_EQ(s1.cpu.sp, s2.cpu.sp) << "GB: two Reset() instances differ in SP";
-    EXPECT_EQ(s1.running, s2.running);
+    for (int i = 0; i < 50; ++i) static_cast<void>(sys_.Step());
+    const uint32_t frameRun1 = sys_.GetFrameCount();
+    const uint16_t pcRun1 = sys_.GetCPU()->GetPC();
+
+    sys_.LoadState(saved);
+    ASSERT_EQ(sys_.GetFrameCount(), frameAtSave) << "GB LoadState did not restore frame count";
+
+    for (int i = 0; i < 50; ++i) static_cast<void>(sys_.Step());
+    const uint32_t frameRun2 = sys_.GetFrameCount();
+    const uint16_t pcRun2 = sys_.GetCPU()->GetPC();
+
+    EXPECT_EQ(frameRun1, frameRun2) << "GB frame count diverged after state restore";
+    EXPECT_EQ(pcRun1, pcRun2) << "GB CPU PC diverged after state restore";
 }

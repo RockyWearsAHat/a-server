@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 #include <string>
 
@@ -14,6 +15,9 @@ class GBCartridge {
 
   // Load ROM from file (internally validates size)
   void Load(const std::string& rom_path);
+
+  // Load ROM from in-memory bytes (internally validates size)
+  void Load(std::span<const uint8_t> rom_data);
 
   // 8-bit and 16-bit reads
   uint8_t Read8(uint16_t addr);

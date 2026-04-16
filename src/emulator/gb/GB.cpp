@@ -17,6 +17,11 @@ void GB::Load(const std::string& rom_path) {
   Reset();
 }
 
+void GB::Load(std::span<const uint8_t> rom_data) {
+  cartridge_.Load(rom_data);
+  Reset();
+}
+
 void GB::Reset() {
   cpu_.Reset();
   running_ = true;

@@ -5,6 +5,7 @@
 #include "emulator/gb/GBMemory.h"
 #include "emulator/gb/GBCartridge.h"
 #include "emulator/gb/GBAPU.h"
+#include <span>
 #include <string>
 
 namespace GBEmulator {
@@ -17,6 +18,7 @@ class GB {
 
   // Load ROM and reset to start state
   void Load(const std::string& rom_path);
+  void Load(std::span<const uint8_t> rom_data);
 
   // Execute one CPU instruction; returns cycle count
   uint32_t Step();
