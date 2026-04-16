@@ -175,6 +175,26 @@ set_target_properties(N64Emulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/N64Emulator"
 )
 
+# ─── Saturn Emulator ─────────────────────────────────────────────────────
+add_library(SaturnEmulator STATIC
+    ${PROJECT_ROOT}/src/emulator/saturn/SH2.cpp
+    ${PROJECT_ROOT}/src/emulator/saturn/VDP1.cpp
+    ${PROJECT_ROOT}/src/emulator/saturn/VDP2.cpp
+    ${PROJECT_ROOT}/src/emulator/saturn/SaturnMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/saturn/Saturn.cpp
+)
+
+target_include_directories(SaturnEmulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(SaturnEmulator PUBLIC EmulatorCommon)
+
+set_target_properties(SaturnEmulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SaturnEmulator"
+)
+
 add_library(SwitchEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/switch/SwitchEmulator.cpp
     ${PROJECT_ROOT}/src/emulator/switch/MemoryManager.cpp
@@ -311,7 +331,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

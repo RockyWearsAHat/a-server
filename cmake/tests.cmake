@@ -652,3 +652,41 @@ gtest_discover_tests(N64CartridgeTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ─── Saturn Emulator Tests ────────────────────────────────────────────────
+
+add_executable(SaturnCPUTests ${PROJECT_ROOT}/tests/SaturnCPUTests.cpp)
+set_target_properties(SaturnCPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SaturnCPUTests"
+)
+target_link_libraries(SaturnCPUTests PRIVATE GTest::gtest_main SaturnEmulator)
+gtest_discover_tests(SaturnCPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(SaturnVDPTests ${PROJECT_ROOT}/tests/SaturnVDPTests.cpp)
+set_target_properties(SaturnVDPTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SaturnVDPTests"
+)
+target_link_libraries(SaturnVDPTests PRIVATE GTest::gtest_main SaturnEmulator)
+gtest_discover_tests(SaturnVDPTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(SaturnMemoryTests ${PROJECT_ROOT}/tests/SaturnMemoryTests.cpp)
+set_target_properties(SaturnMemoryTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SaturnMemoryTests"
+)
+target_link_libraries(SaturnMemoryTests PRIVATE GTest::gtest_main SaturnEmulator)
+gtest_discover_tests(SaturnMemoryTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
