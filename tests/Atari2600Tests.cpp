@@ -24,10 +24,10 @@ TEST(Atari2600PIATests, PortDirectionMixesInputAndOutput) {
   PIA6532 pia;
 
   pia.SetPortA(0xF0);
-  pia.Write(0x0201, 0x0F); // SWACNT: lower nibble output, upper nibble input
-  pia.Write(0x0200, 0x05); // SWCHA output value
+  pia.Write(0x0281, 0x0F); // SWACNT: lower nibble output, upper nibble input
+  pia.Write(0x0280, 0x05); // SWCHA output value
 
-  const uint8_t swcha = pia.Read(0x0200);
+  const uint8_t swcha = pia.Read(0x0280);
   EXPECT_EQ(swcha, 0xF5);
 }
 
