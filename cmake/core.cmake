@@ -133,6 +133,48 @@ set_target_properties(SNESEmulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SNESEmulator"
 )
 
+# ─── GB/GBC Emulator ─────────────────────────────────────────────────────
+add_library(GBEmulator STATIC
+    ${PROJECT_ROOT}/src/emulator/gb/GBCartridge.cpp
+    ${PROJECT_ROOT}/src/emulator/gb/GBMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/gb/LR35902.cpp
+    ${PROJECT_ROOT}/src/emulator/gb/GBPPU.cpp
+    ${PROJECT_ROOT}/src/emulator/gb/GBAPU.cpp
+    ${PROJECT_ROOT}/src/emulator/gb/GB.cpp
+)
+
+target_include_directories(GBEmulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(GBEmulator PUBLIC EmulatorCommon)
+
+set_target_properties(GBEmulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBEmulator"
+)
+
+# ─── N64 Emulator ────────────────────────────────────────────────────────
+add_library(N64Emulator STATIC
+    ${PROJECT_ROOT}/src/emulator/n64/R4300i.cpp
+    ${PROJECT_ROOT}/src/emulator/n64/RSP.cpp
+    ${PROJECT_ROOT}/src/emulator/n64/RDP.cpp
+    ${PROJECT_ROOT}/src/emulator/n64/N64Memory.cpp
+    ${PROJECT_ROOT}/src/emulator/n64/N64Cartridge.cpp
+    ${PROJECT_ROOT}/src/emulator/n64/N64.cpp
+)
+
+target_include_directories(N64Emulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(N64Emulator PUBLIC EmulatorCommon)
+
+set_target_properties(N64Emulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/N64Emulator"
+)
+
 add_library(SwitchEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/switch/SwitchEmulator.cpp
     ${PROJECT_ROOT}/src/emulator/switch/MemoryManager.cpp
@@ -269,7 +311,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator GenesisEmulator SNESEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

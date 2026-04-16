@@ -576,3 +576,79 @@ gtest_discover_tests(SNESCartridgeTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ─── GB/GBC Emulator Tests ────────────────────────────────────────────────
+
+add_executable(GBCPUTests ${PROJECT_ROOT}/tests/GBCPUTests.cpp)
+set_target_properties(GBCPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBCPUTests"
+)
+target_link_libraries(GBCPUTests PRIVATE GTest::gtest_main GBEmulator)
+gtest_discover_tests(GBCPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(GBPPUTests ${PROJECT_ROOT}/tests/GBPPUTests.cpp)
+set_target_properties(GBPPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBPPUTests"
+)
+target_link_libraries(GBPPUTests PRIVATE GTest::gtest_main GBEmulator)
+gtest_discover_tests(GBPPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(GBCartridgeTests ${PROJECT_ROOT}/tests/GBCartridgeTests.cpp)
+set_target_properties(GBCartridgeTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBCartridgeTests"
+)
+target_link_libraries(GBCartridgeTests PRIVATE GTest::gtest_main GBEmulator)
+gtest_discover_tests(GBCartridgeTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+# ─── N64 Emulator Tests ───────────────────────────────────────────────────
+
+add_executable(N64CPUTests ${PROJECT_ROOT}/tests/N64CPUTests.cpp)
+set_target_properties(N64CPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/N64CPUTests"
+)
+target_link_libraries(N64CPUTests PRIVATE GTest::gtest_main N64Emulator)
+gtest_discover_tests(N64CPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(N64RDPTests ${PROJECT_ROOT}/tests/N64RDPTests.cpp)
+set_target_properties(N64RDPTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/N64RDPTests"
+)
+target_link_libraries(N64RDPTests PRIVATE GTest::gtest_main N64Emulator)
+gtest_discover_tests(N64RDPTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(N64CartridgeTests ${PROJECT_ROOT}/tests/N64CartridgeTests.cpp)
+set_target_properties(N64CartridgeTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/N64CartridgeTests"
+)
+target_link_libraries(N64CartridgeTests PRIVATE GTest::gtest_main N64Emulator)
+gtest_discover_tests(N64CartridgeTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
