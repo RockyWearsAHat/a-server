@@ -195,6 +195,24 @@ set_target_properties(SaturnEmulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/SaturnEmulator"
 )
 
+add_library(DreamcastEmulator STATIC
+    ${PROJECT_ROOT}/src/emulator/dreamcast/SH4.cpp
+    ${PROJECT_ROOT}/src/emulator/dreamcast/PowerVR2.cpp
+    ${PROJECT_ROOT}/src/emulator/dreamcast/DreamcastMemory.cpp
+    ${PROJECT_ROOT}/src/emulator/dreamcast/Dreamcast.cpp
+)
+
+target_include_directories(DreamcastEmulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(DreamcastEmulator PUBLIC EmulatorCommon)
+
+set_target_properties(DreamcastEmulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DreamcastEmulator"
+)
+
 add_library(SwitchEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/switch/SwitchEmulator.cpp
     ${PROJECT_ROOT}/src/emulator/switch/MemoryManager.cpp
@@ -331,7 +349,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator DreamcastEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

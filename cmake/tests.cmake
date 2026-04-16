@@ -690,3 +690,40 @@ gtest_discover_tests(SaturnMemoryTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ──────────────────────────── Dreamcast ────────────────────────────
+add_executable(DreamcastCPUTests ${PROJECT_ROOT}/tests/DreamcastCPUTests.cpp)
+set_target_properties(DreamcastCPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DreamcastCPUTests"
+)
+target_link_libraries(DreamcastCPUTests PRIVATE GTest::gtest_main DreamcastEmulator)
+gtest_discover_tests(DreamcastCPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(DreamcastGPUTests ${PROJECT_ROOT}/tests/DreamcastGPUTests.cpp)
+set_target_properties(DreamcastGPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DreamcastGPUTests"
+)
+target_link_libraries(DreamcastGPUTests PRIVATE GTest::gtest_main DreamcastEmulator)
+gtest_discover_tests(DreamcastGPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(DreamcastMemoryTests ${PROJECT_ROOT}/tests/DreamcastMemoryTests.cpp)
+set_target_properties(DreamcastMemoryTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DreamcastMemoryTests"
+)
+target_link_libraries(DreamcastMemoryTests PRIVATE GTest::gtest_main DreamcastEmulator)
+gtest_discover_tests(DreamcastMemoryTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
