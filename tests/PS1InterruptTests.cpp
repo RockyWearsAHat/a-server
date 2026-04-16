@@ -1,5 +1,6 @@
 #include "emulator/ps1/InterruptController.h"
 #include "emulator/ps1/PS1Constants.h"
+
 #include <gtest/gtest.h>
 
 using namespace AIO::Emulator::PS1;
@@ -75,4 +76,26 @@ TEST_F(PS1InterruptTest, PendingIRQ_RequiresBothStatAndMask) {
   // Now request TIMER0 (in mask)
   irq->RequestIRQ(IRQ::TIMER0);
   EXPECT_TRUE(irq->HasPendingIRQ());
+}
+
+TEST_F(PS1InterruptTest, CommonInterface_PendingAndMaskBitsReflectRegisters) {
+  AIO::Emulator::Common::IInterruptController* common = irq.get();
+
+  irq->WriteMask(IRQ::VBLANK | IRQ::TIMER1);
+  irq->RequestIRQ(IRQ::TIMER1);
+
+  EXPECT_EQ(common->MaskBits(), irq->ReadMask());
+  EXPECT_EQ(common->PendingBits(), irq->ReadStat());
+  EXPECT_TRUE(common->HasPendingIRQ());
+}
+
+TEST_F(PS1InterruptTest, CommonInterface_ClearIRQRemovesPendingState) {
+  AIO::Emulator::Common::IInterruptController* common = irq.get();
+
+  irq->WriteMask(IRQ::VBLANK);
+  common->RequestIRQ(IRQ::VBLANK);
+  ASSERT_TRUE(common->HasPendingIRQ());
+
+  common->ClearIRQ(IRQ::VBLANK);
+  EXPECT_FALSE(common->HasPendingIRQ());
 }
