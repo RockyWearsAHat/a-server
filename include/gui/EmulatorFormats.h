@@ -26,9 +26,9 @@ inline const QVector<EmulatorFormat> &emulatorFormats() {
       // ── Fully launchable ──────────────────────────────────────────────
       {"GBA", "Game Boy Advance", {"gba", "gb", "gbc"}, true},
       {"PS1", "PlayStation", {"bin", "cue", "iso", "img", "chd", "pbp"}, true},
+      {"Atari2600", "Atari 2600", {"a26"}, true},
 
       // ── Emulation cores present, GUI launch not yet wired ────────────
-      {"Atari2600", "Atari 2600", {"a26", "bin"}, false},
       {"SNES", "Super Nintendo", {"smc", "sfc", "fig", "swc"}, false},
       {"NES", "Nintendo", {"nes"}, false},
       {"Genesis", "Sega Genesis", {"md", "gen", "smd"}, false},

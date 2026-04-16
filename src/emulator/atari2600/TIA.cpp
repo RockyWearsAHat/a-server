@@ -17,6 +17,15 @@ void TIA::Reset() noexcept {
     framebuffer_.fill(0xFF000000u); // Black
 }
 
+void TIA::SetTrigger(int port, bool pressed) noexcept {
+    const uint8_t value = pressed ? 0x00 : 0x80;
+    if (port == 0) {
+        inpt4_ = value;
+    } else {
+        inpt5_ = value;
+    }
+}
+
 // ─── NTSC Colour LUT (128 entries, 2 shades each = luma) ─────────────────────
 // Approximated from the 2600 NTSC colour chart by Kevin Horton.
 uint32_t TIA::NTSCColor(uint8_t v) noexcept {

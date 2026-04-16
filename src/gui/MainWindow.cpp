@@ -26,6 +26,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_hints.h>
 
+#include "emulator/atari2600/Atari2600Console.h"
 #include "emulator/gba/ARM7TDMI.h"
 #include "emulator/gba/GBA.h"
 #include "emulator/ps1/PS1.h"
@@ -298,7 +299,8 @@ MainWindow::MainWindow(QWidget *parent)
       switchEmulator(std::make_unique<AIO::Emulator::Switch::SwitchEmulator>()),
       ps1Emulator(std::make_unique<AIO::Emulator::PS1::PS1>()),
       windowsEmulator(
-          std::make_unique<AIO::Emulator::Windows::WindowsEmulator>()) {
+      std::make_unique<AIO::Emulator::Windows::WindowsEmulator>()),
+    atari2600Console(std::make_unique<Atari2600::Atari2600Console>()) {
   maybeAutostartServer();
   QObject::connect(qApp, &QCoreApplication::aboutToQuit, this,
                    [this]() { stopAutostartedServer(); });
