@@ -10,7 +10,7 @@ namespace GBEmulator {
 // Game Boy ROM cartridge with ROM/RAM banking
 class GBCartridge {
  public:
-  GBCartridge() = default;
+  GBCartridge();
   ~GBCartridge() = default;
 
   // Load ROM from file (internally validates size)
