@@ -217,6 +217,32 @@ uint64_t MainWindow::GetEmulatedMilliseconds() const {
       return (ps1Emulator->GetTotalCycles() * 1000ULL) / kPs1CpuHz;
     }
     break;
+  case EmulatorType::NES:
+    if (nesConsole) {
+      constexpr uint64_t kNesCpuHz = 1789773ULL;
+      return (nesConsole->GetTotalCycles() * 1000ULL) / kNesCpuHz;
+    }
+    break;
+  case EmulatorType::Genesis:
+    if (genesisConsole) {
+      constexpr uint64_t kGenesisMasterHz = 53693175ULL;
+      return (genesisConsole->GetTotalCycles() * 1000ULL) /
+             kGenesisMasterHz;
+    }
+    break;
+  case EmulatorType::SNES:
+    if (snesConsole) {
+      constexpr uint64_t kSnesMasterHz = 21477272ULL;
+      return (snesConsole->GetMasterCycles() * 1000ULL) / kSnesMasterHz;
+    }
+    break;
+  case EmulatorType::GameBoy:
+    if (gameboyConsole) {
+      constexpr uint64_t kGameBoyFps = 60ULL;
+      return (static_cast<uint64_t>(gameboyConsole->GetFrameCount()) * 1000ULL) /
+             kGameBoyFps;
+    }
+    break;
   case EmulatorType::Switch:
   case EmulatorType::Windows:
   case EmulatorType::Atari2600:
@@ -655,6 +681,18 @@ void MainWindow::SetEmulatorType(int type) {
   } else if (type == 4) {
     currentEmulator = EmulatorType::Atari2600;
     std::cout << "[MainWindow] Set emulator type to Atari 2600" << std::endl;
+  } else if (type == 5) {
+    currentEmulator = EmulatorType::NES;
+    std::cout << "[MainWindow] Set emulator type to NES" << std::endl;
+  } else if (type == 6) {
+    currentEmulator = EmulatorType::Genesis;
+    std::cout << "[MainWindow] Set emulator type to Genesis" << std::endl;
+  } else if (type == 7) {
+    currentEmulator = EmulatorType::SNES;
+    std::cout << "[MainWindow] Set emulator type to SNES" << std::endl;
+  } else if (type == 8) {
+    currentEmulator = EmulatorType::GameBoy;
+    std::cout << "[MainWindow] Set emulator type to Game Boy" << std::endl;
   }
 }
 

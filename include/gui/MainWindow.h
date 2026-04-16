@@ -99,7 +99,7 @@ public:
   ~MainWindow();
 
   void LoadROM(const std::string &path);
-  void SetEmulatorType(int type); // 0=GBA, 1=Switch, 2=PS1, 3=Windows, 4=Atari2600
+  void SetEmulatorType(int type); // 0=GBA, 1=Switch, 2=PS1, 3=Windows, 4=Atari2600, 5=NES, 6=Genesis, 7=SNES, 8=GameBoy
   // Debugger controls via GUI/CLI
   void EnableDebugger(bool enabled);
   void AddBreakpoint(uint32_t addr);

@@ -381,6 +381,44 @@ void RemoteControlServer::buildNavTable() {
         Qt::QueuedConnection);
   });
   addLambda("atari2600", navTable_["atari"]);
+  addLambda("nes", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::NES;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("genesis", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::Genesis;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("megadrive", navTable_["genesis"]);
+  addLambda("snes", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::SNES;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("gameboy", [w = window_]() {
+    QMetaObject::invokeMethod(
+        w,
+        [w]() {
+          w->currentEmulator = MainWindow::EmulatorType::GameBoy;
+          w->goToGameSelect();
+        },
+        Qt::QueuedConnection);
+  });
+  addLambda("gb", navTable_["gameboy"]);
   addLambda("youtube", [w = window_]() { w->launchStreamingApp(0); });
   addLambda("netflix", [w = window_]() { w->launchStreamingApp(1); });
   addLambda("disney+", [w = window_]() { w->launchStreamingApp(2); });
@@ -1919,9 +1957,18 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
     // Detect emulator type from extension.
     const QString lower = resolved.toLower();
     MainWindow::EmulatorType emuType = MainWindow::EmulatorType::None;
-    if (lower.endsWith(".gba") || lower.endsWith(".gb") ||
-      lower.endsWith(".gbc"))
+    if (lower.endsWith(".gba"))
       emuType = MainWindow::EmulatorType::GBA;
+    else if (lower.endsWith(".gb") || lower.endsWith(".gbc"))
+      emuType = MainWindow::EmulatorType::GameBoy;
+    else if (lower.endsWith(".nes"))
+      emuType = MainWindow::EmulatorType::NES;
+    else if (lower.endsWith(".md") || lower.endsWith(".gen") ||
+             lower.endsWith(".smd"))
+      emuType = MainWindow::EmulatorType::Genesis;
+    else if (lower.endsWith(".smc") || lower.endsWith(".sfc") ||
+             lower.endsWith(".fig") || lower.endsWith(".swc"))
+      emuType = MainWindow::EmulatorType::SNES;
     else if (lower.endsWith(".a26"))
       emuType = MainWindow::EmulatorType::Atari2600;
     else if (lower.endsWith(".bin") || lower.endsWith(".cue") ||
@@ -1929,7 +1976,7 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
       emuType = MainWindow::EmulatorType::PS1;
     else
       return errorResponse(400, "launch-rom: unrecognized extension "
-                "(supported: .gba .gb .gbc .a26 .bin .cue .iso .img)");
+                "(supported: .gba .gb .gbc .nes .md .gen .smd .smc .sfc .fig .swc .a26 .bin .cue .iso .img)");
 
     // Stop any currently-running emulator cleanly.
     if (window_->emulatorRunning.load()) {
@@ -1943,19 +1990,21 @@ RemoteControlServer::handleExecute(const HttpRequest &req) {
         Qt::QueuedConnection);
 
     const char *emuNames[] = {"none", "GBA", "Switch", "PS1", "Windows",
-                  "Atari2600"};
+            "Atari2600", "NES", "Genesis", "SNES", "GameBoy"};
     int emuIdx = static_cast<int>(emuType);
 
     QJsonObject evData;
     evData["path"] = resolved;
-    evData["emulatorType"] = emuNames[emuIdx];
+    evData["emulatorType"] =
+      (emuIdx >= 0 && emuIdx < 10) ? emuNames[emuIdx] : "unknown";
     appendEvent("launch_rom", evData);
 
     QJsonObject resp;
     resp["ok"] = true;
     resp["action"] = "launch-rom";
     resp["path"] = resolved;
-    resp["emulatorType"] = emuNames[emuIdx];
+    resp["emulatorType"] =
+      (emuIdx >= 0 && emuIdx < 10) ? emuNames[emuIdx] : "unknown";
     return jsonResponse(200,
                         QJsonDocument(resp).toJson(QJsonDocument::Compact));
   }
