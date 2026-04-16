@@ -61,7 +61,7 @@ A console reaches "factory-accurate target" when all are true:
 
 ## Phase plan (start to finish)
 
-## Phase 0: Program setup (Weeks 1-3)
+## Phase 0: Program setup
 
 Deliverables:
 - Repository structure for emulator program docs and test assets.
@@ -72,7 +72,7 @@ Exit criteria:
 - CI can run deterministic replay for at least one existing core (GBA or PS1).
 - Program dashboard exists with pass/fail metrics.
 
-## Phase 1: Shared infrastructure (Weeks 3-8)
+## Phase 1: Shared infrastructure
 
 Deliverables:
 - Shared scheduler and event queue model.
@@ -84,7 +84,7 @@ Exit criteria:
 - Existing emulators can opt into new scheduler in compatibility mode.
 - Cross-platform deterministic replay passes on CI.
 
-## Phase 2: Wave 1 consoles (Months 2-8)
+## Phase 2: Wave 1 consoles
 
 Target manufacturers/systems:
 - Nintendo: NES, GB/C, SNES
@@ -103,7 +103,7 @@ Exit criteria:
 - At least 70% of Wave 1 consoles at Level 2 or higher.
 - At least 3 flagship systems at Level 3 (suggested: NES, Genesis, SNES).
 
-## Phase 3: Wave 2 consoles (Months 6-14)
+## Phase 3: Wave 2 consoles
 
 Target manufacturers/systems:
 - Sony: PS1

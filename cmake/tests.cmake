@@ -764,3 +764,39 @@ gtest_discover_tests(PS2MemoryTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+add_executable(GekkoTests ${PROJECT_ROOT}/tests/GekkoTests.cpp)
+set_target_properties(GekkoTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GekkoTests"
+)
+target_link_libraries(GekkoTests PRIVATE GTest::gtest_main GameCubeEmulator)
+gtest_discover_tests(GekkoTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(FlipperTests ${PROJECT_ROOT}/tests/FlipperTests.cpp)
+set_target_properties(FlipperTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/FlipperTests"
+)
+target_link_libraries(FlipperTests PRIVATE GTest::gtest_main GameCubeEmulator)
+gtest_discover_tests(FlipperTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(GameCubeMemoryTests ${PROJECT_ROOT}/tests/GameCubeMemoryTests.cpp)
+set_target_properties(GameCubeMemoryTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GameCubeMemoryTests"
+)
+target_link_libraries(GameCubeMemoryTests PRIVATE GTest::gtest_main GameCubeEmulator)
+gtest_discover_tests(GameCubeMemoryTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
