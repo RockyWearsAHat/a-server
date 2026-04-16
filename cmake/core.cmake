@@ -213,6 +213,25 @@ set_target_properties(DreamcastEmulator PROPERTIES
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DreamcastEmulator"
 )
 
+add_library(PS2Emulator STATIC
+    ${PROJECT_ROOT}/src/emulator/ps2/R5900.cpp
+    ${PROJECT_ROOT}/src/emulator/ps2/R3000A.cpp
+    ${PROJECT_ROOT}/src/emulator/ps2/GS.cpp
+    ${PROJECT_ROOT}/src/emulator/ps2/PS2Memory.cpp
+    ${PROJECT_ROOT}/src/emulator/ps2/PS2.cpp
+)
+
+target_include_directories(PS2Emulator PUBLIC
+    ${PROJECT_ROOT}/include
+    ${PROJECT_ROOT}/src
+)
+
+target_link_libraries(PS2Emulator PUBLIC EmulatorCommon)
+
+set_target_properties(PS2Emulator PROPERTIES
+    AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS2Emulator"
+)
+
 add_library(SwitchEmulator STATIC
     ${PROJECT_ROOT}/src/emulator/switch/SwitchEmulator.cpp
     ${PROJECT_ROOT}/src/emulator/switch/MemoryManager.cpp
@@ -349,7 +368,7 @@ target_include_directories(AIOServer PRIVATE
 
 target_link_libraries(AIOServer PRIVATE
     Qt6::Widgets Qt6::WebEngineWidgets Qt6::Network Qt6::Multimedia
-    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator DreamcastEmulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
+    GBAEmulator GenesisEmulator SNESEmulator GBEmulator N64Emulator SaturnEmulator DreamcastEmulator PS2Emulator SwitchEmulator PS1Emulator WindowsCompatLayer SDL2::SDL2
     CURL::libcurl OpenSSL::SSL OpenSSL::Crypto
     $<$<BOOL:${APPLE}>:${VIDEOTOOLBOX_FRAMEWORK}>
     $<$<BOOL:${APPLE}>:${COREVIDEO_FRAMEWORK}>

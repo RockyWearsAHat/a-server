@@ -727,3 +727,40 @@ gtest_discover_tests(DreamcastMemoryTests
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST
 )
+
+# ──────────────────────────── PS2 ────────────────────────────
+add_executable(PS2CPUTests ${PROJECT_ROOT}/tests/PS2CPUTests.cpp)
+set_target_properties(PS2CPUTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS2CPUTests"
+)
+target_link_libraries(PS2CPUTests PRIVATE GTest::gtest_main PS2Emulator)
+gtest_discover_tests(PS2CPUTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(PS2GSTests ${PROJECT_ROOT}/tests/PS2GSTests.cpp)
+set_target_properties(PS2GSTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS2GSTests"
+)
+target_link_libraries(PS2GSTests PRIVATE GTest::gtest_main PS2Emulator)
+gtest_discover_tests(PS2GSTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(PS2MemoryTests ${PROJECT_ROOT}/tests/PS2MemoryTests.cpp)
+set_target_properties(PS2MemoryTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS2MemoryTests"
+)
+target_link_libraries(PS2MemoryTests PRIVATE GTest::gtest_main PS2Emulator)
+gtest_discover_tests(PS2MemoryTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
