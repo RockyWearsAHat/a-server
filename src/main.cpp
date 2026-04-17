@@ -17,8 +17,6 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTimer>
-#include <atomic>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <signal.h>
@@ -511,39 +509,47 @@ int main(int argc, char *argv[]) {
             "Headless dump scheduled at %d ms: %s", clampedDumpMs,
             dumpPath.toStdString().c_str());
 
-        auto *headlessDumpTimer = new QTimer(&window);
-        headlessDumpTimer->setInterval(50);
-        QObject::connect(
-            headlessDumpTimer, &QTimer::timeout,
-            [&window, dumpPath, assertNonBlack, clampedDumpMs,
-             headlessDumpTimer]() {
-              const uint64_t emuMs = window.GetEmulatedMilliseconds();
-              if (emuMs < static_cast<uint64_t>(clampedDumpMs)) {
-                return;
-              }
+        // GBA dumps are scheduled directly in the emulation loop to avoid
+        // timer jitter around the requested emulated timestamp.
+        if (romStr.find(".gba") != std::string::npos) {
+          window.ConfigureHeadlessDump(dumpPath.toStdString(), clampedDumpMs,
+                                       assertNonBlack);
+        } else {
+          auto *headlessDumpTimer = new QTimer(&window);
+          headlessDumpTimer->setInterval(50);
+          QObject::connect(
+              headlessDumpTimer, &QTimer::timeout,
+              [&window, dumpPath, assertNonBlack, clampedDumpMs,
+               headlessDumpTimer]() {
+                const uint64_t emuMs = window.GetEmulatedMilliseconds();
+                if (emuMs < static_cast<uint64_t>(clampedDumpMs)) {
+                  return;
+                }
 
-              headlessDumpTimer->stop();
-              double nonBlackRatio = 0.0;
-              const bool ok = window.DumpCurrentFramePPM(dumpPath.toStdString(),
-                                                         &nonBlackRatio);
-              if (!ok) {
-                AIO::Emulator::Common::Logger::Instance().Log(
-                    AIO::Emulator::Common::LogLevel::Error, "main",
-                    "Headless dump failed");
-                if (assertNonBlack) {
+                headlessDumpTimer->stop();
+                double nonBlackRatio = 0.0;
+                const bool ok =
+                    window.DumpCurrentFramePPM(dumpPath.toStdString(),
+                                               &nonBlackRatio);
+                if (!ok) {
+                  AIO::Emulator::Common::Logger::Instance().Log(
+                      AIO::Emulator::Common::LogLevel::Error, "main",
+                      "Headless dump failed");
+                  if (assertNonBlack) {
+                    QCoreApplication::exit(2);
+                  }
+                  return;
+                }
+
+                if (assertNonBlack && nonBlackRatio <= 0.0) {
+                  AIO::Emulator::Common::Logger::Instance().Log(
+                      AIO::Emulator::Common::LogLevel::Error, "main",
+                      "Headless assert failed: frame is entirely black");
                   QCoreApplication::exit(2);
                 }
-                return;
-              }
-
-              if (assertNonBlack && nonBlackRatio <= 0.0) {
-                AIO::Emulator::Common::Logger::Instance().Log(
-                    AIO::Emulator::Common::LogLevel::Error, "main",
-                    "Headless assert failed: frame is entirely black");
-                QCoreApplication::exit(2);
-              }
-            });
-        headlessDumpTimer->start();
+              });
+          headlessDumpTimer->start();
+        }
       }
 
       // Configure debugger on GBA emulator via window API
