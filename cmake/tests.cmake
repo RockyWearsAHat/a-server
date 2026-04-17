@@ -117,35 +117,35 @@ set_target_properties(CPUTests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/CPUTests"
 )
-target_link_libraries(CPUTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(CPUTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 add_executable(EEPROMTests ${PROJECT_ROOT}/tests/EEPROMTests.cpp)
 set_target_properties(EEPROMTests PROPERTIES 
     RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/EEPROMTests"
 )
-target_link_libraries(EEPROMTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(EEPROMTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 add_executable(DMATests ${PROJECT_ROOT}/tests/DMATests.cpp)
 set_target_properties(DMATests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/DMATests"
 )
-target_link_libraries(DMATests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(DMATests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 add_executable(BIOSTests ${PROJECT_ROOT}/tests/BIOSTests.cpp)
 set_target_properties(BIOSTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/BIOSTests"
 )
-target_link_libraries(BIOSTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(BIOSTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 add_executable(ROMMetadataTests ${PROJECT_ROOT}/tests/ROMMetadataTests.cpp)
 set_target_properties(ROMMetadataTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/ROMMetadataTests"
 )
-target_link_libraries(ROMMetadataTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(ROMMetadataTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 add_executable(InputLogicTests ${PROJECT_ROOT}/tests/InputLogicTests.cpp)
 set_target_properties(InputLogicTests PROPERTIES
@@ -159,14 +159,14 @@ set_target_properties(PPUTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PPUTests"
 )
-target_link_libraries(PPUTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(PPUTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 add_executable(MemoryMapTests ${PROJECT_ROOT}/tests/MemoryMapTests.cpp)
 set_target_properties(MemoryMapTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/MemoryMapTests"
 )
-target_link_libraries(MemoryMapTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(MemoryMapTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 # GBA timing/light smoke tests
 add_executable(GbaTests ${PROJECT_ROOT}/tests/GbaTimingTests.cpp)
@@ -174,7 +174,7 @@ set_target_properties(GbaTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GbaTests"
 )
-target_link_libraries(GbaTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(GbaTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 if(EXISTS "${CMAKE_BINARY_DIR}/bin/GbaTests")
   add_test(NAME GbaTests COMMAND "${CMAKE_BINARY_DIR}/bin/GbaTests" --gtest_filter="*")
@@ -189,7 +189,7 @@ if(EXISTS "${PROJECT_ROOT}/tests/APUTests.cpp")
     RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/APUTests"
   )
-  target_link_libraries(APUTests PRIVATE GTest::gtest_main GBAEmulator)
+  target_link_libraries(APUTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
   include(GoogleTest)
   if(EXISTS "${CMAKE_BINARY_DIR}/bin/APUTests")
@@ -290,7 +290,7 @@ set_target_properties(LoggerTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/LoggerTests"
 )
-target_link_libraries(LoggerTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(LoggerTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 gtest_discover_tests(LoggerTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -303,7 +303,7 @@ set_target_properties(GBAIntegrationTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GBAIntegrationTests"
 )
-target_link_libraries(GBAIntegrationTests PRIVATE GTest::gtest_main GBAEmulator)
+target_link_libraries(GBAIntegrationTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
 gtest_discover_tests(GBAIntegrationTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -318,7 +318,7 @@ if(EXISTS "${PROJECT_ROOT}/tests/GraphicsCorruptionTests.cpp")
     RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/GraphicsCorruptionTests"
   )
-  target_link_libraries(GraphicsCorruptionTests PRIVATE GTest::gtest_main GBAEmulator)
+  target_link_libraries(GraphicsCorruptionTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
   gtest_discover_tests(GraphicsCorruptionTests
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -334,7 +334,7 @@ if(EXISTS "${PROJECT_ROOT}/tests/AudioCorruptionTests.cpp")
     RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
     AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/AudioCorruptionTests"
   )
-  target_link_libraries(AudioCorruptionTests PRIVATE GTest::gtest_main GBAEmulator)
+  target_link_libraries(AudioCorruptionTests PRIVATE GTest::gtest_main GBAEmulator GBEmulator)
 
   gtest_discover_tests(AudioCorruptionTests
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

@@ -33,7 +33,7 @@
 
 **Extended Capabilities** (this session):
 - `--capture-times-ms 120000`: Capture at specific millisecond offsets
-- `--run-padding-ms N`: Buffer time after capture (default 500ms, recommended <200ms for long runs)
+- `--run-padding-ms N`: Buffer time after capture (validated recommendation for long runs: `--run-padding-ms 100`)
 - Updated baseline directory: `test_output/tas_baselines/{rom_stem}/120000ms.ppm`
 
 ## Results

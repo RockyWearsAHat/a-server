@@ -67,11 +67,13 @@ Object lifecycle (Qt parent-child ownership), signal/slot threading, resource in
 
 - Translate the Project Lead brief into concrete acceptance criteria before dispatch.
 - Match verification depth to risk:
-  - Critical: build plus targeted tests and runtime confirmation where applicable
-  - High: build plus targeted tests, and visual/runtime checks if lifecycle or UI is involved
-  - Medium: build plus targeted tests or visual confirmation
+  - Critical (emulator timing, opcode behavior, DMA, memory-map semantics): Layers 0-4 required; add Layer 5 for runtime confirmation and Layer 6 when rendering output is touched
+  - High (audio behavior, save-state behavior, lifecycle-sensitive runtime code): Layers 0-3 required, plus Layer 4 if emulator behavior changed
+  - Medium (UI page behavior, settings, adapters): Layer 0 plus targeted Layer 2 tests or visual confirmation
   - Low: smallest relevant verification only
 - Do not sign off work that lacks explicit proof for the relevant risk tier.
+
+Layer definitions come from `.github/instructions/emulator-core.instructions.md` and `.github/skills/emulator-verification-pipeline/SKILL.md`.
 
 ## Diff Review (MANDATORY after every Code Engineer delivery)
 

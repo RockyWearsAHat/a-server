@@ -65,7 +65,12 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 
 ## Scripts & Tools
 
-- `scripts/` — `visual_dev_loop.py`, `test_suite.py`, `clean.sh`, plus debug/analysis helpers
+- `scripts/` — `visual_dev_loop.py`, `tas_determinism_test.py`, `test_suite.py`, `clean.sh`, plus debug/analysis helpers
+- `scripts/tas_determinism_test.py` — TAS-driven frame-hash determinism validation.
+	- GBA: production coverage with 120s checkpoints and committed baselines
+	- NES/SNES/GB/GBC: script adapters exist but coverage depends on ROM and baseline setup
+	- PS1: not yet supported in the TAS pipeline
+	- Baselines: `test_output/tas_baselines/<rom_stem>/<ms>ms.ppm`
 - MCP tools (search, knowledge cache, vision) are provided globally by the gsh MCP server
 
 ## Build Output
@@ -84,6 +89,7 @@ Detailed architecture notes live alongside this source map in `.github/knowledge
 | Streaming services      | `qt-webengine-streaming-integration.md` | WebEngine wrappers, StreamingWebViewPage, DRM                   |
 | GBA emulator            | `gba-emulator-architecture.md`          | CPU, PPU, APU, memory, BIOS, timing                             |
 | PS1 emulator            | `ps1-emulator-architecture.md`          | R3000A, GPU, SPU, DMA, GTE, CDROM, timers                       |
+| Emulator verification   | `emulator-verification-pipeline.md`     | Layered correctness gates, platform coverage, deterministic flow |
 | Build system            | `build-infrastructure.md`               | Makefile chain, CMake, vcpkg, test binaries                     |
 | Research policy         | `research-policy.md`                    | Source priority, spec-first rules, prohibited sources           |
 | UI state control        | `ui-state-and-transition-bugs.md`       | Hidden state, invalid transitions, sequence bug prevention      |

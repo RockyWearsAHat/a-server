@@ -8,6 +8,8 @@ user-invocable: false
 
 Use this skill when code inspection alone cannot answer whether the rendered output is correct.
 
+For emulator correctness gates, load `.github/skills/emulator-verification-pipeline/SKILL.md` first and use this skill as the visual/runtime evidence layer.
+
 ## Emulator Runtime Verification
 
 This skill also covers emulator accuracy verification — not just UI appearance. When checking whether emulators work with real ROMs:
