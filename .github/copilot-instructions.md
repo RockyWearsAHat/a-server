@@ -4,7 +4,7 @@ Build: `make build`
 Targeted tests: `cd build/generated/cmake && ctest -R <pattern> --output-on-failure`
 
 ## Checkpointing
-Use message: "your commit message" to commit without an AI call. The context: parameter calls a subagent, so save the subagent call when possible and please prefer usage of the message parameter if you can write your own message instead.
+Use parameter `message: "your commit message"` to commit without an AI call. The context: parameter calls a subagent, so save the subagent call when possible and please prefer usage of the message parameter instead and just write your own commit message based upon the diff and changes made.
 
 ## A Note on Documentation
 Documentation is only as good as it is made to be, it's only as accurate as it's kept. Please, as you edit and make changes, consider updating knowledge documents and documentation. Along with the actual proper coding principles defined in the CS3500 doc you already follow, documentation really helps for long-running continued knowledge. Keep things consise but also keep them updated with ACTUALLY PROPER INFORMATION REVISING, DELETING, AND CREATING AS YOU GO SO ANY AGENT CAN GO BACK AND REFERENCE WHAT IS NEEDED **ACCURATELY!!!**
