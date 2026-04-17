@@ -16,3 +16,9 @@ This repository builds through the top-level `Makefile`, which delegates to `cma
 - When adding source files, update the owning target and any related tests in the same pass.
 - Avoid broad compiler-flag changes unless the repository already applies that pattern globally.
 - After CMake changes, verify with `make build` rather than ad hoc generator commands.
+
+## Sanitizer Gate Guidance
+
+- Verification workflows may require a sanitizer-clean run (ASan/UBSan) for emulator behavior changes.
+- If sanitizer flags are introduced, keep them opt-in (for example, through a dedicated cache variable) rather than always-on in release-style builds.
+- Document sanitizer enable/disable commands in the owning CMake file comments so test workflows can invoke Layer 1 consistently.

@@ -14,6 +14,45 @@ applyTo: "src/emulator/**/*.cpp,include/emulator/**/*.h,include/emulator/**/*.hp
 - Prefer focused tests, characterization tests, or deterministic headless runs before broad manual verification.
 - Keep hot-path logging minimal and use targeted trace flags plus `debug.log` when runtime evidence is needed.
 
+## Verification Layers (Authoritative)
+
+Use this layered pipeline for emulator correctness. Run the minimum required layers for the change type.
+
+| Layer | Gate | Command / Evidence |
+| --- | --- | --- |
+| 0 | Build | `make build` |
+| 1 | Sanitizer clean (when available) | Sanitizer-enabled build must report zero ASan/UBSan issues |
+| 2 | Targeted tests | `cd build/generated/cmake && ctest -R <pattern> --output-on-failure` |
+| 3 | Cross-subsystem tests | `ctest -R 'GBAIntegrat\|PS1Integrat\|Determinism' --output-on-failure` |
+| 4 | TAS determinism | `python3 scripts/tas_determinism_test.py --system <platform> ...` |
+| 5 | Headless runtime state | `AIOServer --headless ... --headless-assert-nonblack` plus emulator state polling |
+| 6 | Visual evidence | `visual_dev_loop.py screenshot` + MCP image judgment |
+| 7 | Acceptance gate | Update/verify `COMPLETION_CHECKLIST.md` for affected platform |
+
+Detailed operational procedure lives in `.github/skills/emulator-verification-pipeline/SKILL.md` and `.github/knowledge/emulator-verification-pipeline.md`.
+
+## Required Layers By Change Type
+
+| Change type | Minimum layers |
+| --- | --- |
+| CPU opcode, DMA, timer, memory-map behavior | 0-4 |
+| GPU/PPU/rendering correctness | 0-5 plus 6 |
+| APU/SPU behavior | 0-4 |
+| New platform wire-up | 0-7 |
+| UI/QSS-only changes | Follow GUI/QSS instructions instead of emulator pipeline |
+
+If this file says an emulator layer is required, treat it as mandatory sign-off criteria.
+
+## Accuracy Scope Guardrail
+
+The GBA emulator is instruction-accurate, not sub-cycle-accurate. Timing is modeled per instruction. Do not propose sub-cycle pipeline modeling unless the task explicitly expands scope.
+
+## Determinism Baseline Protocol
+
+- Treat baseline changes in `test_output/tas_baselines/` as behavior evidence updates, not routine artifacts.
+- Baseline updates require an explicit reason, associated change type, and the verification layers used to approve the new baseline.
+- Do not accept a baseline change without matching test/runtime evidence.
+
 ## Runtime ROM Verification
 
 Unit tests verify isolated logic. To verify actual gameplay accuracy, use the runtime tooling:
@@ -25,3 +64,5 @@ Unit tests verify isolated logic. To verify actual gameplay accuracy, use the ru
 - **Available ROMs**: `~/Desktop/ROMs/` — GBA (`.gba`), PS1 (`.bin/.cue` in subdirs), Switch (`.xci`).
 
 When asked whether emulators "work" or are "accurate", runtime ROM testing is the PRIMARY verification method — not code reading alone.
+
+For behavior-changing emulator work, runtime checks are not enough by themselves. Include deterministic TAS verification and targeted `ctest` evidence in the same result.

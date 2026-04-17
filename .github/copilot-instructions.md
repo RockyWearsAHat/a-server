@@ -52,6 +52,7 @@ DO NOT touch plans unless the user has asked you to, but every other bit of know
 - Design system: `.github/knowledge/design-system.md`
 - Copilot layout: `.github/knowledge/copilot-customization-layout.md`
 - Test scoping: `.github/instructions/test-scoping.instructions.md`
+- Emulator verification pipeline: `.github/knowledge/emulator-verification-pipeline.md`
 - Build rules: `.github/instructions/cmake-vcpkg.instructions.md`
 
 ## Documentation Hygiene

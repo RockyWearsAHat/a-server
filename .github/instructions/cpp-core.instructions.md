@@ -21,3 +21,11 @@ applyTo: "src/**/*.cpp,include/**/*.h,include/**/*.hpp,tests/**/*Tests.cpp"
 - Build the affected native code with `make build` unless the task is explicitly research-only.
 - Use targeted `ctest -R <pattern>` coverage instead of broad test runs.
 - If a runtime-only bug is involved, pair code-level checks with the runtime debugging workflow in `.github/instructions/runtime-debugging.instructions.md`.
+
+## CS3500/CS2410 Alignment Rules
+
+- Test names must be explicit and behavior-oriented: `Subsystem_Method_Scenario_ExpectedOutcome`.
+- If a method grows beyond roughly 30 lines of active logic, either decompose it or justify why decomposition would reduce correctness/readability.
+- Validate external-facing boundaries at the top of the function (null, range, invalid state), not inside deep logic paths.
+- Emulator memory and bus access functions must make address contract checks explicit at the boundary when safety/correctness depends on them.
+- For public native APIs, document purpose, parameter contract, and failure behavior in concise comments.

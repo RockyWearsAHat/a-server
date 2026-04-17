@@ -9,6 +9,7 @@ user-invocable: false
 Use this skill only as a lightweight dispatch layer.
 
 - Prefer source inspection when code can answer the question.
+- For emulator correctness requests, route through `.github/skills/emulator-verification-pipeline/SKILL.md` first and then use visual checks as Layer 6 evidence.
 - If rendered output must be judged, use `visual-development-loop` for the actual workflow.
 - If a failure is found, return the evidence plus a compact implementation plan.
 

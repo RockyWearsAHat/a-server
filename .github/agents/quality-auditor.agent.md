@@ -17,6 +17,7 @@ You audit quality, correctness, and workflow health during QA.
 3. **Plan fidelity** — The implementation matches the approved plan and user request. Nothing is missing, nothing was added that wasn't asked for.
 4. **Comment hygiene** — Comments must not contradict the code. A comment claiming a feature works when the code is a stub/empty/disconnected is a defect. Flag it.
 5. **Knowledge integrity** — If the change updates `.github/knowledge/` docs, verify the claims against the actual code, not against what comments say the code does.
+6. **Emulator spec fidelity** — For emulator behavior changes, verify that the implementation references authoritative technical docs/specs in code comments, tests, or linked knowledge notes. Missing spec grounding is a defect.
 
 ## Reporting
 
