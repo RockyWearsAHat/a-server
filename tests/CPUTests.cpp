@@ -2359,7 +2359,7 @@ TEST_F(CPUTest, ARM_UMULLS_SetsFlags) {
 // Note: SWP instruction is not currently implemented in the emulator.
 // These tests are disabled until SWP is added.
 
-TEST_F(CPUTest, DISABLED_ARM_SWP) {
+TEST_F(CPUTest, ARM_SWP) {
   // SWP Rd, Rm, [Rn] - atomic read-modify-write
   // E10n0f9m = SWP Rd, Rm, [Rn]
   cpu.SetRegister(15, 0x08000000);
@@ -2374,7 +2374,7 @@ TEST_F(CPUTest, DISABLED_ARM_SWP) {
   EXPECT_EQ(memory.Read32(0x03000100), 0xAABBCCDD); // New value
 }
 
-TEST_F(CPUTest, DISABLED_ARM_SWPB) {
+TEST_F(CPUTest, ARM_SWPB) {
   // SWPB Rd, Rm, [Rn] - byte swap
   cpu.SetRegister(15, 0x08000000);
   cpu.SetRegister(1, 0x03000100);

@@ -106,6 +106,7 @@ private:
   uint32_t readCooldown = 0;
   uint8_t mode = 0;
   bool sectorBufferReady = false;
+  bool playing = false; // CD-DA audio playback active (status bit 7, psx-spx §Play)
 
   // ─── XA-ADPCM Filter ───────────────────────────────────────────────
   uint8_t xaFilterFile = 0;

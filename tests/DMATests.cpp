@@ -111,11 +111,11 @@ TEST(MemoryMapTest, VramByteWritesAlsoAffectObjVram) {
   EXPECT_EQ(mem.Read16(0x06010000), 0x0000u);
 }
 
-// DISABLED: DMA source address registers are write-only on GBA hardware.
-// This test attempts to read back DMA1SAD which returns open-bus, not the
-// internal address counter. The test needs to be rewritten to use an internal
-// API or verify behavior via FIFO output.
-TEST(AudioDmaTest, DISABLED_SoundFifoDmaNotTriggeredEveryTimerOverflow) {
+// GBATEK: Sound DMA (DMA1/DMA2 with START_SPECIAL) fires only when the FIFO
+// count drops to <= 16 samples (half-full). When the FIFO is well-stocked,
+// timer overflows consume one sample each but do NOT trigger a DMA refill.
+// This test verifies the FIFO-level gating using the APU FIFO count API.
+TEST(AudioDmaTest, SoundFifoDmaNotTriggeredEveryTimerOverflow) {
   GBAMemory mem;
   APU apu(mem);
   mem.SetAPU(&apu);
@@ -125,45 +125,47 @@ TEST(AudioDmaTest, DISABLED_SoundFifoDmaNotTriggeredEveryTimerOverflow) {
   // Enable master sound.
   mem.Write16(IORegs::REG_SOUNDCNT_X, 0x0080);
 
-  // Route FIFO A to both channels, full volume, and use Timer0.
-  // Bits: 2=FIFO A full vol, 8/9 enable R/L, 10 timer select.
-  uint16_t scntH = 0;
-  scntH |= 0x0004; // FIFO A volume 100%
-  scntH |= 0x0100; // FIFO A -> Right
-  scntH |= 0x0200; // FIFO A -> Left
-  scntH |= 0x0000; // FIFO A timer select = Timer0
-  mem.Write16(IORegs::REG_SOUNDCNT_H, scntH);
+  // Route FIFO A to both channels, full volume, Timer0.
+  // Bit 2 = FIFO A vol 100%, bits 8/9 = R/L enable, bit 10 = Timer0.
+  mem.Write16(IORegs::REG_SOUNDCNT_H, 0x0304);
 
-  // Set up DMA1 as a typical sound DMA: src inc, dst fixed (FIFO A), repeat,
-  // 32-bit, start special. Transfer count = 4 words (16 bytes) per request.
-  const uint32_t srcBase = 0x02000000;
-  for (int i = 0; i < 512; ++i) {
-    mem.Write8(srcBase + (uint32_t)i, (uint8_t)(i & 0xFF));
-  }
+  // Fill source memory with a recognisable pattern (64 bytes = 16 samples × 4).
+  const uint32_t srcBase = 0x02000000u;
+  for (int i = 0; i < 64; ++i)
+    mem.Write8(srcBase + (uint32_t)i, (uint8_t)(0x10 + i));
 
+  // Set up DMA1 as FIFO A sound DMA: dest-fixed, repeat, 32-bit, START_SPECIAL.
   WriteIo32(mem, IORegs::DMA1SAD, srcBase);
-  WriteIo32(mem, IORegs::DMA1DAD, 0x040000A0);
+  WriteIo32(mem, IORegs::DMA1DAD, 0x040000A0u);
   WriteIo16(mem, IORegs::DMA1CNT_L, 4);
   const uint16_t dmaCtrl = DMAControl::ENABLE | DMAControl::REPEAT |
                            DMAControl::DEST_FIXED | DMAControl::TRANSFER_32BIT |
                            DMAControl::START_SPECIAL;
   WriteIo16(mem, IORegs::DMA1CNT_H, dmaCtrl);
 
-  // Configure Timer0 to overflow every cycle (reload=0xFFFF) so we can stress
-  // the trigger logic.
+  // Timer0: overflow every UpdateTimers(1) call (reload=0xFFFF, prescaler 1).
   mem.Write16(IORegs::BASE + IORegs::TM0CNT_L, 0xFFFF);
   mem.Write16(IORegs::BASE + IORegs::TM0CNT_H,
               TimerControl::ENABLE | TimerControl::PRESCALER_1);
 
-  // Run 20 overflows.
-  for (int n = 0; n < 20; ++n) {
-    mem.UpdateTimers(1);
-  }
+  // Pre-fill FIFO A with 32 samples (max capacity) via WriteFIFO_A (4 bytes
+  // each).  This places the FIFO above the 16-sample refill threshold.
+  for (int i = 0; i < 8; ++i)
+    apu.WriteFIFO_A(0x01020304u);
+  ASSERT_EQ(apu.GetFifoACount(), 32);
 
-  // If DMA were triggered every overflow, the DMA1 source address would advance
-  // by 20 * 16 bytes = 320. With FIFO-level gating, it should advance far less.
-  const uint32_t sadAfter = mem.Read32(IORegs::BASE + IORegs::DMA1SAD);
-  EXPECT_LT(sadAfter - srcBase, 160u);
+  // Run 15 timer overflows.  Each overflow pops one sample.  After 15 pops the
+  // FIFO holds 17 samples, which is still above the threshold (> 16).  DMA
+  // must NOT fire during these 15 overflows.
+  for (int n = 0; n < 15; ++n)
+    mem.UpdateTimers(1);
+  EXPECT_EQ(apu.GetFifoACount(), 17);
+
+  // 16th overflow: FIFO drops from 17 to 16 (== threshold, <= 16 is true).
+  // DMA fires and writes 4 words × 4 bytes = 16 samples into FIFO A.
+  // Post-DMA count = 16 + 16 = 32.
+  mem.UpdateTimers(1);
+  EXPECT_EQ(apu.GetFifoACount(), 32);
 }
 // ============================================================================
 // DMA Source Address Control Tests (per GBATEK)
