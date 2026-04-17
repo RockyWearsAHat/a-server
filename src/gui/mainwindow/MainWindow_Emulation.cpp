@@ -115,6 +115,57 @@ bool WriteRgb555Ppm(const std::string &path, const uint16_t *pixels,
 
 bool MainWindow::DumpCurrentFramePPM(const std::string &path,
                                      double *outNonBlackRatio) const {
+  // For GBA, dump directly from the emulator-owned framebuffer snapshot.
+  // This avoids dependence on UI display timer cadence and ensures headless
+  // captures reflect emulated state at dump time.
+  if (currentEmulator == EmulatorType::GBA && gba) {
+    const int w = gba->GetVideoWidth();
+    const int h = gba->GetVideoHeight();
+    if (w <= 0 || h <= 0) {
+      if (outNonBlackRatio) {
+        *outNonBlackRatio = 0.0;
+      }
+      return false;
+    }
+
+    const size_t pixelCount = static_cast<size_t>(w) * static_cast<size_t>(h);
+    std::vector<uint32_t> fb(pixelCount, 0xFF000000u);
+    gba->CopyFramebufferTo(fb.data(), fb.size());
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) {
+      if (outNonBlackRatio) {
+        *outNonBlackRatio = 0.0;
+      }
+      return false;
+    }
+
+    out << "P6\n" << w << " " << h << "\n255\n";
+
+    uint64_t nonBlack = 0;
+    for (size_t i = 0; i < pixelCount; ++i) {
+      const uint32_t px = fb[i];
+      const uint8_t r = static_cast<uint8_t>((px >> 16) & 0xFF);
+      const uint8_t g = static_cast<uint8_t>((px >> 8) & 0xFF);
+      const uint8_t b = static_cast<uint8_t>(px & 0xFF);
+      if ((r | g | b) != 0) {
+        ++nonBlack;
+      }
+      out.put(static_cast<char>(r));
+      out.put(static_cast<char>(g));
+      out.put(static_cast<char>(b));
+    }
+
+    const double ratio = pixelCount > 0
+                             ? static_cast<double>(nonBlack) /
+                                   static_cast<double>(pixelCount)
+                             : 0.0;
+    if (outNonBlackRatio) {
+      *outNonBlackRatio = ratio;
+    }
+    return true;
+  }
+
   if (displayImage.isNull() || displayImage.width() <= 0 ||
       displayImage.height() <= 0) {
     AIO::Emulator::Common::Logger::Instance().Log(
@@ -251,6 +302,17 @@ uint64_t MainWindow::GetEmulatedMilliseconds() const {
   }
 
   return 0;
+}
+
+void MainWindow::ConfigureHeadlessDump(const std::string &path, int64_t dumpMs,
+                                       bool assertNonBlack) {
+  headlessDumpPath_ = QString::fromStdString(path);
+  headlessDumpTargetMs_.store(std::max<int64_t>(0, dumpMs),
+                              std::memory_order_relaxed);
+  headlessDumpAssertNonBlack_.store(assertNonBlack, std::memory_order_relaxed);
+  headlessDumpDone_.store(false, std::memory_order_relaxed);
+  headlessDumpEnabled_.store(!headlessDumpPath_.isEmpty(),
+                             std::memory_order_relaxed);
 }
 
 static uint16_t ScriptKeyMaskFromName(const std::string &name) {
@@ -761,10 +823,48 @@ void MainWindow::EmulatorThreadMain() {
   Clock::time_point nextFrame = Clock::now();
 
   uint16_t lastAppliedKeyinput = 0x03FF;
+  int64_t lastScriptLogNowMs = -1;
+  auto advanceScriptEventsByEmuTime = [&]() {
+    if (currentEmulator != EmulatorType::GBA ||
+        !scriptEnabled_.load(std::memory_order_relaxed) || inputScript_.empty()) {
+      return;
+    }
+
+    const int64_t nowMs = static_cast<int64_t>(
+        (gba->GetTotalCycles() * 1000ULL) / gba->GetNominalCpuHz());
+
+    while (nextScriptEvent_ < inputScript_.size() &&
+           inputScript_[nextScriptEvent_].ms <= nowMs) {
+      const auto &ev = inputScript_[nextScriptEvent_];
+      if (ev.down) {
+        scriptKeyState_ = static_cast<uint16_t>(scriptKeyState_ & ~ev.mask);
+      } else {
+        scriptKeyState_ = static_cast<uint16_t>(scriptKeyState_ | ev.mask);
+      }
+
+      // Keep debug logging deterministic: only log once per emu-ms tick.
+      if (lastScriptLogNowMs != nowMs) {
+        std::cout << "[SCRIPT] t_ms=" << nowMs
+                  << " event_ms=" << ev.ms
+                  << " key=" << ScriptNameFromMask(ev.mask)
+                  << " action=" << (ev.down ? "DOWN" : "UP")
+                  << " keyState=0x" << std::hex << scriptKeyState_ << std::dec
+                  << " pc=0x" << std::hex << gba->GetPC() << std::dec
+                  << std::endl;
+        lastScriptLogNowMs = nowMs;
+      }
+      ++nextScriptEvent_;
+    }
+
+    pendingEmuKeyinput.store(scriptKeyState_, std::memory_order_relaxed);
+  };
+
   auto applyPendingKeyinput = [&]() {
     if (currentEmulator != EmulatorType::GBA) {
       return;
     }
+    advanceScriptEventsByEmuTime();
+
     const uint16_t desired =
         scriptEnabled_.load(std::memory_order_relaxed)
             ? pendingEmuKeyinput.load(std::memory_order_relaxed)
@@ -974,6 +1074,30 @@ void MainWindow::EmulatorThreadMain() {
     // Increment frame counter
     emulatorFrameNumber.fetch_add(1, std::memory_order_relaxed);
 
+      // Deterministic headless dump: trigger from emulation time on the
+      // emulation thread to avoid Qt timer jitter affecting capture timestamp.
+      if (headlessDumpEnabled_.load(std::memory_order_relaxed) &&
+          !headlessDumpDone_.load(std::memory_order_relaxed)) {
+        const int64_t nowMs = static_cast<int64_t>(
+            (gba->GetTotalCycles() * 1000ULL) / gba->GetNominalCpuHz());
+        if (nowMs >= headlessDumpTargetMs_.load(std::memory_order_relaxed)) {
+          headlessDumpDone_.store(true, std::memory_order_relaxed);
+          double ratio = 0.0;
+          const bool ok = DumpCurrentFramePPM(headlessDumpPath_.toStdString(),
+                                              &ratio);
+          if (!ok && headlessDumpAssertNonBlack_.load(std::memory_order_relaxed)) {
+            QMetaObject::invokeMethod(
+                qApp, []() { QCoreApplication::exit(2); },
+                Qt::QueuedConnection);
+          } else if (headlessDumpAssertNonBlack_.load(std::memory_order_relaxed) &&
+                     ratio <= 0.0) {
+            QMetaObject::invokeMethod(
+                qApp, []() { QCoreApplication::exit(2); },
+                Qt::QueuedConnection);
+          }
+        }
+      }
+
     // If step-one was requested, pause after this frame
     if (emulatorStepOne.exchange(false, std::memory_order_relaxed)) {
       emulatorPaused.store(true, std::memory_order_relaxed);
@@ -1134,56 +1258,15 @@ void MainWindow::UpdateDisplay() {
   }
 
   if (currentEmulator == EmulatorType::GBA) {
-    if (inEmu && scriptEnabled_.load(std::memory_order_relaxed) &&
-        scriptTimer_.isValid()) {
-      int64_t nowMs = 0;
-      const QString timebase =
-          qEnvironmentVariable("AIO_INPUT_SCRIPT_TIMEBASE").trimmed().toUpper();
-      if (timebase == "EMU") {
-        nowMs = (int64_t)((gba->GetTotalCycles() * 1000ULL) /
-                          gba->GetNominalCpuHz());
-      } else {
-        nowMs = (int64_t)scriptTimer_.elapsed();
-      }
-      while (nextScriptEvent_ < inputScript_.size() &&
-             inputScript_[nextScriptEvent_].ms <= nowMs) {
-        const auto &ev = inputScript_[nextScriptEvent_];
-        if (ev.down) {
-          scriptKeyState_ = (uint16_t)(scriptKeyState_ & ~ev.mask);
-        } else {
-          scriptKeyState_ = (uint16_t)(scriptKeyState_ | ev.mask);
-        }
-
-        std::cout << "[SCRIPT] t_ms=" << nowMs << " event_ms=" << ev.ms
-                  << " key=" << ScriptNameFromMask(ev.mask)
-                  << " action=" << (ev.down ? "DOWN" : "UP") << " keyState=0x"
-                  << std::hex << scriptKeyState_ << std::dec << " pc=0x"
-                  << std::hex << gba->GetPC() << std::dec;
-        if (!gba->IsGameBoyFamilyMode()) {
-          const uint16_t dispcnt = gba->ReadMem16(0x04000000);
-          const uint16_t winin = gba->ReadMem16(0x04000048);
-          const uint16_t winout = gba->ReadMem16(0x0400004A);
-          const uint16_t bldcnt = gba->ReadMem16(0x04000050);
-          const uint16_t bldalpha = gba->ReadMem16(0x04000052);
-          const uint16_t win0h = gba->ReadMem16(0x04000040);
-          const uint16_t win0v = gba->ReadMem16(0x04000044);
-          std::cout << " DISPCNT=0x" << std::hex << dispcnt << " WININ=0x"
-                    << winin << " WINOUT=0x" << winout << " WIN0H=0x" << win0h
-                    << " WIN0V=0x" << win0v << " BLDCNT=0x" << bldcnt
-                    << " BLDALPHA=0x" << bldalpha;
-        }
-        std::cout << std::dec << std::endl;
-        nextScriptEvent_++;
-      }
-      inputState = scriptKeyState_;
-    }
-
     // Publish the computed input state to the emulation thread.
     // The core input update is applied from EmulatorThreadMain() in small
-    // chunks for low latency; UpdateDisplay() is where scripted input events
-    // are advanced based on the chosen timebase.
+    // chunks for low latency. Scripted input events are advanced in the
+    // emulation thread so event timing is bound to emulated time, not UI timer
+    // cadence.
     if (inEmu) {
-      pendingEmuKeyinput.store(inputState, std::memory_order_relaxed);
+      if (!scriptEnabled_.load(std::memory_order_relaxed)) {
+        pendingEmuKeyinput.store(inputState, std::memory_order_relaxed);
+      }
     }
 
     // Copy framebuffer atomically under lock to prevent tearing from

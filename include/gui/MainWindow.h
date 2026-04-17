@@ -131,6 +131,8 @@ public:
   bool StopAVRecording();
   bool IsAVRecording() const;
   uint64_t GetEmulatedMilliseconds() const;
+  void ConfigureHeadlessDump(const std::string &path, int64_t dumpMs,
+                             bool assertNonBlack);
 
   struct ScriptEvent {
     int64_t ms = 0;
@@ -402,6 +404,11 @@ private:
   // Published by UI/input polling; consumed/applied by emulation thread.
   // 0x03FF = all released (GBA KEYINPUT is active-low).
   std::atomic<uint16_t> pendingEmuKeyinput{0x03FF};
+  std::atomic<bool> headlessDumpEnabled_{false};
+  std::atomic<bool> headlessDumpDone_{false};
+  std::atomic<int64_t> headlessDumpTargetMs_{0};
+  std::atomic<bool> headlessDumpAssertNonBlack_{false};
+  QString headlessDumpPath_;
   QProcess *serverProcess_ = nullptr;
 
   // Localhost HTTP server for programmatic input injection (visual dev loop)
