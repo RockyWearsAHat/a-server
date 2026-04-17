@@ -13,8 +13,11 @@ namespace Clock {
 inline constexpr uint32_t CPU_HZ = 33868800;
 inline constexpr uint32_t CPU_HZ_NTSC = 33868800;
 inline constexpr uint32_t CPU_HZ_PAL = 33868800;
-inline constexpr double FRAME_RATE_NTSC = 59.94;
-inline constexpr double FRAME_RATE_PAL = 50.0;
+// Actual PSX hardware frame rates derived from clock/scanline/dot counts.
+// psx-spx: 53.222400MHz / 263 / 3413 = 59.29 Hz (NTSC); / 314 / 3406 = 49.76 Hz (PAL)
+// These differ from broadcast TV standards (59.94 / 50.0).
+inline constexpr double FRAME_RATE_NTSC = 59.2916;
+inline constexpr double FRAME_RATE_PAL = 49.7616;
 inline constexpr uint32_t SCANLINES_NTSC = 263;
 inline constexpr uint32_t SCANLINES_PAL = 314;
 inline constexpr uint32_t VISIBLE_SCANLINES_NTSC = 240;
@@ -22,7 +25,9 @@ inline constexpr uint32_t VISIBLE_SCANLINES_PAL = 256;
 inline constexpr uint32_t DOTS_PER_SCANLINE_NTSC = 3413;
 inline constexpr uint32_t DOTS_PER_SCANLINE_PAL = 3406;
 inline constexpr uint32_t CPU_CYCLES_PER_SCANLINE_NTSC = 2171;
-inline constexpr uint32_t CPU_CYCLES_PER_SCANLINE_PAL = 2165;
+// CPU_CYCLES_PER_SCANLINE = DOTS_PER_SCANLINE * (CPU_HZ / GPU_HZ) = DOTS * (7/11)
+// NTSC: 3413 * 7/11 = 2171.0 (exact), PAL: 3406 * 7/11 = 2167.45 -> floor = 2167
+inline constexpr uint32_t CPU_CYCLES_PER_SCANLINE_PAL = 2167;
 inline constexpr uint32_t SPU_SAMPLE_RATE = 44100;
 } // namespace Clock
 

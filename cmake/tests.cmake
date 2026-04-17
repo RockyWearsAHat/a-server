@@ -78,13 +78,19 @@ set_target_properties(PS1SPUTests PROPERTIES
 )
 target_link_libraries(PS1SPUTests PRIVATE GTest::gtest_main PS1Emulator)
 
+add_executable(PS1CDROMTests ${PROJECT_ROOT}/tests/PS1CDROMTests.cpp)
+set_target_properties(PS1CDROMTests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
+  AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1CDROMTests"
+)
+target_link_libraries(PS1CDROMTests PRIVATE GTest::gtest_main PS1Emulator)
+
 add_executable(PS1InterruptTests ${PROJECT_ROOT}/tests/PS1InterruptTests.cpp)
 set_target_properties(PS1InterruptTests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
   AUTOGEN_BUILD_DIR "${BUILD_ROOT}/generated/autogen/PS1InterruptTests"
 )
 target_link_libraries(PS1InterruptTests PRIVATE GTest::gtest_main PS1Emulator)
-
 add_executable(PS1GTETests ${PROJECT_ROOT}/tests/PS1GTETests.cpp)
 set_target_properties(PS1GTETests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${BUILD_ROOT}/bin
@@ -391,6 +397,11 @@ gtest_discover_tests(PS1SPUTests
   DISCOVERY_MODE PRE_TEST
 )
 gtest_discover_tests(PS1InterruptTests
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  TEST_DISCOVERY_TIMEOUT 60
+  DISCOVERY_MODE PRE_TEST
+)
+gtest_discover_tests(PS1CDROMTests
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   TEST_DISCOVERY_TIMEOUT 60
   DISCOVERY_MODE PRE_TEST

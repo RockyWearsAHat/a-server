@@ -46,11 +46,16 @@ Technical file-to-subsystem map for implementation agents. Read this when you ne
 - `src/emulator/` + `include/emulator/`
 - GBA: `ARM7TDMI.cpp` (CPU), `PPU.cpp` (graphics), `APU.cpp` (audio), `GBAMemory.cpp`, `GBA.cpp` (system) — **launchable**
 - PS1: `R3000A.cpp` (CPU), `PS1GPU.cpp`, `PS1SPU.cpp` (audio), `PS1DMA.cpp`, `GTE.cpp`, `PS1Memory.cpp`, `PS1.cpp` (system), `CDROM.cpp`, `PS1Timer.cpp`, `PS1Controller.cpp`, `InterruptController.cpp` — **launchable**
-- SNES: `W65C816.cpp` (CPU), `SNESPPU.cpp`, `SPC700.cpp`, `SNESMemory.cpp`, `SNESCartridge.cpp`, `SNES.cpp` — core present, GUI launch **not yet wired**
-- NES: `RP2A03.cpp` (CPU), `PPU2C02.cpp`, `APU2A03.cpp`, `NESMemory.cpp`, `NESCartridge.cpp`, `NES.cpp` — core present, GUI launch **not yet wired**
-- GB/GBC: `LR35902.cpp`, `GBPPU.cpp`, `GBAPU.cpp`, `GBMemory.cpp`, `GBCartridge.cpp`, `GB.cpp` — core present, GUI launch **not yet wired**
-- Genesis: `M68000.cpp`, `Z80.cpp`, `GenesisVDP.cpp`, `YM2612.cpp`, `SN76489.cpp`, `GenesisMemory.cpp`, `GenesisCartridge.cpp`, `Genesis.cpp` — core present, GUI launch **not yet wired**
+- SNES: `W65C816.cpp` (CPU), `SNESPPU.cpp`, `SPC700.cpp`, `SNESMemory.cpp`, `SNESCartridge.cpp`, `SNES.cpp` — **launchable**
+- NES: `RP2A03.cpp` (CPU), `PPU2C02.cpp`, `APU2A03.cpp`, `NESMemory.cpp`, `NESCartridge.cpp`, `NES.cpp` — **launchable**
+- GB/GBC: `LR35902.cpp`, `GBPPU.cpp`, `GBAPU.cpp`, `GBMemory.cpp`, `GBCartridge.cpp`, `GB.cpp` — **launchable** through the handheld-family wrapper
+- Genesis: `M68000.cpp`, `Z80.cpp`, `GenesisVDP.cpp`, `YM2612.cpp`, `SN76489.cpp`, `GenesisMemory.cpp`, `GenesisCartridge.cpp`, `Genesis.cpp` — **launchable**
 - N64: `R4300i.cpp`, `RSP.cpp`, `RDP.cpp`, `N64Memory.cpp`, `N64Cartridge.cpp`, `N64.cpp` — core present, GUI launch **not yet wired**
+- Atari 2600: `MOS6507.h`, `TIA.h`, `PIA6532.h`, `Atari2600Memory.h`, `Atari2600Console.h` — **launchable**
+- PS2: `EmotionEngine`/graphics/memory subsystems under `src/emulator/ps2/` — core present, GUI launch **not yet wired**
+- Saturn: subsystems under `src/emulator/saturn/` — core present, GUI launch **not yet wired**
+- Dreamcast: subsystems under `src/emulator/dreamcast/` — core present, GUI launch **not yet wired**
+- GameCube: `Gekko`, `Flipper`, and memory subsystems under `src/emulator/gamecube/` — core present, GUI launch **not yet wired**
 - Switch: `CpuCore.cpp`, `GpuCore.cpp`, `MemoryManager.cpp`, `SwitchEmulator.cpp` — **indexed only, intentionally unavailable in production**
 
 ## Server
@@ -90,6 +95,9 @@ Detailed architecture notes live alongside this source map in `.github/knowledge
 | GBA emulator            | `gba-emulator-architecture.md`          | CPU, PPU, APU, memory, BIOS, timing                             |
 | PS1 emulator            | `ps1-emulator-architecture.md`          | R3000A, GPU, SPU, DMA, GTE, CDROM, timers                       |
 | Emulator verification   | `emulator-verification-pipeline.md`     | Layered correctness gates, platform coverage, deterministic flow |
+| Platform support matrix | `emulator-verification-pipeline.md`     | Product launch status, lossless gate, manufacturer backlog      |
+| Emulator audit ledger   | `emulator-audit-ledger.md`              | Platform-by-platform blockers and finished-state criteria        |
+| Emulator roadmap        | `emulator-completion-roadmap.md`        | Phase order for launchable systems, hidden cores, manufacturers |
 | Build system            | `build-infrastructure.md`               | Makefile chain, CMake, vcpkg, test binaries                     |
 | Research policy         | `research-policy.md`                    | Source priority, spec-first rules, prohibited sources           |
 | UI state control        | `ui-state-and-transition-bugs.md`       | Hidden state, invalid transitions, sequence bug prevention      |

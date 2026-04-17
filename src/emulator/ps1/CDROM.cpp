@@ -35,6 +35,7 @@ void CDROM::Reset() {
   seekSector = 0;
   reading = false;
   seeking = false;
+  playing = false;
   readDelay = 0;
   readCooldown = 0;
   mode = 0;
@@ -591,6 +592,7 @@ void CDROM::CmdPause() {
     readCooldown = Clock::CPU_HZ / 3;
   }
   reading = false;
+  playing = false;
   PushResponse(GetStatusByte());
   SetInterrupt(3);
   // Second response after motor stops
@@ -601,6 +603,7 @@ void CDROM::CmdInit() {
   mode = 0;
   reading = false;
   seeking = false;
+  playing = false;
   PushResponse(GetStatusByte());
   SetInterrupt(3);
   // Second response after initialization completes
@@ -681,6 +684,15 @@ void CDROM::CmdReadTOC() {
 }
 
 void CDROM::CmdPlay() {
+  // psx-spx §Play: "Int3(stat)". Optional BCD track number; if 0 or missing
+  // the drive continues from current position.  Status bit 7 must be set.
+  if (!parameterFIFO.empty()) {
+    uint8_t trackBCD = parameterFIFO.front();
+    parameterFIFO.pop();
+    (void)trackBCD; // Track seek not yet implemented; position kept as-is
+  }
+  playing = true;
+  reading = false; // Mutually exclusive with ReadN/ReadS
   PushResponse(GetStatusByte());
   SetInterrupt(3);
 }
@@ -749,6 +761,7 @@ void CDROM::CmdGetTD() {
 void CDROM::CmdStop() {
   reading = false;
   seeking = false;
+  playing = false;
   PushResponse(GetStatusByte());
   SetInterrupt(3);
   QueueSecondResponse(2, {GetStatusByte()}, 33868);
@@ -842,6 +855,8 @@ uint8_t CDROM::GetStatusByte() const {
     stat |= 0x40; // Seeking
   if (!discLoaded)
     stat |= 0x10; // Shell open
+  if (playing)
+    stat |= 0x80; // Playing CD-DA (psx-spx stat bit 7)
   return stat;
 }
 

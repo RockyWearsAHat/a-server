@@ -5,6 +5,7 @@
 BUILD_TYPE ?= Release
 
 BUILD_DIR := ../build/generated/cmake
+COVERAGE_BUILD_DIR := ../build/coverage_cmake
 # Sentinel file — only re-configure when CMake files are newer than this
 CMAKE_SENTINEL := $(BUILD_DIR)/.cmake_configured
 # All cmake input files that, if changed, require a reconfigure
@@ -60,39 +61,38 @@ test: $(CMAKE_SENTINEL)
 	@cd $(BUILD_DIR) && ctest --output-on-failure
 
 # Coverage build and report generation (requires lcov: brew install lcov)
-# Does a full clean build to ensure gcno/gcda files are in sync
+# Uses a dedicated binary directory so coverage can coexist with the normal build.
 coverage:
-	@rm -rf ../build
-	@mkdir -p ../build/generated/cmake
-	@cd ../build/generated/cmake && cmake ../../../cmake -G Ninja -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
-	@cd ../build/generated/cmake && ninja
-	@cd ../build/generated/cmake && ctest --output-on-failure || true
+	@rm -rf $(COVERAGE_BUILD_DIR)
+	@mkdir -p $(COVERAGE_BUILD_DIR)
+	@cd $(COVERAGE_BUILD_DIR) && cmake ../../cmake -G Ninja -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+	@cd $(COVERAGE_BUILD_DIR) && ninja
+	@cd $(COVERAGE_BUILD_DIR) && ctest --output-on-failure || true
 	@echo "Generating coverage report..."
-	@cd ../build/generated/cmake && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
-	@cd ../build/generated/cmake && lcov --remove coverage.info '/usr/*' '*/googletest/*' '*/autogen/*' '*/Applications/*' --output-file coverage_filtered.info --ignore-errors unused,format,inconsistent
-	@cd ../build/generated/cmake && genhtml coverage_filtered.info --output-directory ../../../build/coverage_html --ignore-errors inconsistent,inconsistent,format,format,category
+	@cd $(COVERAGE_BUILD_DIR) && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
+	@cd $(COVERAGE_BUILD_DIR) && lcov --remove coverage.info '/usr/*' '*/googletest/*' '*/autogen/*' '*/Applications/*' --output-file coverage_filtered.info --ignore-errors unused,format,inconsistent
+	@cd $(COVERAGE_BUILD_DIR) && genhtml coverage_filtered.info --output-directory ../coverage_html --ignore-errors inconsistent,inconsistent,format,format,category
 	@# Copy lcov.info to project root for Coverage Gutters extension
-	@cp ../build/generated/cmake/coverage_filtered.info ../lcov.info
+	@cp $(COVERAGE_BUILD_DIR)/coverage_filtered.info ../lcov.info
 	@echo ""
 	@echo "Coverage report: build/coverage_html/index.html"
 	@echo "Coverage Gutters: lcov.info (in project root)"
 
-# Quick coverage regeneration without full rebuild (uses existing .gcno files)
-# Use this after running tests to update coverage without rebuilding
+# Quick coverage regeneration without full rebuild (uses existing coverage .gcno/.gcda files)
 coverage-regen:
 	@echo "Regenerating coverage from existing test run..."
-	@cd ../build/generated/cmake && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
-	@cd ../build/generated/cmake && lcov --remove coverage.info '/usr/*' '*/googletest/*' '*/autogen/*' '*/Applications/*' --output-file coverage_filtered.info --ignore-errors unused,format,inconsistent
-	@cd ../build/generated/cmake && genhtml coverage_filtered.info --output-directory ../../../build/coverage_html --ignore-errors inconsistent,inconsistent,format,format,category
-	@cp ../build/generated/cmake/coverage_filtered.info ../lcov.info
+	@cd $(COVERAGE_BUILD_DIR) && lcov --rc lcov_excl_line='LCOV_EXCL_LINE|Logger::Instance|AIO::Emulator::Common::Logger' --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,inconsistent,unsupported,format
+	@cd $(COVERAGE_BUILD_DIR) && lcov --remove coverage.info '/usr/*' '*/googletest/*' '*/autogen/*' '*/Applications/*' --output-file coverage_filtered.info --ignore-errors unused,format,inconsistent
+	@cd $(COVERAGE_BUILD_DIR) && genhtml coverage_filtered.info --output-directory ../coverage_html --ignore-errors inconsistent,inconsistent,format,format,category
+	@cp $(COVERAGE_BUILD_DIR)/coverage_filtered.info ../lcov.info
 	@echo ""
 	@echo "Coverage report: build/coverage_html/index.html"
 	@echo "Coverage Gutters: lcov.info (in project root)"
 
 coverage-clean:
-	@find ../build -name "*.gcda" -delete 2>/dev/null || true
-	@find ../build -name "*.gcno" -delete 2>/dev/null || true
-	@rm -rf ../build/coverage.info ../build/coverage_filtered.info ../build/coverage_html ../lcov.info
+	@find $(COVERAGE_BUILD_DIR) -name "*.gcda" -delete 2>/dev/null || true
+	@find $(COVERAGE_BUILD_DIR) -name "*.gcno" -delete 2>/dev/null || true
+	@rm -rf $(COVERAGE_BUILD_DIR) ../build/coverage_html ../lcov.info
 	@echo "Coverage data cleaned"
 
 help:

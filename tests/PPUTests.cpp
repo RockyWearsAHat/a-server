@@ -832,10 +832,10 @@ TEST(PPUTest, ObjOverlapSamePriority_LowerOamIndexWins) {
 }
 
 // OAM write timing: On real GBA hardware, Write16/Write32 to OAM succeed at
-// any time. The PPU latches OAM data per-scanline during rendering, so writes
-// during the visible period affect the NEXT scanline's rendering, not the
-// current one. Only 8-bit writes to OAM are truly ignored.
-TEST(PPUTest, DISABLED_OamWritesBlockedDuringVisiblePeriod) {
+// any time. The PPU latches OAM data per-scanline (at HBlank start) so a
+// write during the visible period of scanline N is latched when scanline N+1
+// is rendered.  Only 8-bit writes to OAM are ignored.
+TEST(PPUTest, OamWrites16Bit_DuringVisible_TakeEffectNextScanline) {
   GBAMemory mem;
   mem.Reset();
 
@@ -877,11 +877,17 @@ TEST(PPUTest, DISABLED_OamWritesBlockedDuringVisiblePeriod) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
+  // The OAM write during visible period is captured in the snapshot taken at
+  // HBlank start of scanline 0, so DrawScanline for scanline 1 sees the sprite.
   const size_t idx1 = (size_t)1 * (size_t)PPU::SCREEN_WIDTH;
-  EXPECT_EQ(ppu.GetFramebuffer()[idx1 + 0], 0xFF000000u);
+  EXPECT_EQ(ppu.GetFramebuffer()[idx1 + 0], TestUtil::ARGBFromBGR555(0x001Fu));
 }
 
-TEST(PPUTest, DISABLED_OamWritesDuringHBlankRequireHBlankIntervalFree) {
+// OAM write timing: Write16/Write32 to OAM during HBlank are NOT blocked.
+// The snapshot is refreshed at the start of the following scanline's HBlank,
+// so the sprite appears on scanline N+1 regardless of the H-Blank Interval
+// Free DISPCNT bit.  That bit governs OBJ dot rendering budget, not access.
+TEST(PPUTest, OamWrites16Bit_DuringHBlank_TakeEffectNextScanline) {
   GBAMemory mem;
   mem.Reset();
 
@@ -921,10 +927,13 @@ TEST(PPUTest, DISABLED_OamWritesDuringHBlankRequireHBlankIntervalFree) {
   ppu.Update(960);
   ppu.SwapBuffers();
 
+  // Write during HBlank of scanline 0 is captured when scanline 1 starts.
   const size_t idx1 = (size_t)1 * (size_t)PPU::SCREEN_WIDTH;
-  EXPECT_EQ(ppu.GetFramebuffer()[idx1 + 0], 0xFF000000u);
+  EXPECT_EQ(ppu.GetFramebuffer()[idx1 + 0], TestUtil::ARGBFromBGR555(0x001Fu));
 
-  // Now enable H-Blank Interval Free and retry on the next line's HBlank.
+  // With H-Blank Interval Free enabled the OBJ dot budget shrinks (954 vs
+  // 1210 dots) but OAM writes are still permitted during HBlank. Result for a
+  // single-sprite scene is identical: sprite appears on scanline N+1.
   // Reset back to scanline 0 with a fresh PPU instance.
   GBAMemory mem2;
   mem2.Reset();

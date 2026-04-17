@@ -35,8 +35,10 @@ The PS1 emulator (`PS1.cpp`) coordinates subsystems in a per-step loop. Each `PS
 
 - **CPU**: 33.8688 MHz (33868800 Hz)
 - **SPU Sample Rate**: 44100 Hz (~768 cycles/sample)
-- **NTSC**: 59.94 FPS, 263 scanlines, 2171 CPU cycles/scanline, 3413 dots/scanline
-- **PAL**: 50.0 FPS, 314 scanlines, 2165 CPU cycles/scanline, 3406 dots/scanline
+- **NTSC**: 59.2916 FPS, 263 scanlines, 2171 CPU cycles/scanline, 3413 dots/scanline
+- **PAL**: 49.7616 FPS, 314 scanlines, 2167 CPU cycles/scanline, 3406 dots/scanline
+
+These are hardware-derived PS1 rates from the GPU and scanline timings documented in psx-spx. They differ from broadcast-TV approximations such as 59.94/50.0.
 
 ### Construction Order
 
