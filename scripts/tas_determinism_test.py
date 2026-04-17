@@ -19,6 +19,8 @@ Usage:
   python3 scripts/tas_determinism_test.py --all
   python3 scripts/tas_determinism_test.py --all --update-baseline
   python3 scripts/tas_determinism_test.py --rom test_roms/OG-DK.gba --tas /tmp/dk_run.vbm
+    python3 scripts/tas_determinism_test.py --all --system gba --capture-times-ms 120000 --run-padding-ms 2000
+    python3 scripts/tas_determinism_test.py --all --system gba --require-tas
 
 Baselines are stored as PPM files under test_output/tas_baselines/<stem>/<ms>ms.ppm
 so they can be committed and compared in CI.
@@ -157,7 +159,10 @@ class TestResult:
         self.notes: list[str] = []
 
 
-def run_test(rom: Path, tas: Path | None = None, update_baseline: bool = False) -> TestResult:
+def run_test(rom: Path,
+             tas: Path | None = None,
+             update_baseline: bool = False,
+             run_padding_ms: int = 500) -> TestResult:
     res = TestResult(rom)
     sys_name = _system(rom)
     if sys_name == "unknown":
@@ -188,7 +193,7 @@ def run_test(rom: Path, tas: Path | None = None, update_baseline: bool = False) 
     for ms in capture_times:
         ppm_out = Path(tempfile.mktemp(suffix=f"_{ms}ms.ppm"))
         # Each run only needs to reach the current capture timestamp
-        run_until = ms + 500  # a little past the capture point
+        run_until = ms + run_padding_ms  # a little past the capture point
         cmd = [
             str(BINARY),
             "--headless",
@@ -260,6 +265,24 @@ def run_test(rom: Path, tas: Path | None = None, update_baseline: bool = False) 
     return res
 
 
+def parse_capture_times(raw: str | None) -> list[int] | None:
+    """Parse comma-separated capture times in ms, sorted ascending."""
+    if raw is None:
+        return None
+    vals: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        v = int(part)
+        if v < 0:
+            raise ValueError(f"capture time must be >= 0, got {v}")
+        vals.append(v)
+    if not vals:
+        raise ValueError("capture times cannot be empty")
+    return sorted(set(vals))
+
+
 # ── Reporting ──────────────────────────────────────────────────────────────────
 
 STATUS_ICON = {
@@ -319,7 +342,23 @@ def main() -> None:
                         help="Overwrite stored baseline frames with current output")
     parser.add_argument("--system", metavar="SYS",
                         help="Filter --all to a specific system (gba, nes, snes, gb)")
+    parser.add_argument("--capture-times-ms", metavar="LIST",
+                        help="Comma-separated capture timestamps in ms (e.g. 500,1500,120000)")
+    parser.add_argument("--run-padding-ms", metavar="N", type=int, default=500,
+                        help="Extra emulated ms after each capture timestamp (default: 500)")
+    parser.add_argument("--require-tas", action="store_true",
+                        help="Fail ROM test when no TAS is discovered/provided")
     args = parser.parse_args()
+
+    if args.run_padding_ms < 0:
+        print("ERROR: --run-padding-ms must be >= 0")
+        sys.exit(2)
+
+    try:
+        override_capture_times = parse_capture_times(args.capture_times_ms)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(2)
 
     if not BINARY.exists():
         print(f"ERROR: binary not found: {BINARY}")
@@ -349,7 +388,32 @@ def main() -> None:
     results: list[TestResult] = []
     for rom in roms:
         print(f"\n→ {rom.name}")
-        res = run_test(rom, tas=tas_override, update_baseline=args.update_baseline)
+
+        if override_capture_times is not None:
+            CAPTURE_TIMES[_system(rom)] = override_capture_times
+
+        # Override the per-run max duration behavior by adjusting the implicit
+        # run-until logic used in run_test: run until capture+padding.
+        if args.run_padding_ms != 500:
+            # Store per-system desired duration high enough to avoid accidental
+            # early termination in future refactors that consume RUN_DURATION.
+            max_capture = max(CAPTURE_TIMES.get(_system(rom), DEFAULT_TIMES))
+            RUN_DURATION[_system(rom)] = max_capture + args.run_padding_ms
+
+        if args.require_tas and tas_override is None and _find_tas(rom) is None:
+            res = TestResult(rom)
+            res.status = "SKIP"
+            res.notes.append("No TAS found (required by --require-tas)")
+            print_result(res)
+            results.append(res)
+            continue
+
+        res = run_test(
+            rom,
+            tas=tas_override,
+            update_baseline=args.update_baseline,
+            run_padding_ms=args.run_padding_ms,
+        )
         print_result(res)
         results.append(res)
 
