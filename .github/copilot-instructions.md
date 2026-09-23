@@ -2,6 +2,7 @@ AIO Server is a native TV operating shell built with Qt 6, C++, and CMake, with 
 
 Build: `make build`
 Targeted tests: `cd build/generated/cmake && ctest -R <pattern> --output-on-failure`
+Zero-regression gate: `make truth-gate`
 
 ## Checkpointing
 Use parameter `message: "your commit message"` to commit without an AI call. The context: parameter calls a subagent, so save the subagent call when possible and please prefer usage of the message parameter instead and just write your own commit message based upon the diff and changes made.

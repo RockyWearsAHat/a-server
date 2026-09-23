@@ -1,7 +1,7 @@
 # Root Makefile wrapper - delegates to cmake/Makefile
 # Run this from the project root directory
 
-.PHONY: all clean configure build test help
+.PHONY: all clean configure build test help truth-gate
 
 %:
 	@$(MAKE) -C cmake $@
@@ -29,6 +29,9 @@ coverage-regen:
 
 coverage-clean:
 	@$(MAKE) -C cmake coverage-clean
+
+truth-gate:
+	@python3 scripts/zero_regression_gate.py
 
 help:
 	@$(MAKE) -C cmake help
